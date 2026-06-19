@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from .config import Config
+from .fs import ensure_dir, read_json, write_json_atomic
+from .timeutil import iso_now, parse_time, utc_now
+
+RUNNABLE_STATUSES = {"runnable", "needs_resume"}
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip()).strip("-")
+    return slug or "task"
+
+
+def task_path(config: Config, task_id: str) -> Path:
+    return config.queue_dir / f"{task_id}.json"
+
+
+def load_task(config: Config, task_id: str) -> dict:
+    path = task_path(config, task_id)
+    task = read_json(path)
+    if task is None:
+        raise FileNotFoundError(f"task not found: {task_id}")
+    return task
+
+
+def save_task(config: Config, task: dict) -> None:
+    task["updated_at"] = iso_now()
+    write_json_atomic(task_path(config, task["id"]), task)
+
+
+def list_tasks(config: Config) -> list[dict]:
+    ensure_dir(config.queue_dir)
+    tasks = []
+    for path in sorted(config.queue_dir.glob("*.json")):
+        task = read_json(path)
+        if isinstance(task, dict):
+            tasks.append(task)
+    return tasks
+
+
+def create_task(
+    config: Config,
+    prompt: str,
+    cwd: str,
+    task_id: str | None = None,
+    depends_on: list[str] | None = None,
+) -> dict:
+    ensure_dir(config.queue_dir)
+    now = iso_now()
+    if not task_id:
+        stamp = now.replace(":", "").replace("+", "Z").replace(".", "-")
+        task_id = slugify(f"task-{stamp}")
+    path = task_path(config, task_id)
+    if path.exists():
+        raise FileExistsError(f"task already exists: {task_id}")
+    task = {
+        "id": task_id,
+        "status": "runnable",
+        "prompt": prompt,
+        "next_prompt": None,
+        "cwd": str(Path(cwd).expanduser()),
+        "session_id": None,
+        "thread_id": None,
+        "depends_on": depends_on or [],
+        "attempts": 0,
+        "max_attempts": config.default_max_attempts,
+        "cooldown_until": None,
+        "last_error": None,
+        "created_at": now,
+        "updated_at": now,
+        "started_at": None,
+        "completed_at": None,
+        "log_paths": [],
+    }
+    write_json_atomic(path, task)
+    return task
+
+
+def dependency_status(task: dict, by_id: dict[str, dict]) -> tuple[bool, list[str]]:
+    blocked: list[str] = []
+    for dep_id in task.get("depends_on", []):
+        dep = by_id.get(dep_id)
+        if not dep or dep.get("status") != "completed":
+            blocked.append(dep_id)
+    return not blocked, blocked
+
+
+def is_in_cooldown(task: dict) -> bool:
+    until = parse_time(task.get("cooldown_until"))
+    return bool(until and until > utc_now())
+
+
+def select_next_task(config: Config) -> dict | None:
+    tasks = list_tasks(config)
+    by_id = {task.get("id"): task for task in tasks}
+    candidates = []
+    for task in tasks:
+        if task.get("status") not in RUNNABLE_STATUSES:
+            continue
+        if is_in_cooldown(task):
+            continue
+        deps_ready, _ = dependency_status(task, by_id)
+        if not deps_ready:
+            continue
+        candidates.append(task)
+    candidates.sort(key=lambda item: (item.get("created_at") or "", item.get("id") or ""))
+    return candidates[0] if candidates else None
+
+
+def recover_stale_running_tasks(config: Config) -> list[str]:
+    recovered: list[str] = []
+    for task in list_tasks(config):
+        if task.get("status") != "running":
+            continue
+        started_at = parse_time(task.get("started_at"))
+        stale = not started_at or (utc_now() - started_at).total_seconds() > config.stale_lock_seconds
+        if not stale:
+            continue
+        task["status"] = "needs_resume" if task.get("next_prompt") else "runnable"
+        task["last_error"] = "recovered stale running task"
+        save_task(config, task)
+        recovered.append(task["id"])
+    return recovered

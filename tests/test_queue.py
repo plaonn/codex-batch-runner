@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from codex_batch_runner.config import Config
+from codex_batch_runner.queue import create_task, recover_stale_running_tasks, select_next_task
+
+
+class QueueTests(unittest.TestCase):
+    def test_select_skips_unmet_dependency_and_picks_ready_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            create_task(config, "blocked", tmp, task_id="blocked", depends_on=["missing"])
+            ready = create_task(config, "ready", tmp, task_id="ready")
+
+            selected = select_next_task(config)
+
+            self.assertEqual(ready["id"], selected["id"])
+
+    def test_select_allows_completed_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            dep = create_task(config, "dep", tmp, task_id="dep")
+            dep["status"] = "completed"
+            from codex_batch_runner.queue import save_task
+
+            save_task(config, dep)
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+
+            selected = select_next_task(config)
+
+            self.assertEqual("child", selected["id"])
+
+    def test_recover_stale_running_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            task = create_task(config, "stale", tmp, task_id="stale")
+            task["status"] = "running"
+            task["started_at"] = "2000-01-01T00:00:00+00:00"
+            from codex_batch_runner.queue import load_task, save_task
+
+            save_task(config, task)
+
+            recovered = recover_stale_running_tasks(config)
+            loaded = load_task(config, "stale")
+
+            self.assertEqual(["stale"], recovered)
+            self.assertEqual("runnable", loaded["status"])
+
+
+if __name__ == "__main__":
+    unittest.main()
