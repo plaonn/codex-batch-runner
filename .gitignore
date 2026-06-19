@@ -1,0 +1,8 @@
+AGENTS.md
+*.local.md
+*.local.plist
+.codex-batch-runner/
+__pycache__/
+.pytest_cache/
+*.pyc
+
