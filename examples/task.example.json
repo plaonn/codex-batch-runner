@@ -1,0 +1,19 @@
+{
+  "id": "task-example-001",
+  "status": "runnable",
+  "prompt": "README의 설치 절차를 검토하고 누락된 부분을 보완해.",
+  "next_prompt": null,
+  "cwd": "/path/to/repo",
+  "session_id": null,
+  "thread_id": null,
+  "depends_on": [],
+  "attempts": 0,
+  "max_attempts": 5,
+  "cooldown_until": null,
+  "last_error": null,
+  "created_at": "2026-06-20T00:00:00+00:00",
+  "updated_at": "2026-06-20T00:00:00+00:00",
+  "started_at": null,
+  "completed_at": null,
+  "log_paths": []
+}

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.codex-batch-runner</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/venv/bin/cbr</string>
+    <string>--config</string>
+    <string>/path/to/codex-batch-runner/examples/config.example.json</string>
+    <string>run-next</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/path/to/codex-batch-runner</string>
+
+  <key>StartInterval</key>
+  <integer>600</integer>
+
+  <key>StandardOutPath</key>
+  <string>/path/to/codex-batch-runner/.codex-batch-runner/launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/path/to/codex-batch-runner/.codex-batch-runner/launchd.err.log</string>
+</dict>
+</plist>
