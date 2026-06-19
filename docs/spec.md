@@ -157,8 +157,11 @@ codex-batch-runner/
 - `completed`: 완료
 - `blocked_user`: 사용자 입력 필요
 - `failed`: 실패
+- `archived`: 운영 목록에서 숨긴 보관 task
 
 `cooldown`은 status로 고정하지 않음. `cooldown_until`이 미래이면 해당 task는 실행 후보에서 제외함.
+
+`archived`는 완료/실패/blocked task를 삭제하지 않고 운영 목록에서 숨기기 위한 상태임. archive 전 상태는 `previous_status`, archive 시각은 `archived_at`에 저장함.
 
 ## Dependency policy
 
@@ -337,8 +340,11 @@ rate-limit으로 판단되면:
 - `cooldown_until`을 설정함
 - global cooldown을 설정함
 - 다음 cooldown 전까지 Codex를 호출하지 않음
+- sanitized rate-limit evidence event를 별도 JSON으로 저장함
 
 정상 final JSON 응답이 파싱되면 final JSON의 status를 우선함. Codex stderr에는 plugin warning 같은 비치명적 경고가 섞일 수 있으므로, final JSON 없이 실패한 실행에서만 rate-limit cooldown을 적용함.
+
+rate-limit evidence event는 prompt, 전체 JSONL, session/thread id를 저장하지 않음. 저장 대상은 task id, detected_at, attempt, matched markers, cooldown_until, 짧은 stderr/error excerpt, 원본 log path 정도로 제한함.
 
 초기 기본 정책:
 
@@ -382,6 +388,9 @@ cbr list
 cbr run-next
 cbr show TASK_ID
 cbr logs TASK_ID
+cbr archive TASK_ID
+cbr list --all
+cbr rate-limits
 ```
 
 공통 option:
@@ -389,6 +398,24 @@ cbr logs TASK_ID
 ```bash
 --config path/to/config.json
 ```
+
+`cbr list` 기본 출력은 운영자가 신경 써야 할 task 중심으로 유지함. `completed`와 `archived`는 기본 출력에서 숨기고, 전체 조회가 필요하면 `--all`을 사용함. `failed` task는 한 줄짜리 `last_error` 요약을 함께 표시함.
+
+`cbr archive TASK_ID`는 task 파일을 삭제하지 않고 `status=archived`, `previous_status`, `archived_at`을 기록함.
+
+`cbr rate-limits`는 저장된 sanitized rate-limit evidence event를 조회함.
+
+## Future local web dashboard
+
+향후 read-only local web dashboard를 둘 수 있음.
+
+초기 방향:
+
+- `python -m codex_batch_runner web`
+- localhost 전용
+- 별도 DB 없이 기존 task/state/log/rate-limit evidence JSON을 읽음
+- task table, status counts, dependency graph, task detail, rate-limit events를 표시함
+- 초기 버전에는 write action을 넣지 않음
 
 ## macOS launchd 운영
 
