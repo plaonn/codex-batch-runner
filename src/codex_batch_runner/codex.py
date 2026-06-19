@@ -73,8 +73,8 @@ def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexRes
         process.stderr.close()
     stderr = "".join(stderr_chunks)
     final_response = extract_final_response(events)
-    session_id = first_recursive_value(events, ("session_id", "sessionId", "conversation_id"))
     thread_id = first_recursive_value(events, ("thread_id", "threadId"))
+    session_id = first_recursive_value(events, ("session_id", "sessionId", "conversation_id")) or thread_id
     raw_text = stderr + "\n" + "\n".join(json.dumps(event, ensure_ascii=False) for event in events)
     return CodexResult(
         returncode=returncode,
