@@ -14,13 +14,15 @@
 
 Python 3.11 이상이 필요합니다. runtime dependency는 없습니다.
 
-개발 checkout에서 바로 실행:
+기본 운영에서는 사람이 `cbr`를 직접 자주 실행하기보다, 다른 Codex thread가 전역 skill을 통해 작업을 queue에 등록하고 launchd/systemd 같은 스케줄러가 `run-next`를 호출하는 방식을 권장합니다. CLI 직접 실행은 설치, 디버깅, 상태 확인을 위한 도구로 보는 것이 안전합니다.
+
+개발 checkout에서 바로 실행할 수 있습니다.
 
 ```bash
 PYTHONPATH=src python3 -m codex_batch_runner --help
 ```
 
-editable install:
+`cbr` console script 설치는 선택 사항입니다. 개발 편의가 필요할 때만 editable install을 사용합니다.
 
 ```bash
 python3 -m pip install -e .
@@ -38,51 +40,51 @@ PYTHONPATH=src python3 -m unittest discover -v
 작업 등록:
 
 ```bash
-cbr enqueue --cwd /path/to/repo --prompt "README를 개선하고 테스트를 실행해"
+PYTHONPATH=src python3 -m codex_batch_runner enqueue --cwd /path/to/repo --prompt "README를 개선하고 테스트를 실행해"
 ```
 
 prompt 파일로 등록:
 
 ```bash
-cbr enqueue --cwd /path/to/repo --prompt-file task.md
+PYTHONPATH=src python3 -m codex_batch_runner enqueue --cwd /path/to/repo --prompt-file task.md
 ```
 
 의존성 있는 작업 등록:
 
 ```bash
-cbr enqueue --cwd /path/to/repo --id task-a --prompt-file a.md
-cbr enqueue --cwd /path/to/repo --id task-b --depends-on task-a --prompt-file b.md
+PYTHONPATH=src python3 -m codex_batch_runner enqueue --cwd /path/to/repo --id task-a --prompt-file a.md
+PYTHONPATH=src python3 -m codex_batch_runner enqueue --cwd /path/to/repo --id task-b --depends-on task-a --prompt-file b.md
 ```
 
 목록 확인:
 
 ```bash
-cbr list
+PYTHONPATH=src python3 -m codex_batch_runner list
 ```
 
 다음 실행 가능한 작업 하나 처리:
 
 ```bash
-cbr run-next
+PYTHONPATH=src python3 -m codex_batch_runner run-next
 ```
 
 작업 상세:
 
 ```bash
-cbr show task-a
+PYTHONPATH=src python3 -m codex_batch_runner show task-a
 ```
 
 로그 확인:
 
 ```bash
-cbr logs task-a
-cbr logs task-a --cat
+PYTHONPATH=src python3 -m codex_batch_runner logs task-a
+PYTHONPATH=src python3 -m codex_batch_runner logs task-a --cat
 ```
 
 runner state 확인:
 
 ```bash
-cbr state
+PYTHONPATH=src python3 -m codex_batch_runner state
 ```
 
 ## 설정
@@ -92,7 +94,7 @@ cbr state
 설정 파일 예시는 [examples/config.example.json](examples/config.example.json)에 있습니다.
 
 ```bash
-cbr --config examples/config.example.json run-next
+PYTHONPATH=src python3 -m codex_batch_runner --config examples/config.example.json run-next
 ```
 
 ## macOS launchd 예시
@@ -108,7 +110,7 @@ cp examples/com.example.codex-batch-runner.plist ~/Library/LaunchAgents/com.exam
 launchctl load ~/Library/LaunchAgents/com.example.codex-batch-runner.plist
 ```
 
-사용 전 plist의 `ProgramArguments`, `WorkingDirectory`, config 경로는 로컬 환경에 맞게 수정해야 합니다. editable install 후 생성된 `cbr` 실행 파일을 가리키는 방식이 가장 단순합니다. 개인 수정본은 `*.local.plist` 이름으로 두면 gitignore됩니다.
+사용 전 plist의 `ProgramArguments`, `WorkingDirectory`, config 경로는 로컬 환경에 맞게 수정해야 합니다. 개인 수정본은 `*.local.plist` 이름으로 두면 gitignore됩니다.
 
 ## cron fallback
 
