@@ -245,23 +245,25 @@ Codex JSONL 로그는 attempt별 새 파일로 저장함. 중단되더라도 par
 신규 실행 기본 형태:
 
 ```bash
-codex exec --json "<wrapped prompt>"
+codex exec --sandbox workspace-write --json "<wrapped prompt>"
 ```
 
 resume 실행 기본 형태:
 
 ```bash
-codex exec resume "<session_id>" --json "<wrapped prompt>"
+codex exec --sandbox workspace-write resume "<session_id>" --json "<wrapped prompt>"
 ```
 
 실제 CLI 문법 차이에 대비해 config에서 command template를 제공함.
 
 ```json
 {
-  "codex_command": ["codex", "exec", "--json"],
-  "codex_resume_command": ["codex", "exec", "resume", "{session_id}", "--json"]
+  "codex_command": ["codex", "exec", "--sandbox", "workspace-write", "--json"],
+  "codex_resume_command": ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"]
 }
 ```
+
+`workspace-write`를 기본으로 둠. non-interactive batch 작업은 일반적으로 파일 수정을 해야 하며, read-only sandbox에서는 수정 task가 실패함.
 
 Codex CLI 0.136 JSONL은 `thread.started.thread_id`를 내보내며, 이 값은 `codex exec resume <thread_id>`에 사용할 수 있음. runner는 명시적인 `session_id`가 없으면 `thread_id`를 resume id fallback으로 저장함.
 
@@ -335,6 +337,8 @@ rate-limit으로 판단되면:
 - `cooldown_until`을 설정함
 - global cooldown을 설정함
 - 다음 cooldown 전까지 Codex를 호출하지 않음
+
+정상 final JSON 응답이 파싱되면 final JSON의 status를 우선함. Codex stderr에는 plugin warning 같은 비치명적 경고가 섞일 수 있으므로, final JSON 없이 실패한 실행에서만 rate-limit cooldown을 적용함.
 
 초기 기본 정책:
 

@@ -62,17 +62,16 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
 
     previous_runnable_status = "needs_resume" if task.get("next_prompt") else "runnable"
 
-    if result.rate_limited:
-        cooldown_until = add_seconds(config.rate_limit_cooldown_seconds)
-        task["status"] = previous_runnable_status
-        task["cooldown_until"] = cooldown_until
-        task["last_error"] = compact_error(result.stderr, "rate-limit or usage-limit detected")
-        save_task(config, task)
-        mark_rate_limit(config, cooldown_until, task["id"])
-        return
-
     final_response = result.final_response
     if not final_response:
+        if result.rate_limited:
+            cooldown_until = add_seconds(config.rate_limit_cooldown_seconds)
+            task["status"] = previous_runnable_status
+            task["cooldown_until"] = cooldown_until
+            task["last_error"] = compact_error(result.stderr, "rate-limit or usage-limit detected")
+            save_task(config, task)
+            mark_rate_limit(config, cooldown_until, task["id"])
+            return
         mark_non_rate_failure(config, task, result, "missing final JSON response")
         return
 

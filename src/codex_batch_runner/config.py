@@ -37,9 +37,12 @@ class Config:
             log_dir=path_value("log_dir", ".codex-batch-runner/logs"),
             lock_file=path_value("lock_file", ".codex-batch-runner/runner.lock"),
             state_file=path_value("state_file", ".codex-batch-runner/state.json"),
-            codex_command=list(data.get("codex_command", ["codex", "exec", "--json"])),
+            codex_command=list(data.get("codex_command", ["codex", "exec", "--sandbox", "workspace-write", "--json"])),
             codex_resume_command=list(
-                data.get("codex_resume_command", ["codex", "exec", "resume", "{session_id}", "--json"])
+                data.get(
+                    "codex_resume_command",
+                    ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"],
+                )
             ),
             stale_lock_seconds=int(data.get("stale_lock_seconds", 21600)),
             rate_limit_cooldown_seconds=int(data.get("rate_limit_cooldown_seconds", 1800)),

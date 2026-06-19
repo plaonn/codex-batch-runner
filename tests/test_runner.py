@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 
 from codex_batch_runner.config import Config
+from codex_batch_runner.codex import CodexResult
 from codex_batch_runner.queue import create_task, load_task
-from codex_batch_runner.runner import run_next
+from codex_batch_runner.runner import apply_codex_result, run_next
 from codex_batch_runner.state import load_state
 
 
@@ -72,6 +73,35 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("runnable", task["status"])
             self.assertIsNotNone(task["cooldown_until"])
             self.assertEqual(task["cooldown_until"], state["global_cooldown_until"])
+
+    def test_final_response_wins_over_stderr_rate_limit_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            task = create_task(config, "do it", tmp, task_id="task-final")
+            task["status"] = "running"
+            result = CodexResult(
+                returncode=0,
+                log_path=Path(tmp) / "attempt.jsonl",
+                stderr="OSLogRateLimit warning from plugin loader",
+                events=[],
+                final_response={
+                    "task_id": "task-final",
+                    "status": "completed",
+                    "summary": "done",
+                    "next_prompt": "",
+                    "changed_files": [],
+                    "verification": [],
+                },
+                session_id="thread-1",
+                thread_id="thread-1",
+                rate_limited=True,
+            )
+
+            apply_codex_result(config, task, result)
+            loaded = load_task(config, "task-final")
+
+            self.assertEqual("completed", loaded["status"])
+            self.assertIsNone(loaded["cooldown_until"])
 
     def test_malformed_final_json_retries_until_max_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
