@@ -378,6 +378,63 @@ class CliTests(unittest.TestCase):
             self.assertIn("token [REDACTED]", output)
             self.assertNotIn("private-value", output)
 
+    def test_summary_prints_compact_review_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "prompt",
+                tmp,
+                task_id="task-summary",
+                project_id="project-a",
+                category="implementation",
+                labels=["queue"],
+                created_by="test",
+            )
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["last_result"] = {
+                "task_id": "task-summary",
+                "status": "completed",
+                "summary": "Implemented token=private-value handling.",
+                "next_prompt": "",
+                "changed_files": ["src/example.py"],
+                "verification": ["python3 -m unittest"],
+            }
+            task["log_paths"] = [str(Path(tmp) / "logs" / "attempt-1.jsonl")]
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "summary", "task-summary"])
+
+            self.assertEqual(0, code)
+            self.assertIn("# task task-summary", output)
+            self.assertIn("status: completed", output)
+            self.assertIn("review_status: unreviewed", output)
+            self.assertIn("project_id: project-a", output)
+            self.assertIn("category: implementation", output)
+            self.assertIn("labels: queue", output)
+            self.assertIn("summary:", output)
+            self.assertIn("Implemented token [REDACTED] handling.", output)
+            self.assertIn("- src/example.py", output)
+            self.assertIn("- python3 -m unittest", output)
+            self.assertIn("## logs", output)
+            self.assertNotIn("private-value", output)
+
+    def test_summary_shows_dependency_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "dependency", tmp, task_id="dep")
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+
+            code, output = run_cli(["--config", str(config_path), "summary", "child"])
+
+            self.assertEqual(0, code)
+            self.assertIn("dependencies: dep", output)
+            self.assertIn("dependencies_ready: false", output)
+            self.assertIn("blocked_by: dep", output)
+
     def test_transcript_includes_codex_session_log_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

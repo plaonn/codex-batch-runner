@@ -22,6 +22,7 @@ from .queue import (
 )
 from .runner import run_next
 from .state import load_state
+from .summary import render_task_summary
 from .transcript import render_task_transcript
 
 
@@ -75,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("task_id")
     show.add_argument("--json", action="store_true", help="print raw JSON")
     show.set_defaults(func=cmd_show)
+
+    summary = sub.add_parser("summary", help="show a compact task summary")
+    summary.add_argument("task_id")
+    summary.add_argument("--json", action="store_true", help="print raw JSON")
+    summary.set_defaults(func=cmd_summary)
 
     logs = sub.add_parser("logs", help="show task log paths or log contents")
     logs.add_argument("task_id")
@@ -226,6 +232,16 @@ def cmd_show(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_summary(config: Config, args: argparse.Namespace) -> int:
+    task = load_task(config, args.task_id)
+    if args.json:
+        print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    by_id = {item.get("id"): item for item in list_tasks(config)}
+    print(render_task_summary(task, by_id=by_id), end="")
     return 0
 
 

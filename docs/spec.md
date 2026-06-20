@@ -241,13 +241,17 @@ runner는 아래 조건을 모두 만족하는 task 하나만 실행함.
 
 실운용에서 중앙 queue가 커지면 full transcript를 읽기 전에 저비용 triage가 가능해야 함.
 
+구현:
+
+- `cbr list`는 실행 대기 task와 검토 대기 task를 기본 표시합니다.
+- `cbr list --all`은 accepted/archived까지 포함한 전체 목록을 표시합니다.
+- `cbr summary TASK_ID`는 `last_result.summary`, changed files, verification, last_error를 transcript보다 짧게 보여줍니다.
+
 계획:
 
-- `cbr list`는 실행 대기 task와 검토 대기 task를 기본 표시함
-- `cbr list --all`은 accepted/archived까지 포함한 전체 목록을 표시함
-- `cbr list --verbose` 또는 `cbr summary TASK_ID`는 `last_result.summary`, changed files, verification, last_error를 transcript보다 짧게 보여줌
-- failed/blocked task에는 `resolution` 또는 review 상태를 기록해 `won't fix`, `superseded`, `manual`, `smoke` 같은 운영 결정을 남길 수 있게 함
-- 오래된 `accepted`/`archived` task와 로그는 추후 `cbr prune`으로 정리할 수 있게 함
+- `cbr list --verbose`는 summary의 핵심 정보를 목록 화면에 압축해서 보여줄 수 있습니다.
+- failed/blocked task에는 `resolution` 또는 review 상태를 기록해 `won't fix`, `superseded`, `manual`, `smoke` 같은 운영 결정을 남길 수 있게 합니다.
+- 오래된 `accepted`/`archived` task와 로그는 추후 `cbr prune`으로 정리할 수 있게 합니다.
 
 ## Runner execution policy
 
@@ -468,6 +472,7 @@ cbr list --category implementation
 cbr list --label queue
 cbr run-next
 cbr show TASK_ID
+cbr summary TASK_ID
 cbr logs TASK_ID
 cbr transcript TASK_ID
 cbr archive TASK_ID
@@ -499,6 +504,8 @@ config 탐색 순서:
 `cbr list --unreviewed`는 `completed + unreviewed` task만 표시함. `cbr list --needs-review`는 `completed + unreviewed/rejected/needs_followup` task를 표시함.
 
 `cbr archive TASK_ID`는 task 파일을 삭제하지 않고 `status=archived`, `previous_status`, `archived_at`을 기록함.
+
+`cbr summary TASK_ID`는 task metadata, dependency blocked 상태, `last_result.summary`, changed files, verification, last_error, next_prompt, log path를 transcript보다 짧은 Markdown 형식으로 표시합니다.
 
 `cbr transcript TASK_ID`는 저장된 cbr JSONL 로그와, `session_id` 또는 `thread_id`로 찾을 수 있는 Codex 원본 세션 로그에서 주요 대화, tool 호출, patch, final/error event를 사람이 읽기 좋은 형태로 재구성함. `--raw`는 원본 JSONL을 출력함.
 
