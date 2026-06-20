@@ -151,7 +151,7 @@ PYTHONPATH=src python3 -m codex_batch_runner doctor
 PYTHONPATH=src python3 -m codex_batch_runner doctor --json
 ```
 
-`doctor`는 Codex를 실행하지 않고 config/runtime path, Codex command availability, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts를 점검합니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
+`doctor`는 Codex를 실행하지 않고 config/runtime path, Codex command availability, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts를 점검합니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation은 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
 
 오래된 완료/보관 task 정리 후보 확인:
 
