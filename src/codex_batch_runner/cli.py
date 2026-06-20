@@ -50,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd = sub.add_parser("list", help="list tasks")
     list_cmd.add_argument("--status", help="filter by status")
     list_cmd.add_argument("--all", action="store_true", help="include completed and archived tasks")
+    list_cmd.add_argument("--unreviewed", action="store_true", help="show completed tasks waiting for review")
+    list_cmd.add_argument("--needs-review", action="store_true", help="show tasks that need operator review")
     list_cmd.add_argument("--json", action="store_true", help="print JSON")
     list_cmd.set_defaults(func=cmd_list)
 
@@ -117,10 +119,15 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
 def cmd_list(config: Config, args: argparse.Namespace) -> int:
     tasks = list_tasks(config)
     by_id = {task.get("id"): task for task in tasks}
+    explicit_filter = bool(args.status or args.unreviewed or args.needs_review)
     if args.status:
         tasks = [task for task in tasks if task.get("status") == args.status]
-    elif not args.all:
-        tasks = [task for task in tasks if task.get("status") not in DEFAULT_HIDDEN_LIST_STATUSES]
+    if args.unreviewed:
+        tasks = [task for task in tasks if review_status(task) == "unreviewed"]
+    if args.needs_review:
+        tasks = [task for task in tasks if needs_review(task)]
+    if not explicit_filter and not args.all:
+        tasks = [task for task in tasks if visible_by_default(task)]
     if args.json:
         print(json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -134,7 +141,7 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
         if task.get("status") == "failed" and task.get("last_error"):
             flags.append("last_error=" + one_line(task.get("last_error")))
         if task.get("status") == "completed":
-            flags.append("review=" + str(task.get("review_status") or "unreviewed"))
+            flags.append("review=" + review_status(task))
         suffix = f" [{' '.join(flags)}]" if flags else ""
         print(f"{task.get('id')}\t{task.get('status')}\tattempts={task.get('attempts', 0)}{suffix}")
     return 0
@@ -142,6 +149,24 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
 
 def one_line(value: object) -> str:
     return " ".join(str(value).split())
+
+
+def review_status(task: dict) -> str:
+    if task.get("status") == "completed":
+        return str(task.get("review_status") or "unreviewed")
+    return str(task.get("review_status") or "")
+
+
+def needs_review(task: dict) -> bool:
+    return task.get("status") == "completed" and review_status(task) in {"unreviewed", "rejected", "needs_followup"}
+
+
+def visible_by_default(task: dict) -> bool:
+    if task.get("status") == "archived":
+        return False
+    if task.get("status") == "completed":
+        return needs_review(task)
+    return task.get("status") not in DEFAULT_HIDDEN_LIST_STATUSES
 
 
 def cmd_run_next(config: Config, args: argparse.Namespace) -> int:

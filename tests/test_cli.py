@@ -47,7 +47,7 @@ def set_status(config: Config, task_id: str, status: str, last_error: str | None
 
 
 class CliTests(unittest.TestCase):
-    def test_list_default_hides_completed_and_archived(self) -> None:
+    def test_list_default_shows_reviewable_completed_and_hides_accepted_and_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
@@ -58,10 +58,22 @@ class CliTests(unittest.TestCase):
                 ("blocked", "blocked_user"),
                 ("failed", "failed"),
                 ("completed", "completed"),
+                ("accepted", "completed"),
+                ("rejected", "completed"),
+                ("needs-followup", "completed"),
                 ("archived", "archived"),
             ):
                 create_task(config, task_id, tmp, task_id=task_id)
                 set_status(config, task_id, status)
+            accepted = load_task(config, "accepted")
+            accepted["review_status"] = "accepted"
+            save_task(config, accepted)
+            rejected = load_task(config, "rejected")
+            rejected["review_status"] = "rejected"
+            save_task(config, rejected)
+            needs_followup = load_task(config, "needs-followup")
+            needs_followup["review_status"] = "needs_followup"
+            save_task(config, needs_followup)
 
             code, output = run_cli(["--config", str(config_path), "list"])
 
@@ -71,8 +83,44 @@ class CliTests(unittest.TestCase):
             self.assertIn("running\trunning", output)
             self.assertIn("blocked\tblocked_user", output)
             self.assertIn("failed\tfailed", output)
-            self.assertNotIn("completed\tcompleted", output)
+            self.assertIn("completed\tcompleted\tattempts=0 [review=unreviewed]", output)
+            self.assertIn("rejected\tcompleted\tattempts=0 [review=rejected]", output)
+            self.assertIn("needs-followup\tcompleted\tattempts=0 [review=needs_followup]", output)
+            self.assertNotIn("accepted\tcompleted", output)
             self.assertNotIn("archived\tarchived", output)
+
+    def test_list_review_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            for task_id, review in (
+                ("unreviewed", None),
+                ("accepted", "accepted"),
+                ("rejected", "rejected"),
+                ("followup", "needs_followup"),
+            ):
+                create_task(config, task_id, tmp, task_id=task_id)
+                set_status(config, task_id, "completed")
+                if review:
+                    task = load_task(config, task_id)
+                    task["review_status"] = review
+                    save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--unreviewed"])
+
+            self.assertEqual(0, code)
+            self.assertIn("unreviewed\tcompleted", output)
+            self.assertNotIn("accepted\tcompleted", output)
+            self.assertNotIn("rejected\tcompleted", output)
+            self.assertNotIn("followup\tcompleted", output)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--needs-review"])
+
+            self.assertEqual(0, code)
+            self.assertIn("unreviewed\tcompleted", output)
+            self.assertIn("rejected\tcompleted", output)
+            self.assertIn("followup\tcompleted", output)
+            self.assertNotIn("accepted\tcompleted", output)
 
     def test_list_all_includes_completed_and_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

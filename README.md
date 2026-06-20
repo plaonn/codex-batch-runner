@@ -60,6 +60,8 @@ PYTHONPATH=src python3 -m codex_batch_runner enqueue --cwd /path/to/repo --id ta
 
 ```bash
 PYTHONPATH=src python3 -m codex_batch_runner list
+PYTHONPATH=src python3 -m codex_batch_runner list --unreviewed
+PYTHONPATH=src python3 -m codex_batch_runner list --needs-review
 ```
 
 다음 실행 가능한 작업 하나 처리:

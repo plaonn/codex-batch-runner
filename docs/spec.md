@@ -184,7 +184,7 @@ codex-batch-runner/
 
 runner는 Codex 최종 응답이 `completed`이면 `review_status=unreviewed`를 설정함. 운영자나 관련 프로젝트의 Codex thread는 `cbr transcript`, `cbr show`, 필요한 테스트 결과를 확인한 뒤 `cbr accept` 또는 `cbr reject`로 진짜 완료 여부를 기록함.
 
-운영 모델상 `completed + unreviewed`, `completed + rejected`, `completed + needs_followup`은 아직 처리해야 할 task로 봄. 향후 기본 `cbr list`는 `completed + accepted`와 `archived`만 숨기고, 검토가 끝나지 않은 completed task는 기본 출력에 표시해야 함.
+운영 모델상 `completed + unreviewed`, `completed + rejected`, `completed + needs_followup`은 아직 처리해야 할 task로 봄. 기본 `cbr list`는 `completed + accepted`와 `archived`만 숨기고, 검토가 끝나지 않은 completed task는 기본 출력에 표시함.
 
 ## Project routing metadata
 
@@ -464,6 +464,8 @@ cbr archive TASK_ID
 cbr accept TASK_ID --reason "verified"
 cbr reject TASK_ID --reason "missing tests"
 cbr list --all
+cbr list --unreviewed
+cbr list --needs-review
 cbr rate-limits
 ```
 
@@ -482,7 +484,9 @@ config 탐색 순서:
 
 자동화와 launchd에서는 명시적 config 또는 절대 경로 기반 호출을 권장함. 운영자가 직접 viewer/review 용도로 사용할 때는 `cbr` console script를 설치하고 사용자 config 자동 탐색을 활용할 수 있음.
 
-`cbr list` 기본 출력은 운영자가 신경 써야 할 task 중심으로 유지함. `completed`와 `archived`는 기본 출력에서 숨기고, 전체 조회가 필요하면 `--all`을 사용함. `failed` task는 한 줄짜리 `last_error` 요약을 함께 표시함.
+`cbr list` 기본 출력은 운영자가 신경 써야 할 task 중심으로 유지함. `archived`와 `completed + accepted`는 기본 출력에서 숨기고, `completed + unreviewed/rejected/needs_followup`은 검토 대상이므로 표시함. 전체 조회가 필요하면 `--all`을 사용함. `failed` task는 한 줄짜리 `last_error` 요약을 함께 표시함.
+
+`cbr list --unreviewed`는 `completed + unreviewed` task만 표시함. `cbr list --needs-review`는 `completed + unreviewed/rejected/needs_followup` task를 표시함.
 
 `cbr archive TASK_ID`는 task 파일을 삭제하지 않고 `status=archived`, `previous_status`, `archived_at`을 기록함.
 
