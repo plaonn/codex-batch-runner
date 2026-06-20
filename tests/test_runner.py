@@ -62,6 +62,8 @@ class RunnerTests(unittest.TestCase):
 
             self.assertEqual("completed", outcome.status)
             self.assertEqual("completed", task["status"])
+            self.assertEqual("unreviewed", task["review_status"])
+            self.assertIsNone(task["reviewed_at"])
             self.assertEqual(1, task["attempts"])
             self.assertTrue(task["log_paths"])
             self.assertTrue(Path(task["log_paths"][0]).exists())

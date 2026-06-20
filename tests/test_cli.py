@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from codex_batch_runner.cli import main
@@ -160,6 +161,119 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual("task-rate", events[0]["task_id"])
             self.assertEqual(["usage limit"], events[0]["matched_markers"])
+
+    def test_accept_and_reject_update_review_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "done", tmp, task_id="done")
+            create_task(config, "follow", tmp, task_id="follow")
+            set_status(config, "done", "completed")
+            set_status(config, "follow", "completed")
+
+            code, output = run_cli(["--config", str(config_path), "accept", "done", "--reason", "verified"])
+            accepted = load_task(config, "done")
+
+            self.assertEqual(0, code)
+            self.assertEqual("done\taccepted\n", output)
+            self.assertEqual("accepted", accepted["review_status"])
+            self.assertEqual("verified", accepted["review_reason"])
+
+            code, output = run_cli(
+                ["--config", str(config_path), "reject", "follow", "--follow-up", "--reason", "needs tests"]
+            )
+            rejected = load_task(config, "follow")
+
+            self.assertEqual(0, code)
+            self.assertEqual("follow\tneeds_followup\n", output)
+            self.assertEqual("needs_followup", rejected["review_status"])
+            self.assertEqual("needs tests", rejected["review_reason"])
+
+    def test_list_all_shows_completed_review_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "done", tmp, task_id="done")
+            set_status(config, "done", "completed")
+
+            code, output = run_cli(["--config", str(config_path), "list", "--all"])
+
+            self.assertEqual(0, code)
+            self.assertIn("done\tcompleted\tattempts=0 [review=unreviewed]", output)
+
+    def test_transcript_prints_sanitized_readable_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "prompt", tmp, task_id="task-transcript")
+            log_path = Path(tmp) / "logs" / "task-transcript" / "attempt-1.jsonl"
+            log_path.parent.mkdir(parents=True)
+            log_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "event_msg", "payload": {"type": "user_message", "message": "hello"}}),
+                        json.dumps(
+                            {
+                                "type": "event_msg",
+                                "payload": {"type": "agent_message", "message": "token=private-value done"},
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            task["log_paths"] = [str(log_path)]
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "transcript", "task-transcript"])
+
+            self.assertEqual(0, code)
+            self.assertIn("## attempt 1: attempt-1.jsonl", output)
+            self.assertIn("### user", output)
+            self.assertIn("hello", output)
+            self.assertIn("token [REDACTED]", output)
+            self.assertNotIn("private-value", output)
+
+    def test_transcript_includes_codex_session_log_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "prompt", tmp, task_id="task-session")
+            task["session_id"] = "session-123"
+            save_task(config, task)
+            session_path = (
+                Path(tmp)
+                / "codex-home"
+                / "sessions"
+                / "2026"
+                / "06"
+                / "20"
+                / "rollout-2026-06-20T00-00-00-session-123.jsonl"
+            )
+            session_path.parent.mkdir(parents=True)
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "session summary"}],
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict("os.environ", {"CODEX_HOME": str(Path(tmp) / "codex-home")}):
+                code, output = run_cli(["--config", str(config_path), "transcript", "task-session"])
+
+            self.assertEqual(0, code)
+            self.assertIn("## codex session: rollout-2026-06-20T00-00-00-session-123.jsonl", output)
+            self.assertIn("### assistant", output)
+            self.assertIn("session summary", output)
 
 
 if __name__ == "__main__":

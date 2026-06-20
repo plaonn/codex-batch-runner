@@ -9,6 +9,7 @@ from .timeutil import iso_now, parse_time, utc_now
 
 RUNNABLE_STATUSES = {"runnable", "needs_resume"}
 DEFAULT_HIDDEN_LIST_STATUSES = {"completed", "archived"}
+REVIEW_STATUSES = {"unreviewed", "accepted", "rejected", "needs_followup"}
 
 
 def slugify(value: str) -> str:
@@ -43,6 +44,17 @@ def archive_task(config: Config, task_id: str) -> dict:
     return task
 
 
+def set_review_status(config: Config, task_id: str, review_status: str, reason: str | None = None) -> dict:
+    if review_status not in REVIEW_STATUSES:
+        raise ValueError(f"invalid review status: {review_status}")
+    task = load_task(config, task_id)
+    task["review_status"] = review_status
+    task["reviewed_at"] = iso_now()
+    task["review_reason"] = reason
+    save_task(config, task)
+    return task
+
+
 def list_tasks(config: Config) -> list[dict]:
     ensure_dir(config.queue_dir)
     tasks = []
@@ -71,6 +83,9 @@ def create_task(
     task = {
         "id": task_id,
         "status": "runnable",
+        "review_status": None,
+        "reviewed_at": None,
+        "review_reason": None,
         "prompt": prompt,
         "next_prompt": None,
         "cwd": str(Path(cwd).expanduser()),

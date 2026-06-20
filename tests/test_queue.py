@@ -5,7 +5,14 @@ import unittest
 from pathlib import Path
 
 from codex_batch_runner.config import Config
-from codex_batch_runner.queue import archive_task, create_task, load_task, recover_stale_running_tasks, select_next_task
+from codex_batch_runner.queue import (
+    archive_task,
+    create_task,
+    load_task,
+    recover_stale_running_tasks,
+    select_next_task,
+    set_review_status,
+)
 
 
 class QueueTests(unittest.TestCase):
@@ -61,6 +68,27 @@ class QueueTests(unittest.TestCase):
             self.assertEqual("archived", loaded["status"])
             self.assertEqual("runnable", loaded["previous_status"])
             self.assertIsNotNone(loaded["archived_at"])
+
+    def test_create_task_initializes_review_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+
+            task = create_task(config, "work", tmp, task_id="review")
+
+            self.assertIsNone(task["review_status"])
+            self.assertIsNone(task["reviewed_at"])
+            self.assertIsNone(task["review_reason"])
+
+    def test_set_review_status_records_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            create_task(config, "done", tmp, task_id="done")
+
+            task = set_review_status(config, "done", "accepted", "verified")
+
+            self.assertEqual("accepted", task["review_status"])
+            self.assertEqual("verified", task["review_reason"])
+            self.assertIsNotNone(task["reviewed_at"])
 
 
 if __name__ == "__main__":

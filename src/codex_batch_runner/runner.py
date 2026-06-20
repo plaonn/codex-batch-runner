@@ -92,6 +92,9 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
 
     if status == "completed":
         task["status"] = "completed"
+        task["review_status"] = "unreviewed"
+        task["reviewed_at"] = None
+        task["review_reason"] = None
         task["next_prompt"] = None
         task["completed_at"] = iso_now()
         save_task(config, task)

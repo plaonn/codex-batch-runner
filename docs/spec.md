@@ -107,6 +107,9 @@ codex-batch-runner/
 {
   "id": "task-20260620-001",
   "status": "runnable",
+  "review_status": null,
+  "reviewed_at": null,
+  "review_reason": null,
   "prompt": "작업 지시문",
   "next_prompt": null,
   "cwd": "/path/to/repo",
@@ -147,6 +150,9 @@ codex-batch-runner/
 - `started_at`
 - `completed_at`
 - `log_paths`
+- `review_status`
+- `reviewed_at`
+- `review_reason`
 
 ## Task status
 
@@ -163,6 +169,20 @@ codex-batch-runner/
 `cooldown`은 status로 고정하지 않음. `cooldown_until`이 미래이면 해당 task는 실행 후보에서 제외함.
 
 `archived`는 완료/실패/blocked task를 삭제하지 않고 운영 목록에서 숨기기 위한 상태임. archive 전 상태는 `previous_status`, archive 시각은 `archived_at`에 저장함.
+
+## Review status
+
+`status=completed`는 Codex 실행이 완료되었다는 의미이며, 운영자가 결과를 검토했다는 의미는 아님.
+
+검토 상태는 `review_status`로 별도 기록함.
+
+- `null`: 아직 실행 완료 전이거나 검토 대상이 아님
+- `unreviewed`: 실행 완료 후 검토 대기
+- `accepted`: 검토 후 완료 인정
+- `rejected`: 검토 후 완료 불인정
+- `needs_followup`: 후속 작업 필요
+
+runner는 Codex 최종 응답이 `completed`이면 `review_status=unreviewed`를 설정함. 운영자나 관련 프로젝트의 Codex thread는 `cbr transcript`, `cbr show`, 필요한 테스트 결과를 확인한 뒤 `cbr accept` 또는 `cbr reject`로 진짜 완료 여부를 기록함.
 
 ## Dependency policy
 
@@ -393,7 +413,10 @@ cbr list
 cbr run-next
 cbr show TASK_ID
 cbr logs TASK_ID
+cbr transcript TASK_ID
 cbr archive TASK_ID
+cbr accept TASK_ID --reason "verified"
+cbr reject TASK_ID --reason "missing tests"
 cbr list --all
 cbr rate-limits
 ```
@@ -408,6 +431,10 @@ cbr rate-limits
 
 `cbr archive TASK_ID`는 task 파일을 삭제하지 않고 `status=archived`, `previous_status`, `archived_at`을 기록함.
 
+`cbr transcript TASK_ID`는 저장된 cbr JSONL 로그와, `session_id` 또는 `thread_id`로 찾을 수 있는 Codex 원본 세션 로그에서 주요 대화, tool 호출, patch, final/error event를 사람이 읽기 좋은 형태로 재구성함. `--raw`는 원본 JSONL을 출력함.
+
+`cbr accept TASK_ID`는 `review_status=accepted`를 기록함. `cbr reject TASK_ID`는 `review_status=rejected`를 기록하고, `--follow-up`을 붙이면 `review_status=needs_followup`을 기록함.
+
 `cbr rate-limits`는 저장된 sanitized rate-limit evidence event를 조회함. `--json`을 붙이면 evidence JSON 배열을 출력함.
 
 ## Future local web dashboard
@@ -419,7 +446,7 @@ cbr rate-limits
 - `python -m codex_batch_runner web`
 - localhost 전용
 - 별도 DB 없이 기존 task/state/log/rate-limit evidence JSON을 읽음
-- task table, status counts, dependency graph, task detail, rate-limit events를 표시함
+- task table, status counts, review status, dependency graph, task detail, transcript, rate-limit events를 표시함
 - 초기 버전에는 write action을 넣지 않음
 
 ## macOS launchd 운영

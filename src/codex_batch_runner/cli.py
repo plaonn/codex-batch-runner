@@ -15,9 +15,11 @@ from .queue import (
     is_in_cooldown,
     list_tasks,
     load_task,
+    set_review_status,
 )
 from .runner import run_next
 from .state import load_state
+from .transcript import render_task_transcript
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,6 +66,24 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("task_id")
     logs.add_argument("--cat", action="store_true", help="print log contents")
     logs.set_defaults(func=cmd_logs)
+
+    transcript = sub.add_parser("transcript", help="show a readable task transcript")
+    transcript.add_argument("task_id")
+    transcript.add_argument("--raw", action="store_true", help="print raw JSONL logs")
+    transcript.set_defaults(func=cmd_transcript)
+
+    accept = sub.add_parser("accept", help="mark a completed task as reviewed and accepted")
+    accept.add_argument("task_id")
+    accept.add_argument("--reason", help="review note")
+    accept.add_argument("--json", action="store_true", help="print raw JSON")
+    accept.set_defaults(func=cmd_accept)
+
+    reject = sub.add_parser("reject", help="mark a task review as rejected")
+    reject.add_argument("task_id")
+    reject.add_argument("--reason", required=True, help="review note")
+    reject.add_argument("--follow-up", action="store_true", help="mark as needs_followup instead of rejected")
+    reject.add_argument("--json", action="store_true", help="print raw JSON")
+    reject.set_defaults(func=cmd_reject)
 
     archive = sub.add_parser("archive", help="archive a task")
     archive.add_argument("task_id")
@@ -113,6 +133,8 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
             flags.append("blocked_by=" + ",".join(blocked_by))
         if task.get("status") == "failed" and task.get("last_error"):
             flags.append("last_error=" + one_line(task.get("last_error")))
+        if task.get("status") == "completed":
+            flags.append("review=" + str(task.get("review_status") or "unreviewed"))
         suffix = f" [{' '.join(flags)}]" if flags else ""
         print(f"{task.get('id')}\t{task.get('status')}\tattempts={task.get('attempts', 0)}{suffix}")
     return 0
@@ -153,6 +175,31 @@ def cmd_logs(config: Config, args: argparse.Namespace) -> int:
         print(f"==> {path} <==")
         if path.exists():
             print(path.read_text(encoding="utf-8"), end="")
+    return 0
+
+
+def cmd_transcript(config: Config, args: argparse.Namespace) -> int:
+    task = load_task(config, args.task_id)
+    print(render_task_transcript(task, raw=args.raw), end="")
+    return 0
+
+
+def cmd_accept(config: Config, args: argparse.Namespace) -> int:
+    task = set_review_status(config, args.task_id, "accepted", args.reason)
+    if args.json:
+        print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"{task.get('id')}\taccepted")
+    return 0
+
+
+def cmd_reject(config: Config, args: argparse.Namespace) -> int:
+    status = "needs_followup" if args.follow_up else "rejected"
+    task = set_review_status(config, args.task_id, status, args.reason)
+    if args.json:
+        print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"{task.get('id')}\t{status}")
     return 0
 
 
