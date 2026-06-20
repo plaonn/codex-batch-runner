@@ -11,7 +11,7 @@ from .lock import FileLock
 from .prompts import build_prompt
 from .queue import recover_stale_running_tasks, save_task, select_next_task
 from .state import in_global_cooldown, mark_rate_limit, mark_run, mark_success
-from .timeutil import add_seconds, iso_now
+from .timeutil import add_seconds, iso_now, parse_time
 
 
 @dataclass
@@ -51,6 +51,7 @@ def run_next(config: Config) -> RunOutcome:
         if resume_unavailable:
             task["resume_unavailable_attempts"] = int(task.get("resume_unavailable_attempts", 0)) + 1
         task["attempts"] = int(task.get("attempts", 0)) + 1
+        task["run_count"] = int(task.get("run_count", 0)) + 1
         save_task(config, task)
         mark_run(config, task["id"])
 
@@ -63,6 +64,9 @@ def run_next(config: Config) -> RunOutcome:
 
 def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
     task.setdefault("log_paths", []).append(str(result.log_path))
+    record_last_run(task, result)
+    if result.command_kind == "resume":
+        task["resume_count"] = int(task.get("resume_count", 0)) + 1
     if result.session_id:
         task["session_id"] = result.session_id
     if result.thread_id:
@@ -77,6 +81,7 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
             task["status"] = previous_runnable_status
             task["cooldown_until"] = cooldown_until
             task["last_error"] = compact_error(result.stderr, "rate-limit or usage-limit detected")
+            task["rate_limit_count"] = int(task.get("rate_limit_count", 0)) + 1
             save_task(config, task)
             mark_rate_limit(config, cooldown_until, task["id"])
             capture_rate_limit_evidence(config, task, result, cooldown_until)
@@ -122,17 +127,41 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
 
     task["status"] = "failed"
     task["last_error"] = final_response.get("summary") or "Codex reported failed"
+    task["failure_count"] = int(task.get("failure_count", 0)) + 1
     save_task(config, task)
 
 
 def mark_non_rate_failure(config: Config, task: dict, result: CodexResult, reason: str) -> None:
     max_attempts = int(task.get("max_attempts") or config.default_max_attempts)
     task["last_error"] = compact_error(result.stderr, reason)
+    task["failure_count"] = int(task.get("failure_count", 0)) + 1
     if int(task.get("attempts", 0)) >= max_attempts:
         task["status"] = "failed"
     else:
         task["status"] = resumable_status(task)
     save_task(config, task)
+
+
+def record_last_run(task: dict, result: CodexResult) -> None:
+    finished_at = iso_now()
+    started_at = task.get("started_at")
+    task["last_run"] = {
+        "command_kind": result.command_kind,
+        "returncode": result.returncode,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_seconds": duration_seconds(started_at, finished_at),
+        "resume_id_used": result.resume_id_used,
+        "log_path": str(result.log_path),
+    }
+
+
+def duration_seconds(started_at: object, finished_at: object) -> float | None:
+    started = parse_time(started_at)
+    finished = parse_time(finished_at)
+    if not started or not finished:
+        return None
+    return round((finished - started).total_seconds(), 3)
 
 
 def compact_error(stderr: str, fallback: str) -> str:

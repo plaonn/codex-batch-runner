@@ -22,6 +22,7 @@ def render_task_summary(task: dict, by_id: dict[str, dict] | None = None) -> str
         lines.append(f"created_by: {task.get('created_by')}")
     if task.get("cwd"):
         lines.append(f"cwd: {task.get('cwd')}")
+    append_counters(lines, task)
     if task.get("cooldown_until") or is_in_cooldown(task):
         lines.append(f"cooldown_until: {task.get('cooldown_until')}")
     if task.get("resolution"):
@@ -47,6 +48,7 @@ def render_task_summary(task: dict, by_id: dict[str, dict] | None = None) -> str
             lines.append(f"blocked_by: {', '.join(blocked_by)}")
 
     append_multiline_section(lines, "last_result", render_last_result(task.get("last_result")))
+    append_multiline_section(lines, "last_run", render_last_run(task.get("last_run")))
     append_section(lines, "last_error", task.get("last_error"))
     append_section(lines, "next_prompt", task.get("next_prompt"))
 
@@ -76,6 +78,37 @@ def render_last_result(last_result: object) -> str:
     if last_result.get("next_prompt"):
         lines.extend(["next_prompt:", sanitize(last_result.get("next_prompt"))])
     return "\n".join(lines)
+
+
+def append_counters(lines: list[str], task: dict) -> None:
+    counters = []
+    for key in ("run_count", "resume_count", "rate_limit_count", "failure_count"):
+        if task.get(key):
+            counters.append(f"{key}={task.get(key)}")
+    if counters:
+        lines.append("counters: " + ", ".join(counters))
+
+
+def render_last_run(last_run: object) -> str:
+    if not isinstance(last_run, dict):
+        return ""
+    lines = []
+    for key in (
+        "command_kind",
+        "returncode",
+        "started_at",
+        "finished_at",
+        "duration_seconds",
+        "resume_id_used",
+        "log_path",
+    ):
+        if key in last_run:
+            lines.append(f"{key}: {display_value(last_run.get(key))}")
+    return "\n".join(lines)
+
+
+def display_value(value: object) -> object:
+    return "-" if value is None else value
 
 
 def append_section(lines: list[str], title: str, value: object) -> None:

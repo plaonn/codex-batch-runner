@@ -510,6 +510,8 @@ config 탐색 순서:
 
 `cbr summary TASK_ID`는 task metadata, dependency blocked 상태, `last_result.summary`, changed files, verification, last_error, next_prompt, log path를 transcript보다 짧은 Markdown 형식으로 표시합니다.
 
+runner는 각 Codex 호출 후 task에 `last_run` metadata를 저장합니다. 필드는 `command_kind`, `returncode`, `started_at`, `finished_at`, `duration_seconds`, `resume_id_used`, `log_path`입니다. task-level counters로 `run_count`, `resume_count`, `rate_limit_count`, `failure_count`도 유지합니다.
+
 `cbr transcript TASK_ID`는 저장된 cbr JSONL 로그와, `session_id` 또는 `thread_id`로 찾을 수 있는 Codex 원본 세션 로그에서 주요 대화, tool 호출, patch, final/error event를 사람이 읽기 좋은 형태로 재구성함. `--raw`는 원본 JSONL을 출력함.
 
 `cbr accept TASK_ID`는 `review_status=accepted`를 기록함. `cbr reject TASK_ID`는 `review_status=rejected`를 기록하고, `--follow-up`을 붙이면 `review_status=needs_followup`을 기록함.

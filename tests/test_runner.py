@@ -65,9 +65,14 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("unreviewed", task["review_status"])
             self.assertIsNone(task["reviewed_at"])
             self.assertEqual(1, task["attempts"])
+            self.assertEqual(1, task["run_count"])
             self.assertTrue(task["log_paths"])
             self.assertTrue(Path(task["log_paths"][0]).exists())
             self.assertEqual("synthetic-session", task["session_id"])
+            self.assertEqual("exec", task["last_run"]["command_kind"])
+            self.assertEqual(0, task["last_run"]["returncode"])
+            self.assertIsNone(task["last_run"]["resume_id_used"])
+            self.assertIsNotNone(task["last_run"]["duration_seconds"])
 
     def test_run_next_stores_needs_resume_next_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,6 +102,8 @@ class RunnerTests(unittest.TestCase):
                 return CodexResult(
                     returncode=0,
                     log_path=Path(tmp) / "attempt.jsonl",
+                    command_kind="resume",
+                    resume_id_used="thread-only",
                     stderr="",
                     events=[],
                     final_response={
@@ -123,6 +130,9 @@ class RunnerTests(unittest.TestCase):
             task = load_task(config, "task-thread-resume")
             self.assertTrue(task["resume_requested"])
             self.assertFalse(task["resume_unavailable"])
+            self.assertEqual(1, task["resume_count"])
+            self.assertEqual("resume", task["last_run"]["command_kind"])
+            self.assertEqual("thread-only", task["last_run"]["resume_id_used"])
 
     def test_resume_without_identifier_records_resume_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,6 +148,8 @@ class RunnerTests(unittest.TestCase):
                 return CodexResult(
                     returncode=0,
                     log_path=Path(tmp) / "attempt.jsonl",
+                    command_kind="exec",
+                    resume_id_used=None,
                     stderr="",
                     events=[],
                     final_response={
@@ -165,6 +177,8 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(loaded["resume_unavailable"])
             self.assertIsNotNone(loaded["resume_unavailable_at"])
             self.assertEqual(1, loaded["resume_unavailable_attempts"])
+            self.assertEqual("exec", loaded["last_run"]["command_kind"])
+            self.assertIsNone(loaded["last_run"]["resume_id_used"])
 
     def test_rate_limit_with_session_keeps_task_resumable_after_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -180,6 +194,10 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("synthetic-session", task["session_id"])
             self.assertIsNotNone(task["cooldown_until"])
             self.assertEqual(task["cooldown_until"], state["global_cooldown_until"])
+            self.assertEqual(1, task["rate_limit_count"])
+            self.assertEqual(1, task["run_count"])
+            self.assertEqual("exec", task["last_run"]["command_kind"])
+            self.assertEqual(1, task["last_run"]["returncode"])
 
     def test_rate_limit_without_resume_id_preserves_runnable_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -190,6 +208,8 @@ class RunnerTests(unittest.TestCase):
             result = CodexResult(
                 returncode=1,
                 log_path=Path(tmp) / "attempt.jsonl",
+                command_kind="exec",
+                resume_id_used=None,
                 stderr="usage limit reached, try again later",
                 events=[],
                 final_response=None,
@@ -204,6 +224,8 @@ class RunnerTests(unittest.TestCase):
 
             self.assertEqual("runnable", loaded["status"])
             self.assertIsNotNone(loaded["cooldown_until"])
+            self.assertEqual(1, loaded["rate_limit_count"])
+            self.assertEqual(1, loaded["last_run"]["returncode"])
 
     def test_rate_limit_evidence_is_sanitized(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,6 +236,8 @@ class RunnerTests(unittest.TestCase):
             result = CodexResult(
                 returncode=1,
                 log_path=Path(tmp) / "logs" / "attempt-2.jsonl",
+                command_kind="exec",
+                resume_id_used=None,
                 stderr="usage limit reached token=secret-value\n" + ("x" * 800),
                 events=[
                     {"type": "session.started", "session_id": "synthetic-session", "thread_id": "synthetic-thread"},
@@ -251,6 +275,8 @@ class RunnerTests(unittest.TestCase):
             result = CodexResult(
                 returncode=0,
                 log_path=Path(tmp) / "attempt.jsonl",
+                command_kind="exec",
+                resume_id_used=None,
                 stderr="OSLogRateLimit warning from plugin loader",
                 events=[],
                 final_response={

@@ -16,6 +16,8 @@ from .limits import matched_rate_limit_markers
 class CodexResult:
     returncode: int
     log_path: Path
+    command_kind: str
+    resume_id_used: str | None
     stderr: str
     events: list[dict[str, Any]]
     final_response: dict[str, Any] | None
@@ -39,6 +41,8 @@ def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexRes
     log_dir = ensure_dir(config.log_dir / task["id"])
     log_path = log_dir / f"attempt-{attempt}.jsonl"
     use_resume = should_use_resume(task)
+    resume_id_used = (task.get("session_id") or task.get("thread_id")) if use_resume else None
+    command_kind = "resume" if use_resume else "exec"
     command = format_command(config.codex_resume_command if use_resume else config.codex_command, task, prompt)
     stderr_chunks: list[str] = []
     events: list[dict[str, Any]] = []
@@ -58,6 +62,8 @@ def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexRes
         return CodexResult(
             returncode=127,
             log_path=log_path,
+            command_kind=command_kind,
+            resume_id_used=str(resume_id_used) if resume_id_used else None,
             stderr=str(exc),
             events=[],
             final_response=None,
@@ -96,6 +102,8 @@ def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexRes
     return CodexResult(
         returncode=returncode,
         log_path=log_path,
+        command_kind=command_kind,
+        resume_id_used=str(resume_id_used) if resume_id_used else None,
         stderr=stderr,
         events=events,
         final_response=final_response,

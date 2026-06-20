@@ -122,6 +122,8 @@ Codex가 `completed`를 반환하면 실행은 완료되지만, 검토 상태는
 
 `failed` 또는 `blocked_user` task를 운영상 더 추적하지 않아도 되면 `resolve`로 `resolution`을 기록할 수 있습니다. resolution이 기록된 failed/blocked task는 기본 `list`에서 숨겨지고, `list --all`이나 `summary`에서 확인할 수 있습니다.
 
+각 Codex 실행 뒤에는 task에 `last_run` metadata가 기록됩니다. 여기에는 `command_kind`, `returncode`, 시작/종료 시각, `duration_seconds`, 사용한 resume id, log path가 포함됩니다. `run_count`, `resume_count`, `rate_limit_count`, `failure_count` counters도 함께 유지됩니다.
+
 rate-limit evidence 확인:
 
 ```bash
