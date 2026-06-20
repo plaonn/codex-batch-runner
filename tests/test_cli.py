@@ -46,6 +46,10 @@ def set_status(config: Config, task_id: str, status: str, last_error: str | None
     save_task(config, task)
 
 
+def list_lines(output: str) -> list[str]:
+    return output.strip().splitlines()
+
+
 class CliTests(unittest.TestCase):
     def test_enqueue_records_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +124,7 @@ class CliTests(unittest.TestCase):
                     code, output = run_cli(["--config", str(config_path), "list", *filter_args])
 
                     self.assertEqual(0, code)
+                    self.assertTrue(output.startswith("ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS\n"))
                     self.assertIn("match\trunnable", output)
                     self.assertNotIn("other\trunnable", output)
 
@@ -135,6 +140,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--project", Path(tmp).name])
 
             self.assertEqual(0, code)
+            self.assertTrue(output.startswith("ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS\n"))
             self.assertIn("legacy\trunnable", output)
 
             code, output = run_cli(["--config", str(config_path), "list", "--project-root", tmp])
@@ -178,9 +184,12 @@ class CliTests(unittest.TestCase):
             self.assertIn("running\trunning", output)
             self.assertIn("blocked\tblocked_user", output)
             self.assertIn("failed\tfailed", output)
-            self.assertIn("completed\tcompleted\tattempts=0 [review=unreviewed]", output)
-            self.assertIn("rejected\tcompleted\tattempts=0 [review=rejected]", output)
-            self.assertIn("needs-followup\tcompleted\tattempts=0 [review=needs_followup]", output)
+            self.assertIn("completed\tcompleted\t", output)
+            self.assertIn("\t0\t-\treview=unreviewed", output)
+            self.assertIn("rejected\tcompleted\t", output)
+            self.assertIn("\t0\t-\treview=rejected", output)
+            self.assertIn("needs-followup\tcompleted\t", output)
+            self.assertIn("\t0\t-\treview=needs_followup", output)
             self.assertNotIn("accepted\tcompleted", output)
             self.assertNotIn("archived\tarchived", output)
 
@@ -229,6 +238,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
 
             self.assertEqual(0, code)
+            self.assertTrue(output.startswith("ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS\n"))
             self.assertIn("completed\tcompleted", output)
             self.assertIn("archived\tarchived", output)
 
@@ -243,6 +253,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--status", "archived"])
 
             self.assertEqual(0, code)
+            self.assertTrue(output.startswith("ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS\n"))
             self.assertIn("archived\tarchived", output)
             self.assertNotIn("runnable\trunnable", output)
 
@@ -300,7 +311,8 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
 
             self.assertEqual(0, code)
-            self.assertIn("failed\tfailed\tattempts=0 [last_error=not worth retrying resolution=wont_fix]", output)
+            self.assertIn("failed\tfailed\t", output)
+            self.assertIn("\t0\t-\tlast_error=not worth retrying resolution=wont_fix", output)
 
             code, output = run_cli(["--config", str(config_path), "summary", "failed"])
 
@@ -377,7 +389,42 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
 
             self.assertEqual(0, code)
-            self.assertIn("done\tcompleted\tattempts=0 [review=unreviewed]", output)
+            self.assertIn("done\tcompleted\t", output)
+            self.assertIn("\t0\t-\treview=unreviewed", output)
+
+    def test_list_table_output_includes_header_project_deps_and_empty_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "work", tmp, task_id="plain", project_id="project-a")
+            create_task(config, "work", tmp, task_id="parent", project_id="project-a")
+            create_task(config, "work", tmp, task_id="child", depends_on=["parent"], project_id="project-a")
+            parent = load_task(config, "parent")
+            parent["status"] = "completed"
+            parent["review_status"] = "accepted"
+            save_task(config, parent)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a"])
+            lines = list_lines(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual("ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS", lines[0])
+            self.assertIn("plain\trunnable\tproject-a\t0\t-\t-", lines)
+            self.assertIn("child\trunnable\tproject-a\t0\tparent\t-", lines)
+
+    def test_list_table_project_column_uses_legacy_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="legacy")
+            task.pop("project_id", None)
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "list"])
+            lines = list_lines(output)
+
+            self.assertEqual(0, code)
+            self.assertIn(f"legacy\trunnable\t{Path(tmp).name}\t0\t-\t-", lines)
 
     def test_transcript_prints_sanitized_readable_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

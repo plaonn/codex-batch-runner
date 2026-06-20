@@ -188,22 +188,49 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
+    print("\t".join(("ID", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS")))
     for task in tasks:
-        deps_ready, blocked_by = dependency_status(task, by_id)
-        flags = []
-        if is_in_cooldown(task):
-            flags.append("cooldown")
-        if not deps_ready:
-            flags.append("blocked_by=" + ",".join(blocked_by))
-        if task.get("status") == "failed" and task.get("last_error"):
-            flags.append("last_error=" + one_line(task.get("last_error")))
-        if task.get("resolution"):
-            flags.append("resolution=" + str(task.get("resolution")))
-        if task.get("status") == "completed":
-            flags.append("review=" + review_status(task))
-        suffix = f" [{' '.join(flags)}]" if flags else ""
-        print(f"{task.get('id')}\t{task.get('status')}\tattempts={task.get('attempts', 0)}{suffix}")
+        print("\t".join(list_table_row(task, by_id)))
     return 0
+
+
+def list_table_row(task: dict, by_id: dict[str, dict]) -> list[str]:
+    return [
+        scalar_cell(task.get("id")),
+        scalar_cell(task.get("status")),
+        scalar_cell(task_project_id(task)),
+        scalar_cell(task.get("attempts", 0)),
+        deps_cell(task.get("depends_on")),
+        flags_cell(task, by_id),
+    ]
+
+
+def scalar_cell(value: object) -> str:
+    if value is None or value == "":
+        return "-"
+    return str(value)
+
+
+def deps_cell(depends_on: object) -> str:
+    if not isinstance(depends_on, list) or not depends_on:
+        return "-"
+    return ",".join(str(dep_id) for dep_id in depends_on)
+
+
+def flags_cell(task: dict, by_id: dict[str, dict]) -> str:
+    deps_ready, blocked_by = dependency_status(task, by_id)
+    flags = []
+    if is_in_cooldown(task):
+        flags.append("cooldown")
+    if not deps_ready:
+        flags.append("blocked_by=" + ",".join(blocked_by))
+    if task.get("status") == "failed" and task.get("last_error"):
+        flags.append("last_error=" + one_line(task.get("last_error")))
+    if task.get("resolution"):
+        flags.append("resolution=" + str(task.get("resolution")))
+    if task.get("status") == "completed":
+        flags.append("review=" + review_status(task))
+    return " ".join(flags) if flags else "-"
 
 
 def one_line(value: object) -> str:

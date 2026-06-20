@@ -80,6 +80,8 @@ PYTHONPATH=src python3 -m codex_batch_runner list --unreviewed
 PYTHONPATH=src python3 -m codex_batch_runner list --needs-review
 ```
 
+기본 `list` 출력은 tab-separated table입니다. 열은 `ID`, `STATUS`, `PROJECT`, `ATTEMPTS`, `DEPS`, `FLAGS`이며, `DEPS`는 쉼표로 연결한 dependency id 또는 `-`, `FLAGS`는 `cooldown`, `blocked_by=...`, `last_error=...`, `resolution=...`, `review=...` 같은 운영 표시 또는 `-`를 보여줍니다. 스크립트에서는 사람이 읽는 table 대신 `--json` 출력을 사용해야 합니다.
+
 다음 실행 가능한 작업 하나 처리:
 
 ```bash

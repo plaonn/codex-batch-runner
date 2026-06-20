@@ -504,6 +504,8 @@ config 탐색 순서:
 
 `cbr list` 기본 출력은 운영자가 신경 써야 할 task 중심으로 유지함. `archived`와 `completed + accepted`는 기본 출력에서 숨기고, `completed + unreviewed/rejected/needs_followup`은 검토 대상이므로 표시함. 전체 조회가 필요하면 `--all`을 사용함. `failed` task는 한 줄짜리 `last_error` 요약을 함께 표시함.
 
+사람이 읽는 `cbr list` 출력은 header가 있는 tab-separated table입니다. 기본 list, `--all`, filter list에 같은 형식을 적용합니다. 최소 열은 `ID`, `STATUS`, `PROJECT`, `ATTEMPTS`, `DEPS`, `FLAGS`입니다. `PROJECT`는 task metadata fallback 규칙으로 계산한 project id입니다. `DEPS`는 `depends_on` id를 쉼표로 연결하고 없으면 `-`를 표시합니다. `FLAGS`는 `cooldown`, `blocked_by=...`, `last_error=...`, `resolution=...`, `review=...`를 공백으로 연결하고 없으면 `-`를 표시합니다. table의 빈 scalar 값은 `-`로 표시하며 값을 자르지 않습니다. 자동화나 스크립트는 table format에 의존하지 말고 `--json`을 사용해야 합니다.
+
 `cbr list --unreviewed`는 `completed + unreviewed` task만 표시함. `cbr list --needs-review`는 `completed + unreviewed/rejected/needs_followup` task를 표시함.
 
 `cbr archive TASK_ID`는 task 파일을 삭제하지 않고 `status=archived`, `previous_status`, `archived_at`을 기록함.
