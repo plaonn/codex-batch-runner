@@ -47,6 +47,101 @@ def set_status(config: Config, task_id: str, status: str, last_error: str | None
 
 
 class CliTests(unittest.TestCase):
+    def test_enqueue_records_project_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "enqueue",
+                    "--cwd",
+                    tmp,
+                    "--id",
+                    "metadata",
+                    "--project",
+                    "project-a",
+                    "--category",
+                    "implementation",
+                    "--label",
+                    "queue",
+                    "--label",
+                    "review",
+                    "--created-by",
+                    "test",
+                    "--prompt",
+                    "work",
+                ]
+            )
+            task = load_task(Config.load(str(config_path)), "metadata")
+
+            self.assertEqual(0, code)
+            self.assertEqual("metadata\n", output)
+            self.assertEqual("project-a", task["project_id"])
+            self.assertEqual("implementation", task["category"])
+            self.assertEqual(["queue", "review"], task["labels"])
+            self.assertEqual("test", task["created_by"])
+
+    def test_list_filters_by_project_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(
+                config,
+                "work",
+                tmp,
+                task_id="match",
+                project_id="project-a",
+                category="implementation",
+                labels=["queue", "review"],
+            )
+            other_dir = Path(tmp) / "other"
+            other_dir.mkdir()
+            create_task(
+                config,
+                "work",
+                str(other_dir),
+                task_id="other",
+                project_id="project-b",
+                category="docs",
+                labels=["readme"],
+            )
+
+            filters = (
+                ["--project", "project-a"],
+                ["--project-root", tmp],
+                ["--cwd", tmp],
+                ["--category", "implementation"],
+                ["--label", "queue"],
+            )
+            for filter_args in filters:
+                with self.subTest(filter_args=filter_args):
+                    code, output = run_cli(["--config", str(config_path), "list", *filter_args])
+
+                    self.assertEqual(0, code)
+                    self.assertIn("match\trunnable", output)
+                    self.assertNotIn("other\trunnable", output)
+
+    def test_list_filters_legacy_task_by_cwd_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="legacy")
+            for field in ("schema_version", "project_root", "project_id", "category", "labels", "created_by"):
+                task.pop(field, None)
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", Path(tmp).name])
+
+            self.assertEqual(0, code)
+            self.assertIn("legacy\trunnable", output)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project-root", tmp])
+
+            self.assertEqual(0, code)
+            self.assertIn("legacy\trunnable", output)
+
     def test_list_default_shows_reviewable_completed_and_hides_accepted_and_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

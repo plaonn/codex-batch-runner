@@ -16,6 +16,9 @@ from .queue import (
     list_tasks,
     load_task,
     set_review_status,
+    task_labels,
+    task_project_id,
+    task_project_root,
 )
 from .runner import run_next
 from .state import load_state
@@ -45,10 +48,19 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_group.add_argument("--prompt-file", help="file containing task prompt")
     enqueue.add_argument("--id", dest="task_id", help="explicit task id")
     enqueue.add_argument("--depends-on", action="append", default=[], help="dependency task id, repeatable")
+    enqueue.add_argument("--project", dest="project_id", help="project identifier")
+    enqueue.add_argument("--category", help="task category")
+    enqueue.add_argument("--label", action="append", default=[], help="task label, repeatable")
+    enqueue.add_argument("--created-by", help="task creator")
     enqueue.set_defaults(func=cmd_enqueue)
 
     list_cmd = sub.add_parser("list", help="list tasks")
     list_cmd.add_argument("--status", help="filter by status")
+    list_cmd.add_argument("--project", dest="project_id", help="filter by project id")
+    list_cmd.add_argument("--project-root", help="filter by project root")
+    list_cmd.add_argument("--cwd", help="filter by task cwd")
+    list_cmd.add_argument("--category", help="filter by category")
+    list_cmd.add_argument("--label", help="filter by label")
     list_cmd.add_argument("--all", action="store_true", help="include completed and archived tasks")
     list_cmd.add_argument("--unreviewed", action="store_true", help="show completed tasks waiting for review")
     list_cmd.add_argument("--needs-review", action="store_true", help="show tasks that need operator review")
@@ -111,6 +123,10 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         cwd=args.cwd,
         task_id=args.task_id,
         depends_on=args.depends_on,
+        project_id=args.project_id,
+        category=args.category,
+        labels=args.label,
+        created_by=args.created_by,
     )
     print(task["id"])
     return 0
@@ -119,9 +135,30 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
 def cmd_list(config: Config, args: argparse.Namespace) -> int:
     tasks = list_tasks(config)
     by_id = {task.get("id"): task for task in tasks}
-    explicit_filter = bool(args.status or args.unreviewed or args.needs_review)
+    explicit_filter = bool(
+        args.status
+        or args.project_id
+        or args.project_root
+        or args.cwd
+        or args.category
+        or args.label
+        or args.unreviewed
+        or args.needs_review
+    )
     if args.status:
         tasks = [task for task in tasks if task.get("status") == args.status]
+    if args.project_id:
+        tasks = [task for task in tasks if task_project_id(task) == args.project_id]
+    if args.project_root:
+        project_root = normalized_path(args.project_root)
+        tasks = [task for task in tasks if task_project_root(task) == project_root]
+    if args.cwd:
+        cwd = normalized_path(args.cwd)
+        tasks = [task for task in tasks if normalized_path(task.get("cwd") or "") == cwd]
+    if args.category:
+        tasks = [task for task in tasks if task.get("category") == args.category]
+    if args.label:
+        tasks = [task for task in tasks if args.label in task_labels(task)]
     if args.unreviewed:
         tasks = [task for task in tasks if review_status(task) == "unreviewed"]
     if args.needs_review:
@@ -149,6 +186,10 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
 
 def one_line(value: object) -> str:
     return " ".join(str(value).split())
+
+
+def normalized_path(value: object) -> str:
+    return str(Path(str(value)).expanduser().resolve()) if value else ""
 
 
 def review_status(task: dict) -> str:

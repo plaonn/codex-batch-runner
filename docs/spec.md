@@ -188,23 +188,27 @@ runner는 Codex 최종 응답이 `completed`이면 `review_status=unreviewed`를
 
 ## Project routing metadata
 
-여러 프로젝트가 하나의 중앙 queue를 공유하면 review 대상 판정을 위해 task를 하나씩 열람하는 방식은 토큰과 시간이 낭비됨. task 등록 시 review routing metadata를 함께 저장하는 방향으로 확장함.
+여러 프로젝트가 하나의 중앙 queue를 공유하면 review 대상 판정을 위해 task를 하나씩 열람하는 방식은 토큰과 시간이 낭비됩니다. task 등록 시 review routing metadata를 함께 저장하고, list 단계에서 먼저 좁혀 볼 수 있게 합니다.
 
-계획 필드:
+구현 필드:
 
 - `schema_version`: task schema 호환성 판단용 정수
-- `project_root`: task가 속한 git root. `git rev-parse --show-toplevel` 성공 시 그 값을 사용하고, 실패하면 `cwd`로 fallback함
-- `project_id`: 기본값은 `project_root` basename. 필요하면 config나 enqueue option으로 override할 수 있음
+- `project_root`: task가 속한 git root. `git rev-parse --show-toplevel` 성공 시 그 값을 사용하고, 실패하면 `cwd`로 fallback합니다.
+- `project_id`: 기본값은 `project_root` basename입니다. 필요하면 enqueue option으로 override할 수 있습니다.
 - `category`: `implementation`, `review`, `smoke`, `maintenance`, `docs` 같은 운영 분류
 - `labels`: 사람이 지정하거나 skill이 추론한 짧은 태그 목록
 - `created_by`: `enqueue-codex-batch`, `operator`, `test` 같은 등록 주체
+
+향후 후보 필드:
+
 - `source_thread_id`: 확인 가능한 경우 등록을 요청한 Codex thread id
 
-초기 구현은 기존 task와 호환되어야 함. metadata가 없는 task는 `cwd`를 `project_root` fallback으로 사용하고, `category`는 비워 둠.
+기존 task와 호환되어야 합니다. metadata가 없는 task는 `cwd`를 `project_root` fallback으로 사용하고, `project_id`는 fallback root의 basename으로 계산하며, `category`와 `labels`는 비워 둡니다.
 
-관련 CLI 계획:
+관련 CLI:
 
 ```bash
+cbr enqueue --cwd /path/to/repo --project codex-batch-runner --category implementation --label rate-limit --created-by enqueue-codex-batch --prompt-file task.md
 cbr list --project codex-batch-runner
 cbr list --project-root /path/to/repo
 cbr list --cwd /path/to/repo
@@ -214,7 +218,7 @@ cbr list --unreviewed
 cbr list --needs-review
 ```
 
-전역 enqueue skill은 task 등록 시 현재 repo의 git root를 계산해 `project_root`와 `project_id`를 넣어야 함. review 요청에서는 현재 repo root로 먼저 필터링하고, 필요할 때만 개별 task의 `show` 또는 `transcript`를 읽음.
+전역 enqueue skill은 task 등록 시 `--created-by enqueue-codex-batch`를 함께 넘깁니다. `project_root`는 runner가 `cwd`에서 자동 계산합니다. review 요청에서는 현재 repo root로 먼저 필터링하고, 필요할 때만 개별 task의 `show` 또는 `transcript`를 읽습니다.
 
 ## Dependency policy
 
@@ -455,7 +459,13 @@ global state는 사람이 읽을 수 있는 JSON으로 저장함.
 ```bash
 cbr enqueue --cwd /repo --prompt-file prompt.md
 cbr enqueue --cwd /repo --prompt "작업 지시문"
+cbr enqueue --cwd /repo --project project-id --category implementation --label queue --created-by operator --prompt-file prompt.md
 cbr list
+cbr list --project project-id
+cbr list --project-root /repo
+cbr list --cwd /repo
+cbr list --category implementation
+cbr list --label queue
 cbr run-next
 cbr show TASK_ID
 cbr logs TASK_ID

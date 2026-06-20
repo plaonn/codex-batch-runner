@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 from .config import Config
@@ -10,6 +11,7 @@ from .timeutil import iso_now, parse_time, utc_now
 RUNNABLE_STATUSES = {"runnable", "needs_resume"}
 DEFAULT_HIDDEN_LIST_STATUSES = {"completed", "archived"}
 REVIEW_STATUSES = {"unreviewed", "accepted", "rejected", "needs_followup"}
+SCHEMA_VERSION = 1
 
 
 def slugify(value: str) -> str:
@@ -71,9 +73,16 @@ def create_task(
     cwd: str,
     task_id: str | None = None,
     depends_on: list[str] | None = None,
+    project_id: str | None = None,
+    category: str | None = None,
+    labels: list[str] | None = None,
+    created_by: str | None = None,
 ) -> dict:
     ensure_dir(config.queue_dir)
     now = iso_now()
+    cwd_path = Path(cwd).expanduser()
+    project_root = detect_project_root(cwd_path)
+    resolved_project_id = project_id or project_root.name
     if not task_id:
         stamp = now.replace(":", "").replace("+", "Z").replace(".", "-")
         task_id = slugify(f"task-{stamp}")
@@ -81,14 +90,20 @@ def create_task(
     if path.exists():
         raise FileExistsError(f"task already exists: {task_id}")
     task = {
+        "schema_version": SCHEMA_VERSION,
         "id": task_id,
         "status": "runnable",
         "review_status": None,
         "reviewed_at": None,
         "review_reason": None,
+        "project_root": str(project_root),
+        "project_id": resolved_project_id,
+        "category": category,
+        "labels": labels or [],
+        "created_by": created_by,
         "prompt": prompt,
         "next_prompt": None,
-        "cwd": str(Path(cwd).expanduser()),
+        "cwd": str(cwd_path),
         "session_id": None,
         "thread_id": None,
         "depends_on": depends_on or [],
@@ -104,6 +119,39 @@ def create_task(
     }
     write_json_atomic(path, task)
     return task
+
+
+def detect_project_root(cwd: Path) -> Path:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(cwd),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return cwd.resolve()
+    root = result.stdout.strip()
+    return Path(root).expanduser().resolve() if root else cwd.resolve()
+
+
+def task_project_root(task: dict) -> str:
+    value = task.get("project_root") or task.get("cwd") or ""
+    return str(Path(str(value)).expanduser().resolve()) if value else ""
+
+
+def task_project_id(task: dict) -> str:
+    if task.get("project_id"):
+        return str(task.get("project_id"))
+    root = task_project_root(task)
+    return Path(root).name if root else ""
+
+
+def task_labels(task: dict) -> list[str]:
+    labels = task.get("labels") or []
+    return [str(label) for label in labels] if isinstance(labels, list) else []
 
 
 def dependency_status(task: dict, by_id: dict[str, dict]) -> tuple[bool, list[str]]:

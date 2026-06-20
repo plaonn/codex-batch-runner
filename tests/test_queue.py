@@ -69,15 +69,41 @@ class QueueTests(unittest.TestCase):
             self.assertEqual("runnable", loaded["previous_status"])
             self.assertIsNotNone(loaded["archived_at"])
 
-    def test_create_task_initializes_review_metadata(self) -> None:
+    def test_create_task_initializes_review_and_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))
 
             task = create_task(config, "work", tmp, task_id="review")
 
+            self.assertEqual(1, task["schema_version"])
             self.assertIsNone(task["review_status"])
             self.assertIsNone(task["reviewed_at"])
             self.assertIsNone(task["review_reason"])
+            self.assertEqual(str(Path(tmp).resolve()), task["project_root"])
+            self.assertEqual(Path(tmp).name, task["project_id"])
+            self.assertIsNone(task["category"])
+            self.assertEqual([], task["labels"])
+            self.assertIsNone(task["created_by"])
+
+    def test_create_task_accepts_project_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+
+            task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="metadata",
+                project_id="custom",
+                category="maintenance",
+                labels=["queue", "review"],
+                created_by="test",
+            )
+
+            self.assertEqual("custom", task["project_id"])
+            self.assertEqual("maintenance", task["category"])
+            self.assertEqual(["queue", "review"], task["labels"])
+            self.assertEqual("test", task["created_by"])
 
     def test_set_review_status_records_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
