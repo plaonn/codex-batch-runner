@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from codex_batch_runner.codex import extract_final_response, first_recursive_value
+from codex_batch_runner.codex import extract_final_response, first_recursive_value, format_command
 
 
 class CodexParserTests(unittest.TestCase):
@@ -32,6 +32,11 @@ class CodexParserTests(unittest.TestCase):
         session_id = first_recursive_value(events, ("session_id", "sessionId", "conversation_id")) or thread_id
 
         self.assertEqual("thread-123", session_id)
+
+    def test_format_command_uses_thread_id_as_session_fallback(self) -> None:
+        command = format_command(["codex", "resume", "{session_id}"], {"thread_id": "thread-123"}, "continue")
+
+        self.assertEqual(["codex", "resume", "thread-123", "continue"], command)
 
 
 if __name__ == "__main__":

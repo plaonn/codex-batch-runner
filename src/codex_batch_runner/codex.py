@@ -9,7 +9,7 @@ from typing import Any
 
 from .config import Config
 from .fs import ensure_dir
-from .limits import looks_like_rate_limit
+from .limits import matched_rate_limit_markers
 
 
 @dataclass
@@ -22,11 +22,13 @@ class CodexResult:
     session_id: str | None
     thread_id: str | None
     rate_limited: bool
+    rate_limit_markers: list[str]
 
 
 def format_command(template: list[str], task: dict, prompt: str) -> list[str]:
+    resume_id = task.get("session_id") or task.get("thread_id") or ""
     values = {
-        "session_id": task.get("session_id") or "",
+        "session_id": resume_id,
         "thread_id": task.get("thread_id") or "",
         "task_id": task.get("id") or "",
     }
@@ -36,7 +38,7 @@ def format_command(template: list[str], task: dict, prompt: str) -> list[str]:
 def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
     log_dir = ensure_dir(config.log_dir / task["id"])
     log_path = log_dir / f"attempt-{attempt}.jsonl"
-    use_resume = task.get("status") == "needs_resume" and task.get("session_id")
+    use_resume = task.get("status") == "needs_resume" and (task.get("session_id") or task.get("thread_id"))
     command = format_command(config.codex_resume_command if use_resume else config.codex_command, task, prompt)
     stderr_chunks: list[str] = []
     events: list[dict[str, Any]] = []
@@ -62,6 +64,7 @@ def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexRes
             session_id=None,
             thread_id=None,
             rate_limited=False,
+            rate_limit_markers=[],
         )
 
     def read_stderr() -> None:
@@ -89,6 +92,7 @@ def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexRes
     thread_id = first_recursive_value(events, ("thread_id", "threadId"))
     session_id = first_recursive_value(events, ("session_id", "sessionId", "conversation_id")) or thread_id
     raw_text = stderr + "\n" + "\n".join(json.dumps(event, ensure_ascii=False) for event in events)
+    rate_limit_markers = matched_rate_limit_markers(raw_text)
     return CodexResult(
         returncode=returncode,
         log_path=log_path,
@@ -97,7 +101,8 @@ def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexRes
         final_response=final_response,
         session_id=str(session_id) if session_id else None,
         thread_id=str(thread_id) if thread_id else None,
-        rate_limited=looks_like_rate_limit(raw_text),
+        rate_limited=bool(rate_limit_markers),
+        rate_limit_markers=rate_limit_markers,
     )
 
 

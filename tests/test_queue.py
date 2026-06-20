@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from codex_batch_runner.config import Config
-from codex_batch_runner.queue import create_task, recover_stale_running_tasks, select_next_task
+from codex_batch_runner.queue import archive_task, create_task, load_task, recover_stale_running_tasks, select_next_task
 
 
 class QueueTests(unittest.TestCase):
@@ -48,6 +48,19 @@ class QueueTests(unittest.TestCase):
 
             self.assertEqual(["stale"], recovered)
             self.assertEqual("runnable", loaded["status"])
+
+    def test_archive_task_preserves_task_file_and_previous_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            create_task(config, "done", tmp, task_id="done")
+
+            archived = archive_task(config, "done")
+            loaded = load_task(config, "done")
+
+            self.assertEqual("archived", archived["status"])
+            self.assertEqual("archived", loaded["status"])
+            self.assertEqual("runnable", loaded["previous_status"])
+            self.assertIsNotNone(loaded["archived_at"])
 
 
 if __name__ == "__main__":

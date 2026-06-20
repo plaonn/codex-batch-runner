@@ -6,7 +6,16 @@ import sys
 from pathlib import Path
 
 from .config import Config
-from .queue import create_task, dependency_status, is_in_cooldown, list_tasks, load_task
+from .evidence import list_rate_limit_evidence
+from .queue import (
+    DEFAULT_HIDDEN_LIST_STATUSES,
+    archive_task,
+    create_task,
+    dependency_status,
+    is_in_cooldown,
+    list_tasks,
+    load_task,
+)
 from .runner import run_next
 from .state import load_state
 
@@ -38,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_cmd = sub.add_parser("list", help="list tasks")
     list_cmd.add_argument("--status", help="filter by status")
+    list_cmd.add_argument("--all", action="store_true", help="include completed and archived tasks")
     list_cmd.add_argument("--json", action="store_true", help="print JSON")
     list_cmd.set_defaults(func=cmd_list)
 
@@ -55,8 +65,17 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("--cat", action="store_true", help="print log contents")
     logs.set_defaults(func=cmd_logs)
 
+    archive = sub.add_parser("archive", help="archive a task")
+    archive.add_argument("task_id")
+    archive.add_argument("--json", action="store_true", help="print raw JSON")
+    archive.set_defaults(func=cmd_archive)
+
     state = sub.add_parser("state", help="show runner state")
     state.set_defaults(func=cmd_state)
+
+    rate_limits = sub.add_parser("rate-limits", help="list sanitized rate-limit evidence")
+    rate_limits.add_argument("--json", action="store_true", help="print JSON")
+    rate_limits.set_defaults(func=cmd_rate_limits)
     return parser
 
 
@@ -80,6 +99,8 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
     by_id = {task.get("id"): task for task in tasks}
     if args.status:
         tasks = [task for task in tasks if task.get("status") == args.status]
+    elif not args.all:
+        tasks = [task for task in tasks if task.get("status") not in DEFAULT_HIDDEN_LIST_STATUSES]
     if args.json:
         print(json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -90,9 +111,15 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
             flags.append("cooldown")
         if not deps_ready:
             flags.append("blocked_by=" + ",".join(blocked_by))
+        if task.get("status") == "failed" and task.get("last_error"):
+            flags.append("last_error=" + one_line(task.get("last_error")))
         suffix = f" [{' '.join(flags)}]" if flags else ""
         print(f"{task.get('id')}\t{task.get('status')}\tattempts={task.get('attempts', 0)}{suffix}")
     return 0
+
+
+def one_line(value: object) -> str:
+    return " ".join(str(value).split())
 
 
 def cmd_run_next(config: Config, args: argparse.Namespace) -> int:
@@ -129,8 +156,31 @@ def cmd_logs(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_archive(config: Config, args: argparse.Namespace) -> int:
+    task = archive_task(config, args.task_id)
+    if args.json:
+        print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"{task.get('id')}\tarchived")
+    return 0
+
+
 def cmd_state(config: Config, args: argparse.Namespace) -> int:
     print(json.dumps(load_state(config), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_rate_limits(config: Config, args: argparse.Namespace) -> int:
+    events = list_rate_limit_evidence(config)
+    if args.json:
+        print(json.dumps(events, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    for event in events:
+        markers = ",".join(event.get("matched_markers") or [])
+        print(
+            f"{event.get('detected_at')}\t{event.get('task_id')}\t"
+            f"attempt={event.get('attempt')}\tcooldown_until={event.get('cooldown_until')}\tmarkers={markers}"
+        )
     return 0
 
 

@@ -4,11 +4,14 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from codex_batch_runner.config import Config
+import codex_batch_runner.runner as runner_module
 from codex_batch_runner.codex import CodexResult
-from codex_batch_runner.queue import create_task, load_task
+from codex_batch_runner.evidence import list_rate_limit_evidence
+from codex_batch_runner.queue import create_task, load_task, save_task
 from codex_batch_runner.runner import apply_codex_result, run_next
 from codex_batch_runner.state import load_state
 
@@ -76,7 +79,45 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("needs_resume", task["status"])
             self.assertEqual("continue synthetic task", task["next_prompt"])
 
-    def test_rate_limit_sets_task_and_global_cooldown(self) -> None:
+    def test_run_next_uses_thread_id_as_resume_identifier(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            task = create_task(config, "do part", tmp, task_id="task-thread-resume")
+            task["status"] = "needs_resume"
+            task["next_prompt"] = "continue"
+            task["thread_id"] = "thread-only"
+
+            save_task(config, task)
+            seen_prompts = []
+
+            def fake_run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
+                seen_prompts.append(prompt)
+                return CodexResult(
+                    returncode=0,
+                    log_path=Path(tmp) / "attempt.jsonl",
+                    stderr="",
+                    events=[],
+                    final_response={
+                        "task_id": "task-thread-resume",
+                        "status": "completed",
+                        "summary": "done",
+                        "next_prompt": "",
+                        "changed_files": [],
+                        "verification": [],
+                    },
+                    session_id="thread-only",
+                    thread_id="thread-only",
+                    rate_limited=False,
+                    rate_limit_markers=[],
+                )
+
+            with patch.object(runner_module, "run_codex", fake_run_codex):
+                run_next(config)
+
+            self.assertEqual(1, len(seen_prompts))
+            self.assertNotIn("resume_unavailable: true", seen_prompts[0])
+
+    def test_rate_limit_with_session_keeps_task_resumable_after_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "rate_limit")
             create_task(config, "do it later", tmp, task_id="task-3")
@@ -85,10 +126,73 @@ class RunnerTests(unittest.TestCase):
             task = load_task(config, "task-3")
             state = load_state(config)
 
-            self.assertEqual("runnable", outcome.status)
-            self.assertEqual("runnable", task["status"])
+            self.assertEqual("needs_resume", outcome.status)
+            self.assertEqual("needs_resume", task["status"])
+            self.assertEqual("synthetic-session", task["session_id"])
             self.assertIsNotNone(task["cooldown_until"])
             self.assertEqual(task["cooldown_until"], state["global_cooldown_until"])
+
+    def test_rate_limit_without_resume_id_preserves_runnable_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            task = create_task(config, "do it later", tmp, task_id="task-no-resume")
+            task["status"] = "running"
+            task["attempts"] = 1
+            result = CodexResult(
+                returncode=1,
+                log_path=Path(tmp) / "attempt.jsonl",
+                stderr="usage limit reached, try again later",
+                events=[],
+                final_response=None,
+                session_id=None,
+                thread_id=None,
+                rate_limited=True,
+                rate_limit_markers=["usage limit", "try again"],
+            )
+
+            apply_codex_result(config, task, result)
+            loaded = load_task(config, "task-no-resume")
+
+            self.assertEqual("runnable", loaded["status"])
+            self.assertIsNotNone(loaded["cooldown_until"])
+
+    def test_rate_limit_evidence_is_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            task = create_task(config, "prompt containing private details", tmp, task_id="task-evidence")
+            task["status"] = "running"
+            task["attempts"] = 2
+            result = CodexResult(
+                returncode=1,
+                log_path=Path(tmp) / "logs" / "attempt-2.jsonl",
+                stderr="usage limit reached token=secret-value\n" + ("x" * 800),
+                events=[
+                    {"type": "session.started", "session_id": "synthetic-session", "thread_id": "synthetic-thread"},
+                    {"type": "error", "message": "429 quota reached api_key=abc123"},
+                ],
+                final_response=None,
+                session_id="synthetic-session",
+                thread_id="synthetic-thread",
+                rate_limited=True,
+                rate_limit_markers=["usage limit", "429", "quota"],
+            )
+
+            apply_codex_result(config, task, result)
+            events = list_rate_limit_evidence(config)
+
+            self.assertEqual(1, len(events))
+            evidence = events[0]
+            evidence_text = json.dumps(evidence, ensure_ascii=False)
+            self.assertEqual("task-evidence", evidence["task_id"])
+            self.assertEqual(2, evidence["attempt"])
+            self.assertEqual(["429", "quota", "usage limit"], evidence["matched_markers"])
+            self.assertIn("attempt-2.jsonl", evidence["original_log_path"])
+            self.assertNotIn("prompt containing private details", evidence_text)
+            self.assertNotIn("synthetic-session", evidence_text)
+            self.assertNotIn("synthetic-thread", evidence_text)
+            self.assertNotIn("secret-value", evidence_text)
+            self.assertNotIn("abc123", evidence_text)
+            self.assertLessEqual(len(evidence["stderr_excerpt"]), 503)
 
     def test_final_response_wins_over_stderr_rate_limit_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -111,6 +215,7 @@ class RunnerTests(unittest.TestCase):
                 session_id="thread-1",
                 thread_id="thread-1",
                 rate_limited=True,
+                rate_limit_markers=["rate limit"],
             )
 
             apply_codex_result(config, task, result)
@@ -124,7 +229,6 @@ class RunnerTests(unittest.TestCase):
             config = make_config(tmp, "malformed")
             task = create_task(config, "bad", tmp, task_id="task-4")
             task["max_attempts"] = 1
-            from codex_batch_runner.queue import save_task
 
             save_task(config, task)
             outcome = run_next(config)

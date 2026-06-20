@@ -8,6 +8,7 @@ from .fs import ensure_dir, read_json, write_json_atomic
 from .timeutil import iso_now, parse_time, utc_now
 
 RUNNABLE_STATUSES = {"runnable", "needs_resume"}
+DEFAULT_HIDDEN_LIST_STATUSES = {"completed", "archived"}
 
 
 def slugify(value: str) -> str:
@@ -30,6 +31,16 @@ def load_task(config: Config, task_id: str) -> dict:
 def save_task(config: Config, task: dict) -> None:
     task["updated_at"] = iso_now()
     write_json_atomic(task_path(config, task["id"]), task)
+
+
+def archive_task(config: Config, task_id: str) -> dict:
+    task = load_task(config, task_id)
+    if task.get("status") != "archived":
+        task["previous_status"] = task.get("status")
+        task["status"] = "archived"
+    task["archived_at"] = iso_now()
+    save_task(config, task)
+    return task
 
 
 def list_tasks(config: Config) -> list[dict]:

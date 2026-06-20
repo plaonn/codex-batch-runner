@@ -92,6 +92,7 @@ codex-batch-runner/
 .codex-batch-runner/
   tasks/
   logs/
+  rate-limits/
   runner.lock
   state.json
 ```
@@ -338,15 +339,17 @@ rate-limit/usage-limit 감지 대상:
 rate-limit으로 판단되면:
 
 - task는 실패 처리하지 않음
-- task 상태는 기존 실행 가능한 상태로 되돌림
+- resume id가 있으면 task 상태를 `needs_resume`으로 되돌림
+- resume id가 없으면 task 상태를 기존처럼 `runnable`으로 되돌림
 - `cooldown_until`을 설정함
 - global cooldown을 설정함
 - 다음 cooldown 전까지 Codex를 호출하지 않음
+- cooldown 만료 후 resume id가 있으면 이전 Codex thread를 resume함
 - sanitized rate-limit evidence event를 별도 JSON으로 저장함
 
 정상 final JSON 응답이 파싱되면 final JSON의 status를 우선함. Codex stderr에는 plugin warning 같은 비치명적 경고가 섞일 수 있으므로, final JSON 없이 실패한 실행에서만 rate-limit cooldown을 적용함.
 
-rate-limit evidence event는 prompt, 전체 JSONL, session/thread id를 저장하지 않음. 저장 대상은 task id, detected_at, attempt, matched markers, cooldown_until, 짧은 stderr/error excerpt, 원본 log path 정도로 제한함.
+rate-limit evidence event는 runtime directory의 `rate-limits/` 아래에 attempt별 JSON으로 저장함. prompt, 전체 JSONL, session/thread id, secrets를 저장하지 않음. 저장 대상은 task id, detected_at, attempt, matched markers, cooldown_until, 짧은 stderr/error excerpt, 원본 log path 정도로 제한함.
 
 초기 기본 정책:
 
@@ -405,7 +408,7 @@ cbr rate-limits
 
 `cbr archive TASK_ID`는 task 파일을 삭제하지 않고 `status=archived`, `previous_status`, `archived_at`을 기록함.
 
-`cbr rate-limits`는 저장된 sanitized rate-limit evidence event를 조회함.
+`cbr rate-limits`는 저장된 sanitized rate-limit evidence event를 조회함. `--json`을 붙이면 evidence JSON 배열을 출력함.
 
 ## Future local web dashboard
 

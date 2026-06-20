@@ -5,6 +5,7 @@ from typing import Any
 
 from .codex import CodexResult, run_codex
 from .config import Config
+from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
 from .lock import FileLock
 from .prompts import build_prompt
@@ -44,7 +45,7 @@ def run_next(config: Config) -> RunOutcome:
         save_task(config, task)
         mark_run(config, task["id"])
 
-        resume_unavailable = bool(task.get("next_prompt") and not task.get("session_id"))
+        resume_unavailable = bool(task.get("next_prompt") and not resume_id(task))
         prompt = build_prompt(task, resume_unavailable=resume_unavailable)
         result = run_codex(config, task, prompt, task["attempts"])
         apply_codex_result(config, task, result)
@@ -60,7 +61,7 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
     if result.thread_id:
         task["thread_id"] = result.thread_id
 
-    previous_runnable_status = "needs_resume" if task.get("next_prompt") else "runnable"
+    previous_runnable_status = resumable_status(task)
 
     final_response = result.final_response
     if not final_response:
@@ -71,6 +72,7 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
             task["last_error"] = compact_error(result.stderr, "rate-limit or usage-limit detected")
             save_task(config, task)
             mark_rate_limit(config, cooldown_until, task["id"])
+            capture_rate_limit_evidence(config, task, result, cooldown_until)
             return
         mark_non_rate_failure(config, task, result, "missing final JSON response")
         return
@@ -119,7 +121,7 @@ def mark_non_rate_failure(config: Config, task: dict, result: CodexResult, reaso
     if int(task.get("attempts", 0)) >= max_attempts:
         task["status"] = "failed"
     else:
-        task["status"] = "needs_resume" if task.get("next_prompt") else "runnable"
+        task["status"] = resumable_status(task)
     save_task(config, task)
 
 
@@ -128,3 +130,13 @@ def compact_error(stderr: str, fallback: str) -> str:
     if not text:
         return fallback
     return text[-2000:]
+
+
+def resumable_status(task: dict) -> str:
+    if task.get("next_prompt") or resume_id(task):
+        return "needs_resume"
+    return "runnable"
+
+
+def resume_id(task: dict) -> str | None:
+    return task.get("session_id") or task.get("thread_id") or None
