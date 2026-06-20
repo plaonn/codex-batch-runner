@@ -41,15 +41,28 @@ def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexRes
     stderr_chunks: list[str] = []
     events: list[dict[str, Any]] = []
 
-    process = subprocess.Popen(
-        command,
-        cwd=task.get("cwd") or None,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=task.get("cwd") or None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as exc:
+        log_path.write_text("", encoding="utf-8")
+        return CodexResult(
+            returncode=127,
+            log_path=log_path,
+            stderr=str(exc),
+            events=[],
+            final_response=None,
+            session_id=None,
+            thread_id=None,
+            rate_limited=False,
+        )
 
     def read_stderr() -> None:
         assert process.stderr is not None

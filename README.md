@@ -112,6 +112,8 @@ launchctl load ~/Library/LaunchAgents/com.example.codex-batch-runner.plist
 
 사용 전 plist의 `ProgramArguments`, `WorkingDirectory`, config 경로는 로컬 환경에 맞게 수정해야 합니다. 개인 수정본은 `*.local.plist` 이름으로 두면 gitignore됩니다.
 
+launchd는 사용자 shell의 `PATH`를 그대로 상속하지 않습니다. `codex`가 `/Users/you/.local/bin/codex`처럼 기본 launchd `PATH` 밖에 있으면 config의 `codex_command`와 `codex_resume_command`에는 `codex` 대신 절대 경로를 사용하는 것이 안전합니다.
+
 ## cron fallback
 
 cron을 써야 하는 환경에서는 아래처럼 실행할 수 있습니다.

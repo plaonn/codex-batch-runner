@@ -32,6 +32,22 @@ def make_config(tmp: str, mode: str) -> Config:
     )
 
 
+def missing_command_config(tmp: str) -> Config:
+    base = Config.load(root=Path(tmp))
+    return Config(
+        root=base.root,
+        queue_dir=base.queue_dir,
+        log_dir=base.log_dir,
+        lock_file=base.lock_file,
+        state_file=base.state_file,
+        codex_command=[str(Path(tmp) / "missing-codex-command")],
+        codex_resume_command=[str(Path(tmp) / "missing-codex-command"), "resume", "{session_id}"],
+        stale_lock_seconds=base.stale_lock_seconds,
+        rate_limit_cooldown_seconds=1800,
+        default_max_attempts=base.default_max_attempts,
+    )
+
+
 class RunnerTests(unittest.TestCase):
     def test_run_next_completes_task_and_writes_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,6 +132,19 @@ class RunnerTests(unittest.TestCase):
 
             self.assertEqual("failed", outcome.status)
             self.assertEqual("failed", task["status"])
+
+    def test_missing_codex_command_does_not_leave_task_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = missing_command_config(tmp)
+            create_task(config, "do it", tmp, task_id="task-missing-command")
+
+            outcome = run_next(config)
+            task = load_task(config, "task-missing-command")
+
+            self.assertEqual("runnable", outcome.status)
+            self.assertEqual("runnable", task["status"])
+            self.assertIn("No such file", task["last_error"])
+            self.assertTrue(task["log_paths"])
 
 
 if __name__ == "__main__":
