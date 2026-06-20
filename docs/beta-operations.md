@@ -33,6 +33,26 @@ cbr run-next
 cbr --config /path/to/cbr-config.json run-next
 ```
 
+기본 config 예시는 [examples/config.example.json](../examples/config.example.json)입니다.
+이 예시는 `--sandbox workspace-write`를 사용하므로 일반 beta 운영의 출발점으로
+적합합니다.
+
+완전 비대화형 batch 운영이 필요하고 운영자가 full local access 위험을 수용한
+환경에서는 [examples/config.automation.example.json](../examples/config.automation.example.json)을
+별도 참고할 수 있습니다. 이 automation 예시는 Codex CLI에
+`--dangerously-bypass-approvals-and-sandbox`를 전달해 approval prompt와 sandbox를
+모두 비활성화합니다. 따라서 해당 사용자 권한으로 접근 가능한 로컬 파일과 명령을
+제한 없이 사용할 수 있으므로, trusted queue와 운영자가 직접 관리하는 scheduler에만
+사용해야 합니다.
+
+이 mode는 approval 대기나 sandbox 거부로 task가 `blocked_user`, `failed`, 또는
+오래 유지되는 lock 상태에 머무는 일을 줄여 pending queue 정체를 완화할 수
+있습니다. 반대로 실행 후 검토 책임은 더 커집니다. `summary`로 결과를 먼저
+확인하고, 필요한 경우에만 `transcript`를 열며, 대상 repository에서 test와 git
+상태를 확인한 뒤 `accept`를 기록합니다. `doctor`는 Codex를 호출하지 않지만 full
+access config의 command availability, lock, cooldown, review count를 보여주므로
+scheduler 변경 후 상태 점검에 유용합니다.
+
 ## Inbox triage
 
 기본 `cbr list` 출력을 actionable inbox로 사용합니다. 기본 목록은 accepted와

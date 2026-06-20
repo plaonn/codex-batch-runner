@@ -173,11 +173,19 @@ config 탐색 순서는 다음과 같습니다.
 
 config가 없을 때의 기본 runtime 디렉터리는 현재 작업 디렉터리의 `.codex-batch-runner/`입니다. 이 디렉터리는 gitignore 대상입니다.
 
-설정 파일 예시는 [examples/config.example.json](examples/config.example.json)에 있습니다.
+설정 파일 예시는 [examples/config.example.json](examples/config.example.json)에 있습니다. 이 예시는 `--sandbox workspace-write`를 사용하는 안전한 기본값입니다.
 
 ```bash
 PYTHONPATH=src python3 -m codex_batch_runner --config examples/config.example.json run-next
 ```
+
+완전 비대화형 자동화가 필요하고 운영자가 로컬 전체 접근 위험을 명시적으로 수용한 환경에서는 [examples/config.automation.example.json](examples/config.automation.example.json)을 참고할 수 있습니다. 이 예시는 Codex CLI에 `--dangerously-bypass-approvals-and-sandbox`를 전달하므로 approval prompt와 sandbox를 모두 비활성화합니다. 즉, 배치 작업이 해당 사용자 권한으로 접근 가능한 로컬 파일과 명령을 제한 없이 사용할 수 있습니다.
+
+```bash
+PYTHONPATH=src python3 -m codex_batch_runner --config examples/config.automation.example.json run-next
+```
+
+Automation mode는 approval prompt에서 멈추는 작업이나 sandbox 권한 부족으로 반복 실패하는 작업을 줄여 pending queue와 오래 유지되는 lock 정체를 완화할 수 있습니다. 대신 실행 후에는 `summary`, 필요한 경우 `transcript`, 대상 repository의 검증 명령, `doctor`를 신중하게 사용해 결과와 queue 상태를 확인해야 합니다. `accept`는 변경 내용과 검증 결과를 운영자가 확인한 뒤에만 기록합니다.
 
 ## macOS launchd 예시
 

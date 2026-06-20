@@ -1,0 +1,11 @@
+{
+  "queue_dir": ".codex-batch-runner/tasks",
+  "log_dir": ".codex-batch-runner/logs",
+  "lock_file": ".codex-batch-runner/runner.lock",
+  "state_file": ".codex-batch-runner/state.json",
+  "codex_command": ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--json"],
+  "codex_resume_command": ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "resume", "{session_id}", "--json"],
+  "stale_lock_seconds": 21600,
+  "rate_limit_cooldown_seconds": 1800,
+  "default_max_attempts": 5
+}
