@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .config import Config
+from .doctor import build_doctor_report, render_doctor_report
 from .evidence import list_rate_limit_evidence
 from .queue import (
     DEFAULT_HIDDEN_LIST_STATUSES,
@@ -125,6 +126,10 @@ def build_parser() -> argparse.ArgumentParser:
     rate_limits = sub.add_parser("rate-limits", help="list sanitized rate-limit evidence")
     rate_limits.add_argument("--json", action="store_true", help="print JSON")
     rate_limits.set_defaults(func=cmd_rate_limits)
+
+    doctor = sub.add_parser("doctor", help="check local cbr health without invoking Codex")
+    doctor.add_argument("--json", action="store_true", help="print JSON")
+    doctor.set_defaults(func=cmd_doctor)
     return parser
 
 
@@ -333,6 +338,15 @@ def cmd_rate_limits(config: Config, args: argparse.Namespace) -> int:
             f"attempt={event.get('attempt')}\tcooldown_until={event.get('cooldown_until')}\tmarkers={markers}"
         )
     return 0
+
+
+def cmd_doctor(config: Config, args: argparse.Namespace) -> int:
+    report = build_doctor_report(config)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_doctor_report(report), end="")
+    return 0 if report["ok"] else 1
 
 
 if __name__ == "__main__":

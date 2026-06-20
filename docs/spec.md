@@ -483,6 +483,8 @@ cbr list --all
 cbr list --unreviewed
 cbr list --needs-review
 cbr rate-limits
+cbr doctor
+cbr doctor --json
 ```
 
 공통 option:
@@ -515,6 +517,8 @@ config 탐색 순서:
 `cbr resolve TASK_ID --resolution VALUE`는 `failed` 또는 `blocked_user` task에 운영상 처리 결정을 기록합니다. 허용값은 `wont_fix`, `superseded`, `manual`, `smoke`, `duplicate`입니다. resolution이 있는 failed/blocked task는 기본 `cbr list`에서 숨기고, `cbr list --all` 또는 `cbr summary TASK_ID`에서 확인합니다.
 
 `cbr rate-limits`는 저장된 sanitized rate-limit evidence event를 조회함. `--json`을 붙이면 evidence JSON 배열을 출력함.
+
+`cbr doctor`는 Codex를 호출하지 않는 저비용 health check임. resolved `queue_dir`, `log_dir`, `lock_file`, `state_file` 경로, runtime directory 접근 가능 여부, configured Codex command executable availability, global cooldown, active lock age, status별 task 수, needs-review completed task 수, resolved failed/blocked task 수, runnable task 수, cooldown task 수를 표시함. `--json`을 붙이면 같은 정보를 JSON으로 출력함. error check가 있으면 non-zero로 종료하고 warning은 종료 코드에 영향을 주지 않음.
 
 ## Future local web dashboard
 

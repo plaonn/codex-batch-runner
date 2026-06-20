@@ -135,6 +135,15 @@ runner state 확인:
 PYTHONPATH=src python3 -m codex_batch_runner state
 ```
 
+beta health check:
+
+```bash
+PYTHONPATH=src python3 -m codex_batch_runner doctor
+PYTHONPATH=src python3 -m codex_batch_runner doctor --json
+```
+
+`doctor`는 Codex를 실행하지 않고 config/runtime path, Codex command availability, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts를 점검합니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
+
 ## 설정
 
 config 탐색 순서는 다음과 같습니다.
