@@ -78,9 +78,12 @@ PYTHONPATH=src python3 -m codex_batch_runner list --category implementation
 PYTHONPATH=src python3 -m codex_batch_runner list --label queue
 PYTHONPATH=src python3 -m codex_batch_runner list --unreviewed
 PYTHONPATH=src python3 -m codex_batch_runner list --needs-review
+PYTHONPATH=src python3 -m codex_batch_runner list --verbose
 ```
 
 기본 `list` 출력은 tab-separated table입니다. 열은 `ID`, `STATUS`, `PROJECT`, `ATTEMPTS`, `DEPS`, `FLAGS`이며, `DEPS`는 쉼표로 연결한 dependency id 또는 `-`, `FLAGS`는 `cooldown`, `blocked_by=...`, `last_error=...`, `resolution=...`, `review=...` 같은 운영 표시 또는 `-`를 보여줍니다. 스크립트에서는 사람이 읽는 table 대신 `--json` 출력을 사용해야 합니다.
+
+`list --verbose`는 사람이 읽는 table에 `LAST_RESULT`, `LAST_RUN`, `LAST_ERROR` 열을 추가합니다. 이 열은 `last_result.status`, `last_result.summary` 한 줄 요약, `last_run`의 command/returncode/duration, `last_error` 한 줄 요약을 표시하며, 값이 없으면 `-`를 표시합니다. `list --json` 출력은 `--verbose` 여부와 관계없이 기존 JSON task 배열을 그대로 출력합니다.
 
 다음 실행 가능한 작업 하나 처리:
 

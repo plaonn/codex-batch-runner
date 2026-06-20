@@ -69,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("--all", action="store_true", help="include completed and archived tasks")
     list_cmd.add_argument("--unreviewed", action="store_true", help="show completed tasks waiting for review")
     list_cmd.add_argument("--needs-review", action="store_true", help="show tasks that need operator review")
+    list_cmd.add_argument("--verbose", action="store_true", help="include compact result and run summary columns")
     list_cmd.add_argument("--json", action="store_true", help="print JSON")
     list_cmd.set_defaults(func=cmd_list)
 
@@ -202,9 +203,15 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
-    print("\t".join(("ID", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS")))
+    header = ["ID", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS"]
+    if args.verbose:
+        header.extend(["LAST_RESULT", "LAST_RUN", "LAST_ERROR"])
+    print("\t".join(header))
     for task in tasks:
-        print("\t".join(list_table_row(task, by_id)))
+        row = list_table_row(task, by_id)
+        if args.verbose:
+            row.extend(verbose_table_cells(task))
+        print("\t".join(row))
     return 0
 
 
@@ -245,6 +252,52 @@ def flags_cell(task: dict, by_id: dict[str, dict]) -> str:
     if task.get("status") == "completed":
         flags.append("review=" + review_status(task))
     return " ".join(flags) if flags else "-"
+
+
+def verbose_table_cells(task: dict) -> list[str]:
+    return [
+        last_result_cell(task.get("last_result")),
+        last_run_cell(task.get("last_run")),
+        excerpt_cell(task.get("last_error")),
+    ]
+
+
+def last_result_cell(last_result: object) -> str:
+    if not isinstance(last_result, dict):
+        return "-"
+    parts = []
+    if last_result.get("status"):
+        parts.append("status=" + one_line(last_result.get("status")))
+    if last_result.get("summary"):
+        parts.append("summary=" + excerpt(last_result.get("summary")))
+    return " ".join(parts) if parts else "-"
+
+
+def last_run_cell(last_run: object) -> str:
+    if not isinstance(last_run, dict):
+        return "-"
+    parts = []
+    command_kind = last_run.get("command_kind")
+    if command_kind:
+        parts.append("command=" + one_line(command_kind))
+    if "returncode" in last_run and last_run.get("returncode") is not None:
+        parts.append("returncode=" + one_line(last_run.get("returncode")))
+    if "duration_seconds" in last_run and last_run.get("duration_seconds") is not None:
+        parts.append("duration=" + one_line(last_run.get("duration_seconds")) + "s")
+    return " ".join(parts) if parts else "-"
+
+
+def excerpt_cell(value: object) -> str:
+    if not value:
+        return "-"
+    return excerpt(value)
+
+
+def excerpt(value: object, limit: int = 120) -> str:
+    text = one_line(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 def one_line(value: object) -> str:

@@ -523,6 +523,69 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertIn(f"legacy\trunnable\t{Path(tmp).name}\t0\t-\t-", lines)
 
+    def test_list_verbose_adds_compact_summary_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="verbose", project_id="project-a")
+            task["status"] = "failed"
+            task["last_result"] = {
+                "status": "failed",
+                "summary": "first line\nsecond\tline",
+            }
+            task["last_run"] = {
+                "command_kind": "exec",
+                "returncode": 1,
+                "duration_seconds": 2.5,
+                "log_path": str(Path(tmp) / "logs" / "verbose" / "attempt-1.jsonl"),
+            }
+            task["last_error"] = "error line one\nline two"
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--verbose"])
+            lines = list_lines(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(
+                "ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS\tLAST_RESULT\tLAST_RUN\tLAST_ERROR",
+                lines[0],
+            )
+            self.assertIn(
+                "verbose\tfailed\tproject-a\t0\t-\tlast_error=error line one line two"
+                "\tstatus=failed summary=first line second line"
+                "\tcommand=exec returncode=1 duration=2.5s"
+                "\terror line one line two",
+                lines,
+            )
+
+    def test_list_verbose_uses_dash_for_missing_summary_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "work", tmp, task_id="plain", project_id="project-a")
+
+            code, output = run_cli(["--config", str(config_path), "list", "--verbose"])
+            lines = list_lines(output)
+
+            self.assertEqual(0, code)
+            self.assertIn("plain\trunnable\tproject-a\t0\t-\t-\t-\t-\t-", lines)
+
+    def test_list_verbose_does_not_change_json_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="json-task", project_id="project-a")
+            task["last_result"] = {"status": "completed", "summary": "done"}
+            task["last_run"] = {"command_kind": "exec", "returncode": 0, "duration_seconds": 1.25}
+            save_task(config, task)
+
+            plain_code, plain_output = run_cli(["--config", str(config_path), "list", "--json"])
+            verbose_code, verbose_output = run_cli(["--config", str(config_path), "list", "--json", "--verbose"])
+
+            self.assertEqual(0, plain_code)
+            self.assertEqual(0, verbose_code)
+            self.assertEqual(json.loads(plain_output), json.loads(verbose_output))
+
     def test_transcript_prints_sanitized_readable_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
