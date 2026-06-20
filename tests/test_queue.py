@@ -10,7 +10,9 @@ from codex_batch_runner.queue import (
     create_task,
     load_task,
     recover_stale_running_tasks,
+    save_task,
     select_next_task,
+    set_resolution,
     set_review_status,
 )
 
@@ -31,7 +33,6 @@ class QueueTests(unittest.TestCase):
             config = Config.load(root=Path(tmp))
             dep = create_task(config, "dep", tmp, task_id="dep")
             dep["status"] = "completed"
-            from codex_batch_runner.queue import save_task
 
             save_task(config, dep)
             create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
@@ -46,7 +47,6 @@ class QueueTests(unittest.TestCase):
             task = create_task(config, "stale", tmp, task_id="stale")
             task["status"] = "running"
             task["started_at"] = "2000-01-01T00:00:00+00:00"
-            from codex_batch_runner.queue import load_task, save_task
 
             save_task(config, task)
 
@@ -115,6 +115,28 @@ class QueueTests(unittest.TestCase):
             self.assertEqual("accepted", task["review_status"])
             self.assertEqual("verified", task["review_reason"])
             self.assertIsNotNone(task["reviewed_at"])
+
+    def test_set_resolution_records_failed_task_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            task = create_task(config, "work", tmp, task_id="failed")
+            task["status"] = "failed"
+            save_task(config, task)
+
+            resolved = set_resolution(config, "failed", "manual", "handled outside cbr")
+
+            self.assertEqual("failed", resolved["status"])
+            self.assertEqual("manual", resolved["resolution"])
+            self.assertEqual("handled outside cbr", resolved["resolution_reason"])
+            self.assertIsNotNone(resolved["resolved_at"])
+
+    def test_set_resolution_rejects_runnable_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            create_task(config, "work", tmp, task_id="task")
+
+            with self.assertRaises(ValueError):
+                set_resolution(config, "task", "manual", "not failed")
 
 
 if __name__ == "__main__":

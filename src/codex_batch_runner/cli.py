@@ -9,12 +9,14 @@ from .config import Config
 from .evidence import list_rate_limit_evidence
 from .queue import (
     DEFAULT_HIDDEN_LIST_STATUSES,
+    RESOLUTIONS,
     archive_task,
     create_task,
     dependency_status,
     is_in_cooldown,
     list_tasks,
     load_task,
+    set_resolution,
     set_review_status,
     task_labels,
     task_project_id,
@@ -110,6 +112,13 @@ def build_parser() -> argparse.ArgumentParser:
     archive.add_argument("--json", action="store_true", help="print raw JSON")
     archive.set_defaults(func=cmd_archive)
 
+    resolve = sub.add_parser("resolve", help="record an operational resolution for failed or blocked tasks")
+    resolve.add_argument("task_id")
+    resolve.add_argument("--resolution", required=True, choices=sorted(RESOLUTIONS), help="resolution decision")
+    resolve.add_argument("--reason", help="resolution note")
+    resolve.add_argument("--json", action="store_true", help="print raw JSON")
+    resolve.set_defaults(func=cmd_resolve)
+
     state = sub.add_parser("state", help="show runner state")
     state.set_defaults(func=cmd_state)
 
@@ -183,6 +192,8 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
             flags.append("blocked_by=" + ",".join(blocked_by))
         if task.get("status") == "failed" and task.get("last_error"):
             flags.append("last_error=" + one_line(task.get("last_error")))
+        if task.get("resolution"):
+            flags.append("resolution=" + str(task.get("resolution")))
         if task.get("status") == "completed":
             flags.append("review=" + review_status(task))
         suffix = f" [{' '.join(flags)}]" if flags else ""
@@ -213,6 +224,8 @@ def visible_by_default(task: dict) -> bool:
         return False
     if task.get("status") == "completed":
         return needs_review(task)
+    if task.get("status") in {"failed", "blocked_user"} and task.get("resolution"):
+        return False
     return task.get("status") not in DEFAULT_HIDDEN_LIST_STATUSES
 
 
@@ -291,6 +304,15 @@ def cmd_archive(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(f"{task.get('id')}\tarchived")
+    return 0
+
+
+def cmd_resolve(config: Config, args: argparse.Namespace) -> int:
+    task = set_resolution(config, args.task_id, args.resolution, args.reason)
+    if args.json:
+        print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"{task.get('id')}\tresolved\t{task.get('resolution')}")
     return 0
 
 

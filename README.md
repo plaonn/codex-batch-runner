@@ -115,9 +115,12 @@ PYTHONPATH=src python3 -m codex_batch_runner transcript task-a --raw
 PYTHONPATH=src python3 -m codex_batch_runner accept task-a --reason "verified locally"
 PYTHONPATH=src python3 -m codex_batch_runner reject task-a --reason "tests are missing"
 PYTHONPATH=src python3 -m codex_batch_runner reject task-a --follow-up --reason "needs follow-up task"
+PYTHONPATH=src python3 -m codex_batch_runner resolve task-a --resolution manual --reason "handled outside cbr"
 ```
 
 Codex가 `completed`를 반환하면 실행은 완료되지만, 검토 상태는 `unreviewed`로 남습니다. 운영상 진짜 완료로 판단한 뒤 `accept`로 `review_status=accepted`를 기록하는 흐름을 권장합니다.
+
+`failed` 또는 `blocked_user` task를 운영상 더 추적하지 않아도 되면 `resolve`로 `resolution`을 기록할 수 있습니다. resolution이 기록된 failed/blocked task는 기본 `list`에서 숨겨지고, `list --all`이나 `summary`에서 확인할 수 있습니다.
 
 rate-limit evidence 확인:
 

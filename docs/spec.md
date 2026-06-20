@@ -246,11 +246,11 @@ runner는 아래 조건을 모두 만족하는 task 하나만 실행함.
 - `cbr list`는 실행 대기 task와 검토 대기 task를 기본 표시합니다.
 - `cbr list --all`은 accepted/archived까지 포함한 전체 목록을 표시합니다.
 - `cbr summary TASK_ID`는 `last_result.summary`, changed files, verification, last_error를 transcript보다 짧게 보여줍니다.
+- failed/blocked task에는 `resolution`을 기록해 `wont_fix`, `superseded`, `manual`, `smoke`, `duplicate` 같은 운영 결정을 남길 수 있습니다.
 
 계획:
 
 - `cbr list --verbose`는 summary의 핵심 정보를 목록 화면에 압축해서 보여줄 수 있습니다.
-- failed/blocked task에는 `resolution` 또는 review 상태를 기록해 `won't fix`, `superseded`, `manual`, `smoke` 같은 운영 결정을 남길 수 있게 합니다.
 - 오래된 `accepted`/`archived` task와 로그는 추후 `cbr prune`으로 정리할 수 있게 합니다.
 
 ## Runner execution policy
@@ -478,6 +478,7 @@ cbr transcript TASK_ID
 cbr archive TASK_ID
 cbr accept TASK_ID --reason "verified"
 cbr reject TASK_ID --reason "missing tests"
+cbr resolve TASK_ID --resolution manual --reason "handled outside cbr"
 cbr list --all
 cbr list --unreviewed
 cbr list --needs-review
@@ -510,6 +511,8 @@ config 탐색 순서:
 `cbr transcript TASK_ID`는 저장된 cbr JSONL 로그와, `session_id` 또는 `thread_id`로 찾을 수 있는 Codex 원본 세션 로그에서 주요 대화, tool 호출, patch, final/error event를 사람이 읽기 좋은 형태로 재구성함. `--raw`는 원본 JSONL을 출력함.
 
 `cbr accept TASK_ID`는 `review_status=accepted`를 기록함. `cbr reject TASK_ID`는 `review_status=rejected`를 기록하고, `--follow-up`을 붙이면 `review_status=needs_followup`을 기록함.
+
+`cbr resolve TASK_ID --resolution VALUE`는 `failed` 또는 `blocked_user` task에 운영상 처리 결정을 기록합니다. 허용값은 `wont_fix`, `superseded`, `manual`, `smoke`, `duplicate`입니다. resolution이 있는 failed/blocked task는 기본 `cbr list`에서 숨기고, `cbr list --all` 또는 `cbr summary TASK_ID`에서 확인합니다.
 
 `cbr rate-limits`는 저장된 sanitized rate-limit evidence event를 조회함. `--json`을 붙이면 evidence JSON 배열을 출력함.
 

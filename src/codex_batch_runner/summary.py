@@ -24,6 +24,12 @@ def render_task_summary(task: dict, by_id: dict[str, dict] | None = None) -> str
         lines.append(f"cwd: {task.get('cwd')}")
     if task.get("cooldown_until") or is_in_cooldown(task):
         lines.append(f"cooldown_until: {task.get('cooldown_until')}")
+    if task.get("resolution"):
+        lines.append(f"resolution: {task.get('resolution')}")
+        if task.get("resolved_at"):
+            lines.append(f"resolved_at: {task.get('resolved_at')}")
+        if task.get("resolution_reason"):
+            lines.append(f"resolution_reason: {sanitize(task.get('resolution_reason'))}")
     if task.get("resume_unavailable"):
         lines.append("resume_unavailable: true")
         if task.get("resume_unavailable_at"):

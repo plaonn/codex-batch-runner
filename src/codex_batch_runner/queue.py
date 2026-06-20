@@ -11,6 +11,7 @@ from .timeutil import iso_now, parse_time, utc_now
 RUNNABLE_STATUSES = {"runnable", "needs_resume"}
 DEFAULT_HIDDEN_LIST_STATUSES = {"completed", "archived"}
 REVIEW_STATUSES = {"unreviewed", "accepted", "rejected", "needs_followup"}
+RESOLUTIONS = {"wont_fix", "superseded", "manual", "smoke", "duplicate"}
 SCHEMA_VERSION = 1
 
 
@@ -53,6 +54,19 @@ def set_review_status(config: Config, task_id: str, review_status: str, reason: 
     task["review_status"] = review_status
     task["reviewed_at"] = iso_now()
     task["review_reason"] = reason
+    save_task(config, task)
+    return task
+
+
+def set_resolution(config: Config, task_id: str, resolution: str, reason: str | None = None) -> dict:
+    if resolution not in RESOLUTIONS:
+        raise ValueError(f"invalid resolution: {resolution}")
+    task = load_task(config, task_id)
+    if task.get("status") not in {"failed", "blocked_user"}:
+        raise ValueError("resolution can only be set on failed or blocked_user tasks")
+    task["resolution"] = resolution
+    task["resolved_at"] = iso_now()
+    task["resolution_reason"] = reason
     save_task(config, task)
     return task
 

@@ -273,6 +273,41 @@ class CliTests(unittest.TestCase):
             self.assertEqual("runnable", task["previous_status"])
             self.assertIsNotNone(task["archived_at"])
 
+    def test_resolve_command_records_resolution_and_hides_from_default_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "task", tmp, task_id="failed")
+            set_status(config, "failed", "failed", "not worth retrying")
+
+            code, output = run_cli(
+                ["--config", str(config_path), "resolve", "failed", "--resolution", "wont_fix", "--reason", "obsolete"]
+            )
+            task = load_task(config, "failed")
+
+            self.assertEqual(0, code)
+            self.assertEqual("failed\tresolved\twont_fix\n", output)
+            self.assertEqual("failed", task["status"])
+            self.assertEqual("wont_fix", task["resolution"])
+            self.assertEqual("obsolete", task["resolution_reason"])
+            self.assertIsNotNone(task["resolved_at"])
+
+            code, output = run_cli(["--config", str(config_path), "list"])
+
+            self.assertEqual(0, code)
+            self.assertNotIn("failed\tfailed", output)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--all"])
+
+            self.assertEqual(0, code)
+            self.assertIn("failed\tfailed\tattempts=0 [last_error=not worth retrying resolution=wont_fix]", output)
+
+            code, output = run_cli(["--config", str(config_path), "summary", "failed"])
+
+            self.assertEqual(0, code)
+            self.assertIn("resolution: wont_fix", output)
+            self.assertIn("resolution_reason: obsolete", output)
+
     def test_rate_limits_lists_sanitized_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
