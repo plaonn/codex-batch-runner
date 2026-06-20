@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import Config
 from .doctor import build_doctor_report, render_doctor_report
 from .evidence import list_rate_limit_evidence
+from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
 from .queue import (
     DEFAULT_HIDDEN_LIST_STATUSES,
     RESOLUTIONS,
@@ -130,6 +131,19 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="check local cbr health without invoking Codex")
     doctor.add_argument("--json", action="store_true", help="print JSON")
     doctor.set_defaults(func=cmd_doctor)
+
+    prune = sub.add_parser("prune", help="report or remove old archived and accepted tasks")
+    prune.add_argument(
+        "--older-than-days",
+        type=int,
+        default=DEFAULT_PRUNE_AGE_DAYS,
+        help=f"minimum candidate age in days (default: {DEFAULT_PRUNE_AGE_DAYS})",
+    )
+    prune_mode = prune.add_mutually_exclusive_group()
+    prune_mode.add_argument("--apply", action="store_true", help="delete reported safe files")
+    prune_mode.add_argument("--dry-run", action="store_true", help="report only; this is the default")
+    prune.add_argument("--json", action="store_true", help="print JSON")
+    prune.set_defaults(func=cmd_prune)
     return parser
 
 
@@ -374,6 +388,39 @@ def cmd_doctor(config: Config, args: argparse.Namespace) -> int:
     else:
         print(render_doctor_report(report), end="")
     return 0 if report["ok"] else 1
+
+
+def cmd_prune(config: Config, args: argparse.Namespace) -> int:
+    report = build_prune_report(config, age_days=args.older_than_days, apply=args.apply)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_prune_report(report), end="")
+    return 0
+
+
+def render_prune_report(report: dict) -> str:
+    lines = [
+        f"mode: {report['mode']}",
+        f"older_than_days: {report['age_days']}",
+        f"candidates: {report['candidate_count']}",
+        f"deleted_files: {report['deleted_files']}",
+    ]
+    for candidate in report["candidates"]:
+        lines.append(f"{candidate['task_id']}\t{candidate['reason']}\t{candidate['timestamp']}")
+        for file in candidate["files"]:
+            flags = []
+            if file["deleted"]:
+                flags.append("deleted")
+            elif not file["exists"]:
+                flags.append("missing")
+            elif report["dry_run"]:
+                flags.append("would-delete")
+            if not file["safe"]:
+                flags.append(f"blocked={file['reason']}")
+            flag_text = ",".join(flags) if flags else "-"
+            lines.append(f"  {file['kind']}\t{flag_text}\t{file['path']}")
+    return "\n".join(lines) + "\n"
 
 
 if __name__ == "__main__":

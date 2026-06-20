@@ -148,6 +148,15 @@ PYTHONPATH=src python3 -m codex_batch_runner doctor --json
 
 `doctor`는 Codex를 실행하지 않고 config/runtime path, Codex command availability, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts를 점검합니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
 
+오래된 완료/보관 task 정리 후보 확인:
+
+```bash
+PYTHONPATH=src python3 -m codex_batch_runner prune
+PYTHONPATH=src python3 -m codex_batch_runner prune --older-than-days 60 --json
+```
+
+`prune`은 기본적으로 dry-run입니다. `archived` task와 `completed + review_status=accepted` task 중 지정한 age보다 오래된 항목만 후보로 보고하며, task JSON 파일과 task에 기록된 log path를 함께 표시합니다. 실제 삭제는 `--apply`를 명시한 경우에만 수행합니다.
+
 ## 설정
 
 config 탐색 순서는 다음과 같습니다.
@@ -205,6 +214,8 @@ Codex를 호출하지 않는 조건:
 동시 실행 방지는 `.codex-batch-runner/runner.lock` atomic create로 처리합니다. lock이 오래 남아 있으면 stale lock으로 보고 복구합니다. 기본 stale 기준은 6시간입니다.
 
 task와 state 파일은 같은 디렉터리에 임시 파일을 쓴 뒤 `os.replace`로 교체합니다. Codex JSONL 로그는 attempt별 파일로 저장합니다.
+
+`prune`은 삭제 동작이 있는 명령이므로 기본값이 비파괴 dry-run입니다. `--apply`가 없으면 파일을 삭제하지 않습니다. `--apply`가 있어도 resolved path가 configured `queue_dir` 또는 `log_dir` 밖에 있는 파일은 삭제하지 않으며, report에 blocked 항목으로 남깁니다.
 
 ## Rate-limit 처리
 

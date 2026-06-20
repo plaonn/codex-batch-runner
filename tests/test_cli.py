@@ -352,6 +352,103 @@ class CliTests(unittest.TestCase):
             self.assertEqual("task-rate", events[0]["task_id"])
             self.assertEqual(["usage limit"], events[0]["matched_markers"])
 
+    def test_prune_dry_run_reports_archived_and_accepted_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            archived = create_task(config, "old archived", tmp, task_id="old-archived")
+            accepted = create_task(config, "old accepted", tmp, task_id="old-accepted")
+            unreviewed = create_task(config, "old unreviewed", tmp, task_id="old-unreviewed")
+            for task in (archived, accepted, unreviewed):
+                task["status"] = "completed"
+                task["completed_at"] = "2000-01-01T00:00:00+00:00"
+            archived["status"] = "archived"
+            archived["archived_at"] = "2000-01-02T00:00:00+00:00"
+            accepted["review_status"] = "accepted"
+            accepted["reviewed_at"] = "2000-01-03T00:00:00+00:00"
+            unreviewed["review_status"] = "unreviewed"
+            for task in (archived, accepted, unreviewed):
+                save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "prune", "--older-than-days", "30"])
+
+            self.assertEqual(0, code)
+            self.assertIn("mode: dry-run", output)
+            self.assertIn("old-archived\tarchived\t2000-01-02T00:00:00+00:00", output)
+            self.assertIn("old-accepted\tcompleted_accepted\t2000-01-03T00:00:00+00:00", output)
+            self.assertNotIn("old-unreviewed", output)
+            self.assertTrue((config.queue_dir / "old-archived.json").exists())
+            self.assertTrue((config.queue_dir / "old-accepted.json").exists())
+
+    def test_prune_default_does_not_delete_task_or_log_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "done", tmp, task_id="done")
+            log_path = config.log_dir / "done" / "attempt-1.jsonl"
+            log_path.parent.mkdir(parents=True)
+            log_path.write_text("{}\n", encoding="utf-8")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            task["reviewed_at"] = "2000-01-01T00:00:00+00:00"
+            task["log_paths"] = [str(log_path)]
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "prune"])
+
+            self.assertEqual(0, code)
+            self.assertIn("would-delete", output)
+            self.assertTrue((config.queue_dir / "done.json").exists())
+            self.assertTrue(log_path.exists())
+
+    def test_prune_json_output_is_machine_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "done", tmp, task_id="json-task")
+            task["status"] = "archived"
+            task["archived_at"] = "2000-01-01T00:00:00+00:00"
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "prune", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["dry_run"])
+            self.assertEqual("dry-run", report["mode"])
+            self.assertEqual(1, report["candidate_count"])
+            self.assertEqual("json-task", report["candidates"][0]["task_id"])
+            self.assertEqual("task", report["candidates"][0]["files"][0]["kind"])
+
+    def test_prune_apply_deletes_only_paths_inside_configured_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "done", tmp, task_id="safe")
+            safe_log = config.log_dir / "safe" / "attempt-1.jsonl"
+            safe_log.parent.mkdir(parents=True)
+            safe_log.write_text("{}\n", encoding="utf-8")
+            outside_log = Path(tmp) / "outside.jsonl"
+            outside_log.write_text("{}\n", encoding="utf-8")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            task["reviewed_at"] = "2000-01-01T00:00:00+00:00"
+            task["log_paths"] = [str(safe_log), str(outside_log)]
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "prune", "--apply", "--json"])
+            report = json.loads(output)
+            files = report["candidates"][0]["files"]
+            outside = [file for file in files if file["path"] == str(outside_log.resolve())][0]
+
+            self.assertEqual(0, code)
+            self.assertFalse((config.queue_dir / "safe.json").exists())
+            self.assertFalse(safe_log.exists())
+            self.assertTrue(outside_log.exists())
+            self.assertFalse(outside["safe"])
+            self.assertFalse(outside["deleted"])
+            self.assertEqual("outside configured log_dir", outside["reason"])
+
     def test_accept_and_reject_update_review_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
