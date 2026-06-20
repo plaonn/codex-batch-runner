@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -48,6 +49,16 @@ def missing_command_config(tmp: str) -> Config:
         stale_lock_seconds=base.stale_lock_seconds,
         rate_limit_cooldown_seconds=1800,
         default_max_attempts=base.default_max_attempts,
+    )
+
+
+def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
 
 
@@ -298,6 +309,59 @@ class RunnerTests(unittest.TestCase):
 
             self.assertEqual("completed", loaded["status"])
             self.assertIsNone(loaded["cooldown_until"])
+
+    def test_apply_result_preserves_optional_metadata_and_records_git_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.git"
+            repo = root / "repo"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, stdout=subprocess.PIPE)
+            subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, stdout=subprocess.PIPE)
+            git(repo, "config", "user.email", "test@example.invalid")
+            git(repo, "config", "user.name", "Test User")
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            git(repo, "remote", "add", "origin", str(remote))
+            git(repo, "push", "-u", "origin", "main")
+            (repo / "file.txt").write_text("base\nchange\n", encoding="utf-8")
+            git(repo, "commit", "-am", "local change")
+
+            config = make_config(tmp, "success")
+            task = create_task(config, "do it", str(repo), task_id="task-git")
+            task["status"] = "running"
+            result = CodexResult(
+                returncode=0,
+                log_path=root / "attempt.jsonl",
+                command_kind="exec",
+                resume_id_used=None,
+                stderr="",
+                events=[],
+                final_response={
+                    "task_id": "task-git",
+                    "status": "completed",
+                    "summary": "done",
+                    "next_prompt": "",
+                    "changed_files": ["file.txt"],
+                    "verification": ["unit tests"],
+                    "commits": ["local change"],
+                    "push_status": {"ahead": 1, "behind": 0},
+                },
+                session_id=None,
+                thread_id=None,
+                rate_limited=False,
+                rate_limit_markers=[],
+            )
+
+            apply_codex_result(config, task, result)
+            loaded = load_task(config, "task-git")
+
+            self.assertEqual(["local change"], loaded["last_result"]["commits"])
+            self.assertEqual({"ahead": 1, "behind": 0}, loaded["last_result"]["push_status"])
+            self.assertEqual(1, loaded["git_status"]["ahead"])
+            self.assertEqual(0, loaded["git_status"]["behind"])
+            self.assertTrue(loaded["git_status"]["has_unpushed"])
+            self.assertIn("local change", " ".join(loaded["git_status"]["unpushed_commits"]))
 
     def test_malformed_final_json_retries_until_max_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

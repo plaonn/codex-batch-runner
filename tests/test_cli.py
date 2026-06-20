@@ -558,6 +558,39 @@ class CliTests(unittest.TestCase):
                 lines,
             )
 
+    def test_list_verbose_includes_result_push_and_git_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="push-meta", project_id="project-a")
+            task["status"] = "completed"
+            task["last_result"] = {
+                "status": "completed",
+                "summary": "done",
+                "commits": ["abc1234 change"],
+                "push_status": {"ahead": 1, "behind": 0},
+            }
+            task["git_status"] = {
+                "branch": "main",
+                "comparison_ref": "origin/main",
+                "ahead": 1,
+                "behind": 0,
+                "dirty": False,
+            }
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--verbose", "--all"])
+            lines = list_lines(output)
+
+            self.assertEqual(0, code)
+            self.assertIn(
+                "push-meta\tcompleted\tproject-a\t0\t-\treview=unreviewed"
+                "\tstatus=completed summary=done commits=1 push_status=ahead=1 behind=0 "
+                "git=branch=main compare=origin/main ahead=1 behind=0 dirty=false"
+                "\t-\t-",
+                lines,
+            )
+
     def test_list_verbose_uses_dash_for_missing_summary_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -641,8 +674,19 @@ class CliTests(unittest.TestCase):
                 "status": "completed",
                 "summary": "Implemented token=private-value handling.",
                 "next_prompt": "",
+                "commits": ["abc1234 redact private handling"],
+                "push_status": {"ahead": 1, "behind": 0},
                 "changed_files": ["src/example.py"],
                 "verification": ["python3 -m unittest"],
+            }
+            task["git_status"] = {
+                "branch": "main",
+                "comparison_ref": "origin/main",
+                "ahead": 1,
+                "behind": 0,
+                "has_unpushed": True,
+                "dirty": False,
+                "unpushed_commits": ["abc1234 redact private handling"],
             }
             task["log_paths"] = [str(Path(tmp) / "logs" / "attempt-1.jsonl")]
             save_task(config, task)
@@ -658,6 +702,12 @@ class CliTests(unittest.TestCase):
             self.assertIn("labels: queue", output)
             self.assertIn("summary:", output)
             self.assertIn("Implemented token [REDACTED] handling.", output)
+            self.assertIn("commits:", output)
+            self.assertIn("- abc1234 redact private handling", output)
+            self.assertIn("push_status:", output)
+            self.assertIn("ahead: 1", output)
+            self.assertIn("## git_status", output)
+            self.assertIn("has_unpushed: True", output)
             self.assertIn("- src/example.py", output)
             self.assertIn("- python3 -m unittest", output)
             self.assertIn("## logs", output)

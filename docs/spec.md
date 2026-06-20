@@ -381,9 +381,13 @@ wrapper 요구사항:
   "summary": "string",
   "next_prompt": "string",
   "changed_files": ["string"],
-  "verification": ["string"]
+  "verification": ["string"],
+  "commits": ["string, optional"],
+  "push_status": "string or object, optional"
 }
 ```
+
+`commits`와 `push_status`는 optional result metadata임. 기존 final JSON처럼 이 필드를 생략해도 파싱과 상태 전이는 동일하게 동작해야 함. 포함된 optional field는 runner가 의미를 강제 변환하지 않고 `last_result`에 그대로 저장함.
 
 ## Partial completion policy
 
@@ -520,15 +524,17 @@ config 탐색 순서:
 
 사람이 읽는 `cbr list` 출력은 header가 있는 tab-separated table입니다. 기본 list, `--all`, filter list에 같은 형식을 적용합니다. 최소 열은 `ID`, `STATUS`, `PROJECT`, `ATTEMPTS`, `DEPS`, `FLAGS`입니다. `PROJECT`는 task metadata fallback 규칙으로 계산한 project id입니다. `DEPS`는 `depends_on` id를 쉼표로 연결하고 없으면 `-`를 표시합니다. `FLAGS`는 `cooldown`, `blocked_by=...`, `last_error=...`, `resolution=...`, `review=...`를 공백으로 연결하고 없으면 `-`를 표시합니다. table의 빈 scalar 값은 `-`로 표시하며 값을 자르지 않습니다. 자동화나 스크립트는 table format에 의존하지 말고 `--json`을 사용해야 합니다.
 
-`cbr list --verbose`는 사람용 table에 `LAST_RESULT`, `LAST_RUN`, `LAST_ERROR` 열을 추가합니다. `LAST_RESULT`는 `last_result.status`와 `last_result.summary`의 한 줄 요약을, `LAST_RUN`은 `last_run.command_kind`, `returncode`, `duration_seconds`를, `LAST_ERROR`는 `last_error`의 한 줄 요약을 표시합니다. 누락된 값은 `-`로 표시하고 transcript 또는 raw JSONL 내용은 출력하지 않습니다. `--json`을 함께 사용하면 verbose 열을 만들지 않고 기존 JSON 배열만 출력합니다.
+`cbr list --verbose`는 사람용 table에 `LAST_RESULT`, `LAST_RUN`, `LAST_ERROR` 열을 추가합니다. `LAST_RESULT`는 `last_result.status`, `last_result.summary`, optional `commits`/`push_status`, task `git_status`의 한 줄 요약을, `LAST_RUN`은 `last_run.command_kind`, `returncode`, `duration_seconds`를, `LAST_ERROR`는 `last_error`의 한 줄 요약을 표시합니다. 누락된 값은 `-`로 표시하고 transcript 또는 raw JSONL 내용은 출력하지 않습니다. `--json`을 함께 사용하면 verbose 열을 만들지 않고 기존 JSON 배열만 출력합니다.
 
 `cbr list --unreviewed`는 `completed + unreviewed` task만 표시함. `cbr list --needs-review`는 `completed + unreviewed/rejected/needs_followup` task를 표시함.
 
 `cbr archive TASK_ID`는 task 파일을 삭제하지 않고 `status=archived`, `previous_status`, `archived_at`을 기록함.
 
-`cbr summary TASK_ID`는 task metadata, dependency blocked 상태, `last_result.summary`, changed files, verification, last_error, next_prompt, log path를 transcript보다 짧은 Markdown 형식으로 표시합니다.
+`cbr summary TASK_ID`는 task metadata, dependency blocked 상태, `last_result.summary`, optional commits/push_status, changed files, verification, task `git_status`, last_error, next_prompt, log path를 transcript보다 짧은 Markdown 형식으로 표시합니다.
 
 runner는 각 Codex 호출 후 task에 `last_run` metadata를 저장합니다. 필드는 `command_kind`, `returncode`, `started_at`, `finished_at`, `duration_seconds`, `resume_id_used`, `log_path`입니다. task-level counters로 `run_count`, `resume_count`, `rate_limit_count`, `failure_count`도 유지합니다.
+
+정상 final JSON 응답을 받은 뒤 runner는 task `cwd`에서 네트워크를 사용하지 않는 local Git inspection을 시도할 수 있습니다. repository이면 `git_status`에 `branch`, `upstream`, `comparison_ref`, `ahead`, `behind`, `has_unpushed`, `dirty`, `unpushed_commits`, `warnings`, `inspected_at`을 저장합니다. 비교 기준은 configured upstream을 우선하고, 없으면 local `origin/<branch>` 또는 `origin/main` ref를 사용합니다. runner는 push를 수행하지 않으며, 이 metadata는 운영자가 남은 push 작업을 판단하기 위한 보고용입니다.
 
 `cbr transcript TASK_ID`는 저장된 cbr JSONL 로그와, `session_id` 또는 `thread_id`로 찾을 수 있는 Codex 원본 세션 로그에서 주요 대화, tool 호출, patch, final/error event를 사람이 읽기 좋은 형태로 재구성함. `--raw`는 원본 JSONL을 출력함.
 

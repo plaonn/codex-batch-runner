@@ -256,20 +256,28 @@ def flags_cell(task: dict, by_id: dict[str, dict]) -> str:
 
 def verbose_table_cells(task: dict) -> list[str]:
     return [
-        last_result_cell(task.get("last_result")),
+        last_result_cell(task.get("last_result"), task.get("git_status")),
         last_run_cell(task.get("last_run")),
         excerpt_cell(task.get("last_error")),
     ]
 
 
-def last_result_cell(last_result: object) -> str:
-    if not isinstance(last_result, dict):
+def last_result_cell(last_result: object, git_status: object | None = None) -> str:
+    if not isinstance(last_result, dict) and not isinstance(git_status, dict):
         return "-"
     parts = []
-    if last_result.get("status"):
-        parts.append("status=" + one_line(last_result.get("status")))
-    if last_result.get("summary"):
-        parts.append("summary=" + excerpt(last_result.get("summary")))
+    if isinstance(last_result, dict):
+        if last_result.get("status"):
+            parts.append("status=" + one_line(last_result.get("status")))
+        if last_result.get("summary"):
+            parts.append("summary=" + excerpt(last_result.get("summary")))
+        if last_result.get("commits"):
+            parts.append("commits=" + commits_summary(last_result.get("commits")))
+        if last_result.get("push_status"):
+            parts.append("push_status=" + compact_value(last_result.get("push_status")))
+    git_summary = git_status_cell(git_status)
+    if git_summary != "-":
+        parts.append("git=" + git_summary)
     return " ".join(parts) if parts else "-"
 
 
@@ -285,6 +293,44 @@ def last_run_cell(last_run: object) -> str:
     if "duration_seconds" in last_run and last_run.get("duration_seconds") is not None:
         parts.append("duration=" + one_line(last_run.get("duration_seconds")) + "s")
     return " ".join(parts) if parts else "-"
+
+
+def git_status_cell(git_status: object) -> str:
+    if not isinstance(git_status, dict):
+        return "-"
+    parts = []
+    if git_status.get("branch"):
+        parts.append("branch=" + one_line(git_status.get("branch")))
+    if git_status.get("comparison_ref"):
+        parts.append("compare=" + one_line(git_status.get("comparison_ref")))
+    if git_status.get("ahead") is not None:
+        parts.append("ahead=" + one_line(git_status.get("ahead")))
+    if git_status.get("behind") is not None:
+        parts.append("behind=" + one_line(git_status.get("behind")))
+    if git_status.get("dirty") is not None:
+        parts.append("dirty=" + str(bool(git_status.get("dirty"))).lower())
+    return " ".join(parts) if parts else "-"
+
+
+def commits_summary(value: object) -> str:
+    if isinstance(value, list):
+        return one_line(len(value))
+    return compact_value(value)
+
+
+def compact_value(value: object) -> str:
+    if isinstance(value, dict):
+        parts = []
+        for key in sorted(value):
+            item = value.get(key)
+            if isinstance(item, (dict, list)):
+                parts.append(f"{key}={json.dumps(item, ensure_ascii=False, sort_keys=True)}")
+            else:
+                parts.append(f"{key}={item}")
+        return excerpt(" ".join(parts))
+    if isinstance(value, list):
+        return excerpt(", ".join(one_line(item) for item in value))
+    return excerpt(value)
 
 
 def excerpt_cell(value: object) -> str:

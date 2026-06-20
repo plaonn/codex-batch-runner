@@ -48,6 +48,7 @@ def render_task_summary(task: dict, by_id: dict[str, dict] | None = None) -> str
             lines.append(f"blocked_by: {', '.join(blocked_by)}")
 
     append_multiline_section(lines, "last_result", render_last_result(task.get("last_result")))
+    append_multiline_section(lines, "git_status", render_git_status(task.get("git_status")))
     append_multiline_section(lines, "last_run", render_last_run(task.get("last_run")))
     append_section(lines, "last_error", task.get("last_error"))
     append_section(lines, "next_prompt", task.get("next_prompt"))
@@ -67,6 +68,14 @@ def render_last_result(last_result: object) -> str:
         lines.append(f"status: {last_result.get('status')}")
     if last_result.get("summary"):
         lines.extend(["summary:", sanitize(last_result.get("summary"))])
+    commits = last_result.get("commits") or []
+    if isinstance(commits, list) and commits:
+        lines.append("commits:")
+        lines.extend(f"- {sanitize(item)}" for item in commits)
+    elif commits:
+        lines.extend(["commits:", sanitize(commits)])
+    if last_result.get("push_status"):
+        lines.extend(["push_status:", render_structured_value(last_result.get("push_status"))])
     changed_files = last_result.get("changed_files") or []
     if isinstance(changed_files, list) and changed_files:
         lines.append("changed_files:")
@@ -78,6 +87,41 @@ def render_last_result(last_result: object) -> str:
     if last_result.get("next_prompt"):
         lines.extend(["next_prompt:", sanitize(last_result.get("next_prompt"))])
     return "\n".join(lines)
+
+
+def render_git_status(git_status: object) -> str:
+    if not isinstance(git_status, dict):
+        return ""
+    lines = []
+    for key in (
+        "branch",
+        "upstream",
+        "comparison_ref",
+        "ahead",
+        "behind",
+        "has_unpushed",
+        "dirty",
+        "inspected_at",
+    ):
+        if key in git_status:
+            lines.append(f"{key}: {display_value(git_status.get(key))}")
+    unpushed_commits = git_status.get("unpushed_commits") or []
+    if isinstance(unpushed_commits, list) and unpushed_commits:
+        lines.append("unpushed_commits:")
+        lines.extend(f"- {sanitize(item)}" for item in unpushed_commits)
+    warnings = git_status.get("warnings") or []
+    if isinstance(warnings, list) and warnings:
+        lines.append("warnings:")
+        lines.extend(f"- {sanitize(item)}" for item in warnings)
+    return "\n".join(lines)
+
+
+def render_structured_value(value: object) -> str:
+    if isinstance(value, dict):
+        return "\n".join(f"{key}: {sanitize(item)}" for key, item in value.items())
+    if isinstance(value, list):
+        return "\n".join(f"- {sanitize(item)}" for item in value)
+    return sanitize(value)
 
 
 def append_counters(lines: list[str], task: dict) -> None:

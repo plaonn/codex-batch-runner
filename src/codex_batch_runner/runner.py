@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .codex import CodexResult, run_codex
@@ -99,6 +102,11 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
         return
 
     task["last_result"] = final_response
+    git_status = inspect_task_git_status(task.get("cwd"))
+    if git_status:
+        task["git_status"] = git_status
+    else:
+        task.pop("git_status", None)
     task["last_error"] = None
     task["cooldown_until"] = None
 
@@ -179,3 +187,106 @@ def resumable_status(task: dict) -> str:
 
 def resume_id(task: dict) -> str | None:
     return task.get("session_id") or task.get("thread_id") or None
+
+
+def inspect_task_git_status(cwd: object) -> dict[str, Any] | None:
+    if not cwd or not shutil.which("git"):
+        return None
+    workdir = Path(str(cwd)).expanduser()
+    repo_root = run_git(workdir, ["rev-parse", "--show-toplevel"])
+    if repo_root.returncode != 0 or not repo_root.stdout.strip():
+        return None
+
+    repo_path = Path(repo_root.stdout.strip()).expanduser().resolve()
+    status: dict[str, Any] = {
+        "root": str(repo_path),
+        "branch": None,
+        "dirty": None,
+        "upstream": None,
+        "comparison_ref": None,
+        "ahead": None,
+        "behind": None,
+        "has_unpushed": None,
+        "unpushed_commits": [],
+        "warnings": [],
+        "inspected_at": iso_now(),
+    }
+
+    branch = run_git(repo_path, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    if branch.returncode == 0 and branch.stdout.strip():
+        status["branch"] = branch.stdout.strip()
+    else:
+        head = run_git(repo_path, ["rev-parse", "--short", "HEAD"])
+        status["branch"] = f"HEAD ({head.stdout.strip()})" if head.returncode == 0 and head.stdout.strip() else "HEAD"
+
+    dirty = run_git(repo_path, ["status", "--porcelain=v1", "--untracked-files=all"])
+    if dirty.returncode == 0:
+        status["dirty"] = bool(dirty.stdout.strip())
+    else:
+        status["warnings"].append(f"cannot read dirty status: {clean_git_error(dirty)}")
+
+    comparison_ref = git_comparison_ref(repo_path, status)
+    if comparison_ref:
+        counts = run_git(repo_path, ["rev-list", "--left-right", "--count", f"{comparison_ref}...HEAD"])
+        if counts.returncode == 0:
+            parts = counts.stdout.strip().split()
+            if len(parts) == 2 and all(part.isdigit() for part in parts):
+                status["behind"] = int(parts[0])
+                status["ahead"] = int(parts[1])
+                status["has_unpushed"] = status["ahead"] > 0
+                if status["ahead"]:
+                    log = run_git(repo_path, ["log", "--format=%h %s", "--max-count=20", f"{comparison_ref}..HEAD"])
+                    if log.returncode == 0:
+                        status["unpushed_commits"] = [line for line in log.stdout.splitlines() if line.strip()]
+                    else:
+                        status["warnings"].append(f"cannot list unpushed commits: {clean_git_error(log)}")
+            else:
+                status["warnings"].append(f"cannot parse ahead/behind output for {comparison_ref}")
+        else:
+            status["warnings"].append(f"cannot read ahead/behind against {comparison_ref}: {clean_git_error(counts)}")
+
+    return status
+
+
+def git_comparison_ref(repo_path: Path, status: dict[str, Any]) -> str | None:
+    upstream = run_git(repo_path, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+    if upstream.returncode == 0 and upstream.stdout.strip():
+        value = upstream.stdout.strip()
+        status["upstream"] = value
+        status["comparison_ref"] = value
+        return value
+
+    branch = status.get("branch")
+    if branch and not str(branch).startswith("HEAD"):
+        origin_branch = f"origin/{branch}"
+        if run_git(repo_path, ["show-ref", "--verify", "--quiet", f"refs/remotes/{origin_branch}"]).returncode == 0:
+            status["comparison_ref"] = origin_branch
+            status["warnings"].append(f"no upstream configured; using {origin_branch} for ahead/behind")
+            return origin_branch
+
+    if run_git(repo_path, ["show-ref", "--verify", "--quiet", "refs/remotes/origin/main"]).returncode == 0:
+        status["comparison_ref"] = "origin/main"
+        status["warnings"].append("no upstream configured; using origin/main for ahead/behind")
+        return "origin/main"
+
+    status["warnings"].append("no upstream or local origin ref available for ahead/behind")
+    return None
+
+
+def run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess(["git", "-C", str(cwd), *args], 1, "", str(exc))
+
+
+def clean_git_error(result: subprocess.CompletedProcess[str]) -> str:
+    text = (result.stderr or result.stdout or "").strip()
+    return text.splitlines()[-1] if text else f"git exited with {result.returncode}"

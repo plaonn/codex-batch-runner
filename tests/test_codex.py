@@ -25,6 +25,27 @@ class CodexParserTests(unittest.TestCase):
         self.assertEqual("task-1", response["task_id"])
         self.assertEqual("completed", response["status"])
 
+    def test_extracts_final_response_with_optional_metadata(self) -> None:
+        events = [
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": (
+                        '{"task_id":"task-optional","status":"completed","summary":"done",'
+                        '"next_prompt":"","changed_files":[],"verification":[],'
+                        '"commits":["abc1234 implement thing"],'
+                        '"push_status":{"ahead":1,"behind":0}}'
+                    ),
+                },
+            }
+        ]
+
+        response = extract_final_response(events)
+
+        self.assertEqual(["abc1234 implement thing"], response["commits"])
+        self.assertEqual({"ahead": 1, "behind": 0}, response["push_status"])
+
     def test_thread_id_can_be_used_as_resume_identifier(self) -> None:
         events = [{"type": "thread.started", "thread_id": "thread-123"}]
 

@@ -10,6 +10,8 @@ FINAL_SCHEMA = {
     "next_prompt": "string",
     "changed_files": ["string"],
     "verification": ["string"],
+    "commits": ["string, optional"],
+    "push_status": "string or object, optional",
 }
 
 
