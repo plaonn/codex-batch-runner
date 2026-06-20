@@ -38,7 +38,7 @@ def format_command(template: list[str], task: dict, prompt: str) -> list[str]:
 def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
     log_dir = ensure_dir(config.log_dir / task["id"])
     log_path = log_dir / f"attempt-{attempt}.jsonl"
-    use_resume = task.get("status") == "needs_resume" and (task.get("session_id") or task.get("thread_id"))
+    use_resume = should_use_resume(task)
     command = format_command(config.codex_resume_command if use_resume else config.codex_command, task, prompt)
     stderr_chunks: list[str] = []
     events: list[dict[str, Any]] = []
@@ -104,6 +104,11 @@ def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexRes
         rate_limited=bool(rate_limit_markers),
         rate_limit_markers=rate_limit_markers,
     )
+
+
+def should_use_resume(task: dict) -> bool:
+    resume_requested = task.get("resume_requested") or task.get("status") == "needs_resume"
+    return bool(resume_requested and (task.get("session_id") or task.get("thread_id")))
 
 
 def parse_json_line(line: str) -> Any:

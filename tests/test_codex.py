@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from codex_batch_runner.codex import extract_final_response, first_recursive_value, format_command
+from codex_batch_runner.codex import extract_final_response, first_recursive_value, format_command, should_use_resume
 
 
 class CodexParserTests(unittest.TestCase):
@@ -37,6 +37,11 @@ class CodexParserTests(unittest.TestCase):
         command = format_command(["codex", "resume", "{session_id}"], {"thread_id": "thread-123"}, "continue")
 
         self.assertEqual(["codex", "resume", "thread-123", "continue"], command)
+
+    def test_should_use_resume_after_task_is_marked_running(self) -> None:
+        task = {"status": "running", "resume_requested": True, "thread_id": "thread-123"}
+
+        self.assertTrue(should_use_resume(task))
 
 
 if __name__ == "__main__":

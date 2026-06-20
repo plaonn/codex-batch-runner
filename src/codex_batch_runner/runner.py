@@ -39,14 +39,21 @@ def run_next(config: Config) -> RunOutcome:
             mark_run(config, None)
             return RunOutcome(status="empty", message="no runnable task")
 
+        started_at = iso_now()
+        resume_requested = task.get("status") == "needs_resume"
+        resume_unavailable = bool(resume_requested and task.get("next_prompt") and not resume_id(task))
+        prompt = build_prompt(task, resume_unavailable=resume_unavailable)
         task["status"] = "running"
-        task["started_at"] = iso_now()
+        task["started_at"] = started_at
+        task["resume_requested"] = resume_requested
+        task["resume_unavailable"] = resume_unavailable
+        task["resume_unavailable_at"] = started_at if resume_unavailable else None
+        if resume_unavailable:
+            task["resume_unavailable_attempts"] = int(task.get("resume_unavailable_attempts", 0)) + 1
         task["attempts"] = int(task.get("attempts", 0)) + 1
         save_task(config, task)
         mark_run(config, task["id"])
 
-        resume_unavailable = bool(task.get("next_prompt") and not resume_id(task))
-        prompt = build_prompt(task, resume_unavailable=resume_unavailable)
         result = run_codex(config, task, prompt, task["attempts"])
         apply_codex_result(config, task, result)
         return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])

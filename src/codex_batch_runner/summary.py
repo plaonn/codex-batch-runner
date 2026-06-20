@@ -24,6 +24,12 @@ def render_task_summary(task: dict, by_id: dict[str, dict] | None = None) -> str
         lines.append(f"cwd: {task.get('cwd')}")
     if task.get("cooldown_until") or is_in_cooldown(task):
         lines.append(f"cooldown_until: {task.get('cooldown_until')}")
+    if task.get("resume_unavailable"):
+        lines.append("resume_unavailable: true")
+        if task.get("resume_unavailable_at"):
+            lines.append(f"resume_unavailable_at: {task.get('resume_unavailable_at')}")
+        if task.get("resume_unavailable_attempts"):
+            lines.append(f"resume_unavailable_attempts: {task.get('resume_unavailable_attempts')}")
 
     if by_id is not None:
         deps_ready, blocked_by = dependency_status(task, by_id)

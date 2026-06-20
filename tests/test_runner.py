@@ -117,7 +117,54 @@ class RunnerTests(unittest.TestCase):
                 run_next(config)
 
             self.assertEqual(1, len(seen_prompts))
+            self.assertIn("continue", seen_prompts[0])
+            self.assertNotIn("do part", seen_prompts[0])
             self.assertNotIn("resume_unavailable: true", seen_prompts[0])
+            task = load_task(config, "task-thread-resume")
+            self.assertTrue(task["resume_requested"])
+            self.assertFalse(task["resume_unavailable"])
+
+    def test_resume_without_identifier_records_resume_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            task = create_task(config, "original", tmp, task_id="task-resume-unavailable")
+            task["status"] = "needs_resume"
+            task["next_prompt"] = "continue without session"
+            save_task(config, task)
+            seen_prompts = []
+
+            def fake_run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
+                seen_prompts.append(prompt)
+                return CodexResult(
+                    returncode=0,
+                    log_path=Path(tmp) / "attempt.jsonl",
+                    stderr="",
+                    events=[],
+                    final_response={
+                        "task_id": "task-resume-unavailable",
+                        "status": "completed",
+                        "summary": "done",
+                        "next_prompt": "",
+                        "changed_files": [],
+                        "verification": [],
+                    },
+                    session_id=None,
+                    thread_id=None,
+                    rate_limited=False,
+                    rate_limit_markers=[],
+                )
+
+            with patch.object(runner_module, "run_codex", fake_run_codex):
+                run_next(config)
+
+            loaded = load_task(config, "task-resume-unavailable")
+            self.assertEqual(1, len(seen_prompts))
+            self.assertIn("resume_unavailable: true", seen_prompts[0])
+            self.assertIn("continue without session", seen_prompts[0])
+            self.assertTrue(loaded["resume_requested"])
+            self.assertTrue(loaded["resume_unavailable"])
+            self.assertIsNotNone(loaded["resume_unavailable_at"])
+            self.assertEqual(1, loaded["resume_unavailable_attempts"])
 
     def test_rate_limit_with_session_keeps_task_resumable_after_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
