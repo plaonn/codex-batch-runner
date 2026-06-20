@@ -184,6 +184,38 @@ codex-batch-runner/
 
 runner는 Codex 최종 응답이 `completed`이면 `review_status=unreviewed`를 설정함. 운영자나 관련 프로젝트의 Codex thread는 `cbr transcript`, `cbr show`, 필요한 테스트 결과를 확인한 뒤 `cbr accept` 또는 `cbr reject`로 진짜 완료 여부를 기록함.
 
+운영 모델상 `completed + unreviewed`, `completed + rejected`, `completed + needs_followup`은 아직 처리해야 할 task로 봄. 향후 기본 `cbr list`는 `completed + accepted`와 `archived`만 숨기고, 검토가 끝나지 않은 completed task는 기본 출력에 표시해야 함.
+
+## Project routing metadata
+
+여러 프로젝트가 하나의 중앙 queue를 공유하면 review 대상 판정을 위해 task를 하나씩 열람하는 방식은 토큰과 시간이 낭비됨. task 등록 시 review routing metadata를 함께 저장하는 방향으로 확장함.
+
+계획 필드:
+
+- `schema_version`: task schema 호환성 판단용 정수
+- `project_root`: task가 속한 git root. `git rev-parse --show-toplevel` 성공 시 그 값을 사용하고, 실패하면 `cwd`로 fallback함
+- `project_id`: 기본값은 `project_root` basename. 필요하면 config나 enqueue option으로 override할 수 있음
+- `category`: `implementation`, `review`, `smoke`, `maintenance`, `docs` 같은 운영 분류
+- `labels`: 사람이 지정하거나 skill이 추론한 짧은 태그 목록
+- `created_by`: `enqueue-codex-batch`, `operator`, `test` 같은 등록 주체
+- `source_thread_id`: 확인 가능한 경우 등록을 요청한 Codex thread id
+
+초기 구현은 기존 task와 호환되어야 함. metadata가 없는 task는 `cwd`를 `project_root` fallback으로 사용하고, `category`는 비워 둠.
+
+관련 CLI 계획:
+
+```bash
+cbr list --project codex-batch-runner
+cbr list --project-root /path/to/repo
+cbr list --cwd /path/to/repo
+cbr list --category implementation
+cbr list --label rate-limit
+cbr list --unreviewed
+cbr list --needs-review
+```
+
+전역 enqueue skill은 task 등록 시 현재 repo의 git root를 계산해 `project_root`와 `project_id`를 넣어야 함. review 요청에서는 현재 repo root로 먼저 필터링하고, 필요할 때만 개별 task의 `show` 또는 `transcript`를 읽음.
+
 ## Dependency policy
 
 task 등록 시 `depends_on`으로 의존 task id를 명시할 수 있음.
@@ -198,6 +230,20 @@ runner는 아래 조건을 모두 만족하는 task 하나만 실행함.
 실행 가능한 task가 없으면 Codex를 호출하지 않고 즉시 종료함.
 
 의존 task가 `failed` 또는 `blocked_user`인 경우 dependent task를 자동 실패시키지 않음. `list` 또는 `show`에서 dependency blocked 상태를 표시하고 runner는 해당 task를 건너뜀.
+
+향후 review model과 dependency policy를 통합해야 함. 기본 정책 후보는 dependency 만족 조건을 `status=completed`에서 `status=completed && review_status=accepted`로 강화하는 것임. 다만 기존 자동화와의 호환성을 위해 초기 전환은 config option으로 둘 수 있음.
+
+## Operational triage plan
+
+실운용에서 중앙 queue가 커지면 full transcript를 읽기 전에 저비용 triage가 가능해야 함.
+
+계획:
+
+- `cbr list`는 실행 대기 task와 검토 대기 task를 기본 표시함
+- `cbr list --all`은 accepted/archived까지 포함한 전체 목록을 표시함
+- `cbr list --verbose` 또는 `cbr summary TASK_ID`는 `last_result.summary`, changed files, verification, last_error를 transcript보다 짧게 보여줌
+- failed/blocked task에는 `resolution` 또는 review 상태를 기록해 `won't fix`, `superseded`, `manual`, `smoke` 같은 운영 결정을 남길 수 있게 함
+- 오래된 `accepted`/`archived` task와 로그는 추후 `cbr prune`으로 정리할 수 있게 함
 
 ## Runner execution policy
 
