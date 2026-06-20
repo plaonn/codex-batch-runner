@@ -14,7 +14,7 @@
 
 Python 3.11 이상이 필요합니다. runtime dependency는 없습니다.
 
-기본 운영에서는 사람이 `cbr`를 직접 자주 실행하기보다, 다른 Codex thread가 전역 skill을 통해 작업을 queue에 등록하고 launchd/systemd 같은 스케줄러가 `run-next`를 호출하는 방식을 권장합니다. CLI 직접 실행은 설치, 디버깅, 상태 확인을 위한 도구로 보는 것이 안전합니다.
+기본 운영에서는 다른 Codex thread가 전역 skill을 통해 작업을 queue에 등록하고 launchd/systemd 같은 스케줄러가 `run-next`를 호출하는 방식을 권장합니다. 자동화 경로에서는 `PATH`에 의존하지 않고 config와 절대 경로를 사용하는 것이 안전합니다.
 
 개발 checkout에서 바로 실행할 수 있습니다.
 
@@ -22,7 +22,7 @@ Python 3.11 이상이 필요합니다. runtime dependency는 없습니다.
 PYTHONPATH=src python3 -m codex_batch_runner --help
 ```
 
-`cbr` console script 설치는 선택 사항입니다. 개발 편의가 필요할 때만 editable install을 사용합니다.
+운영자가 직접 상태를 조회하거나 transcript를 검토하고 `accept`/`reject`를 기록하는 환경에서는 `cbr` console script 설치가 편리합니다. 자동화의 필수 조건은 아닙니다.
 
 ```bash
 python3 -m pip install -e .
@@ -115,7 +115,14 @@ PYTHONPATH=src python3 -m codex_batch_runner state
 
 ## 설정
 
-기본 runtime 디렉터리는 현재 작업 디렉터리의 `.codex-batch-runner/`입니다. 이 디렉터리는 gitignore 대상입니다.
+config 탐색 순서는 다음과 같습니다.
+
+1. `--config path/to/config.json`
+2. `CBR_CONFIG` 환경 변수
+3. `~/.config/codex-batch-runner/config.json`
+4. 현재 작업 디렉터리 기준 기본값
+
+config가 없을 때의 기본 runtime 디렉터리는 현재 작업 디렉터리의 `.codex-batch-runner/`입니다. 이 디렉터리는 gitignore 대상입니다.
 
 설정 파일 예시는 [examples/config.example.json](examples/config.example.json)에 있습니다.
 
