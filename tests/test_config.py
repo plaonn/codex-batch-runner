@@ -87,6 +87,18 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "dependency_requires_accepted_review must be a boolean"):
                 Config.load(str(config_path), root=Path(tmp))
 
+    def test_notifier_cursor_state_paths_are_optional_local_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps({"notifier_cursor_state_paths": ["notify-state.json", str(Path(tmp) / "state.json")]}),
+                encoding="utf-8",
+            )
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertEqual([Path(tmp).resolve() / "notify-state.json", Path(tmp) / "state.json"], config.notifier_cursor_state_paths)
+
     def test_post_mutation_trigger_command_defaults_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))

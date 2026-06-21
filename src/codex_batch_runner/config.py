@@ -14,6 +14,7 @@ class Config:
     queue_dir: Path
     log_dir: Path
     event_dir: Path
+    notifier_cursor_state_paths: list[Path]
     lock_file: Path
     state_file: Path
     codex_command: list[str]
@@ -39,12 +40,14 @@ class Config:
         queue_dir = path_value("queue_dir", ".codex-batch-runner/tasks")
         log_dir = path_value("log_dir", ".codex-batch-runner/logs")
         event_dir = path_value("event_dir", str(log_dir.parent / "events"))
+        notifier_cursor_state_paths = path_list_value("notifier_cursor_state_paths", data, base)
 
         return cls(
             root=base,
             queue_dir=queue_dir,
             log_dir=log_dir,
             event_dir=event_dir,
+            notifier_cursor_state_paths=notifier_cursor_state_paths,
             lock_file=path_value("lock_file", ".codex-batch-runner/runner.lock"),
             state_file=path_value("state_file", ".codex-batch-runner/state.json"),
             codex_command=list(data.get("codex_command", ["codex", "exec", "--sandbox", "workspace-write", "--json"])),
@@ -68,6 +71,19 @@ def argv_list(value: object) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError("post_mutation_trigger_command must be a list of strings")
     return value
+
+
+def path_list_value(key: str, data: dict[str, Any], base: Path) -> list[Path]:
+    value = data.get(key, [])
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{key} must be a list of path strings")
+    paths = []
+    for item in value:
+        path = Path(item).expanduser()
+        paths.append(path if path.is_absolute() else base / path)
+    return paths
 
 
 def bool_value(value: object) -> bool:

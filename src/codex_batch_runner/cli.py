@@ -182,6 +182,12 @@ def build_parser() -> argparse.ArgumentParser:
     prune_mode = prune.add_mutually_exclusive_group()
     prune_mode.add_argument("--apply", action="store_true", help="delete reported safe files")
     prune_mode.add_argument("--dry-run", action="store_true", help="report only; this is the default")
+    prune.add_argument(
+        "--notifier-cursor-state",
+        action="append",
+        default=[],
+        help="local notifier cursor state JSON path; repeatable",
+    )
     prune.add_argument("--json", action="store_true", help="print JSON")
     prune.set_defaults(func=cmd_prune)
 
@@ -618,7 +624,8 @@ def cmd_doctor(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_prune(config: Config, args: argparse.Namespace) -> int:
-    report = build_prune_report(config, age_days=args.older_than_days, apply=args.apply)
+    cursor_paths = [Path(path) for path in args.notifier_cursor_state]
+    report = build_prune_report(config, age_days=args.older_than_days, apply=args.apply, notifier_cursor_state_paths=cursor_paths or None)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
@@ -647,6 +654,8 @@ def render_prune_report(report: dict) -> str:
         f"event_candidates: {report.get('event_candidate_count', len(report.get('event_candidates', [])))}",
         f"deleted_files: {report['deleted_files']}",
     ]
+    for warning in report.get("warnings", []):
+        lines.append(f"warning: {warning}")
     if report["candidates"]:
         lines.append("task/log candidates:")
     for candidate in report["candidates"]:
@@ -655,6 +664,8 @@ def render_prune_report(report: dict) -> str:
             flags = []
             if file["deleted"]:
                 flags.append("deleted")
+            elif file.get("skipped"):
+                flags.append(f"skipped={file['reason']}")
             elif not file["exists"]:
                 flags.append("missing")
             elif report["dry_run"]:
@@ -669,6 +680,8 @@ def render_prune_report(report: dict) -> str:
         flags = []
         if file["deleted"]:
             flags.append("deleted")
+        elif file.get("skipped"):
+            flags.append(f"skipped={file['reason']}")
         elif not file["exists"]:
             flags.append("missing")
         elif report["dry_run"]:

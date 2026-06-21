@@ -184,9 +184,10 @@ PYTHONPATH=src python3 -m codex_batch_runner doctor --json
 ```bash
 PYTHONPATH=src python3 -m codex_batch_runner prune
 PYTHONPATH=src python3 -m codex_batch_runner prune --older-than-days 60 --json
+PYTHONPATH=src python3 -m codex_batch_runner prune --notifier-cursor-state .codex-batch-runner/notify-state.json --json
 ```
 
-`prune`은 기본적으로 dry-run입니다. `archived` task와 `completed + review_status=accepted` task 중 지정한 age보다 오래된 항목을 task/log 후보로 보고하며, task JSON 파일과 task에 기록된 log path를 함께 표시합니다. configured `event_dir` 아래의 오래된 `*.jsonl` event log 파일은 별도의 event 후보로 보고합니다. 실제 삭제는 `--apply`를 명시한 경우에만 수행합니다.
+`prune`은 기본적으로 dry-run입니다. `archived` task와 `completed + review_status=accepted` task 중 지정한 age보다 오래된 항목을 task/log 후보로 보고하며, task JSON 파일과 task에 기록된 log path를 함께 표시합니다. configured `event_dir` 아래의 오래된 `*.jsonl` event log 파일은 별도의 event 후보로 보고합니다. 실제 삭제는 `--apply`를 명시한 경우에만 수행합니다. Optional notifier cursor state paths can be supplied by config or repeated `--notifier-cursor-state` flags; they are local-only state files and are not enabled by default.
 
 queue mutation plan 검증:
 
@@ -209,6 +210,18 @@ config 탐색 순서는 다음과 같습니다.
 config가 없을 때의 기본 runtime 디렉터리는 현재 작업 디렉터리의 `.codex-batch-runner/`입니다. 이 디렉터리는 gitignore 대상입니다.
 
 Optional `event_dir` can override the append-only event log directory. If omitted, it defaults to `.codex-batch-runner/events` under the active runtime root.
+
+Optional `notifier_cursor_state_paths` can point to local notifier cursor state JSON files used only by `prune` event-log safety checks. It is disabled by default. The generic cursor schema is intentionally small:
+
+```json
+{
+  "schema_version": 1,
+  "current_event_file": ".codex-batch-runner/events/2000-01-02.jsonl",
+  "current_byte_offset": 1234
+}
+```
+
+`last_processed_event_file` may be used instead of `current_event_file` when a notifier records only whole-file progress. Cursor event file paths may be absolute or relative to `event_dir`, but they must resolve inside configured `event_dir`. If a configured cursor state file is missing, malformed, unreadable, or references an event file outside `event_dir`, `prune` reports a warning and skips old event JSONL deletion rather than failing the whole command.
 
 Optional `post_mutation_trigger_command` can run a generic scheduler wake-up hook after successful queue mutations and after `run-next` finishes one task when another task is eligible to run. The value is an argv list, not a shell string, so it is not shell-expanded. It is disabled by default.
 
@@ -299,7 +312,7 @@ task와 state 파일은 같은 디렉터리에 임시 파일을 쓴 뒤 `os.repl
 
 Core state-changing commands also append sanitized audit events. Initial event types include `task_created`, `task_started`, `task_completed`, `task_failed`, `task_needs_resume`, `task_blocked_user`, `task_reviewed`, `task_resolved`, `task_archived`, and `rate_limit_detected`. Event payloads are intentionally small and redact prompt text, raw transcripts, session/thread ids, secrets, credentials, and token-like fields. Event write failures are warnings; queue operations continue to rely on canonical task JSON files.
 
-`prune`은 삭제 동작이 있는 명령이므로 기본값이 비파괴 dry-run입니다. `--apply`가 없으면 파일을 삭제하지 않습니다. `--apply`가 있어도 resolved path가 configured `queue_dir`, `log_dir`, 또는 `event_dir` 밖에 있는 파일은 삭제하지 않으며, report에 blocked 항목으로 남깁니다. Event pruning only considers `*.jsonl` files under `event_dir`; notifier cursor/state files and other non-JSONL files are skipped. Notifier cursor-aware retention is not implemented yet, so event pruning currently uses age and `event_dir` containment only.
+`prune`은 삭제 동작이 있는 명령이므로 기본값이 비파괴 dry-run입니다. `--apply`가 없으면 파일을 삭제하지 않습니다. `--apply`가 있어도 resolved path가 configured `queue_dir`, `log_dir`, 또는 `event_dir` 밖에 있는 파일은 삭제하지 않으며, report에 blocked 항목으로 남깁니다. Event pruning only considers `*.jsonl` files under `event_dir`; notifier cursor/state files and other non-JSONL files are skipped. When notifier cursor state is configured, old event files that may not be fully consumed are reported with a skipped reason instead of being deleted.
 
 ## Codex CLI maintenance
 

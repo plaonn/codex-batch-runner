@@ -641,6 +641,111 @@ class CliTests(unittest.TestCase):
             self.assertEqual(str(outside_event.resolve()), event["path"])
             self.assertEqual("outside configured event_dir", event["reason"])
 
+    def test_prune_skips_event_file_when_cursor_has_not_fully_processed_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            config.event_dir.mkdir(parents=True)
+            old_event = config.event_dir / "2000-01-01.jsonl"
+            old_event.write_text('{"event_type":"task_created"}\n{"event_type":"task_started"}\n', encoding="utf-8")
+            os.utime(old_event, (946684800, 946684800))
+            cursor = Path(tmp) / "notify-state.json"
+            cursor.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "current_event_file": str(old_event),
+                        "current_byte_offset": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(
+                ["--config", str(config_path), "prune", "--apply", "--json", "--notifier-cursor-state", str(cursor)]
+            )
+            report = json.loads(output)
+            event = report["event_candidates"][0]
+
+            self.assertEqual(0, code)
+            self.assertTrue(old_event.exists())
+            self.assertFalse(event["deleted"])
+            self.assertTrue(event["skipped"])
+            self.assertEqual("notifier cursor has not fully processed this event file", event["reason"])
+
+    def test_prune_malformed_cursor_warns_and_skips_event_pruning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            config.event_dir.mkdir(parents=True)
+            old_event = config.event_dir / "2000-01-01.jsonl"
+            old_event.write_text('{"event_type":"task_created"}\n', encoding="utf-8")
+            os.utime(old_event, (946684800, 946684800))
+            cursor = Path(tmp) / "notify-state.json"
+            cursor.write_text("{not json\n", encoding="utf-8")
+
+            code, output = run_cli(["--config", str(config_path), "prune", "--apply", "--json", "--notifier-cursor-state", str(cursor)])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertTrue(old_event.exists())
+            self.assertTrue(report["warnings"])
+            self.assertTrue(report["event_candidates"][0]["skipped"])
+            self.assertEqual("notifier cursor safety warning", report["event_candidates"][0]["reason"])
+
+    def test_prune_cursor_outside_event_dir_warns_and_skips_event_pruning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            config.event_dir.mkdir(parents=True)
+            old_event = config.event_dir / "2000-01-01.jsonl"
+            old_event.write_text('{"event_type":"task_created"}\n', encoding="utf-8")
+            os.utime(old_event, (946684800, 946684800))
+            outside_event = Path(tmp) / "outside.jsonl"
+            cursor = Path(tmp) / "notify-state.json"
+            cursor.write_text(json.dumps({"schema_version": 1, "current_event_file": str(outside_event)}), encoding="utf-8")
+
+            code, output = run_cli(["--config", str(config_path), "prune", "--apply", "--json", "--notifier-cursor-state", str(cursor)])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertTrue(old_event.exists())
+            self.assertIn("outside event_dir", report["warnings"][0])
+            self.assertTrue(report["event_candidates"][0]["skipped"])
+
+    def test_prune_deletes_old_event_when_cursor_is_beyond_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            config.event_dir.mkdir(parents=True)
+            old_event = config.event_dir / "2000-01-01.jsonl"
+            old_event.write_text('{"event_type":"task_created"}\n', encoding="utf-8")
+            newer_event = config.event_dir / "2000-01-02.jsonl"
+            newer_event.write_text('{"event_type":"task_started"}\n', encoding="utf-8")
+            os.utime(old_event, (946684800, 946684800))
+            os.utime(newer_event, (946684800, 946684800))
+            cursor = Path(tmp) / "notify-state.json"
+            cursor.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "current_event_file": str(newer_event),
+                        "current_byte_offset": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(["--config", str(config_path), "prune", "--apply", "--json", "--notifier-cursor-state", str(cursor)])
+            report = json.loads(output)
+            by_path = {event["path"]: event for event in report["event_candidates"]}
+
+            self.assertEqual(0, code)
+            self.assertFalse(old_event.exists())
+            self.assertTrue(newer_event.exists())
+            self.assertTrue(by_path[str(old_event.resolve())]["deleted"])
+            self.assertTrue(by_path[str(newer_event.resolve())]["skipped"])
+
     def test_apply_plan_dry_run_accepts_valid_dependency_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
