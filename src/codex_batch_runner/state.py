@@ -11,6 +11,8 @@ DEFAULT_STATE = {
     "last_run_at": None,
     "last_success_at": None,
     "last_task_id": None,
+    "reviewer_codex_cooldown_until": None,
+    "last_reviewer_codex_rate_limit_at": None,
 }
 
 
@@ -28,6 +30,11 @@ def save_state(config: Config, state: dict) -> None:
 
 def in_global_cooldown(config: Config) -> bool:
     until = parse_time(load_state(config).get("global_cooldown_until"))
+    return bool(until and until > utc_now())
+
+
+def in_reviewer_codex_cooldown(config: Config) -> bool:
+    until = parse_time(load_state(config).get("reviewer_codex_cooldown_until"))
     return bool(until and until > utc_now())
 
 
@@ -51,6 +58,14 @@ def mark_rate_limit(config: Config, cooldown_until: str, task_id: str) -> None:
     state = load_state(config)
     state["global_cooldown_until"] = cooldown_until
     state["last_rate_limit_at"] = iso_now()
+    state["last_task_id"] = task_id
+    save_state(config, state)
+
+
+def mark_reviewer_codex_rate_limit(config: Config, cooldown_until: str, task_id: str) -> None:
+    state = load_state(config)
+    state["reviewer_codex_cooldown_until"] = cooldown_until
+    state["last_reviewer_codex_rate_limit_at"] = iso_now()
     state["last_task_id"] = task_id
     save_state(config, state)
 

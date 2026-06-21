@@ -19,8 +19,10 @@ from .queue import (
     task_project_root,
 )
 from .review_bundle import build_review_bundle
+from .reviewer_codex import reviewer_clear_pass, run_reviewer_codex
+from .state import in_global_cooldown, in_reviewer_codex_cooldown, mark_reviewer_codex_rate_limit
 from .summary import review_status
-from .timeutil import iso_now
+from .timeutil import add_seconds, iso_now
 from .transcript import sanitize
 
 REVIEW_NEEDED_STATUSES = {"unreviewed", "rejected", "needs_followup"}
@@ -37,6 +39,7 @@ def build_review_next_apply_report(
     filters: Namespace | None = None,
     *,
     mechanical_auto_accept: bool = False,
+    reviewer_codex: bool = False,
 ) -> dict[str, Any]:
     ensure_dir(config.queue_dir)
     lock = FileLock(config.lock_file, config.stale_lock_seconds)
@@ -53,6 +56,7 @@ def build_review_next_apply_report(
             config,
             filters,
             mechanical_auto_accept=mechanical_auto_accept,
+            reviewer_codex=reviewer_codex,
         )
     finally:
         lock.release()
@@ -63,25 +67,27 @@ def build_review_next_apply_report_locked(
     filters: Namespace | None = None,
     *,
     mechanical_auto_accept: bool = False,
+    reviewer_codex: bool = False,
 ) -> dict[str, Any]:
     report = select_review_next_report(config, filters, mode="apply")
     expected = report.pop("_fingerprint", None)
-    enabled = mechanical_auto_accept or config.auto_review_mechanical_accept
+    mechanical_enabled = mechanical_auto_accept or config.auto_review_mechanical_accept
+    reviewer_enabled = reviewer_codex or config.auto_review_codex_enabled
     report["auto_review"] = auto_review_summary(
         decision="none",
         reason="no completed task needs review" if not report["selected"] else "pending",
-        enabled=enabled,
-        reviewer_codex_enabled=config.auto_review_codex_enabled,
+        enabled=mechanical_enabled,
+        reviewer_codex_enabled=reviewer_enabled,
     )
     if not report["selected"]:
         return report
 
-    if not enabled:
+    if not mechanical_enabled and not reviewer_enabled:
         report["auto_review"] = auto_review_summary(
             decision="needs_human",
-            reason="mechanical auto-accept is disabled",
+            reason="mechanical auto-accept and reviewer Codex are disabled",
             enabled=False,
-            reviewer_codex_enabled=config.auto_review_codex_enabled,
+            reviewer_codex_enabled=False,
         )
         return report
 
@@ -90,8 +96,8 @@ def build_review_next_apply_report_locked(
         report["auto_review"] = auto_review_summary(
             decision="needs_human",
             reason="mechanical gates failed",
-            enabled=True,
-            reviewer_codex_enabled=config.auto_review_codex_enabled,
+            enabled=mechanical_enabled,
+            reviewer_codex_enabled=reviewer_enabled,
             failing_gates=[gate.get("name") for gate in failed],
         )
         return report
@@ -101,10 +107,27 @@ def build_review_next_apply_report_locked(
         report["auto_review"] = auto_review_summary(
             decision="needs_human",
             reason="review fingerprint unavailable",
-            enabled=True,
-            reviewer_codex_enabled=config.auto_review_codex_enabled,
+            enabled=mechanical_enabled,
+            reviewer_codex_enabled=reviewer_enabled,
         )
         return report
+
+    if reviewer_enabled:
+        reviewer_report = run_reviewer_phase(config, task_id, expected, mechanical_enabled=mechanical_enabled)
+        report["mutated"] = reviewer_report["mutated"]
+        report["review_status"] = reviewer_report.get("review_status", report.get("review_status"))
+        report["auto_review"] = reviewer_report["auto_review"]
+        return report
+
+    if not mechanical_enabled:
+        report["auto_review"] = auto_review_summary(
+            decision="needs_human",
+            reason="mechanical auto-accept is disabled",
+            enabled=False,
+            reviewer_codex_enabled=False,
+        )
+        return report
+
     applied = apply_mechanical_accept(config, task_id, expected)
     report["mutated"] = applied["mutated"]
     report["review_status"] = applied.get("review_status", report.get("review_status"))
@@ -112,7 +135,7 @@ def build_review_next_apply_report_locked(
         decision=applied["decision"],
         reason=applied["reason"],
         enabled=True,
-        reviewer_codex_enabled=config.auto_review_codex_enabled,
+        reviewer_codex_enabled=False,
     )
     return report
 
@@ -436,6 +459,252 @@ def apply_mechanical_accept(config: Config, task_id: str, expected_fingerprint: 
         "decision": "accepted",
         "reason": "all local mechanical gates passed",
         "review_status": "accepted",
+    }
+
+
+def run_reviewer_phase(
+    config: Config,
+    task_id: str,
+    expected_fingerprint: dict[str, Any],
+    *,
+    mechanical_enabled: bool,
+) -> dict[str, Any]:
+    if config.auto_review_codex_max_calls_per_run < 1:
+        return reviewer_phase_report(
+            decision="needs_human",
+            reason="reviewer Codex call limit is zero",
+            mechanical_enabled=mechanical_enabled,
+            reviewer_codex_invoked=False,
+        )
+    if in_global_cooldown(config):
+        return reviewer_phase_report(
+            decision="needs_human",
+            reason="global cooldown is active",
+            mechanical_enabled=mechanical_enabled,
+            reviewer_codex_invoked=False,
+        )
+    if in_reviewer_codex_cooldown(config):
+        return reviewer_phase_report(
+            decision="needs_human",
+            reason="reviewer Codex cooldown is active",
+            mechanical_enabled=mechanical_enabled,
+            reviewer_codex_invoked=False,
+        )
+
+    task = load_task(config, task_id)
+    bundle = build_review_bundle(
+        task,
+        by_id={item.get("id"): item for item in list_tasks(config)},
+        require_accepted_review=config.dependency_requires_accepted_review,
+    )
+    limit_error = bundle_limit_error(config, bundle)
+    if limit_error:
+        record_reviewer_summary(config, task_id, {"decision": "needs_human", "reason": limit_error})
+        return reviewer_phase_report(
+            decision="needs_human",
+            reason=limit_error,
+            mechanical_enabled=mechanical_enabled,
+            reviewer_codex_invoked=False,
+        )
+
+    outcome = run_reviewer_codex(config, task, bundle, calls_used_this_run=1)
+    if outcome.rate_limited:
+        cooldown_until = add_seconds(config.auto_review_codex_cooldown_seconds)
+        mark_reviewer_codex_rate_limit(config, cooldown_until, task_id)
+        record_reviewer_summary(
+            config,
+            task_id,
+            {
+                "decision": "failed_review",
+                "reason": outcome.reason,
+                "rate_limit_markers": sorted(set(outcome.rate_limit_markers or [])),
+                "cooldown_until": cooldown_until,
+            },
+        )
+        return reviewer_phase_report(
+            decision="failed_review",
+            reason=outcome.reason,
+            mechanical_enabled=mechanical_enabled,
+            reviewer_codex_invoked=True,
+            reviewer_result=outcome.result,
+            rate_limited=True,
+        )
+
+    reviewer_result = outcome.result or {
+        "decision": "failed_review",
+        "confidence": "low",
+        "reason": outcome.reason,
+        "findings": [],
+        "required_human_checks": [],
+        "suggested_fix_prompt": "",
+        "reviewer_limits": {
+            "calls_used_this_run": 1,
+            "fix_loops_used_for_task": 0,
+            "cooldown_recommended_seconds": 0,
+        },
+    }
+    if reviewer_clear_pass(reviewer_result):
+        applied = apply_reviewer_accept(config, task_id, expected_fingerprint, reviewer_result)
+        return reviewer_phase_report(
+            decision=applied["decision"],
+            reason=applied["reason"],
+            mechanical_enabled=mechanical_enabled,
+            reviewer_codex_invoked=True,
+            reviewer_result=reviewer_result,
+            mutated=applied["mutated"],
+            review_status=applied.get("review_status"),
+        )
+
+    record_reviewer_summary(config, task_id, reviewer_result)
+    return reviewer_phase_report(
+        decision=str(reviewer_result.get("decision") or "failed_review"),
+        reason=str(reviewer_result.get("reason") or outcome.reason),
+        mechanical_enabled=mechanical_enabled,
+        reviewer_codex_invoked=True,
+        reviewer_result=reviewer_result,
+    )
+
+
+def apply_reviewer_accept(
+    config: Config,
+    task_id: str,
+    expected_fingerprint: dict[str, Any],
+    reviewer_result: dict[str, Any],
+) -> dict[str, Any]:
+    task = load_task(config, task_id)
+    bundle = build_review_bundle(
+        task,
+        by_id={item.get("id"): item for item in list_tasks(config)},
+        require_accepted_review=config.dependency_requires_accepted_review,
+    )
+    current = review_fingerprint(task, bundle)
+    if current != expected_fingerprint:
+        record_reviewer_summary(
+            config,
+            task_id,
+            {
+                **reviewer_result,
+                "decision": "needs_human",
+                "reason": "stale review state after reviewer Codex pass",
+            },
+        )
+        return {
+            "mutated": False,
+            "decision": "needs_human",
+            "reason": "stale review state after reviewer Codex pass",
+            "review_status": review_status(task),
+        }
+    gates = mechanical_gates(task, bundle)
+    if not all(gate["ok"] for gate in gates):
+        record_reviewer_summary(
+            config,
+            task_id,
+            {
+                **reviewer_result,
+                "decision": "needs_human",
+                "reason": "mechanical gates no longer pass after reviewer Codex pass",
+            },
+        )
+        return {
+            "mutated": False,
+            "decision": "needs_human",
+            "reason": "mechanical gates no longer pass after reviewer Codex pass",
+            "review_status": review_status(task),
+        }
+
+    task["review_status"] = "accepted"
+    task["reviewed_at"] = iso_now()
+    task["review_reason"] = "auto-accepted by reviewer Codex clear pass and local mechanical gates"
+    task["reviewer_codex"] = compact_reviewer_result(reviewer_result)
+    save_task(config, task)
+    emit_task_event(
+        config,
+        "task_reviewed",
+        task,
+        source="review-next",
+        summary=f"reviewer Codex auto-accepted task {task_id}",
+        payload=transition_payload(
+            task,
+            review_status="accepted",
+            reviewed_at=task.get("reviewed_at"),
+            reviewer_codex=compact_reviewer_result(reviewer_result),
+        ),
+    )
+    return {
+        "mutated": True,
+        "decision": "accepted",
+        "reason": "reviewer Codex returned high-confidence pass and mechanical gates passed",
+        "review_status": "accepted",
+    }
+
+
+def record_reviewer_summary(config: Config, task_id: str, reviewer_result: dict[str, Any]) -> None:
+    task = load_task(config, task_id)
+    task["reviewer_codex"] = compact_reviewer_result(reviewer_result)
+    save_task(config, task)
+    emit_task_event(
+        config,
+        "task_reviewer_codex_reviewed",
+        task,
+        source="review-next",
+        summary=f"reviewer Codex decision for task {task_id}: {task['reviewer_codex'].get('decision')}",
+        payload=transition_payload(task, reviewer_codex=task["reviewer_codex"]),
+    )
+
+
+def compact_reviewer_result(result: dict[str, Any]) -> dict[str, Any]:
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    return {
+        "decision": sanitize(result.get("decision")),
+        "confidence": sanitize(result.get("confidence")),
+        "reason": sanitize(result.get("reason")),
+        "findings": findings[:10],
+        "required_human_checks": result.get("required_human_checks", [])[:10]
+        if isinstance(result.get("required_human_checks"), list)
+        else [],
+        "suggested_fix_prompt": sanitize(result.get("suggested_fix_prompt", "")),
+        "reviewer_limits": result.get("reviewer_limits") if isinstance(result.get("reviewer_limits"), dict) else {},
+        "reviewed_at": sanitize(result.get("reviewed_at") or iso_now()),
+    }
+
+
+def bundle_limit_error(config: Config, bundle: dict[str, Any]) -> str | None:
+    encoded = json.dumps(bundle, ensure_ascii=False, sort_keys=True)
+    if len(encoded) > config.auto_review_codex_max_bundle_chars:
+        return "review bundle exceeds reviewer Codex bundle size limit"
+    diff = bundle.get("git_diff")
+    diff_encoded = json.dumps(diff, ensure_ascii=False, sort_keys=True) if isinstance(diff, dict) else ""
+    if len(diff_encoded) > config.auto_review_codex_max_diff_chars:
+        return "review bundle diff exceeds reviewer Codex diff size limit"
+    return None
+
+
+def reviewer_phase_report(
+    *,
+    decision: str,
+    reason: str,
+    mechanical_enabled: bool,
+    reviewer_codex_invoked: bool,
+    reviewer_result: dict[str, Any] | None = None,
+    mutated: bool = False,
+    review_status: str | None = None,
+    rate_limited: bool = False,
+) -> dict[str, Any]:
+    summary = auto_review_summary(
+        decision=decision if decision != "pass" else "needs_human",
+        reason=reason,
+        enabled=mechanical_enabled,
+        reviewer_codex_enabled=True,
+    )
+    summary["reviewer_codex_invoked"] = reviewer_codex_invoked
+    if reviewer_result is not None:
+        summary["reviewer_codex_result"] = compact_reviewer_result(reviewer_result)
+    if rate_limited:
+        summary["rate_limited"] = True
+    return {
+        "mutated": mutated,
+        "review_status": review_status,
+        "auto_review": summary,
     }
 
 

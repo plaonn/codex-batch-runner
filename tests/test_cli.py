@@ -24,6 +24,10 @@ from codex_batch_runner.fs import write_json_atomic
 from codex_batch_runner.queue import create_task, load_task, save_task
 from codex_batch_runner.review_bundle import build_review_bundle
 from codex_batch_runner.review_next import apply_mechanical_accept, detectable_safety_violation, review_fingerprint
+from codex_batch_runner.state import load_state
+
+
+FAKE_CODEX = Path(__file__).parent / "fixtures" / "fake_codex.py"
 
 
 def write_config(
@@ -33,6 +37,9 @@ def write_config(
     manual_cooldown_wake_command: list[str] | None = None,
     dependency_requires_accepted_review: bool = False,
     auto_review_mechanical_accept: bool = False,
+    auto_review_codex_enabled: bool = False,
+    auto_review_codex_max_calls_per_run: int = 0,
+    codex_command: list[str] | None = None,
 ) -> Path:
     root = Path(tmp)
     data = {
@@ -43,7 +50,11 @@ def write_config(
         "state_file": str(root / "state.json"),
         "dependency_requires_accepted_review": dependency_requires_accepted_review,
         "auto_review_mechanical_accept": auto_review_mechanical_accept,
+        "auto_review_codex_enabled": auto_review_codex_enabled,
+        "auto_review_codex_max_calls_per_run": auto_review_codex_max_calls_per_run,
     }
+    if codex_command is not None:
+        data["codex_command"] = codex_command
     if trigger_command is not None:
         data["post_mutation_trigger_command"] = trigger_command
     if manual_cooldown_wake_scheduler is not None:
@@ -2447,6 +2458,121 @@ class CliTests(unittest.TestCase):
             self.assertFalse(report["auto_review"]["follow_up_enqueued"])
             self.assertEqual("accepted", task["review_status"])
             self.assertEqual("auto-accepted by local mechanical review gates", task["review_reason"])
+
+    def test_review_next_reviewer_codex_pass_accepts_task_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                codex_command=[sys.executable, str(FAKE_CODEX), "reviewer_pass"],
+            )
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "reviewer-pass")
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+            task = load_task(config, "reviewer-pass")
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["mutated"])
+            self.assertEqual("accepted", report["auto_review"]["decision"])
+            self.assertTrue(report["auto_review"]["reviewer_codex_invoked"])
+            self.assertEqual("pass", report["auto_review"]["reviewer_codex_result"]["decision"])
+            self.assertEqual("accepted", task["review_status"])
+            self.assertIn("reviewer Codex clear pass", task["review_reason"])
+
+    def test_review_next_reviewer_codex_needs_fix_records_summary_without_accepting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                codex_command=[sys.executable, str(FAKE_CODEX), "reviewer_needs_fix"],
+            )
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "reviewer-fix")
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+            task = load_task(config, "reviewer-fix")
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["mutated"])
+            self.assertEqual("needs_fix", report["auto_review"]["decision"])
+            self.assertTrue(report["auto_review"]["reviewer_codex_invoked"])
+            self.assertEqual("unreviewed", task["review_status"])
+            self.assertEqual("needs_fix", task["reviewer_codex"]["decision"])
+            self.assertIn("Update docs/spec.md", task["reviewer_codex"]["suggested_fix_prompt"])
+
+    def test_review_next_reviewer_codex_invalid_json_records_failed_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                codex_command=[sys.executable, str(FAKE_CODEX), "reviewer_invalid"],
+            )
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "reviewer-invalid")
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+            task = load_task(config, "reviewer-invalid")
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["mutated"])
+            self.assertEqual("failed_review", report["auto_review"]["decision"])
+            self.assertTrue(report["auto_review"]["reviewer_codex_invoked"])
+            self.assertEqual("unreviewed", task["review_status"])
+            self.assertEqual("failed_review", task["reviewer_codex"]["decision"])
+
+    def test_review_next_reviewer_codex_rate_limit_sets_reviewer_cooldown_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                codex_command=[sys.executable, str(FAKE_CODEX), "rate_limit"],
+            )
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "reviewer-rate-limit")
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+            state = load_state(config)
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["mutated"])
+            self.assertEqual("failed_review", report["auto_review"]["decision"])
+            self.assertTrue(report["auto_review"]["reviewer_codex_invoked"])
+            self.assertTrue(report["auto_review"]["rate_limited"])
+            self.assertIsNotNone(state["reviewer_codex_cooldown_until"])
+            self.assertEqual("unreviewed", load_task(config, "reviewer-rate-limit")["review_status"])
 
     def test_review_next_prefers_current_unpushed_state_over_stale_task_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

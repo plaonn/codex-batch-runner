@@ -17,6 +17,9 @@ def main() -> int:
         if line.startswith("task_id:"):
             task_id = line.split(":", 1)[1].strip()
             break
+        if line.startswith("reviewer_task_id:"):
+            task_id = line.split(":", 1)[1].strip()
+            break
 
     if mode == "hang_empty":
         time.sleep(60)
@@ -78,6 +81,66 @@ def main() -> int:
                 },
             }
         )
+        return 0
+
+    if mode == "reviewer_pass":
+        emit(
+            {
+                "type": "turn.completed",
+                "response": {
+                    "task_id": task_id,
+                    "decision": "pass",
+                    "confidence": "high",
+                    "reason": "bundle evidence supports accepting the task",
+                    "findings": [
+                        {
+                            "severity": "info",
+                            "summary": "verification reported",
+                            "evidence": "review bundle includes synthetic verification",
+                        }
+                    ],
+                    "required_human_checks": [],
+                    "suggested_fix_prompt": "",
+                    "reviewer_limits": {
+                        "calls_used_this_run": 1,
+                        "fix_loops_used_for_task": 0,
+                        "cooldown_recommended_seconds": 0,
+                    },
+                },
+            }
+        )
+        return 0
+
+    if mode == "reviewer_needs_fix":
+        emit(
+            {
+                "type": "turn.completed",
+                "response": {
+                    "task_id": task_id,
+                    "decision": "needs_fix",
+                    "confidence": "medium",
+                    "reason": "documentation update is incomplete",
+                    "findings": [
+                        {
+                            "severity": "warning",
+                            "summary": "missing docs",
+                            "evidence": "README change is not reflected in docs/spec.md",
+                        }
+                    ],
+                    "required_human_checks": [],
+                    "suggested_fix_prompt": "Update docs/spec.md to match the README behavior.",
+                    "reviewer_limits": {
+                        "calls_used_this_run": 1,
+                        "fix_loops_used_for_task": 0,
+                        "cooldown_recommended_seconds": 0,
+                    },
+                },
+            }
+        )
+        return 0
+
+    if mode == "reviewer_invalid":
+        emit({"type": "turn.completed", "response": {"task_id": task_id, "decision": "pass"}})
         return 0
 
     if mode == "needs_resume":

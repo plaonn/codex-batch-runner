@@ -44,11 +44,8 @@ def run_next(config: Config) -> RunOutcome:
         recover_stale_running_tasks(config)
         task = select_next_task(config)
         if not task:
-            if config.auto_review_mechanical_accept:
-                report = build_review_next_apply_report_locked(
-                    config,
-                    mechanical_auto_accept=True,
-                )
+            if config.auto_review_mechanical_accept or config.auto_review_codex_enabled:
+                report = build_review_next_apply_report_locked(config)
                 if report.get("mutated"):
                     mark_run(config, None)
                     outcome = RunOutcome(

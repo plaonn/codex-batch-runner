@@ -122,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow --apply to accept when every local mechanical gate passes",
     )
+    review_next.add_argument(
+        "--reviewer-codex",
+        action="store_true",
+        help="allow --apply to invoke reviewer Codex when config call limits permit it",
+    )
     review_next.add_argument("--project", dest="project_id", help="filter by project id")
     review_next.add_argument("--project-root", help="filter by project root")
     review_next.add_argument("--category", help="filter by category")
@@ -797,11 +802,15 @@ def cmd_review_next(config: Config, args: argparse.Namespace) -> int:
     if args.mechanical_auto_accept and not args.apply:
         print("error: --mechanical-auto-accept requires --apply", file=sys.stderr)
         return 1
+    if args.reviewer_codex and not args.apply:
+        print("error: --reviewer-codex requires --apply", file=sys.stderr)
+        return 1
     if args.apply:
         report = build_review_next_apply_report(
             config,
             args,
             mechanical_auto_accept=args.mechanical_auto_accept,
+            reviewer_codex=args.reviewer_codex,
         )
         if report.get("mutated"):
             run_post_mutation_trigger(config)
