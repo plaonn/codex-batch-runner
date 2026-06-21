@@ -663,6 +663,12 @@ Next minimal implementation task:
 
 - `worktree prepare/cleanup commands`: `run-next` 연결 없이 branch sanitizer, path guard, stale worktree classifier, dry-run/apply command, focused tests를 구현합니다. 이 단계가 완료된 뒤에 `run-next worktree adapter`를 별도 task로 진행합니다.
 
+현재 구현된 prepare/cleanup command 범위:
+
+- `cbr worktree prepare TASK_ID --dry-run|--apply`: `worktree_mode=task`일 때만 task-specific branch와 worktree를 준비합니다. Apply mode는 queue lock 아래에서 task metadata를 갱신하고 `task_worktree_prepared` event를 기록합니다.
+- `cbr worktree cleanup TASK_ID --dry-run|--apply`: `completed + accepted` 또는 `archived` task의 retained worktree만 정리합니다. Cleanup은 configured `worktree_root` 아래의 Git registry에 등록된 path와 task metadata branch가 일치할 때만 수행하며, local branch는 보존합니다. Apply mode는 queue lock 아래에서 `execution_worktree_status=cleaned`를 기록하고 `task_worktree_cleaned` event를 남깁니다.
+- 두 명령은 Codex를 호출하지 않으며, `run-next` worktree adapter는 아직 구현하지 않습니다. Existing branch/worktree가 metadata와 맞지 않거나 path/registry 상태가 불일치하면 `recovery_required`로 보고하고 자동 복구하지 않습니다.
+
 ## Project routing metadata
 
 여러 프로젝트가 하나의 중앙 queue를 공유하면 review 대상 판정을 위해 task를 하나씩 열람하는 방식은 토큰과 시간이 낭비됩니다. task 등록 시 review routing metadata를 함께 저장하고, list 단계에서 먼저 좁혀 볼 수 있게 합니다.

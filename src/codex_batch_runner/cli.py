@@ -41,6 +41,7 @@ from .timeutil import parse_time, utc_now
 from .transcript import render_task_transcript
 from .triggers import run_post_mutation_trigger
 from .wake import schedule_manual_cooldown_wake
+from .worktree import build_cleanup_report, build_prepare_report, render_worktree_report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -234,6 +235,24 @@ def build_parser() -> argparse.ArgumentParser:
     apply_mode.add_argument("--apply", action="store_true", help="apply validated safe queue mutations under the queue lock")
     apply_plan.add_argument("--json", action="store_true", help="print JSON")
     apply_plan.set_defaults(func=cmd_apply_plan)
+
+    worktree = sub.add_parser("worktree", help="prepare or cleanup task git worktrees")
+    worktree_sub = worktree.add_subparsers(dest="worktree_command", required=True)
+    worktree_prepare = worktree_sub.add_parser("prepare", help="prepare a task git worktree without running Codex")
+    worktree_prepare.add_argument("task_id")
+    prepare_mode = worktree_prepare.add_mutually_exclusive_group(required=True)
+    prepare_mode.add_argument("--dry-run", action="store_true", help="report planned worktree preparation")
+    prepare_mode.add_argument("--apply", action="store_true", help="create/reuse the worktree and store task metadata under the queue lock")
+    worktree_prepare.add_argument("--json", action="store_true", help="print JSON")
+    worktree_prepare.set_defaults(func=cmd_worktree_prepare)
+
+    worktree_cleanup = worktree_sub.add_parser("cleanup", help="cleanup a retained task git worktree without deleting the branch")
+    worktree_cleanup.add_argument("task_id")
+    cleanup_mode = worktree_cleanup.add_mutually_exclusive_group(required=True)
+    cleanup_mode.add_argument("--dry-run", action="store_true", help="report planned worktree cleanup")
+    cleanup_mode.add_argument("--apply", action="store_true", help="remove the worktree and store task metadata under the queue lock")
+    worktree_cleanup.add_argument("--json", action="store_true", help="print JSON")
+    worktree_cleanup.set_defaults(func=cmd_worktree_cleanup)
     return parser
 
 
@@ -1016,6 +1035,24 @@ def cmd_apply_plan(config: Config, args: argparse.Namespace) -> int:
     else:
         print(render_apply_plan_report(report), end="")
     return 0 if report["ok"] else 1
+
+
+def cmd_worktree_prepare(config: Config, args: argparse.Namespace) -> int:
+    report = build_prepare_report(config, args.task_id, apply=args.apply)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_worktree_report(report), end="")
+    return 1 if report.get("errors") else 0
+
+
+def cmd_worktree_cleanup(config: Config, args: argparse.Namespace) -> int:
+    report = build_cleanup_report(config, args.task_id, apply=args.apply)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_worktree_report(report), end="")
+    return 1 if report.get("errors") else 0
 
 
 def render_prune_report(report: dict) -> str:

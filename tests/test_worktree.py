@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from codex_batch_runner.cli import main
+from codex_batch_runner.config import Config
+from codex_batch_runner.events import list_events
+from codex_batch_runner.queue import create_task, load_task, save_task
+from codex_batch_runner.worktree import sanitize_branch_name
+
+
+def run_cli(args: list[str]) -> tuple[int, dict]:
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        code = main(args)
+    return code, json.loads(stdout.getvalue())
+
+
+def git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def init_repo(path: Path) -> None:
+    subprocess.run(["git", "init", "-b", "main", str(path)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    git(path, "config", "user.email", "test@example.invalid")
+    git(path, "config", "user.name", "Test User")
+    (path / "file.txt").write_text("base\n", encoding="utf-8")
+    git(path, "add", "file.txt")
+    git(path, "commit", "-m", "initial")
+
+
+def write_config(root: Path, *, worktree_mode: str = "task", worktree_root: Path | None = None) -> Path:
+    data = {
+        "queue_dir": str(root / "tasks"),
+        "log_dir": str(root / "logs"),
+        "event_dir": str(root / "events"),
+        "lock_file": str(root / "runner.lock"),
+        "state_file": str(root / "state.json"),
+        "worktree_mode": worktree_mode,
+        "worktree_root": str(worktree_root or root / "worktrees"),
+        "codex_command": [sys.executable, "-c", "raise SystemExit('codex must not run')"],
+    }
+    path = root / "config.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+class WorktreeTests(unittest.TestCase):
+    def test_branch_name_sanitizes_task_id_for_git_ref(self) -> None:
+        self.assertEqual("cbr/task-a-b-c", sanitize_branch_name(" task/a b~c "))
+        self.assertEqual("cbr/task", sanitize_branch_name("@{"))
+
+    def test_prepare_dry_run_does_not_create_branch_or_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="task-dry-run")
+
+            with patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")):
+                code, report = run_cli(["--config", str(config_path), "worktree", "prepare", "task-dry-run", "--dry-run", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["applied"])
+            self.assertEqual("absent", report["classification"]["status"])
+            self.assertNotIn("execution_branch", load_task(config, "task-dry-run"))
+            branches = git(repo, "branch", "--list", "cbr/task-dry-run")
+            self.assertEqual("", branches)
+
+    def test_prepare_apply_creates_worktree_and_sanitized_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="task/apply 1")
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "prepare", "task/apply 1", "--apply", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["applied"])
+            self.assertEqual("cbr/task-apply-1", report["branch"])
+            task = load_task(config, "task/apply 1")
+            self.assertEqual("git_worktree", task["execution_mode"])
+            self.assertEqual("prepared", task["execution_worktree_status"])
+            self.assertTrue(Path(task["execution_worktree_path"]).is_dir())
+            self.assertIn("cbr/task-apply-1", git(repo, "branch", "--list", "cbr/task-apply-1"))
+            events = list_events(config, task_id="task/apply 1", limit=0)
+            self.assertTrue(any(event["event_type"] == "task_worktree_prepared" for event in events))
+            self.assertNotIn("prompt", json.dumps(events))
+
+    def test_prepare_requires_task_worktree_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root, worktree_mode="disabled")
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="disabled")
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "prepare", "disabled", "--apply", "--json"])
+
+            self.assertEqual(1, code)
+            self.assertIn("worktree_mode is disabled", report["errors"][0])
+            self.assertNotIn("execution_branch", load_task(config, "disabled"))
+
+    def test_prepare_blocks_path_outside_configured_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", str(repo), task_id="escape")
+            task["execution_worktree_path"] = str(root / "outside")
+            task["execution_branch"] = "cbr/escape"
+            task["execution_base_head"] = git(repo, "rev-parse", "HEAD")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "cleanup", "escape", "--dry-run", "--json"])
+
+            self.assertEqual(1, code)
+            self.assertIn("worktree path must be inside configured worktree_root", report["errors"][0])
+
+    def test_prepare_classifies_existing_unlinked_branch_as_recovery_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            git(repo, "branch", "cbr/existing")
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="existing")
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "prepare", "existing", "--dry-run", "--json"])
+
+            self.assertEqual(1, code)
+            self.assertEqual("existing_branch", report["classification"]["status"])
+            self.assertIn("existing branch", report["errors"][0])
+
+    def test_cleanup_refuses_unaccepted_task_and_removes_accepted_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="cleanup")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "cleanup", "--apply", "--json"])[0])
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "cleanup", "cleanup", "--apply", "--json"])
+            self.assertEqual(1, code)
+            self.assertIn("only allowed", report["errors"][0])
+
+            task = load_task(config, "cleanup")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
+            worktree_path = Path(task["execution_worktree_path"])
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "cleanup", "cleanup", "--apply", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["applied"])
+            self.assertFalse(worktree_path.exists())
+            self.assertEqual("cleaned", load_task(config, "cleanup")["execution_worktree_status"])
+            self.assertIn("cbr/cleanup", git(repo, "branch", "--list", "cbr/cleanup"))
+
+
+if __name__ == "__main__":
+    unittest.main()
