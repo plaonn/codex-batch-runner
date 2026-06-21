@@ -52,6 +52,8 @@ def build_review_bundle(
         "verification": result_list(last_result, "verification"),
         "last_error": sanitize(task.get("last_error")) if task.get("last_error") else None,
         "relevant_log_paths": sanitize_value(task.get("log_paths") or []),
+        "task_git_status_snapshot": sanitize_value(task.get("git_status")) if isinstance(task.get("git_status"), dict) else None,
+        "current_git_repository": public_repo(repo),
         "git_status": sanitize_value(task.get("git_status")) if isinstance(task.get("git_status"), dict) else None,
         "git_repository": public_repo(repo),
         "commit_information": commit_information(task, repo),
@@ -177,7 +179,7 @@ def inspect_repo(task: dict) -> dict[str, Any] | None:
     branch = run_git(repo_root, ["symbolic-ref", "--quiet", "--short", "HEAD"])
     head = run_git(repo_root, ["rev-parse", "--short", "HEAD"])
     name_status = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
-    return {
+    repo: dict[str, Any] = {
         "available": True,
         "root": sanitize(repo_root),
         "_root_path": str(repo_root),
@@ -186,7 +188,65 @@ def inspect_repo(task: dict) -> dict[str, Any] | None:
         "dirty": bool(status.stdout.strip()) if status.returncode == 0 else None,
         "name_status": sanitize_value(name_status),
         "status_error": sanitize(clean_git_error(status)) if status.returncode != 0 else None,
+        "upstream": None,
+        "comparison_ref": None,
+        "ahead": None,
+        "behind": None,
+        "has_unpushed": None,
+        "unpushed_commits": [],
+        "warnings": [],
     }
+    add_current_push_status(repo_root, repo)
+    return repo
+
+
+def add_current_push_status(repo_root: Path, repo: dict[str, Any]) -> None:
+    comparison_ref = git_comparison_ref(repo_root, repo)
+    if not comparison_ref:
+        repo["warnings"].append("git comparison ref unavailable")
+        return
+    counts = run_git(repo_root, ["rev-list", "--left-right", "--count", f"{comparison_ref}...HEAD"])
+    if counts.returncode != 0:
+        repo["warnings"].append(f"cannot read ahead/behind against {comparison_ref}: {clean_git_error(counts)}")
+        return
+    parts = counts.stdout.strip().split()
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        repo["warnings"].append(f"cannot parse ahead/behind output for {comparison_ref}")
+        return
+    repo["behind"] = int(parts[0])
+    repo["ahead"] = int(parts[1])
+    repo["has_unpushed"] = repo["ahead"] > 0
+    if repo["ahead"]:
+        log = run_git(repo_root, ["log", "--format=%h %s", "--max-count=20", f"{comparison_ref}..HEAD"])
+        if log.returncode == 0:
+            repo["unpushed_commits"] = sanitize_value([line for line in log.stdout.splitlines() if line.strip()])
+        else:
+            repo["warnings"].append(f"cannot list unpushed commits: {clean_git_error(log)}")
+
+
+def git_comparison_ref(repo_root: Path, repo: dict[str, Any]) -> str | None:
+    upstream = run_git(repo_root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+    if upstream.returncode == 0 and upstream.stdout.strip():
+        value = upstream.stdout.strip()
+        repo["upstream"] = sanitize(value)
+        repo["comparison_ref"] = sanitize(value)
+        return value
+
+    branch = repo.get("branch")
+    if isinstance(branch, str) and branch and branch != "HEAD":
+        origin_branch = f"origin/{branch}"
+        if git_ref_exists(repo_root, origin_branch):
+            repo["comparison_ref"] = sanitize(origin_branch)
+            return origin_branch
+    if git_ref_exists(repo_root, "origin/main"):
+        repo["comparison_ref"] = "origin/main"
+        return "origin/main"
+    return None
+
+
+def git_ref_exists(repo_root: Path, ref: str) -> bool:
+    result = run_git(repo_root, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def public_repo(repo: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -331,8 +391,8 @@ def render_review_bundle(bundle: dict[str, Any]) -> str:
     append_list_section(lines, "verification", bundle.get("verification"))
     append_text_section(lines, "last_error", bundle.get("last_error"))
     append_list_section(lines, "relevant_log_paths", bundle.get("relevant_log_paths"))
-    append_object_section(lines, "git_status", bundle.get("git_status"))
-    append_object_section(lines, "git_repository", bundle.get("git_repository"))
+    append_object_section(lines, "task_git_status_snapshot", bundle.get("task_git_status_snapshot"))
+    append_object_section(lines, "current_git_repository", bundle.get("current_git_repository"))
     append_object_section(lines, "commit_information", bundle.get("commit_information"))
     append_object_section(lines, "git_diff", bundle.get("git_diff"))
     append_list_section(lines, "safety_policy", bundle.get("safety_policy"))

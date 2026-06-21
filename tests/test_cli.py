@@ -101,6 +101,19 @@ def init_repo(path: Path) -> None:
     git(path, "config", "user.name", "Test User")
 
 
+def create_pushed_repo(path: Path) -> Path:
+    path.mkdir()
+    init_repo(path)
+    (path / "file.txt").write_text("base\n", encoding="utf-8")
+    git(path, "add", "file.txt")
+    git(path, "commit", "-m", "initial")
+    remote = path.parent / f"{path.name}-remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    git(path, "remote", "add", "origin", str(remote))
+    git(path, "push", "-u", "origin", "main")
+    return remote
+
+
 def create_clean_completed_task(config: Config, repo: Path, task_id: str = "reviewable") -> dict:
     task = create_task(config, "work", str(repo), task_id=task_id)
     task["status"] = "completed"
@@ -1733,6 +1746,7 @@ class CliTests(unittest.TestCase):
             self.assertIn('"kind": "working_tree"', output)
             self.assertIn("+change", output)
             self.assertIn("python3 -m unittest", output)
+            self.assertIn("## current_git_repository", output)
             self.assertIn("transcript_contents_included: False", output)
             self.assertNotIn("private-value", output)
             self.assertNotIn("/Users/example", output)
@@ -1761,6 +1775,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual("completed", bundle["status"])
             self.assertEqual(["unit tests"], bundle["verification"])
             self.assertFalse(bundle["transcript_contents_included"])
+            self.assertIn("task_git_status_snapshot", bundle)
+            self.assertIn("current_git_repository", bundle)
             self.assertIn("git_repository", bundle)
             self.assertIn("safety_policy", bundle)
 
@@ -2018,6 +2034,47 @@ class CliTests(unittest.TestCase):
             self.assertFalse(report["auto_review"]["follow_up_enqueued"])
             self.assertEqual("accepted", task["review_status"])
             self.assertEqual("auto-accepted by local mechanical review gates", task["review_reason"])
+
+    def test_review_next_prefers_current_unpushed_state_over_stale_task_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            create_pushed_repo(repo)
+            commit = git(repo, "rev-parse", "--short", "HEAD")
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_clean_completed_task(config, repo, "stale-snapshot")
+            task["git_status"] = {
+                "branch": "main",
+                "upstream": "origin/main",
+                "comparison_ref": "origin/main",
+                "ahead": 1,
+                "behind": 0,
+                "has_unpushed": True,
+                "dirty": False,
+                "unpushed_commits": [f"{commit} initial"],
+            }
+            save_task(config, task)
+
+            dry_code, dry_output = run_cli(["--config", str(config_path), "review-next", "--dry-run", "--json"])
+            dry_report = json.loads(dry_output)
+            gate_details = {gate["name"]: gate["detail"] for gate in dry_report["gates"]}
+            apply_code, apply_output = run_cli(
+                ["--config", str(config_path), "review-next", "--apply", "--mechanical-auto-accept", "--json"]
+            )
+            apply_report = json.loads(apply_output)
+
+            self.assertEqual(0, dry_code)
+            self.assertTrue(dry_report["gates_ok"])
+            self.assertIn(
+                "current_has_unpushed=False; current_ahead=0; snapshot_has_unpushed=True; snapshot_ahead=1",
+                gate_details["no_unpushed_commits"],
+            )
+            self.assertFalse(dry_report["bundle"]["current_git_repository"]["has_unpushed"])
+            self.assertTrue(dry_report["bundle"]["task_git_status_snapshot"]["has_unpushed"])
+            self.assertEqual(0, apply_code)
+            self.assertTrue(apply_report["mutated"])
+            self.assertEqual("accepted", apply_report["auto_review"]["decision"])
+            self.assertEqual("accepted", load_task(config, "stale-snapshot")["review_status"])
 
     def test_review_next_safety_gate_ignores_private_operational_paths(self) -> None:
         task = {

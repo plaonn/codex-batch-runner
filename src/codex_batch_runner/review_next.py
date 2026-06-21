@@ -237,7 +237,7 @@ def review_sort_key(task: dict) -> tuple[str, str, str]:
 def mechanical_gates(task: dict, bundle: dict[str, Any]) -> list[dict[str, Any]]:
     last_result = task.get("last_result") if isinstance(task.get("last_result"), dict) else {}
     git_status = task.get("git_status") if isinstance(task.get("git_status"), dict) else {}
-    repo = bundle.get("git_repository") if isinstance(bundle.get("git_repository"), dict) else {}
+    repo = bundle.get("current_git_repository") if isinstance(bundle.get("current_git_repository"), dict) else {}
     changed_files = last_result.get("changed_files") if isinstance(last_result, dict) else None
     verification = last_result.get("verification") if isinstance(last_result, dict) else None
     deps = bundle.get("dependencies") if isinstance(bundle.get("dependencies"), dict) else {}
@@ -270,7 +270,7 @@ def mechanical_gates(task: dict, bundle: dict[str, Any]) -> list[dict[str, Any]]
         ),
         gate("dependencies_ready", bool(deps.get("ready")), dependency_detail(deps)),
         gate("git_clean", repo.get("dirty") is False, git_clean_detail(repo)),
-        gate("no_unpushed_commits", no_unpushed(git_status), unpushed_detail(git_status)),
+        gate("no_unpushed_commits", no_unpushed(repo, git_status), unpushed_detail(repo, git_status)),
         gate("safety_metadata_clean", not detectable_safety_violation(task, bundle), safety_detail(task, bundle)),
     ]
 
@@ -299,7 +299,9 @@ def git_clean_detail(repo: dict[str, Any]) -> str:
     return f"dirty={repo.get('dirty')}"
 
 
-def no_unpushed(git_status: dict[str, Any]) -> bool:
+def no_unpushed(repo: dict[str, Any], git_status: dict[str, Any]) -> bool:
+    if repo and repo.get("has_unpushed") is not None:
+        return repo.get("has_unpushed") is False
     if not git_status:
         return False
     if git_status.get("has_unpushed") is not None:
@@ -308,10 +310,15 @@ def no_unpushed(git_status: dict[str, Any]) -> bool:
     return isinstance(ahead, int) and ahead == 0
 
 
-def unpushed_detail(git_status: dict[str, Any]) -> str:
-    if not git_status:
-        return "git_status unavailable"
-    return f"has_unpushed={git_status.get('has_unpushed')} ahead={git_status.get('ahead')}"
+def unpushed_detail(repo: dict[str, Any], git_status: dict[str, Any]) -> str:
+    if not repo and not git_status:
+        return "current_git_repository and task_git_status_snapshot unavailable"
+    return (
+        f"current_has_unpushed={repo.get('has_unpushed') if repo else None}; "
+        f"current_ahead={repo.get('ahead') if repo else None}; "
+        f"snapshot_has_unpushed={git_status.get('has_unpushed') if git_status else None}; "
+        f"snapshot_ahead={git_status.get('ahead') if git_status else None}"
+    )
 
 
 def concise_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
@@ -327,6 +334,8 @@ def concise_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
         "changed_files": bundle.get("changed_files"),
         "verification": bundle.get("verification"),
         "last_error": bundle.get("last_error"),
+        "task_git_status_snapshot": bundle.get("task_git_status_snapshot"),
+        "current_git_repository": bundle.get("current_git_repository"),
         "git_status": bundle.get("git_status"),
         "git_repository": bundle.get("git_repository"),
         "commit_information": bundle.get("commit_information"),
@@ -362,7 +371,7 @@ def safety_detail(task: dict, bundle: dict[str, Any]) -> str:
 
 
 def review_fingerprint(task: dict, bundle: dict[str, Any]) -> dict[str, Any]:
-    repo = bundle.get("git_repository") if isinstance(bundle.get("git_repository"), dict) else {}
+    repo = bundle.get("current_git_repository") if isinstance(bundle.get("current_git_repository"), dict) else {}
     commit_info = bundle.get("commit_information") if isinstance(bundle.get("commit_information"), dict) else {}
     return {
         "updated_at": task.get("updated_at"),
@@ -370,12 +379,15 @@ def review_fingerprint(task: dict, bundle: dict[str, Any]) -> dict[str, Any]:
         "review_status": review_status(task),
         "completed_at": task.get("completed_at"),
         "last_result": task.get("last_result"),
-        "git_status": task.get("git_status"),
         "repo": {
             "available": repo.get("available"),
             "branch": repo.get("branch"),
             "head": repo.get("head"),
             "dirty": repo.get("dirty"),
+            "comparison_ref": repo.get("comparison_ref"),
+            "ahead": repo.get("ahead"),
+            "behind": repo.get("behind"),
+            "has_unpushed": repo.get("has_unpushed"),
         },
         "commit_information": {
             "status": commit_info.get("status"),
@@ -511,7 +523,7 @@ def append_result_summary(lines: list[str], bundle: dict[str, Any]) -> None:
     lines.append(f"changed_files_reported: {len(reported) if isinstance(reported, list) else 0}")
     verification = bundle.get("verification") if isinstance(bundle.get("verification"), list) else []
     lines.append(f"verification_count: {len(verification)}")
-    git_repo = bundle.get("git_repository") if isinstance(bundle.get("git_repository"), dict) else {}
+    git_repo = bundle.get("current_git_repository") if isinstance(bundle.get("current_git_repository"), dict) else {}
     if git_repo:
         lines.append(f"git: branch={git_repo.get('branch') or '-'} dirty={git_repo.get('dirty')}")
     commit_info = bundle.get("commit_information") if isinstance(bundle.get("commit_information"), dict) else {}
