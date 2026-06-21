@@ -323,7 +323,7 @@ def render_table_row(row: list[str], widths: list[int]) -> str:
 
 
 def render_compact_list(tasks: list[dict], by_id: dict[str, dict], config: Config, color: "ListColor") -> str:
-    header = ["PROJECT", "TITLE(ID)", "STATUS", "ATT", "DEPS", "NOTE"]
+    header = ["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"]
     row_groups = [compact_task_rows(task, by_id, config, color) for task in tasks]
     rows = [row for group in row_groups for row in group]
     widths = [max(visible_len(row[index]) for row in [header, *rows]) for index in range(len(header))]
@@ -334,26 +334,38 @@ def render_compact_list(tasks: list[dict], by_id: dict[str, dict], config: Confi
 
 
 def compact_task_rows(task: dict, by_id: dict[str, dict], config: Config, color: "ListColor") -> list[list[str]]:
-    dep_ids = dependency_id_cells(task.get("depends_on"), color)
+    dep_ids = dependency_id_cells(task.get("depends_on"), by_id, config, color)
+    note_segments = note_cells(task, by_id, config)
+    row_count = max(2, len(dep_ids), len(note_segments))
     rows = [
         [
-            scalar_cell(task_project_id(task)),
-            task_title(task),
+            color.project(scalar_cell(task_project_id(task))),
+            color.task_id(scalar_cell(task.get("id"))),
             color.status(status_cell(task)),
             scalar_cell(task.get("attempts", 0)),
             dep_ids[0] if dep_ids else "-",
-            note_cell(task, by_id, config),
+            note_segments[0] if note_segments else "-",
         ],
         [
+            color.title(task_title(task)),
             "",
-            "(" + color.task_id(scalar_cell(task.get("id"))) + ")",
             "",
             "",
             dep_ids[1] if len(dep_ids) > 1 else "",
-            "",
+            note_segments[1] if len(note_segments) > 1 else "",
         ],
     ]
-    rows.extend(["", "", "", "", dep_id, ""] for dep_id in dep_ids[2:])
+    rows.extend(
+        [
+            "",
+            "",
+            "",
+            "",
+            dep_ids[index] if index < len(dep_ids) else "",
+            note_segments[index] if index < len(note_segments) else "",
+        ]
+        for index in range(2, row_count)
+    )
     return rows
 
 
@@ -387,10 +399,23 @@ def deps_cell(depends_on: object, by_id: dict[str, dict] | None = None, color: "
     return ",".join(color.task_id(str(dep_id)) for dep_id in depends_on)
 
 
-def dependency_id_cells(depends_on: object, color: "ListColor") -> list[str]:
+def dependency_id_cells(depends_on: object, by_id: dict[str, dict], config: Config, color: "ListColor") -> list[str]:
     if not isinstance(depends_on, list):
         return []
-    return [color.task_id(str(dep_id)) for dep_id in depends_on]
+    return [dependency_id_cell(str(dep_id), by_id, config, color) for dep_id in depends_on]
+
+
+def dependency_id_cell(dep_id: str, by_id: dict[str, dict], config: Config, color: "ListColor") -> str:
+    dep = by_id.get(dep_id)
+    if dependency_satisfied(dep, config):
+        return color.satisfied_dependency(dep_id)
+    return color.task_id(dep_id)
+
+
+def dependency_satisfied(dep: dict | None, config: Config) -> bool:
+    if not dep or dep.get("status") != "completed":
+        return False
+    return not config.dependency_requires_accepted_review or dep.get("review_status") == "accepted"
 
 
 def status_cell(task: dict) -> str:
@@ -411,6 +436,11 @@ def status_cell(task: dict) -> str:
 
 
 def note_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
+    notes = note_cells(task, by_id, config)
+    return "; ".join(notes) if notes else "-"
+
+
+def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
     deps_ready = dependency_status(
         task,
         by_id,
@@ -441,7 +471,7 @@ def note_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
             notes.append("reviewing")
         if config.auto_review_mechanical_accept and needs_review(task):
             notes.append("mechanical auto-review enabled")
-    return "; ".join(notes) if notes else "-"
+    return notes or ["-"]
 
 
 def startup_stalled(task: dict) -> bool:
@@ -512,6 +542,7 @@ class ListColor:
     YELLOW = "\033[33m"
     GREEN = "\033[32m"
     CYAN = "\033[36m"
+    LIGHT_CYAN = "\033[96m"
     BLUE = "\033[34m"
     BG_RED = "\033[41;37m"
     BG_YELLOW = "\033[43;30m"
@@ -534,6 +565,17 @@ class ListColor:
             return task_id
         index = zlib.crc32(task_id.encode("utf-8")) % len(self.ID_COLORS)
         return self.apply(task_id, self.ID_COLORS[index])
+
+    def project(self, project_id: str) -> str:
+        return self.apply(project_id, self.LIGHT_CYAN)
+
+    def title(self, title: str) -> str:
+        return title
+
+    def satisfied_dependency(self, dep_id: str) -> str:
+        if not self.enabled or dep_id == "-":
+            return f"{dep_id} (done)"
+        return self.apply(dep_id, self.DIM)
 
     def status(self, status: str) -> str:
         if status in {"failed", "blocked_user", "review_failed", "needs_followup"}:
