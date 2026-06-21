@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from codex_batch_runner.codex import extract_final_response, first_recursive_value, format_command, should_use_resume
+from codex_batch_runner.codex import (
+    extract_final_response,
+    first_recursive_value,
+    format_command,
+    is_meaningful_event,
+    should_use_resume,
+)
 
 
 class CodexParserTests(unittest.TestCase):
@@ -63,6 +69,11 @@ class CodexParserTests(unittest.TestCase):
         task = {"status": "running", "resume_requested": True, "thread_id": "thread-123"}
 
         self.assertTrue(should_use_resume(task))
+
+    def test_item_progress_events_are_meaningful(self) -> None:
+        self.assertTrue(is_meaningful_event({"type": "item.started", "item": {"type": "command_execution"}}))
+        self.assertTrue(is_meaningful_event({"type": "item.completed", "item": {"type": "file_change"}}))
+        self.assertTrue(is_meaningful_event({"type": "item.completed", "item": {"type": "agent_message"}}))
 
 
 if __name__ == "__main__":

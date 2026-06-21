@@ -571,6 +571,24 @@ class RunnerTests(unittest.TestCase):
             self.assertNotIn("last_progress", task)
             self.assertNotIn("watchdog_reason", task["last_run"])
 
+    def test_watchdog_treats_item_progress_as_meaningful(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                make_config(tmp, "item_progress_then_exit"),
+                codex_startup_stall_seconds=1,
+                codex_first_meaningful_timeout_seconds=1,
+                codex_mid_run_idle_seconds=1,
+            )
+            create_task(config, "do it", tmp, task_id="task-item-progress")
+
+            outcome = run_next(config)
+            task = load_task(config, "task-item-progress")
+
+            self.assertEqual("needs_resume", outcome.status)
+            self.assertEqual("needs_resume", task["status"])
+            self.assertNotIn("watchdog_reason", task["last_run"])
+            self.assertIn("missing final JSON response", task["last_error"])
+
     def test_watchdog_warns_but_does_not_kill_mid_run_idle_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = replace(

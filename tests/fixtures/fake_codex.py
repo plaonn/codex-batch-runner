@@ -55,6 +55,15 @@ def main() -> int:
         time.sleep(2)
         return 0
 
+    if mode == "item_progress_then_exit":
+        emit({"type": "turn.started"})
+        emit({"type": "item.started", "item": {"type": "command_execution"}})
+        emit({"type": "item.completed", "item": {"type": "command_execution"}})
+        emit({"type": "item.started", "item": {"type": "file_change"}})
+        emit({"type": "item.completed", "item": {"type": "file_change"}})
+        time.sleep(2)
+        return 0
+
     if mode == "success":
         emit(
             {

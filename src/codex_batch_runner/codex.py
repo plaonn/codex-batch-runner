@@ -326,17 +326,36 @@ def is_meaningful_event(event: dict[str, Any]) -> bool:
     if find_response_object(event):
         return True
     event_type = event_type_of(event) or ""
+    item_type = item_type_of(event) or ""
     if event_type in {"turn.completed", "turn.failed", "error"} or event_type.startswith("error"):
+        return True
+    if event_type in {"item.started", "item.completed"} and item_type in {
+        "agent_message",
+        "command_execution",
+        "file_change",
+        "tool_call",
+        "tool_result",
+    }:
         return True
     if "agent" in event_type and ("message" in event_type or "response" in event_type):
         return True
-    if any(token in event_type for token in ("command", "exec", "tool")) and any(
+    if any(token in event_type or token in item_type for token in ("command", "exec", "tool")) and any(
         state in event_type for state in ("start", "complete", "finish", "output")
     ):
         return True
-    if "file" in event_type and any(token in event_type for token in ("change", "patch", "edit", "modified")):
+    if ("file" in event_type or "file" in item_type) and any(
+        token in event_type or token in item_type for token in ("change", "patch", "edit", "modified")
+    ):
         return True
     return False
+
+
+def item_type_of(event: dict[str, Any]) -> str | None:
+    item = event.get("item")
+    if not isinstance(item, dict):
+        return None
+    value = item.get("type") or item.get("kind")
+    return str(value).lower() if value else None
 
 
 def find_response_object(value: Any) -> dict[str, Any] | None:
