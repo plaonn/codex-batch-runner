@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -88,6 +89,36 @@ def fixed_table_rows(output: str) -> list[dict[str, str]]:
             end = starts[index + 1] if index + 1 < len(starts) else None
             row[header] = line[start:end].strip()
         rows.append(row)
+    return rows
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(value: str) -> str:
+    return ANSI_RE.sub("", value)
+
+
+def compact_list_rows(output: str) -> list[dict[str, str]]:
+    lines = [strip_ansi(line) for line in list_lines(output)]
+    if not lines:
+        return []
+    headers = lines[0].split()
+    starts = [lines[0].index(header) for header in headers]
+    rows = []
+    current: dict[str, str] | None = None
+    for line in lines[1:]:
+        if line.startswith("  TITLE "):
+            if current is not None:
+                current["TITLE"] = line.removeprefix("  TITLE ")
+            continue
+        row = {}
+        for index, header in enumerate(headers):
+            start = starts[index]
+            end = starts[index + 1] if index + 1 < len(starts) else None
+            row[header] = line[start:end].strip()
+        rows.append(row)
+        current = row
     return rows
 
 
@@ -470,8 +501,8 @@ class CliTests(unittest.TestCase):
                     code, output = run_cli(["--config", str(config_path), "list", *filter_args])
 
                     self.assertEqual(0, code)
-                    self.assertEqual(["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"], list_lines(output)[0].split())
-                    rows = {row["ID"]: row for row in fixed_table_rows(output)}
+                    self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+                    rows = {row["ID"]: row for row in compact_list_rows(output)}
                     self.assertEqual("runnable", rows["match"]["STATUS"])
                     self.assertNotIn("other", rows)
 
@@ -487,13 +518,13 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--project", Path(tmp).name])
 
             self.assertEqual(0, code)
-            self.assertEqual(["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"], list_lines(output)[0].split())
-            self.assertEqual("runnable", fixed_table_rows(output)[0]["STATUS"])
+            self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+            self.assertEqual("runnable", compact_list_rows(output)[0]["STATUS"])
 
             code, output = run_cli(["--config", str(config_path), "list", "--project-root", tmp])
 
             self.assertEqual(0, code)
-            self.assertEqual("runnable", fixed_table_rows(output)[0]["STATUS"])
+            self.assertEqual("runnable", compact_list_rows(output)[0]["STATUS"])
 
     def test_list_default_shows_reviewable_completed_and_hides_accepted_and_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -526,7 +557,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list"])
 
             self.assertEqual(0, code)
-            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("runnable", rows["runnable"]["STATUS"])
             self.assertEqual("needs_resume", rows["resume"]["STATUS"])
             self.assertEqual("running", rows["running"]["STATUS"])
@@ -561,7 +592,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--unreviewed"])
 
             self.assertEqual(0, code)
-            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("awaiting_review", rows["unreviewed"]["STATUS"])
             self.assertNotIn("accepted", rows)
             self.assertNotIn("rejected", rows)
@@ -570,7 +601,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--needs-review"])
 
             self.assertEqual(0, code)
-            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("awaiting_review", rows["unreviewed"]["STATUS"])
             self.assertEqual("review_failed", rows["rejected"]["STATUS"])
             self.assertEqual("needs_followup", rows["followup"]["STATUS"])
@@ -586,7 +617,7 @@ class CliTests(unittest.TestCase):
             save_task(config, task)
 
             code, output = run_cli(["--config", str(config_path), "list"])
-            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
 
             self.assertEqual(0, code)
             self.assertIn("awaiting review", rows["reviewable"]["NOTE"])
@@ -604,8 +635,8 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
 
             self.assertEqual(0, code)
-            self.assertEqual(["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"], list_lines(output)[0].split())
-            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("awaiting_review", rows["completed"]["STATUS"])
             self.assertEqual("archived", rows["archived"]["STATUS"])
 
@@ -620,8 +651,8 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--status", "archived"])
 
             self.assertEqual(0, code)
-            self.assertEqual(["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"], list_lines(output)[0].split())
-            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("archived", rows["archived"]["STATUS"])
             self.assertNotIn("runnable", rows)
 
@@ -636,6 +667,106 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertIn("last error: first line second line", output)
+
+    def test_list_default_uses_two_line_layout_and_dependency_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            parent = create_task(config, "Expanded dependency title", tmp, task_id="parent-task")
+            parent["status"] = "completed"
+            parent["review_status"] = "accepted"
+            save_task(config, parent)
+            create_task(config, "Child task title", tmp, task_id="child-task", depends_on=["parent-task"], project_id="project-a")
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a"])
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertEqual("parent-task", rows["child-task"]["DEPS"])
+            self.assertEqual("Child task title", rows["child-task"]["TITLE"])
+            self.assertIn("\n  TITLE Child task title\n", output)
+            self.assertNotIn("Expanded dependency title", rows["child-task"]["DEPS"])
+
+    def test_list_color_modes_respect_auto_no_color_and_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "failed", tmp, task_id="failed")
+            set_status(config, "failed", "failed")
+
+            code, never_output = run_cli(["--config", str(config_path), "list", "--color=never"])
+            auto_code, auto_output = run_cli(["--config", str(config_path), "list", "--color=auto"])
+            with patch.dict(os.environ, {"NO_COLOR": "1"}):
+                no_color_code, no_color_output = run_cli(["--config", str(config_path), "list", "--color=always"])
+                auto_no_color_code, auto_no_color_output = run_cli(["--config", str(config_path), "list", "--color=auto"])
+            always_code, always_output = run_cli(["--config", str(config_path), "list", "--color=always"])
+            json_code, json_output = run_cli(["--config", str(config_path), "list", "--color=always", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, auto_code)
+            self.assertEqual(0, no_color_code)
+            self.assertEqual(0, auto_no_color_code)
+            self.assertEqual(0, always_code)
+            self.assertEqual(0, json_code)
+            self.assertNotIn("\033[", never_output)
+            self.assertNotIn("\033[", auto_output)
+            self.assertIn("\033[31mfailed\033[0m", always_output)
+            self.assertIn("\033[31mfailed\033[0m", no_color_output)
+            self.assertNotIn("\033[", auto_no_color_output)
+            self.assertNotIn("\033[", json_output)
+            self.assertEqual("failed", json.loads(json_output)[0]["id"])
+
+    def test_list_color_uses_stable_task_id_color_in_dependency_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "dep", tmp, task_id="dep-a")
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep-a"])
+
+            code, output = run_cli(["--config", str(config_path), "list", "--color=always", "--all"])
+            dep_color = re.search(r"(\x1b\[[0-9;]*m)dep-a\x1b\[0m", output)
+
+            self.assertEqual(0, code)
+            self.assertIsNotNone(dep_color)
+            self.assertGreaterEqual(output.count(f"{dep_color.group(1)}dep-a\033[0m"), 2)
+
+    def test_list_running_task_shows_elapsed_and_progress_age(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "running", tmp, task_id="running")
+            task["status"] = "running"
+            task["started_at"] = "2026-06-21T00:00:00+00:00"
+            task["last_progress"] = {"last_jsonl_event_at": "2026-06-21T01:03:25+00:00"}
+            save_task(config, task)
+            fixed_now = datetime(2026, 6, 21, 1, 4, tzinfo=timezone.utc)
+
+            with patch("codex_batch_runner.cli.utc_now", return_value=fixed_now):
+                code, output = run_cli(["--config", str(config_path), "list"])
+
+            self.assertEqual(0, code)
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+            self.assertIn("running for 1h 04m", rows["running"]["NOTE"])
+            self.assertIn("last event 35s ago", rows["running"]["NOTE"])
+
+    def test_list_running_task_shows_no_progress_note_when_progress_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "running", tmp, task_id="running")
+            task["status"] = "running"
+            task["started_at"] = "2026-06-21T00:00:00+00:00"
+            task["last_progress"] = {"first_meaningful_event_at": None}
+            save_task(config, task)
+            fixed_now = datetime(2026, 6, 21, 0, 9, tzinfo=timezone.utc)
+
+            with patch("codex_batch_runner.cli.utc_now", return_value=fixed_now):
+                code, output = run_cli(["--config", str(config_path), "list"])
+
+            self.assertEqual(0, code)
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+            self.assertIn("running for 9m", rows["running"]["NOTE"])
+            self.assertIn("no progress 9m", rows["running"]["NOTE"])
 
     def test_archive_command_marks_task_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -674,10 +805,10 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list"])
 
             self.assertEqual(0, code)
-            self.assertNotIn("failed", {row["ID"] for row in fixed_table_rows(output)})
+            self.assertNotIn("failed", {row["ID"] for row in compact_list_rows(output)})
 
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
-            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
 
             self.assertEqual(0, code)
             self.assertEqual("resolved", rows["failed"]["STATUS"])
@@ -1354,11 +1485,11 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
 
             self.assertEqual(0, code)
-            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("awaiting_review", rows["done"]["STATUS"])
             self.assertEqual("awaiting review", rows["done"]["NOTE"])
 
-    def test_list_table_output_includes_header_project_deps_and_empty_flags(self) -> None:
+    def test_list_compact_output_includes_header_title_project_deps_and_empty_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
@@ -1372,19 +1503,19 @@ class CliTests(unittest.TestCase):
 
             code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a"])
             lines = list_lines(output)
-            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
 
             self.assertEqual(0, code)
-            self.assertEqual(["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"], lines[0].split())
+            self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], lines[0].split())
             self.assertNotIn("\t", output)
             self.assertEqual(
-                {"TITLE": "work", "STATUS": "runnable", "PROJECT": "project-a", "ATTEMPTS": "0", "DEPS": "-", "NOTE": "-"},
-                {key: rows["plain"][key] for key in ("TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE")},
+                {"TITLE": "work", "STATUS": "runnable", "PROJECT": "project-a", "ATT": "0", "DEPS": "-", "NOTE": "-"},
+                {key: rows["plain"][key] for key in ("TITLE", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE")},
             )
-            self.assertEqual("parent work", rows["child"]["DEPS"])
+            self.assertEqual("parent", rows["child"]["DEPS"])
             self.assertEqual("-", rows["child"]["NOTE"])
 
-    def test_list_table_aligns_columns_and_sorts_by_created_at_then_id(self) -> None:
+    def test_list_compact_output_sorts_by_created_at_then_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
@@ -1399,7 +1530,7 @@ class CliTests(unittest.TestCase):
 
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
             lines = list_lines(output)
-            rows = fixed_table_rows(output)
+            rows = compact_list_rows(output)
             json_code, json_output = run_cli(["--config", str(config_path), "list", "--all", "--json"])
 
             self.assertEqual(0, code)
@@ -1407,11 +1538,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("\t", output)
             self.assertEqual(["same-a", "same-b", "later"], [row["ID"] for row in rows])
             self.assertEqual(["same-a", "same-b", "later"], [task["id"] for task in json.loads(json_output)])
-            status_start = lines[0].index("STATUS")
-            project_start = lines[0].index("PROJECT")
-            for line in lines[1:]:
-                self.assertEqual(status_start, line.index("runnable"))
-                self.assertGreaterEqual(line.index("project-"), project_start)
+            self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], lines[0].split())
 
     def test_list_summary_and_review_next_report_unaccepted_dependency_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1452,7 +1579,7 @@ class CliTests(unittest.TestCase):
             save_task(config, task)
 
             code, output = run_cli(["--config", str(config_path), "list"])
-            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
 
             self.assertEqual(0, code)
             self.assertEqual(Path(tmp).name, rows["legacy"]["PROJECT"])
@@ -1816,7 +1943,7 @@ class CliTests(unittest.TestCase):
             summary_code, summary_output = run_cli(["--config", str(config_path), "summary", "task-stalled"])
 
             self.assertEqual(0, list_code)
-            rows = {row["ID"]: row for row in fixed_table_rows(list_output)}
+            rows = {row["ID"]: row for row in compact_list_rows(list_output)}
             self.assertIn("startup stall retry evidence", rows["task-stalled"]["NOTE"])
             self.assertIn("startup stall history", rows["task-stall-history"]["NOTE"])
             self.assertEqual(0, summary_code)
