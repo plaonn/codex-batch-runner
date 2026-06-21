@@ -49,59 +49,72 @@ def build_review_next_apply_report(
         )
 
     try:
-        report = select_review_next_report(config, filters, mode="apply")
-        expected = report.pop("_fingerprint", None)
+        return build_review_next_apply_report_locked(
+            config,
+            filters,
+            mechanical_auto_accept=mechanical_auto_accept,
+        )
+    finally:
+        lock.release()
+
+
+def build_review_next_apply_report_locked(
+    config: Config,
+    filters: Namespace | None = None,
+    *,
+    mechanical_auto_accept: bool = False,
+) -> dict[str, Any]:
+    report = select_review_next_report(config, filters, mode="apply")
+    expected = report.pop("_fingerprint", None)
+    enabled = mechanical_auto_accept or config.auto_review_mechanical_accept
+    report["auto_review"] = auto_review_summary(
+        decision="none",
+        reason="no completed task needs review" if not report["selected"] else "pending",
+        enabled=enabled,
+        reviewer_codex_enabled=config.auto_review_codex_enabled,
+    )
+    if not report["selected"]:
+        return report
+
+    if not enabled:
         report["auto_review"] = auto_review_summary(
-            decision="none",
-            reason="no completed task needs review" if not report["selected"] else "pending",
-            enabled=mechanical_auto_accept or config.auto_review_mechanical_accept,
+            decision="needs_human",
+            reason="mechanical auto-accept is disabled",
+            enabled=False,
             reviewer_codex_enabled=config.auto_review_codex_enabled,
         )
-        if not report["selected"]:
-            return report
+        return report
 
-        enabled = mechanical_auto_accept or config.auto_review_mechanical_accept
-        if not enabled:
-            report["auto_review"] = auto_review_summary(
-                decision="needs_human",
-                reason="mechanical auto-accept is disabled",
-                enabled=False,
-                reviewer_codex_enabled=config.auto_review_codex_enabled,
-            )
-            return report
-
-        failed = [gate for gate in report.get("gates", []) if not gate.get("ok")]
-        if failed:
-            report["auto_review"] = auto_review_summary(
-                decision="needs_human",
-                reason="mechanical gates failed",
-                enabled=True,
-                reviewer_codex_enabled=config.auto_review_codex_enabled,
-                failing_gates=[gate.get("name") for gate in failed],
-            )
-            return report
-
-        task_id = str(report["task_id"])
-        if not isinstance(expected, dict):
-            report["auto_review"] = auto_review_summary(
-                decision="needs_human",
-                reason="review fingerprint unavailable",
-                enabled=True,
-                reviewer_codex_enabled=config.auto_review_codex_enabled,
-            )
-            return report
-        applied = apply_mechanical_accept(config, task_id, expected)
-        report["mutated"] = applied["mutated"]
-        report["review_status"] = applied.get("review_status", report.get("review_status"))
+    failed = [gate for gate in report.get("gates", []) if not gate.get("ok")]
+    if failed:
         report["auto_review"] = auto_review_summary(
-            decision=applied["decision"],
-            reason=applied["reason"],
+            decision="needs_human",
+            reason="mechanical gates failed",
+            enabled=True,
+            reviewer_codex_enabled=config.auto_review_codex_enabled,
+            failing_gates=[gate.get("name") for gate in failed],
+        )
+        return report
+
+    task_id = str(report["task_id"])
+    if not isinstance(expected, dict):
+        report["auto_review"] = auto_review_summary(
+            decision="needs_human",
+            reason="review fingerprint unavailable",
             enabled=True,
             reviewer_codex_enabled=config.auto_review_codex_enabled,
         )
         return report
-    finally:
-        lock.release()
+    applied = apply_mechanical_accept(config, task_id, expected)
+    report["mutated"] = applied["mutated"]
+    report["review_status"] = applied.get("review_status", report.get("review_status"))
+    report["auto_review"] = auto_review_summary(
+        decision=applied["decision"],
+        reason=applied["reason"],
+        enabled=True,
+        reviewer_codex_enabled=config.auto_review_codex_enabled,
+    )
+    return report
 
 
 def select_review_next_report(config: Config, filters: Namespace | None = None, *, mode: str) -> dict[str, Any]:
@@ -485,7 +498,7 @@ def render_review_next_report(report: dict[str, Any]) -> str:
         f"blocked_by={blocked_by}"
     )
     append_result_summary(lines, bundle)
-    lines.append("dry_run: no task state changed; reviewer Codex not invoked; auto-apply not implemented")
+    lines.append("dry_run: no task state changed; reviewer Codex not invoked")
     return "\n".join(lines).rstrip() + "\n"
 
 

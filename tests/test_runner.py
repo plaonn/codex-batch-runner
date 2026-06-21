@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from codex_batch_runner.events import list_events
 from codex_batch_runner.queue import create_task, load_task, save_task
 from codex_batch_runner.runner import apply_codex_result, run_next
 from codex_batch_runner.state import load_state
+from codex_batch_runner.timeutil import iso_now
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_codex.py"
@@ -73,6 +75,32 @@ def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def init_repo(path: Path) -> None:
+    subprocess.run(["git", "init", "-b", "main", str(path)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    git(path, "config", "user.email", "test@example.invalid")
+    git(path, "config", "user.name", "Test User")
+    (path / "file.txt").write_text("base\n", encoding="utf-8")
+    git(path, "add", "file.txt")
+    git(path, "commit", "-m", "initial")
+
+
+def create_clean_completed_task(config: Config, repo: Path, task_id: str = "reviewable") -> dict:
+    task = create_task(config, "work", str(repo), task_id=task_id)
+    task["status"] = "completed"
+    task["review_status"] = "unreviewed"
+    task["completed_at"] = "2026-01-01T00:00:00+00:00"
+    task["last_result"] = {
+        "task_id": task_id,
+        "status": "completed",
+        "summary": "done",
+        "changed_files": ["file.txt"],
+        "verification": ["unit tests"],
+    }
+    task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
+    save_task(config, task)
+    return task
+
+
 class RunnerTests(unittest.TestCase):
     def test_run_next_processes_one_task_and_triggers_after_lock_release_when_follow_up_is_eligible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +128,112 @@ class RunnerTests(unittest.TestCase):
             second = load_task(config, "task-2")
             self.assertEqual("runnable", second["status"])
             self.assertEqual(0, second["attempts"])
+            self.assertEqual("unlocked\n", marker.read_text(encoding="utf-8"))
+
+    def test_run_next_does_not_auto_review_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = make_config(tmp, "success")
+            create_clean_completed_task(config, repo, "reviewable")
+
+            with patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")):
+                outcome = run_next(config)
+
+            self.assertEqual("empty", outcome.status)
+            self.assertIsNone(outcome.task_id)
+            self.assertEqual("unreviewed", load_task(config, "reviewable")["review_status"])
+
+    def test_run_next_auto_review_accepts_one_completed_task_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(make_config(tmp, "success"), auto_review_mechanical_accept=True)
+            create_clean_completed_task(config, repo, "reviewable-1")
+            create_clean_completed_task(config, repo, "reviewable-2")
+
+            with patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")):
+                outcome = run_next(config)
+
+            self.assertEqual("review_accepted", outcome.status)
+            self.assertEqual("reviewable-1", outcome.task_id)
+            self.assertEqual("accepted", load_task(config, "reviewable-1")["review_status"])
+            self.assertEqual("unreviewed", load_task(config, "reviewable-2")["review_status"])
+            self.assertFalse(outcome.review["auto_review"]["reviewer_codex_invoked"])
+
+    def test_run_next_runnable_task_takes_precedence_over_auto_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(make_config(tmp, "success"), auto_review_mechanical_accept=True)
+            create_clean_completed_task(config, repo, "reviewable")
+            create_task(config, "implementation", tmp, task_id="implementation")
+
+            outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("implementation", outcome.task_id)
+            self.assertEqual("unreviewed", load_task(config, "reviewable")["review_status"])
+
+    def test_run_next_auto_review_respects_runner_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(make_config(tmp, "success"), auto_review_mechanical_accept=True)
+            create_clean_completed_task(config, repo, "locked-review")
+            config.lock_file.parent.mkdir(parents=True, exist_ok=True)
+            config.lock_file.write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "hostname": socket.gethostname(),
+                        "created_at": iso_now(),
+                        "task_id": "running-task",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            outcome = run_next(config)
+
+            self.assertEqual("locked", outcome.status)
+            self.assertEqual("unreviewed", load_task(config, "locked-review")["review_status"])
+
+    def test_run_next_auto_review_triggers_when_dependent_task_becomes_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; import sys; "
+                    "Path(sys.argv[1]).write_text("
+                    "'locked\\n' if Path(sys.argv[2]).exists() else 'unlocked\\n', encoding='utf-8')"
+                ),
+                str(marker),
+                str(Path(tmp) / ".codex-batch-runner" / "runner.lock"),
+            ]
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(
+                make_config(tmp, "success", trigger),
+                auto_review_mechanical_accept=True,
+                dependency_requires_accepted_review=True,
+            )
+            create_clean_completed_task(config, repo, "dependency")
+            create_task(config, "child", tmp, task_id="child", depends_on=["dependency"])
+
+            with patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")):
+                outcome = run_next(config)
+
+            self.assertEqual("review_accepted", outcome.status)
+            self.assertEqual("accepted", load_task(config, "dependency")["review_status"])
+            self.assertEqual("runnable", load_task(config, "child")["status"])
             self.assertEqual("unlocked\n", marker.read_text(encoding="utf-8"))
 
     def test_run_next_does_not_trigger_without_eligible_follow_up(self) -> None:

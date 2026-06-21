@@ -14,6 +14,7 @@ from .fs import ensure_dir
 from .lock import FileLock
 from .prompts import build_prompt
 from .queue import is_in_cooldown, recover_stale_running_tasks, save_task, select_next_task
+from .review_next import build_review_next_apply_report_locked
 from .state import in_global_cooldown, mark_rate_limit, mark_run, mark_success
 from .timeutil import add_seconds, iso_now, parse_time
 from .triggers import run_post_run_trigger
@@ -24,6 +25,7 @@ class RunOutcome:
     status: str
     message: str
     task_id: str | None = None
+    review: dict[str, Any] | None = None
 
 
 def run_next(config: Config) -> RunOutcome:
@@ -42,6 +44,29 @@ def run_next(config: Config) -> RunOutcome:
         recover_stale_running_tasks(config)
         task = select_next_task(config)
         if not task:
+            if config.auto_review_mechanical_accept:
+                report = build_review_next_apply_report_locked(
+                    config,
+                    mechanical_auto_accept=True,
+                )
+                if report.get("mutated"):
+                    mark_run(config, None)
+                    outcome = RunOutcome(
+                        status="review_accepted",
+                        message="mechanical auto-review accepted one completed task",
+                        task_id=str(report.get("task_id") or "") or None,
+                        review=report,
+                    )
+                    return outcome
+                if report.get("selected"):
+                    mark_run(config, None)
+                    outcome = RunOutcome(
+                        status="review_needed",
+                        message="completed task needs human review",
+                        task_id=str(report.get("task_id") or "") or None,
+                        review=report,
+                    )
+                    return outcome
             mark_run(config, None)
             outcome = RunOutcome(status="empty", message="no runnable task")
             return outcome
@@ -83,6 +108,8 @@ def run_next(config: Config) -> RunOutcome:
         lock.release()
         if outcome and outcome.task_id and should_trigger_post_run_wake(config, task):
             run_post_run_trigger(config)
+        elif outcome and outcome.status == "review_accepted" and should_trigger_post_review_wake(config):
+            run_post_run_trigger(config)
 
 
 def should_trigger_post_run_wake(config: Config, processed_task: dict[str, Any] | None) -> bool:
@@ -91,6 +118,12 @@ def should_trigger_post_run_wake(config: Config, processed_task: dict[str, Any] 
     if in_global_cooldown(config):
         return False
     if is_in_cooldown(processed_task):
+        return False
+    return select_next_task(config) is not None
+
+
+def should_trigger_post_review_wake(config: Config) -> bool:
+    if in_global_cooldown(config):
         return False
     return select_next_task(config) is not None
 

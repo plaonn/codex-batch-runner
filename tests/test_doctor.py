@@ -18,7 +18,7 @@ from codex_batch_runner.queue import create_task, save_task
 from codex_batch_runner.timeutil import add_seconds
 
 
-def write_config(tmp: str, codex_command: list[str]) -> Path:
+def write_config(tmp: str, codex_command: list[str], auto_review_mechanical_accept: bool = False) -> Path:
     root = Path(tmp)
     config_path = root / "config.json"
     config_path.write_text(
@@ -30,6 +30,7 @@ def write_config(tmp: str, codex_command: list[str]) -> Path:
                 "lock_file": str(root / "runner.lock"),
                 "state_file": str(root / "state.json"),
                 "codex_command": codex_command,
+                "auto_review_mechanical_accept": auto_review_mechanical_accept,
             }
         ),
         encoding="utf-8",
@@ -225,7 +226,7 @@ class DoctorTests(unittest.TestCase):
             executable = Path(tmp) / "codex"
             executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             executable.chmod(0o755)
-            config_path = write_config(tmp, [str(executable)])
+            config_path = write_config(tmp, [str(executable)], auto_review_mechanical_accept=True)
             config = Config.load(str(config_path))
 
             create_task(config, "ready", tmp, task_id="ready")
@@ -252,6 +253,15 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(1, report["tasks"]["runnable"])
             self.assertEqual(1, report["tasks"]["cooldown"])
             self.assertEqual(0, report["tasks"]["startup_stalled"])
+            self.assertTrue(report["auto_review"]["mechanical_auto_accept_enabled"])
+            self.assertFalse(report["auto_review"]["reviewer_codex_enabled"])
+            self.assertEqual(1, report["auto_review"]["reviewable_completed"])
+
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+            self.assertEqual(0, human_code)
+            self.assertIn("auto_review:", human_output)
+            self.assertIn("mechanical_auto_accept_enabled: true", human_output)
+            self.assertIn("reviewable_completed: 1", human_output)
 
     def test_doctor_reports_startup_stall_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -377,6 +377,8 @@ def note_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
             notes.append("needs follow-up")
         elif review == "reviewing":
             notes.append("reviewing")
+        if config.auto_review_mechanical_accept and needs_review(task):
+            notes.append("mechanical auto-review enabled")
     return "; ".join(notes) if notes else "-"
 
 

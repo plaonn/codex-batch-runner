@@ -48,6 +48,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
         "state": state_summary(config),
         "lock": lock_summary(config),
         "git": git,
+        "auto_review": auto_review_summary(tasks, config),
         "tasks": task_summary(tasks, by_id, config),
         "checks": checks,
     }
@@ -330,6 +331,19 @@ def task_summary(tasks: list[dict[str, Any]], by_id: dict[Any, dict[str, Any]], 
     }
 
 
+def auto_review_summary(tasks: list[dict[str, Any]], config: Config) -> dict[str, Any]:
+    reviewable_count = sum(
+        1
+        for task in tasks
+        if task.get("status") == "completed" and review_status(task) in {"unreviewed", "rejected", "needs_followup"}
+    )
+    return {
+        "mechanical_auto_accept_enabled": config.auto_review_mechanical_accept,
+        "reviewer_codex_enabled": config.auto_review_codex_enabled,
+        "reviewable_completed": reviewable_count,
+    }
+
+
 def startup_watchdog_progress(task: dict[str, Any]) -> bool:
     progress = task.get("last_progress")
     return isinstance(progress, dict) and bool(progress.get("watchdog_reason"))
@@ -428,6 +442,16 @@ def render_doctor_report(report: dict[str, Any]) -> str:
         lines.append("  warnings:")
         for message in git["warnings"]:
             lines.append(f"    - {message}")
+    auto_review = report["auto_review"]
+    lines.extend(
+        [
+            "",
+            "auto_review:",
+            f"  mechanical_auto_accept_enabled: {str(auto_review.get('mechanical_auto_accept_enabled')).lower()}",
+            f"  reviewer_codex_enabled: {str(auto_review.get('reviewer_codex_enabled')).lower()}",
+            f"  reviewable_completed: {auto_review.get('reviewable_completed')}",
+        ]
+    )
     tasks = report["tasks"]
     lines.extend(["", "tasks:", f"  total: {tasks['total']}", "  by_status:"])
     if tasks["by_status"]:

@@ -116,6 +116,8 @@ PYTHONPATH=src python3 -m codex_batch_runner review-next --apply --mechanical-au
 
 `review-next --apply`는 runner와 같은 queue lock 아래에서 실행되는 순차 자동 검토 phase입니다. 기본적으로는 적용을 거부하고 `needs_human`을 보고합니다. `--mechanical-auto-accept`를 함께 지정하거나 config에서 `"auto_review_mechanical_accept": true`를 명시한 경우에만 모든 local mechanical gate가 통과한 task를 `review_status=accepted`로 변경합니다. Gate가 실패하거나 상태가 모호하면 reviewer Codex를 호출하지 않고 `review_status`를 그대로 둡니다. Reviewer Codex 경로는 기본값이 `"auto_review_codex_enabled": false`인 별도 선택 기능으로 남겨 두며, 현재 local apply path는 Codex token을 소비하지 않습니다. 적용 직전에는 task `updated_at`, `last_result`, task `git_status`, repository head/dirty 상태, inferred commit 정보가 gate 계산 시점과 같은지 다시 확인하여 stale state이면 accept를 적용하지 않습니다.
 
+`run-next`는 기본적으로 runnable/needs_resume 구현 작업만 처리합니다. Config에서 `"auto_review_mechanical_accept": true`를 명시하면 runnable 구현 작업이 없을 때 같은 queue lock 안에서 `review-next --apply --mechanical-auto-accept`와 동일한 local-only 검토를 최대 한 건 실행할 수 있습니다. Runnable 구현 작업은 자동 검토보다 우선하며, 자동 검토가 dependent task를 새로 runnable하게 만들면 기존 post-run trigger 규칙에 따라 scheduler wake-up hook이 실행될 수 있습니다.
+
 로그 확인:
 
 ```bash
@@ -210,7 +212,7 @@ PYTHONPATH=src python3 -m codex_batch_runner doctor
 PYTHONPATH=src python3 -m codex_batch_runner doctor --json
 ```
 
-`doctor`는 config/runtime path, event directory, configured Codex executable path, resolved executable path, executable availability, bounded `codex --version` output, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts, startup/no-progress stall evidence를 점검합니다. Lock metadata에 현재 host의 pid가 있으면 pid와 liveness도 표시합니다. Version 확인은 configured executable에 `--version`만 붙여 짧은 timeout으로 실행하며, `codex exec`를 호출하거나 network operation을 수행한다고 가정하지 않습니다. Version command가 실패하거나 timeout되면 warning으로 보고하지만 doctor 실패로 취급하지 않습니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation은 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
+`doctor`는 config/runtime path, event directory, configured Codex executable path, resolved executable path, executable availability, bounded `codex --version` output, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts, 자동 검토 enable 상태와 reviewable completed task 수, startup/no-progress stall evidence를 점검합니다. Lock metadata에 현재 host의 pid가 있으면 pid와 liveness도 표시합니다. Version 확인은 configured executable에 `--version`만 붙여 짧은 timeout으로 실행하며, `codex exec`를 호출하거나 network operation을 수행한다고 가정하지 않습니다. Version command가 실패하거나 timeout되면 warning으로 보고하지만 doctor 실패로 취급하지 않습니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation을 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
 
 오래된 완료/보관 task 정리 후보 확인:
 
@@ -264,7 +266,7 @@ Optional `post_mutation_trigger_command` can run a generic scheduler wake-up hoo
 }
 ```
 
-The hook runs after durable task state writes for commands such as `enqueue`, `accept`, `reject`, `resolve`, and `archive`. `run-next` may also run it after releasing the runner lock, but only after processing one task and only when there is eligible follow-up work and no active global cooldown. It is not run by read-only commands, empty `run-next` invocations, cooldown exits, dependency-blocked-only queues, or `prune`. Hook failures print a warning to stderr but do not fail the core operation. Polling remains the fallback, and duplicate wake-ups are safe because `run-next` still enforces the runner lock, cooldown checks, empty-queue behavior, dependency checks, and single-task execution.
+The hook runs after durable task state writes for commands such as `enqueue`, `accept`, `reject`, `resolve`, and `archive`. `run-next` may also run it after releasing the runner lock, but only after processing one implementation task or mechanically accepting one completed task, and only when there is eligible follow-up work and no active global cooldown. It is not run by read-only commands, empty `run-next` invocations, cooldown exits, dependency-blocked-only queues, auto-review attempts that do not mutate task state, or `prune`. Hook failures print a warning to stderr but do not fail the core operation. Polling remains the fallback, and duplicate wake-ups are safe because `run-next` still enforces the runner lock, cooldown checks, empty-queue behavior, dependency checks, and single-task execution.
 
 설정 파일 예시는 [examples/config.example.json](examples/config.example.json)에 있습니다. 이 예시는 `--sandbox workspace-write`를 사용하는 안전한 기본값입니다.
 

@@ -28,6 +28,7 @@ def write_config(
     tmp: str,
     trigger_command: list[str] | None = None,
     dependency_requires_accepted_review: bool = False,
+    auto_review_mechanical_accept: bool = False,
 ) -> Path:
     root = Path(tmp)
     data = {
@@ -37,6 +38,7 @@ def write_config(
         "lock_file": str(root / "runner.lock"),
         "state_file": str(root / "state.json"),
         "dependency_requires_accepted_review": dependency_requires_accepted_review,
+        "auto_review_mechanical_accept": auto_review_mechanical_accept,
     }
     if trigger_command is not None:
         data["post_mutation_trigger_command"] = trigger_command
@@ -559,6 +561,22 @@ class CliTests(unittest.TestCase):
             self.assertEqual("review_failed", rows["rejected"]["STATUS"])
             self.assertEqual("needs_followup", rows["followup"]["STATUS"])
             self.assertNotIn("accepted", rows)
+
+    def test_list_note_shows_when_mechanical_auto_review_is_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, auto_review_mechanical_accept=True)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="reviewable")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "list"])
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertIn("awaiting review", rows["reviewable"]["NOTE"])
+            self.assertIn("mechanical auto-review enabled", rows["reviewable"]["NOTE"])
 
     def test_list_all_includes_completed_and_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

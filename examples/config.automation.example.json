@@ -5,6 +5,8 @@
   "state_file": ".codex-batch-runner/state.json",
   "codex_command": ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--json"],
   "codex_resume_command": ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "resume", "{session_id}", "--json"],
+  "auto_review_mechanical_accept": false,
+  "auto_review_codex_enabled": false,
   "stale_lock_seconds": 21600,
   "rate_limit_cooldown_seconds": 1800,
   "default_max_attempts": 5
