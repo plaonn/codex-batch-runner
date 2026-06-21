@@ -186,6 +186,67 @@ runner는 Codex 최종 응답이 `completed`이면 `review_status=unreviewed`를
 
 운영 모델상 `completed + unreviewed`, `completed + rejected`, `completed + needs_followup`은 아직 처리해야 할 task로 봄. 기본 `cbr list`는 `completed + accepted`와 `archived`만 숨기고, 검토가 끝나지 않은 completed task는 기본 출력에 표시함.
 
+## Automatic review bundle and reviewer Codex
+
+규칙만으로 `completed` task를 자동 accept하는 방식은 충분하지 않음. 파일 변경, 테스트 명령, commit/push 상태 같은 기계적 신호는 누락과 모순을 찾는 데 유용하지만, 원래 prompt 의도 충족 여부, 문서/코드 변경의 적절성, 공개 저장소 안전 정책 준수 여부, 후속 작업 필요성은 task마다 문맥 판단이 필요함. 따라서 review는 아래 단계로 분리함.
+
+- Mechanical gates: task 상태, dependency 상태, final JSON schema, verification 유무, git dirty/unpushed 상태, diff 크기, 금지된 runtime/private 파일 포함 여부 같은 결정적 검사를 수행함.
+- Reviewer Codex: 독립적으로 생성한 review bundle만 읽고 작업 결과를 평가함. 현재 대화 context나 작업 실행 thread 기억에 의존하지 않음.
+- Human fallback: confidence가 낮거나 private/public 안전성, 의도 충족, 큰 diff, 실패한 검증, credential 가능성처럼 사람이 봐야 하는 항목이 있으면 accept하지 않고 확인 대상으로 남김.
+
+Review bundle은 특정 task의 결과를 재검토하기 위한 self-contained artifact임. 생성 시점의 현재 대화 context, Codex transcript 전체, operator 개인 메모에 의존하지 않고, task JSON과 대상 git repository의 현재 local state에서 다시 만들 수 있어야 함. bundle은 기본적으로 report-only 입력이며, 첫 구현은 파일 저장 또는 stdout 출력만 수행하고 review status를 변경하지 않음.
+
+필수 입력:
+
+- task prompt: task에 저장된 prompt와, `needs_resume` 완료인 경우 관련 `next_prompt` 요약
+- task metadata: id, status, review_status, cwd, project_root, project_id, category, labels, created_by, attempts, timestamps
+- dependencies: `depends_on` id와 각 dependency의 status/review_status 요약
+- `last_result`: status, summary, next_prompt, changed_files, verification, optional `commits`, optional `push_status`
+- `last_run`: command_kind, returncode, started/finished time, duration_seconds, resume_id_used 존재 여부, log path 존재 여부
+- changed files: `last_result.changed_files`와 git diff/name-status에서 확인한 변경 파일 목록
+- verification: Codex가 보고한 검증 명령과 결과 요약. 필요하면 reviewer가 재실행할 명령을 제안할 수 있으나 bundle 생성 단계에서 임의 실행하지 않음
+- git status: branch, upstream/comparison ref, ahead/behind, dirty 여부, unpushed commit 요약, warnings
+- commit data: 관련 commit hash, 짧은 subject/stat, 필요한 경우 sanitized diff. commit/push metadata는 `cbr-result-push-metadata`에서 저장한 optional result fields와 task `git_status`를 함께 사용함
+- relevant docs/spec excerpts: README, `docs/spec.md`, examples, public policy 문서가 변경된 경우 해당 주변 문단의 짧은 excerpt
+- public/private safety policy: 공개 repo에 commit하면 안 되는 runtime state, 실제 logs/prompts/session ids/thread ids, credentials, 개인 경로, Telegram token/chat id, private queue contents 금지 규칙
+
+Bundle에 기본 포함하지 않는 정보:
+
+- raw private logs 또는 전체 JSONL transcript
+- 전체 대화 transcript
+- credentials, tokens, chat ids, 개인 계정 식별자
+- session id/thread id 원문. 필요한 경우 존재 여부만 표시하거나 sanitized placeholder 사용
+- `.codex-batch-runner/` runtime state contents, 실제 queue contents, operator-local `*.local.md` 세부 내용
+
+Reviewer Codex decision schema:
+
+```json
+{
+  "task_id": "string",
+  "decision": "accept | needs_human | reject | follow_up",
+  "confidence": "low | medium | high",
+  "reason": "string",
+  "required_human_checks": ["string"],
+  "suggested_follow_up_prompt": "string"
+}
+```
+
+Decision 의미:
+
+- `accept`: bundle만으로 prompt 충족, 검증, 공개 안전 정책을 high confidence로 확인함
+- `needs_human`: 자동 판단에는 정보가 부족하거나 사람이 봐야 할 위험이 있음
+- `reject`: 결과가 명확히 실패했거나 task 목표와 충돌함
+- `follow_up`: 기본 방향은 맞지만 추가 Codex 작업이 필요함. 이 경우 `suggested_follow_up_prompt`를 구체적으로 작성함
+
+초기 구현은 반드시 dry-run/report-only로 시작함. `cbr review-next --dry-run`은 reviewer decision과 근거를 출력하되 `review_status`를 바꾸거나 follow-up task를 만들지 않음. Auto-accept는 별도 후속 phase이며, mechanical gates를 모두 통과하고 reviewer decision이 `accept`, confidence가 `high`, `required_human_checks`가 비어 있는 경우에만 선택적으로 허용할 수 있음. Auto-apply phase에서도 기본값은 비활성화하고, rejected/follow_up 결정은 자동으로 새 task를 enqueue하지 않음.
+
+Rough roadmap:
+
+- `cbr review-bundle TASK_ID`: bundle을 stdout 또는 지정 파일로 생성함. raw transcript 없이 self-contained report를 만들고, private/public 안전 policy를 항상 포함함.
+- `cbr review-next --dry-run`: `completed + unreviewed` task 중 하나를 선택해 bundle을 만들고 mechanical gates와 reviewer decision report를 출력함.
+- Reviewer Codex call: bundle만 prompt로 전달해 decision schema JSON을 받음. 실패하거나 schema가 맞지 않으면 `needs_human`으로 보고함.
+- Later optional auto-apply: config로 명시적으로 켠 경우에만 high-confidence `accept`를 `cbr accept`와 동일한 상태 변경으로 반영함. `follow_up`은 report에 follow-up prompt를 남기되 task 생성은 operator가 별도로 수행함.
+
 ## Project routing metadata
 
 여러 프로젝트가 하나의 중앙 queue를 공유하면 review 대상 판정을 위해 task를 하나씩 열람하는 방식은 토큰과 시간이 낭비됩니다. task 등록 시 review routing metadata를 함께 저장하고, list 단계에서 먼저 좁혀 볼 수 있게 합니다.
