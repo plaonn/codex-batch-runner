@@ -108,15 +108,30 @@ def compact_list_rows(output: str) -> list[dict[str, str]]:
     rows = []
     current: dict[str, str] | None = None
     for line in lines[1:]:
-        if line.startswith("  TITLE "):
-            if current is not None:
-                current["TITLE"] = line.removeprefix("  TITLE ")
-            continue
-        row = {}
+        parsed = {}
         for index, header in enumerate(headers):
             start = starts[index]
             end = starts[index + 1] if index + 1 < len(starts) else None
-            row[header] = line[start:end].strip()
+            parsed[header] = line[start:end].strip()
+        if not parsed["PROJECT"] and current is not None:
+            title_or_id = parsed["TITLE(ID)"]
+            if title_or_id.startswith("(") and title_or_id.endswith(")"):
+                current["ID"] = title_or_id[1:-1]
+            if parsed["DEPS"]:
+                if current["DEPS"] in {"", "-"}:
+                    current["DEPS"] = parsed["DEPS"]
+                else:
+                    current["DEPS"] += "\n" + parsed["DEPS"]
+            continue
+        row = {
+            "ID": "",
+            "TITLE": parsed["TITLE(ID)"],
+            "PROJECT": parsed["PROJECT"],
+            "STATUS": parsed["STATUS"],
+            "ATT": parsed["ATT"],
+            "DEPS": parsed["DEPS"],
+            "NOTE": parsed["NOTE"],
+        }
         rows.append(row)
         current = row
     return rows
@@ -501,7 +516,7 @@ class CliTests(unittest.TestCase):
                     code, output = run_cli(["--config", str(config_path), "list", *filter_args])
 
                     self.assertEqual(0, code)
-                    self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+                    self.assertEqual(["PROJECT", "TITLE(ID)", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
                     rows = {row["ID"]: row for row in compact_list_rows(output)}
                     self.assertEqual("runnable", rows["match"]["STATUS"])
                     self.assertNotIn("other", rows)
@@ -518,7 +533,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--project", Path(tmp).name])
 
             self.assertEqual(0, code)
-            self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+            self.assertEqual(["PROJECT", "TITLE(ID)", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
             self.assertEqual("runnable", compact_list_rows(output)[0]["STATUS"])
 
             code, output = run_cli(["--config", str(config_path), "list", "--project-root", tmp])
@@ -635,7 +650,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
 
             self.assertEqual(0, code)
-            self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+            self.assertEqual(["PROJECT", "TITLE(ID)", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
             rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("awaiting_review", rows["completed"]["STATUS"])
             self.assertEqual("archived", rows["archived"]["STATUS"])
@@ -651,7 +666,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--status", "archived"])
 
             self.assertEqual(0, code)
-            self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+            self.assertEqual(["PROJECT", "TITLE(ID)", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
             rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("archived", rows["archived"]["STATUS"])
             self.assertNotIn("runnable", rows)
@@ -668,23 +683,34 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertIn("last error: first line second line", output)
 
-    def test_list_default_uses_two_line_layout_and_dependency_ids(self) -> None:
+    def test_list_default_uses_project_first_title_id_layout_and_vertical_dependency_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
-            parent = create_task(config, "Expanded dependency title", tmp, task_id="parent-task")
-            parent["status"] = "completed"
-            parent["review_status"] = "accepted"
-            save_task(config, parent)
-            create_task(config, "Child task title", tmp, task_id="child-task", depends_on=["parent-task"], project_id="project-a")
+            for task_id in ("parent-task", "second-parent"):
+                parent = create_task(config, "Expanded dependency title", tmp, task_id=task_id)
+                parent["status"] = "completed"
+                parent["review_status"] = "accepted"
+                save_task(config, parent)
+            create_task(
+                config,
+                "Child task title",
+                tmp,
+                task_id="child-task",
+                depends_on=["parent-task", "second-parent"],
+                project_id="project-a",
+            )
 
             code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a"])
+            lines = list_lines(output)
             rows = {row["ID"]: row for row in compact_list_rows(output)}
 
             self.assertEqual(0, code)
-            self.assertEqual("parent-task", rows["child-task"]["DEPS"])
+            self.assertEqual(["PROJECT", "TITLE(ID)", "STATUS", "ATT", "DEPS", "NOTE"], lines[0].split())
+            self.assertTrue(lines[1].startswith("project-a"))
+            self.assertIn("(child-task)", output)
+            self.assertEqual("parent-task\nsecond-parent", rows["child-task"]["DEPS"])
             self.assertEqual("Child task title", rows["child-task"]["TITLE"])
-            self.assertIn("\n  TITLE Child task title\n", output)
             self.assertNotIn("Expanded dependency title", rows["child-task"]["DEPS"])
 
     def test_list_color_modes_respect_auto_no_color_and_json(self) -> None:
@@ -710,8 +736,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, json_code)
             self.assertNotIn("\033[", never_output)
             self.assertNotIn("\033[", auto_output)
-            self.assertIn("\033[31mfailed\033[0m", always_output)
-            self.assertIn("\033[31mfailed\033[0m", no_color_output)
+            self.assertIn("\033[41;37mfailed\033[0m", always_output)
+            self.assertIn("\033[41;37mfailed\033[0m", no_color_output)
             self.assertNotIn("\033[", auto_no_color_output)
             self.assertNotIn("\033[", json_output)
             self.assertEqual("failed", json.loads(json_output)[0]["id"])
@@ -1506,7 +1532,7 @@ class CliTests(unittest.TestCase):
             rows = {row["ID"]: row for row in compact_list_rows(output)}
 
             self.assertEqual(0, code)
-            self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], lines[0].split())
+            self.assertEqual(["PROJECT", "TITLE(ID)", "STATUS", "ATT", "DEPS", "NOTE"], lines[0].split())
             self.assertNotIn("\t", output)
             self.assertEqual(
                 {"TITLE": "work", "STATUS": "runnable", "PROJECT": "project-a", "ATT": "0", "DEPS": "-", "NOTE": "-"},
@@ -1538,7 +1564,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("\t", output)
             self.assertEqual(["same-a", "same-b", "later"], [row["ID"] for row in rows])
             self.assertEqual(["same-a", "same-b", "later"], [task["id"] for task in json.loads(json_output)])
-            self.assertEqual(["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"], lines[0].split())
+            self.assertEqual(["PROJECT", "TITLE(ID)", "STATUS", "ATT", "DEPS", "NOTE"], lines[0].split())
 
     def test_list_summary_and_review_next_report_unaccepted_dependency_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

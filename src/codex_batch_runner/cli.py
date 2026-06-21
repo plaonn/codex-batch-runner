@@ -323,24 +323,38 @@ def render_table_row(row: list[str], widths: list[int]) -> str:
 
 
 def render_compact_list(tasks: list[dict], by_id: dict[str, dict], config: Config, color: "ListColor") -> str:
-    header = ["ID", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE"]
-    rows = [
-        [
-            color.task_id(scalar_cell(task.get("id"))),
-            color.status(status_cell(task)),
-            scalar_cell(task_project_id(task)),
-            scalar_cell(task.get("attempts", 0)),
-            deps_cell(task.get("depends_on"), by_id, color),
-            note_cell(task, by_id, config),
-        ]
-        for task in tasks
-    ]
+    header = ["PROJECT", "TITLE(ID)", "STATUS", "ATT", "DEPS", "NOTE"]
+    row_groups = [compact_task_rows(task, by_id, config, color) for task in tasks]
+    rows = [row for group in row_groups for row in group]
     widths = [max(visible_len(row[index]) for row in [header, *rows]) for index in range(len(header))]
     lines = [render_compact_row(header, widths)]
-    for task, row in zip(tasks, rows):
-        lines.append(render_compact_row(row, widths))
-        lines.append("  TITLE " + task_title(task))
+    for group in row_groups:
+        lines.extend(render_compact_row(row, widths) for row in group)
     return "\n".join(lines)
+
+
+def compact_task_rows(task: dict, by_id: dict[str, dict], config: Config, color: "ListColor") -> list[list[str]]:
+    dep_ids = dependency_id_cells(task.get("depends_on"), color)
+    rows = [
+        [
+            scalar_cell(task_project_id(task)),
+            task_title(task),
+            color.status(status_cell(task)),
+            scalar_cell(task.get("attempts", 0)),
+            dep_ids[0] if dep_ids else "-",
+            note_cell(task, by_id, config),
+        ],
+        [
+            "",
+            "(" + color.task_id(scalar_cell(task.get("id"))) + ")",
+            "",
+            "",
+            dep_ids[1] if len(dep_ids) > 1 else "",
+            "",
+        ],
+    ]
+    rows.extend(["", "", "", "", dep_id, ""] for dep_id in dep_ids[2:])
+    return rows
 
 
 def render_compact_row(row: list[str], widths: list[int]) -> str:
@@ -371,6 +385,12 @@ def deps_cell(depends_on: object, by_id: dict[str, dict] | None = None, color: "
         return "-"
     color = color or ListColor(False)
     return ",".join(color.task_id(str(dep_id)) for dep_id in depends_on)
+
+
+def dependency_id_cells(depends_on: object, color: "ListColor") -> list[str]:
+    if not isinstance(depends_on, list):
+        return []
+    return [color.task_id(str(dep_id)) for dep_id in depends_on]
 
 
 def status_cell(task: dict) -> str:
@@ -493,6 +513,12 @@ class ListColor:
     GREEN = "\033[32m"
     CYAN = "\033[36m"
     BLUE = "\033[34m"
+    BG_RED = "\033[41;37m"
+    BG_YELLOW = "\033[43;30m"
+    BG_GREEN = "\033[42;30m"
+    BG_CYAN = "\033[46;30m"
+    BG_BLUE = "\033[44;37m"
+    BG_DIM = "\033[100;37m"
     ID_COLORS = ("\033[35m", "\033[36m", "\033[34m", "\033[32m", "\033[33m", "\033[91m")
 
     def __init__(self, enabled: bool) -> None:
@@ -511,17 +537,17 @@ class ListColor:
 
     def status(self, status: str) -> str:
         if status in {"failed", "blocked_user", "review_failed", "needs_followup"}:
-            return self.apply(status, self.RED)
+            return self.apply(status, self.BG_RED)
         if status in {"awaiting_review", "reviewing"}:
-            return self.apply(status, self.YELLOW)
+            return self.apply(status, self.BG_YELLOW)
         if status == "running":
-            return self.apply(status, self.CYAN)
+            return self.apply(status, self.BG_CYAN)
         if status in {"runnable", "needs_resume"}:
-            return self.apply(status, self.BLUE)
+            return self.apply(status, self.BG_BLUE)
         if status in {"cooldown", "usage_exhausted"}:
-            return self.apply(status, self.DIM)
+            return self.apply(status, self.BG_DIM)
         if status in {"completed", "accepted"}:
-            return self.apply(status, self.GREEN)
+            return self.apply(status, self.BG_GREEN)
         return status
 
 
