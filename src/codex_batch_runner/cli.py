@@ -40,6 +40,7 @@ from .summary import render_task_summary
 from .timeutil import parse_time, utc_now
 from .transcript import render_task_transcript
 from .triggers import run_post_mutation_trigger
+from .wake import schedule_manual_cooldown_wake
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -922,6 +923,7 @@ def cmd_cooldown_clear(config: Config, args: argparse.Namespace) -> int:
 def cmd_cooldown_set(config: Config, args: argparse.Namespace) -> int:
     schedule = parse_manual_cooldown(args.value)
     set_global_cooldown(config, schedule.effective_cooldown_until.isoformat())
+    wake_result = schedule_manual_cooldown_wake(config, schedule.effective_cooldown_until)
     write_event_nonfatal(
         config,
         "cooldown_updated",
@@ -939,6 +941,7 @@ def cmd_cooldown_set(config: Config, args: argparse.Namespace) -> int:
     print(f"interpreted_reset_at: {schedule.interpreted_reset_at.isoformat()}")
     print(f"effective_cooldown_until: {schedule.effective_cooldown_until.isoformat()}")
     print(f"duration: {format_duration(schedule.duration_seconds)}")
+    print(f"one_shot_wake: {wake_result.status} ({wake_result.message})")
     return 0
 
 

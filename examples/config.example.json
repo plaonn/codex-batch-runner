@@ -6,6 +6,8 @@
   "state_file": ".codex-batch-runner/state.json",
   "codex_command": ["codex", "exec", "--sandbox", "workspace-write", "--json"],
   "codex_resume_command": ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"],
+  "manual_cooldown_wake_scheduler": "disabled",
+  "manual_cooldown_wake_command": [],
   "auto_review_mechanical_accept": false,
   "auto_review_codex_enabled": false,
   "worktree_mode": "disabled",

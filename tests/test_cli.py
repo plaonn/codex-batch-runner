@@ -29,6 +29,8 @@ from codex_batch_runner.review_next import apply_mechanical_accept, detectable_s
 def write_config(
     tmp: str,
     trigger_command: list[str] | None = None,
+    manual_cooldown_wake_scheduler: str | None = None,
+    manual_cooldown_wake_command: list[str] | None = None,
     dependency_requires_accepted_review: bool = False,
     auto_review_mechanical_accept: bool = False,
 ) -> Path:
@@ -44,6 +46,10 @@ def write_config(
     }
     if trigger_command is not None:
         data["post_mutation_trigger_command"] = trigger_command
+    if manual_cooldown_wake_scheduler is not None:
+        data["manual_cooldown_wake_scheduler"] = manual_cooldown_wake_scheduler
+    if manual_cooldown_wake_command is not None:
+        data["manual_cooldown_wake_command"] = manual_cooldown_wake_command
     config_path = root / "config.json"
     config_path.write_text(json.dumps(data), encoding="utf-8")
     return config_path
@@ -200,8 +206,86 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertIn("interpreted_reset_at: 2026-06-22T07:06:00+09:00", output)
             self.assertIn("effective_cooldown_until: 2026-06-22T07:07:00+09:00", output)
+            self.assertIn("one_shot_wake: skipped (manual cooldown one-shot wake disabled)", output)
             state = json.loads((Path(tmp) / "state.json").read_text(encoding="utf-8"))
             self.assertEqual("2026-06-22T07:07:00+09:00", state["global_cooldown_until"])
+            events = list_events(Config.load(str(config_path)), limit=0)
+            self.assertTrue(any(event["event_type"] == "cooldown_wake_skipped" for event in events))
+
+    def test_cooldown_set_schedules_macos_one_shot_wake_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                manual_cooldown_wake_scheduler="macos_launchd",
+                manual_cooldown_wake_command=["launchctl", "start", "com.example.codex-batch-runner"],
+            )
+            fixed_now = datetime(2026, 6, 21, 20, 35, tzinfo=timezone(timedelta(hours=9)))
+
+            with (
+                patch("codex_batch_runner.cooldown.local_now", return_value=fixed_now),
+                patch("codex_batch_runner.wake.utc_now", return_value=fixed_now.astimezone(timezone.utc)),
+                patch("codex_batch_runner.wake.platform.system", return_value="Darwin"),
+                patch("codex_batch_runner.wake.subprocess.run") as run,
+            ):
+                run.return_value.returncode = 0
+                code, output = run_cli(["--config", str(config_path), "cooldown", "set", "7:6"])
+
+            self.assertEqual(0, code)
+            self.assertIn("one_shot_wake: scheduled (manual cooldown one-shot wake scheduled)", output)
+            scheduled_command = run.call_args.args[0]
+            self.assertEqual("launchctl", scheduled_command[0])
+            self.assertIn("submit", scheduled_command)
+            self.assertIn("37920", scheduled_command)
+            self.assertEqual(["launchctl", "start", "com.example.codex-batch-runner"], scheduled_command[-3:])
+            self.assertNotIn("codex", scheduled_command)
+            events = list_events(Config.load(str(config_path)), limit=0)
+            scheduled_events = [event for event in events if event["event_type"] == "cooldown_wake_scheduled"]
+            self.assertEqual(1, len(scheduled_events))
+            self.assertEqual("scheduled", scheduled_events[0]["payload"]["status"])
+
+    def test_cooldown_set_wake_failure_is_warning_and_nonfatal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                manual_cooldown_wake_scheduler="macos_launchd",
+                manual_cooldown_wake_command=["launchctl", "start", "com.example.codex-batch-runner"],
+            )
+            fixed_now = datetime(2026, 6, 21, 20, 35, tzinfo=timezone(timedelta(hours=9)))
+
+            with (
+                patch("codex_batch_runner.cooldown.local_now", return_value=fixed_now),
+                patch("codex_batch_runner.wake.utc_now", return_value=fixed_now.astimezone(timezone.utc)),
+                patch("codex_batch_runner.wake.platform.system", return_value="Darwin"),
+                patch("codex_batch_runner.wake.subprocess.run") as run,
+            ):
+                run.return_value.returncode = 7
+                code, output, stderr = run_cli_with_stderr(["--config", str(config_path), "cooldown", "set", "7:6"])
+
+            self.assertEqual(0, code)
+            self.assertIn("one_shot_wake: failed (manual cooldown one-shot wake scheduler exited with status 7)", output)
+            self.assertIn("warning: manual cooldown one-shot wake scheduler exited with status 7", stderr)
+            events = list_events(Config.load(str(config_path)), limit=0)
+            self.assertTrue(any(event["event_type"] == "cooldown_wake_failed" for event in events))
+
+    def test_cooldown_set_rejects_direct_codex_wake_command_without_invoking_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                manual_cooldown_wake_scheduler="macos_launchd",
+                manual_cooldown_wake_command=["codex", "exec", "--json"],
+            )
+            fixed_now = datetime(2026, 6, 21, 20, 35, tzinfo=timezone(timedelta(hours=9)))
+
+            with (
+                patch("codex_batch_runner.cooldown.local_now", return_value=fixed_now),
+                patch("codex_batch_runner.wake.subprocess.run") as run,
+            ):
+                code, output, stderr = run_cli_with_stderr(["--config", str(config_path), "cooldown", "set", "7:6"])
+
+            self.assertEqual(0, code)
+            self.assertIn("one_shot_wake: failed (manual cooldown one-shot wake command must not invoke codex directly)", output)
+            self.assertIn("warning: manual cooldown one-shot wake command must not invoke codex directly", stderr)
+            run.assert_not_called()
 
     def test_cooldown_set_time_only_future_uses_today_and_past_rolls_tomorrow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

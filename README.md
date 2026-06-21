@@ -206,7 +206,7 @@ PYTHONPATH=src python3 -m codex_batch_runner cooldown set +2h30m
 PYTHONPATH=src python3 -m codex_batch_runner cooldown clear
 ```
 
-`cooldown show`는 현재 `global_cooldown_until`, 활성 여부, 남은 시간을 표시합니다. `cooldown set VALUE`는 운영자가 알고 있는 usage/rate-limit reset 시각을 local timezone 기준으로 해석하고, 해석된 reset 시각에 60초 safety offset을 더한 값을 `global_cooldown_until`에 저장합니다. 지원 형식은 local time-only `H:M`/`HH:MM`, month/day date-time `M/D H:M` 또는 `M-D H:M`, year date-time `YYYY-MM-DD H:M`, timezone이 포함된 ISO datetime, 그리고 `+90m`, `+2h30m`, `+1d3h` 같은 상대 duration입니다. Time-only 입력은 오늘 해당 시각이 미래이면 오늘, 이미 지났으면 내일로 해석합니다. Date-time 입력이 과거이거나 reset 시각이 7일보다 멀면 오류로 종료합니다. `cooldown clear`는 global cooldown을 지우고 즉시 실행 가능한 작업이 있을 수 있으므로 configured post-mutation trigger를 실행합니다.
+`cooldown show`는 현재 `global_cooldown_until`, 활성 여부, 남은 시간을 표시합니다. `cooldown set VALUE`는 운영자가 알고 있는 usage/rate-limit reset 시각을 local timezone 기준으로 해석하고, 해석된 reset 시각에 60초 safety offset을 더한 값을 `global_cooldown_until`에 저장합니다. 지원 형식은 local time-only `H:M`/`HH:MM`, month/day date-time `M/D H:M` 또는 `M-D H:M`, year date-time `YYYY-MM-DD H:M`, timezone이 포함된 ISO datetime, 그리고 `+90m`, `+2h30m`, `+1d3h` 같은 상대 duration입니다. Time-only 입력은 오늘 해당 시각이 미래이면 오늘, 이미 지났으면 내일로 해석합니다. Date-time 입력이 과거이거나 reset 시각이 7일보다 멀면 오류로 종료합니다. `cooldown set`은 optional one-shot wake 설정 상태를 함께 출력하며, `cooldown clear`는 global cooldown을 지우고 즉시 실행 가능한 작업이 있을 수 있으므로 기존 configured post-mutation trigger를 계속 실행합니다.
 
 beta health check:
 
@@ -274,6 +274,17 @@ Optional `post_mutation_trigger_command` can run a generic scheduler wake-up hoo
 ```
 
 The hook runs after durable task state writes for commands such as `enqueue`, `accept`, `reject`, `resolve`, `archive`, and successful `apply-plan --apply` mutations. `run-next` may also run it after releasing the runner lock, but only after processing one implementation task or mechanically accepting one completed task, and only when there is eligible follow-up work and no active global cooldown. It is not run by read-only commands, empty `run-next` invocations, cooldown exits, dependency-blocked-only queues, auto-review attempts that do not mutate task state, or `prune`. Hook failures print a warning to stderr but do not fail the core operation. Polling remains the fallback, and duplicate wake-ups are safe because `run-next` still enforces the runner lock, cooldown checks, empty-queue behavior, dependency checks, and single-task execution.
+
+수동 cooldown deadline에는 optional one-shot wake도 설정할 수 있습니다. 기본값은 disabled이며, polling scheduler가 항상 fallback입니다. 이 hook은 Codex를 직접 실행하지 않고, cooldown이 끝난 뒤 기존 scheduler service 또는 `run-next` entrypoint를 깨우는 용도로만 사용해야 합니다.
+
+```json
+{
+  "manual_cooldown_wake_scheduler": "macos_launchd",
+  "manual_cooldown_wake_command": ["launchctl", "start", "com.example.codex-batch-runner"]
+}
+```
+
+현재 scheduler adapter는 `disabled`와 `macos_launchd`를 지원합니다. `macos_launchd`는 `cooldown set` 시점에 `launchctl submit`으로 launchd가 관리하는 one-shot job을 등록하고, job 안에서 `effective_cooldown_until`까지 sleep한 뒤 configured wake command를 실행합니다. `launchctl kickstart -k`는 사용하지 않습니다. Wake command는 정상 runner entrypoint를 실행하게 해야 하며 `codex` executable을 직접 지정하면 warning과 event를 남기고 schedule하지 않습니다. Schedule 성공, skip, 실패는 각각 `cooldown_wake_scheduled`, `cooldown_wake_skipped`, `cooldown_wake_failed` event로 기록됩니다. Schedule 실패는 warning으로만 처리되며 `global_cooldown_until` 저장은 유지됩니다.
 
 설정 파일 예시는 [examples/config.example.json](examples/config.example.json)에 있습니다. 이 예시는 `--sandbox workspace-write`를 사용하는 안전한 기본값입니다.
 

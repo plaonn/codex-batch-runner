@@ -136,6 +136,29 @@ Launch agent를 load했다면 첫 scheduler pass 이후 또는 manual `run-next`
 `doctor`를 다시 실행해 runtime path와 lock/state 파일이 예상 위치에 생기는지
 확인합니다.
 
+## 수동 cooldown one-shot wake
+
+`cooldown set VALUE`는 기본적으로 `global_cooldown_until`만 저장하며, 기존
+launchd polling이 fallback으로 계속 동작합니다. Manual reset 시각에 더 가깝게
+재시작하려면 config에서 macOS one-shot wake adapter를 명시적으로 켤 수 있습니다.
+
+```json
+{
+  "manual_cooldown_wake_scheduler": "macos_launchd",
+  "manual_cooldown_wake_command": ["launchctl", "start", "com.example.codex-batch-runner"]
+}
+```
+
+`manual_cooldown_wake_command`는 Codex CLI가 아니라 정상 runner entrypoint를 깨우는
+명령이어야 합니다. Launch agent를 쓰는 환경에서는 위 예시처럼 service label을
+`launchctl start`로 시작하는 구성이 가장 단순합니다. Adapter는 `launchctl submit`으로
+launchd 관리 one-shot job을 등록하고, job은 `effective_cooldown_until`까지 기다린 뒤
+wake command를 실행합니다. `launchctl kickstart -k`는 사용하지 않습니다.
+
+One-shot 등록에 실패해도 `cooldown set` 자체는 실패하지 않습니다. 명령 출력과 event
+log에 scheduled, skipped, failed 상태가 남으며, polling scheduler가 다음 주기에서
+계속 fallback으로 동작합니다.
+
 ## 다른 프로젝트에서 enqueue/check 하기
 
 다른 프로젝트 저장소는 runner 설치 위치의 `cbr`를 호출하고 대상 프로젝트를

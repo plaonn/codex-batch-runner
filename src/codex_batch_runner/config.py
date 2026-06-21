@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,8 @@ class Config:
     stale_lock_seconds: int
     rate_limit_cooldown_seconds: int
     default_max_attempts: int
+    manual_cooldown_wake_scheduler: str = "disabled"
+    manual_cooldown_wake_command: list[str] = field(default_factory=list)
     dependency_requires_accepted_review: bool = False
     auto_review_mechanical_accept: bool = False
     auto_review_codex_enabled: bool = False
@@ -68,7 +70,17 @@ class Config:
                     ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"],
                 )
             ),
-            post_mutation_trigger_command=argv_list(data.get("post_mutation_trigger_command", [])),
+            post_mutation_trigger_command=argv_list(
+                "post_mutation_trigger_command",
+                data.get("post_mutation_trigger_command", []),
+            ),
+            manual_cooldown_wake_scheduler=manual_cooldown_wake_scheduler_value(
+                data.get("manual_cooldown_wake_scheduler", "disabled")
+            ),
+            manual_cooldown_wake_command=argv_list(
+                "manual_cooldown_wake_command",
+                data.get("manual_cooldown_wake_command", []),
+            ),
             stale_lock_seconds=int(data.get("stale_lock_seconds", 21600)),
             rate_limit_cooldown_seconds=int(data.get("rate_limit_cooldown_seconds", 1800)),
             default_max_attempts=int(data.get("default_max_attempts", 5)),
@@ -99,11 +111,11 @@ class Config:
         )
 
 
-def argv_list(value: object) -> list[str]:
+def argv_list(key: str, value: object) -> list[str]:
     if value is None:
         return []
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError("post_mutation_trigger_command must be a list of strings")
+        raise ValueError(f"{key} must be a list of strings")
     return value
 
 
@@ -130,6 +142,12 @@ def worktree_mode_value(value: object) -> str:
     if value in {"disabled", "task"}:
         return str(value)
     raise ValueError("worktree_mode must be one of: disabled, task")
+
+
+def manual_cooldown_wake_scheduler_value(value: object) -> str:
+    if value in {"disabled", "macos_launchd"}:
+        return str(value)
+    raise ValueError("manual_cooldown_wake_scheduler must be one of: disabled, macos_launchd")
 
 
 def optional_int_value(value: object) -> int | None:
