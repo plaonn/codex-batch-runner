@@ -10,6 +10,7 @@ from .config import Config
 from .doctor import build_doctor_report, render_doctor_report
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human
 from .evidence import list_rate_limit_evidence
+from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
 from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
 from .queue import (
     DEFAULT_HIDDEN_LIST_STATUSES,
@@ -115,6 +116,18 @@ def build_parser() -> argparse.ArgumentParser:
     transcript.add_argument("task_id")
     transcript.add_argument("--raw", action="store_true", help="print raw JSONL logs")
     transcript.set_defaults(func=cmd_transcript)
+
+    follow = sub.add_parser("follow", help="follow a compact readable task attempt stream")
+    follow.add_argument("task_id")
+    follow.add_argument("--lines", type=int, default=DEFAULT_INITIAL_LINES, help=f"initial JSONL lines to tail (default: {DEFAULT_INITIAL_LINES})")
+    follow.add_argument(
+        "--poll-interval",
+        type=float,
+        default=DEFAULT_POLL_INTERVAL_SECONDS,
+        help=f"seconds between polling reads (default: {DEFAULT_POLL_INTERVAL_SECONDS})",
+    )
+    follow.add_argument("--max-polls", type=int, help=argparse.SUPPRESS)
+    follow.set_defaults(func=cmd_follow)
 
     accept = sub.add_parser("accept", help="mark a completed task as reviewed and accepted")
     accept.add_argument("task_id")
@@ -476,6 +489,26 @@ def cmd_logs(config: Config, args: argparse.Namespace) -> int:
 def cmd_transcript(config: Config, args: argparse.Namespace) -> int:
     task = load_task(config, args.task_id)
     print(render_task_transcript(task, raw=args.raw), end="")
+    return 0
+
+
+def cmd_follow(config: Config, args: argparse.Namespace) -> int:
+    if args.lines < 0:
+        print("error: --lines must be non-negative", file=sys.stderr)
+        return 1
+    if args.poll_interval < 0:
+        print("error: --poll-interval must be non-negative", file=sys.stderr)
+        return 1
+    follow_task(
+        config,
+        FollowOptions(
+            task_id=args.task_id,
+            initial_lines=args.lines,
+            poll_interval_seconds=args.poll_interval,
+            max_polls=args.max_polls,
+        ),
+        sys.stdout,
+    )
     return 0
 
 

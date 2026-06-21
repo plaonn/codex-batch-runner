@@ -119,9 +119,13 @@ PYTHONPATH=src python3 -m codex_batch_runner logs task-a --cat
 실행 대화 요약 확인:
 
 ```bash
+PYTHONPATH=src python3 -m codex_batch_runner follow task-a
+PYTHONPATH=src python3 -m codex_batch_runner follow task-a --lines 40 --poll-interval 1
 PYTHONPATH=src python3 -m codex_batch_runner transcript task-a
 PYTHONPATH=src python3 -m codex_batch_runner transcript task-a --raw
 ```
+
+`follow`는 실행 중인 task의 attempt JSONL을 polling으로 따라가며 assistant message, command start/finish, command exit code, final JSON, error/rate-limit marker 요약을 compact stream으로 출력합니다. 이 명령은 task state를 변경하지 않고 Codex를 호출하지 않으며 post-mutation trigger를 실행하지 않습니다. task가 아직 실행 중이고 attempt log가 뒤늦게 생기는 경우에도 log directory와 task metadata를 다시 확인합니다. task가 더 이상 `running`이 아니고 현재 로그에서 새 이벤트가 없으면 cleanly 종료합니다.
 
 `transcript`는 기본적으로 cbr JSONL 로그와, `session_id` 또는 `thread_id`로 찾을 수 있는 Codex 원본 세션 로그에서 사용자 메시지, assistant 메시지, tool 호출, patch, final/error event를 사람이 읽기 좋은 형태로 재구성합니다. `--raw`를 붙이면 원본 JSONL 로그를 출력합니다.
 

@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -152,6 +154,7 @@ class CliTests(unittest.TestCase):
                 ["review-bundle", "task"],
                 ["logs", "task"],
                 ["transcript", "task"],
+                ["follow", "task", "--poll-interval", "0", "--max-polls", "1"],
                 ["doctor"],
                 ["events"],
                 ["rate-limits"],
@@ -1039,6 +1042,129 @@ class CliTests(unittest.TestCase):
             self.assertIn("hello", output)
             self.assertIn("token [REDACTED]", output)
             self.assertNotIn("private-value", output)
+
+    def test_follow_prints_compact_sanitized_attempt_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "prompt with token=private-value", tmp, task_id="task-follow")
+            task["status"] = "completed"
+            log_path = config.log_dir / "task-follow" / "attempt-1.jsonl"
+            log_path.parent.mkdir(parents=True)
+            log_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "event_msg", "payload": {"type": "user_message", "message": "raw prompt"}}),
+                        json.dumps(
+                            {
+                                "type": "event_msg",
+                                "payload": {"type": "agent_message", "message": "working token=private-value"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "function_call",
+                                "name": "exec_command",
+                                "arguments": '{"cmd": "python3 -m unittest", "cwd": "/Users/alice/repo"}',
+                            }
+                        ),
+                        json.dumps({"type": "function_call_output", "output": '{"exit_code": 0, "output": "ok"}'}),
+                        json.dumps({"type": "error", "message": "usage limit reached; try again later"}),
+                        json.dumps(
+                            {
+                                "type": "turn.completed",
+                                "response": {
+                                    "task_id": "task-follow",
+                                    "status": "completed",
+                                    "summary": "done with secret=private-value",
+                                    "next_prompt": "private continuation",
+                                    "changed_files": ["README.md"],
+                                    "verification": ["unit tests"],
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            task["log_paths"] = [str(log_path)]
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "follow", "task-follow", "--lines", "20"])
+
+            self.assertEqual(0, code)
+            self.assertIn("==> attempt-1.jsonl <==", output)
+            self.assertIn("assistant: working token [REDACTED]", output)
+            self.assertIn("command start: exec_command", output)
+            self.assertIn("/Users/[USER]/repo", output)
+            self.assertIn("command finish: exit=0", output)
+            self.assertIn("rate-limit: markers=", output)
+            self.assertIn('final: {"changed_files": ["README.md"]', output)
+            self.assertIn('"next_prompt": "[REDACTED]"', output)
+            self.assertNotIn("raw prompt", output)
+            self.assertNotIn("private-value", output)
+            self.assertNotIn("private continuation", output)
+
+    def test_follow_tails_initial_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "prompt", tmp, task_id="tail")
+            task["status"] = "completed"
+            log_path = config.log_dir / "tail" / "attempt-1.jsonl"
+            log_path.parent.mkdir(parents=True)
+            log_path.write_text(
+                "\n".join(
+                    json.dumps({"type": "agent_message", "message": f"line {index}"}) for index in range(4)
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            task["log_paths"] = [str(log_path)]
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "follow", "tail", "--lines", "2"])
+
+            self.assertEqual(0, code)
+            self.assertNotIn("line 0", output)
+            self.assertNotIn("line 1", output)
+            self.assertIn("line 2", output)
+            self.assertIn("line 3", output)
+
+    def test_follow_waits_for_running_task_log_to_appear_and_exits_when_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "prompt", tmp, task_id="running-follow")
+            task["status"] = "running"
+            save_task(config, task)
+            log_path = config.log_dir / "running-follow" / "attempt-1.jsonl"
+
+            def finish_task() -> None:
+                time.sleep(0.02)
+                log_path.parent.mkdir(parents=True)
+                log_path.write_text(
+                    json.dumps({"type": "agent_message", "message": "appeared"}) + "\n",
+                    encoding="utf-8",
+                )
+                loaded = load_task(config, "running-follow")
+                loaded["status"] = "completed"
+                loaded["log_paths"] = [str(log_path)]
+                save_task(config, loaded)
+
+            worker = threading.Thread(target=finish_task)
+            worker.start()
+            try:
+                code, output = run_cli(
+                    ["--config", str(config_path), "follow", "running-follow", "--poll-interval", "0.005"]
+                )
+            finally:
+                worker.join(timeout=1)
+
+            self.assertEqual(0, code)
+            self.assertIn("==> attempt-1.jsonl <==", output)
+            self.assertIn("assistant: appeared", output)
 
     def test_summary_prints_compact_review_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
