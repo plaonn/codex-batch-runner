@@ -247,6 +247,115 @@ Rough roadmap:
 - Reviewer Codex call: bundle만 prompt로 전달해 decision schema JSON을 받음. 실패하거나 schema가 맞지 않으면 `needs_human`으로 보고함.
 - Later optional auto-apply: config로 명시적으로 켠 경우에만 high-confidence `accept`를 `cbr accept`와 동일한 상태 변경으로 반영함. `follow_up`은 report에 follow-up prompt를 남기되 task 생성은 operator가 별도로 수행함.
 
+## Queue mutation and replan control plane
+
+Queue mutation은 사람이 task JSON을 편집하기 쉽게 만드는 기능이 주목적이 아님. 핵심 목적은 Codex 또는 operator workflow가 설계 변경, review 결과, dependency 재정렬, 운영 중단 같은 control-plane 결정을 안전하고 감사 가능하게 queue에 반영하는 것임. 특히 이미 여러 batch task가 enqueued된 뒤 spec이나 roadmap이 바뀌면, 기존 prompt를 지우거나 task를 임의로 삭제하는 대신 변경 이유와 적용 결과가 남는 replan 흐름이 필요함.
+
+초기 설계는 “명시적 계획을 검증하고 적용하는 작은 mutation engine”으로 둠. Codex가 곧바로 queue를 무제한 수정하지 않고, 사람이 읽을 수 있는 plan patch를 만들고 dry-run 검증을 거친 뒤 제한된 operation만 적용할 수 있어야 함.
+
+의도한 operation:
+
+- `pause`: 아직 실행하지 않을 task를 일시 중지함. 원래 status와 사유를 기록함.
+- `unpause`: pause된 task를 원래 실행 가능 상태로 되돌림.
+- `replan` 또는 `update`: task의 실행 지시를 최신 설계에 맞게 보강함. 원본 prompt를 덮어쓰지 않고 `next_prompt`, `plan_notes`, `history` 같은 append-only field 또는 명시적 revision metadata에 변경을 남김.
+- `supersede`: 기존 task를 더 이상 실행하지 않도록 표시하고 대체 task id나 resolution reason을 연결함.
+- `split`: 큰 task를 여러 후속 task로 나누고, 원 task에는 split history와 child task id를 기록함.
+- `merge`: 중복되거나 강하게 결합된 task들을 하나의 대표 task로 합치고, source task에는 merge 대상과 사유를 기록함.
+- `retarget_metadata`: `project_root`, `project_id`, `category`, `labels`, `created_by` 같은 routing metadata를 수정함.
+- `dependency_changes`: `depends_on`을 추가, 제거, 교체함.
+- `append_note` 또는 `append_history`: task 실행 지시를 바꾸지 않고 운영 메모나 review/replan 근거만 추가함.
+- `create_followup`: review 또는 replan 결과로 새 task를 제한적으로 등록함. 기본값은 dry-run이며, 자동 생성 수와 dependency 연결을 엄격히 제한함.
+
+안전 규칙:
+
+- `running` task는 절대 mutate하지 않음. runner lock 또는 task `status=running`이 보이면 reject함.
+- `completed` task는 원칙적으로 재작성하지 않음. 허용 범위는 `review_status`, `reviewed_at`, `review_reason`, `resolution`, audit/history 같은 review/resolution metadata로 제한함.
+- 원본 `prompt`, 기존 `next_prompt`, 실행 history, `last_result`, `last_run`, log path는 보존함. 설계 변경은 덮어쓰기보다 revision 또는 append-only history로 표현함.
+- 모든 mutation은 `reason`이 필수임. 자동 생성 계획에는 `actor`와 plan 생성 근거도 포함함.
+- dependency graph에 cycle이 생기면 reject함. 존재하지 않는 task id, 자기 자신 dependency, completed가 아닌 superseded dependency 같은 애매한 상태는 dry-run에서 warning 또는 error로 보고함.
+- `create_followup`, `split`, `merge`는 unbounded task creation을 만들 수 있으므로 plan당 생성 task 수와 전체 queue 증가량을 제한함.
+- public/private 안전 정책을 그대로 적용함. mutation plan, task history, event log에는 로컬 runtime state, 실제 raw log/prompt/session id/thread id, credentials, 개인 경로, Telegram token/chat id, private queue contents를 넣지 않음. 필요한 prompt 변경은 sanitized summary 또는 operator가 의도적으로 제공한 public-safe prompt text만 저장함.
+- mutation apply는 atomic write와 lock policy를 따라야 함. 여러 task를 바꾸는 plan은 가능한 한 all-or-nothing으로 검증하고, 부분 적용이 불가피하면 event log에 적용 성공/실패 task를 명확히 남김.
+
+초기 interface 후보:
+
+```bash
+cbr queue pause TASK_ID --reason "blocked by spec change"
+cbr queue unpause TASK_ID --reason "new spec accepted"
+cbr queue note TASK_ID --reason "review found missing dependency" --note "wait for task-b"
+cbr queue supersede TASK_ID --by TASK_ID --reason "covered by newer plan"
+cbr queue deps TASK_ID --add DEP_ID --remove OLD_DEP_ID --reason "implementation order changed"
+cbr queue replan TASK_ID --prompt-file replan.md --reason "spec updated"
+cbr queue plan --from review-bundle.json --out queue-plan.json
+cbr apply-plan queue-plan.json --dry-run
+cbr apply-plan queue-plan.json
+```
+
+작은 수동 operation은 `cbr queue ...` subcommand로 표현하고, Codex/operator workflow가 여러 task를 함께 바꾸는 경우에는 구조화된 `cbr apply-plan queue-plan.json`을 기본 경로로 둠. 첫 구현은 `apply-plan --dry-run`만 제공해 validation report를 출력하고 task 파일을 쓰지 않는 것이 좋음.
+
+Plan patch schema의 상위 형태:
+
+```json
+{
+  "schema_version": 1,
+  "plan_id": "queue-plan-20260621-001",
+  "actor": {
+    "type": "codex | operator | reviewer",
+    "id": "string"
+  },
+  "reason": "string",
+  "created_at": "2026-06-21T12:00:00+09:00",
+  "expected_queue_revision": "string optional",
+  "limits": {
+    "max_created_tasks": 3
+  },
+  "operations": [
+    {
+      "op": "pause | unpause | replan | supersede | split | merge | retarget_metadata | dependency_changes | append_note | create_followup",
+      "task_id": "string optional",
+      "task_ids": ["string optional"],
+      "creates": ["task draft optional"],
+      "fields": {
+        "status": "string optional",
+        "next_prompt": "string optional",
+        "depends_on": ["string optional"],
+        "project_id": "string optional",
+        "category": "string optional",
+        "labels": ["string optional"]
+      },
+      "reason": "string",
+      "expected": {
+        "status": "string optional",
+        "review_status": "string optional",
+        "updated_at": "string optional"
+      },
+      "validation": {
+        "allow_completed_metadata_only": true,
+        "requires_no_running_task": true,
+        "reject_dependency_cycles": true
+      }
+    }
+  ]
+}
+```
+
+각 operation은 바꿀 task id, 변경하려는 field, operation별 reason, 기대하는 현재 상태(`expected`)를 포함해야 함. `expected`는 stale plan 방지용 optimistic validation으로 사용함. 적용 전 validation은 schema, task existence, allowed status transition, dependency graph, public/private safety, task creation limit, atomic write 가능 여부를 검사하고, dry-run report에 `would_change`, `warnings`, `errors`를 구분해 출력함.
+
+Audit 요구사항:
+
+- 모든 mutation은 task의 `history` 배열 또는 별도 append-only queue event log에 기록함.
+- 기록에는 mutation id, operation, actor, reason, affected task id, changed fields, before/after summary, validation result, occurred_at을 포함함.
+- 나중에 review bundle이나 operator가 “왜 queue가 바뀌었는지”를 재구성할 수 있어야 함.
+- event payload는 notification event model과 같은 안전 기준을 따르며, raw prompt/log/session/thread id나 credential을 포함하지 않음.
+
+Rough roadmap:
+
+- Spec first: 이 section을 기준으로 operation, validation, audit model을 확정함.
+- Read-only validation/dry-run: `cbr apply-plan --dry-run`이 queue를 읽고 plan patch의 schema와 dependency graph, safety rule 위반을 보고함.
+- Limited mutations: `pause`, `unpause`, `append_note`, `dependency_changes`, metadata retarget처럼 blast radius가 작은 operation부터 적용함.
+- Replan/supersede/split/merge: review bundle과 operator 확인 흐름이 충분히 안정된 뒤 task prompt revision과 task creation을 제한적으로 허용함.
+- Codex-generated plan patches: reviewer gates와 human fallback이 존재한 뒤에만 Codex가 plan patch를 생성하게 하고, 기본은 dry-run 또는 human-approved apply로 유지함.
+
 ## Project routing metadata
 
 여러 프로젝트가 하나의 중앙 queue를 공유하면 review 대상 판정을 위해 task를 하나씩 열람하는 방식은 토큰과 시간이 낭비됩니다. task 등록 시 review routing metadata를 함께 저장하고, list 단계에서 먼저 좁혀 볼 수 있게 합니다.
