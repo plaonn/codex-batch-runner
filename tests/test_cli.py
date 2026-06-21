@@ -24,6 +24,7 @@ def write_config(tmp: str) -> Path:
             {
                 "queue_dir": str(root / "tasks"),
                 "log_dir": str(root / "logs"),
+                "event_dir": str(root / "events"),
                 "lock_file": str(root / "runner.lock"),
                 "state_file": str(root / "state.json"),
             }

@@ -25,6 +25,16 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(queue_dir, config.queue_dir)
 
+    def test_event_dir_defaults_next_to_log_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            log_dir = Path(tmp) / "runtime" / "logs"
+            config_path.write_text(json.dumps({"log_dir": str(log_dir)}), encoding="utf-8")
+
+            config = Config.load(str(config_path), root=Path(tmp) / "cwd")
+
+            self.assertEqual(log_dir.parent / "events", config.event_dir)
+
     def test_cbr_config_env_is_used_when_explicit_path_is_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "env-config.json"
@@ -56,6 +66,7 @@ class ConfigTests(unittest.TestCase):
                 config = Config.load(root=cwd)
 
             self.assertEqual(cwd.resolve() / ".codex-batch-runner" / "tasks", config.queue_dir)
+            self.assertEqual(cwd.resolve() / ".codex-batch-runner" / "events", config.event_dir)
             self.assertIsNone(resolve_config_path(include_user_config=False))
 
 

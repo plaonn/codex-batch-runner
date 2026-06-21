@@ -23,6 +23,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
     checks = [
         check_directory("queue_dir", config.queue_dir),
         check_directory("log_dir", config.log_dir),
+        check_directory("event_dir", config.event_dir),
         check_parent("lock_file_parent", config.lock_file),
         check_parent("state_file_parent", config.state_file),
         codex_check,
@@ -35,6 +36,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
             "root": str(config.root),
             "queue_dir": str(config.queue_dir),
             "log_dir": str(config.log_dir),
+            "event_dir": str(config.event_dir),
             "lock_file": str(config.lock_file),
             "state_file": str(config.state_file),
         },

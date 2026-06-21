@@ -8,6 +8,7 @@ from typing import Any
 
 from .codex import CodexResult, run_codex
 from .config import Config
+from .events import emit_task_event, result_summary_payload, transition_payload
 from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
 from .lock import FileLock
@@ -56,6 +57,19 @@ def run_next(config: Config) -> RunOutcome:
         task["attempts"] = int(task.get("attempts", 0)) + 1
         task["run_count"] = int(task.get("run_count", 0)) + 1
         save_task(config, task)
+        emit_task_event(
+            config,
+            "task_started",
+            task,
+            source="run-next",
+            summary=f"started task {task['id']}",
+            payload=transition_payload(
+                task,
+                started_at=started_at,
+                resume_requested=resume_requested,
+                resume_unavailable=resume_unavailable,
+            ),
+        )
         mark_run(config, task["id"])
 
         result = run_codex(config, task, prompt, task["attempts"])
@@ -88,6 +102,18 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
             save_task(config, task)
             mark_rate_limit(config, cooldown_until, task["id"])
             capture_rate_limit_evidence(config, task, result, cooldown_until)
+            emit_task_event(
+                config,
+                "rate_limit_detected",
+                task,
+                source="run-next",
+                summary=f"rate limit detected for task {task.get('id')}",
+                payload=transition_payload(
+                    task,
+                    cooldown_until=cooldown_until,
+                    matched_markers=sorted(set(result.rate_limit_markers or [])),
+                ),
+            )
             return
         mark_non_rate_failure(config, task, result, "missing final JSON response")
         return
@@ -119,24 +145,64 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
         task["completed_at"] = iso_now()
         save_task(config, task)
         mark_success(config, task["id"])
+        payload = transition_payload(task, completed_at=task.get("completed_at"))
+        payload.update(result_summary_payload(task))
+        emit_task_event(
+            config,
+            "task_completed",
+            task,
+            source="run-next",
+            summary=payload.get("summary_excerpt") or f"completed task {task.get('id')}",
+            payload=payload,
+        )
         return
 
     if status == "needs_resume":
         task["status"] = "needs_resume"
         task["next_prompt"] = final_response.get("next_prompt") or ""
         save_task(config, task)
+        payload = transition_payload(task)
+        payload.update(result_summary_payload(task))
+        emit_task_event(
+            config,
+            "task_needs_resume",
+            task,
+            source="run-next",
+            summary=payload.get("summary_excerpt") or f"task {task.get('id')} needs resume",
+            payload=payload,
+        )
         return
 
     if status == "blocked_user":
         task["status"] = "blocked_user"
         task["next_prompt"] = final_response.get("next_prompt") or None
         save_task(config, task)
+        payload = transition_payload(task)
+        payload.update(result_summary_payload(task))
+        emit_task_event(
+            config,
+            "task_blocked_user",
+            task,
+            source="run-next",
+            summary=payload.get("summary_excerpt") or f"task {task.get('id')} blocked on user input",
+            payload=payload,
+        )
         return
 
     task["status"] = "failed"
     task["last_error"] = final_response.get("summary") or "Codex reported failed"
     task["failure_count"] = int(task.get("failure_count", 0)) + 1
     save_task(config, task)
+    payload = transition_payload(task, failure_count=task.get("failure_count"))
+    payload.update(result_summary_payload(task))
+    emit_task_event(
+        config,
+        "task_failed",
+        task,
+        source="run-next",
+        summary=payload.get("summary_excerpt") or str(task.get("last_error") or f"failed task {task.get('id')}"),
+        payload=payload,
+    )
 
 
 def mark_non_rate_failure(config: Config, task: dict, result: CodexResult, reason: str) -> None:
@@ -148,6 +214,15 @@ def mark_non_rate_failure(config: Config, task: dict, result: CodexResult, reaso
     else:
         task["status"] = resumable_status(task)
     save_task(config, task)
+    if task.get("status") == "failed":
+        emit_task_event(
+            config,
+            "task_failed",
+            task,
+            source="run-next",
+            summary=reason,
+            payload=transition_payload(task, failure_count=task.get("failure_count"), reason=reason),
+        )
 
 
 def record_last_run(task: dict, result: CodexResult) -> None:

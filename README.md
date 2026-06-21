@@ -143,6 +143,16 @@ PYTHONPATH=src python3 -m codex_batch_runner rate-limits
 PYTHONPATH=src python3 -m codex_batch_runner rate-limits --json
 ```
 
+recent event log 확인:
+
+```bash
+PYTHONPATH=src python3 -m codex_batch_runner events
+PYTHONPATH=src python3 -m codex_batch_runner events --task-id task-a --limit 10
+PYTHONPATH=src python3 -m codex_batch_runner events --json
+```
+
+`events`는 `.codex-batch-runner/events/YYYY-MM-DD.jsonl`에 append-only로 저장된 sanitized audit events를 최근순으로 보여줍니다. JSON 출력은 event object 배열을 반환하고, 기본 출력은 `occurred_at`, event type, task id, summary만 표시합니다. Event log는 task JSON 파일을 대체하지 않는 감사 stream입니다.
+
 runner state 확인:
 
 ```bash
@@ -156,7 +166,7 @@ PYTHONPATH=src python3 -m codex_batch_runner doctor
 PYTHONPATH=src python3 -m codex_batch_runner doctor --json
 ```
 
-`doctor`는 Codex를 실행하지 않고 config/runtime path, Codex command availability, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts를 점검합니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation은 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
+`doctor`는 Codex를 실행하지 않고 config/runtime path, event directory, Codex command availability, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts를 점검합니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation은 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
 
 오래된 완료/보관 task 정리 후보 확인:
 
@@ -165,7 +175,7 @@ PYTHONPATH=src python3 -m codex_batch_runner prune
 PYTHONPATH=src python3 -m codex_batch_runner prune --older-than-days 60 --json
 ```
 
-`prune`은 기본적으로 dry-run입니다. `archived` task와 `completed + review_status=accepted` task 중 지정한 age보다 오래된 항목만 후보로 보고하며, task JSON 파일과 task에 기록된 log path를 함께 표시합니다. 실제 삭제는 `--apply`를 명시한 경우에만 수행합니다.
+`prune`은 기본적으로 dry-run입니다. `archived` task와 `completed + review_status=accepted` task 중 지정한 age보다 오래된 항목만 후보로 보고하며, task JSON 파일과 task에 기록된 log path를 함께 표시합니다. 실제 삭제는 `--apply`를 명시한 경우에만 수행합니다. Event retention pruning is a follow-up; current `prune` does not delete event JSONL files.
 
 ## 설정
 
@@ -177,6 +187,8 @@ config 탐색 순서는 다음과 같습니다.
 4. 현재 작업 디렉터리 기준 기본값
 
 config가 없을 때의 기본 runtime 디렉터리는 현재 작업 디렉터리의 `.codex-batch-runner/`입니다. 이 디렉터리는 gitignore 대상입니다.
+
+Optional `event_dir` can override the append-only event log directory. If omitted, it defaults to `.codex-batch-runner/events` under the active runtime root.
 
 설정 파일 예시는 [examples/config.example.json](examples/config.example.json)에 있습니다. 이 예시는 `--sandbox workspace-write`를 사용하는 안전한 기본값입니다.
 
@@ -232,6 +244,8 @@ Codex를 호출하지 않는 조건:
 동시 실행 방지는 `.codex-batch-runner/runner.lock` atomic create로 처리합니다. lock이 오래 남아 있으면 stale lock으로 보고 복구합니다. 기본 stale 기준은 6시간입니다.
 
 task와 state 파일은 같은 디렉터리에 임시 파일을 쓴 뒤 `os.replace`로 교체합니다. Codex JSONL 로그는 attempt별 파일로 저장합니다.
+
+Core state-changing commands also append sanitized audit events. Initial event types include `task_created`, `task_started`, `task_completed`, `task_failed`, `task_needs_resume`, `task_blocked_user`, `task_reviewed`, `task_resolved`, `task_archived`, and `rate_limit_detected`. Event payloads are intentionally small and redact prompt text, raw transcripts, session/thread ids, secrets, credentials, and token-like fields. Event write failures are warnings; queue operations continue to rely on canonical task JSON files.
 
 `prune`은 삭제 동작이 있는 명령이므로 기본값이 비파괴 dry-run입니다. `--apply`가 없으면 파일을 삭제하지 않습니다. `--apply`가 있어도 resolved path가 configured `queue_dir` 또는 `log_dir` 밖에 있는 파일은 삭제하지 않으며, report에 blocked 항목으로 남깁니다.
 

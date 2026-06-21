@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import Config
 from .doctor import build_doctor_report, render_doctor_report
+from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human
 from .evidence import list_rate_limit_evidence
 from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
 from .queue import (
@@ -134,6 +135,12 @@ def build_parser() -> argparse.ArgumentParser:
     rate_limits = sub.add_parser("rate-limits", help="list sanitized rate-limit evidence")
     rate_limits.add_argument("--json", action="store_true", help="print JSON")
     rate_limits.set_defaults(func=cmd_rate_limits)
+
+    events = sub.add_parser("events", help="list recent sanitized event log entries")
+    events.add_argument("--task-id", help="filter by task id")
+    events.add_argument("--limit", type=int, default=DEFAULT_EVENT_LIMIT, help=f"maximum events to show (default: {DEFAULT_EVENT_LIMIT})")
+    events.add_argument("--json", action="store_true", help="print JSON")
+    events.set_defaults(func=cmd_events)
 
     doctor = sub.add_parser("doctor", help="check local cbr health without invoking Codex")
     doctor.add_argument("--json", action="store_true", help="print JSON")
@@ -494,6 +501,15 @@ def cmd_rate_limits(config: Config, args: argparse.Namespace) -> int:
             f"{event.get('detected_at')}\t{event.get('task_id')}\t"
             f"attempt={event.get('attempt')}\tcooldown_until={event.get('cooldown_until')}\tmarkers={markers}"
         )
+    return 0
+
+
+def cmd_events(config: Config, args: argparse.Namespace) -> int:
+    events = list_events(config, task_id=args.task_id, limit=args.limit)
+    if args.json:
+        print(json.dumps(events, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_events_human(events), end="")
     return 0
 
 

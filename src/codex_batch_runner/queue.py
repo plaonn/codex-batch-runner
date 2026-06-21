@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from .config import Config
+from .events import emit_task_event, transition_payload
 from .fs import ensure_dir, read_json, write_json_atomic
 from .timeutil import iso_now, parse_time, utc_now
 
@@ -39,11 +40,20 @@ def save_task(config: Config, task: dict) -> None:
 
 def archive_task(config: Config, task_id: str) -> dict:
     task = load_task(config, task_id)
+    previous_status = task.get("status")
     if task.get("status") != "archived":
-        task["previous_status"] = task.get("status")
+        task["previous_status"] = previous_status
         task["status"] = "archived"
     task["archived_at"] = iso_now()
     save_task(config, task)
+    emit_task_event(
+        config,
+        "task_archived",
+        task,
+        source="archive",
+        summary=f"archived task {task_id}",
+        payload=transition_payload(task, previous_status=previous_status, archived_at=task.get("archived_at")),
+    )
     return task
 
 
@@ -55,6 +65,14 @@ def set_review_status(config: Config, task_id: str, review_status: str, reason: 
     task["reviewed_at"] = iso_now()
     task["review_reason"] = reason
     save_task(config, task)
+    emit_task_event(
+        config,
+        "task_reviewed",
+        task,
+        source="review",
+        summary=f"reviewed task {task_id} as {review_status}",
+        payload=transition_payload(task, review_status=review_status, reviewed_at=task.get("reviewed_at")),
+    )
     return task
 
 
@@ -68,6 +86,14 @@ def set_resolution(config: Config, task_id: str, resolution: str, reason: str | 
     task["resolved_at"] = iso_now()
     task["resolution_reason"] = reason
     save_task(config, task)
+    emit_task_event(
+        config,
+        "task_resolved",
+        task,
+        source="resolve",
+        summary=f"resolved task {task_id} as {resolution}",
+        payload=transition_payload(task, resolution=resolution, resolved_at=task.get("resolved_at")),
+    )
     return task
 
 
@@ -132,6 +158,21 @@ def create_task(
         "log_paths": [],
     }
     write_json_atomic(path, task)
+    emit_task_event(
+        config,
+        "task_created",
+        task,
+        actor=created_by or "cbr",
+        source="enqueue",
+        summary=f"created task {task_id}",
+        payload=transition_payload(
+            task,
+            depends_on_count=len(task["depends_on"]),
+            category=task.get("category"),
+            labels=task.get("labels"),
+            created_by=task.get("created_by"),
+        ),
+    )
     return task
 
 

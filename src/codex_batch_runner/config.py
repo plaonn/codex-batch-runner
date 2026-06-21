@@ -13,6 +13,7 @@ class Config:
     root: Path
     queue_dir: Path
     log_dir: Path
+    event_dir: Path
     lock_file: Path
     state_file: Path
     codex_command: list[str]
@@ -33,10 +34,15 @@ class Config:
             raw = Path(data.get(key, default)).expanduser()
             return raw if raw.is_absolute() else base / raw
 
+        queue_dir = path_value("queue_dir", ".codex-batch-runner/tasks")
+        log_dir = path_value("log_dir", ".codex-batch-runner/logs")
+        event_dir = path_value("event_dir", str(log_dir.parent / "events"))
+
         return cls(
             root=base,
-            queue_dir=path_value("queue_dir", ".codex-batch-runner/tasks"),
-            log_dir=path_value("log_dir", ".codex-batch-runner/logs"),
+            queue_dir=queue_dir,
+            log_dir=log_dir,
+            event_dir=event_dir,
             lock_file=path_value("lock_file", ".codex-batch-runner/runner.lock"),
             state_file=path_value("state_file", ".codex-batch-runner/state.json"),
             codex_command=list(data.get("codex_command", ["codex", "exec", "--sandbox", "workspace-write", "--json"])),
