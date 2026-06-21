@@ -584,7 +584,8 @@ Worktree 격리가 도움을 주는 영역:
 - task별 작업 디렉터리를 분리해 main worktree의 dirty file과 충돌할 가능성을 줄입니다.
 - 같은 repository에서 여러 branch 또는 여러 project routing target을 다룰 때 작업 산출물을 task 단위로 추적하기 쉽게 합니다.
 - 실패한 task의 파일 상태를 보존해 후속 review, 수동 복구, 재시도 판단을 쉽게 합니다.
-- single-runner 정책을 유지하면서도 completed-but-unreviewed 산출물이 다른 독립 task 실행을 막지 않게 합니다.
+- single-runner 정책을 유지하면서도 completed-but-unreviewed 산출물과 다른 독립 task 실행이 main worktree를 더럽히거나 서로 다른 task state를 섞지 않고 공존하게 합니다.
+- 기본 dependency readiness policy가 review backlog보다 throughput과 latency를 우선하는 동안, worktree 격리는 completed-but-unreviewed 결과를 독립적인 후속 작업과 분리해 운영 위험을 줄이는 보완 장치가 됩니다.
 
 Worktree 격리가 해결하지 않는 영역:
 
@@ -718,13 +719,17 @@ runner는 아래 조건을 모두 만족하는 task 하나만 실행함.
 
 실행 가능한 task가 없으면 Codex를 호출하지 않고 즉시 종료함.
 
-기본 dependency readiness policy는 기존 동작과 호환되도록 dependency task의 `status=completed`만 요구함. Config `dependency_requires_accepted_review` 기본값은 `false`임.
+기본 dependency readiness policy는 기존 동작과 호환되도록 dependency task의 `status=completed`만 요구함. Config `dependency_requires_accepted_review` 기본값은 `false`임. 따라서 dependency가 `completed`이면 `review_status`가 아직 `unreviewed` 또는 운영 화면에서 `awaiting_review`로 표시되는 completed-but-unreviewed 상태여도 ready로 판단함.
+
+이 기본값은 batch 운영에서 의도한 throughput/latency 선택임. 독립적인 후속 작업은 review backlog가 있다는 이유만으로 멈추지 않아야 하며, runner는 completed 결과를 기반으로 다음 eligible work를 계속 처리할 수 있어야 함. 대신 실행 결과의 품질 확인과 공개 저장소 안전성 판단은 review workflow가 별도로 수행하고, 운영자는 필요할 때 `accept`, `reject`, `reject --follow-up`으로 review state를 정리함.
 
 `dependency_requires_accepted_review=true`이면 dependency task는 `status=completed`와 `review_status=accepted`를 모두 만족해야 ready임. 이때 dependency가 `completed`이지만 `review_status`가 `accepted`가 아니면 runner는 dependent task를 건너뛰고 reporting은 blocker reason을 `not_accepted`로 표시함. dependency가 없거나 `completed`가 아니면 blocker reason은 `not_completed`임.
 
+Accepted-review dependency mode는 dependent work에 더 엄격하고 안전한 정책임. 검토가 완료된 결과만 후속 작업의 전제로 사용하므로 잘못된 completed 결과가 이어지는 작업에 전파될 가능성을 줄임. 그 대가로 review backlog가 있을 때 처리량이 낮아지고, 더 많은 task가 dependency blocked 상태로 남을 수 있음.
+
 의존 task가 `failed` 또는 `blocked_user`인 경우 dependent task를 자동 실패시키지 않음. `list` 또는 `show`에서 dependency blocked 상태를 표시하고 runner는 해당 task를 건너뜀.
 
-마이그레이션은 기본값 `false`로 기존 queue behavior를 유지하면서 completed task의 review state를 정리한 뒤, operator가 accepted review를 dependency gate로 쓸 준비가 되었을 때 `dependency_requires_accepted_review=true`를 설정하는 순서로 진행함. 전환 직후 completed-but-unaccepted dependency를 가진 child task는 runnable 목록에서 제외될 수 있으며, `list`, `summary`, `review-bundle`, `review-next`, `doctor` report에서 blocker reason을 확인함.
+마이그레이션은 기본값 `false`로 기존 queue behavior를 유지하면서 completed task의 review state를 정리한 뒤, operator가 accepted review를 dependency gate로 쓸 준비가 되었을 때 `dependency_requires_accepted_review=true`를 설정하는 순서로 진행함. 전환 직후 completed-but-unaccepted dependency를 가진 child task는 runnable 목록에서 제외될 수 있으며, `list`, `summary`, `review-bundle`, `review-next`, `doctor` report에서 blocker reason을 확인함. Optional worktree isolation roadmap은 기본 호환성 정책을 유지하더라도 completed-but-unreviewed 결과와 독립적인 후속 작업이 main worktree를 더럽히거나 unrelated task state를 섞지 않고 공존하도록 만드는 방향임.
 
 ## Operational triage plan
 
