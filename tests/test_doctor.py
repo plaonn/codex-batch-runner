@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from codex_batch_runner.cli import main
@@ -61,7 +62,7 @@ class DoctorTests(unittest.TestCase):
     def test_doctor_reports_healthy_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executable = Path(tmp) / "codex"
-            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli 1.2.3\\n'\n", encoding="utf-8")
             executable.chmod(0o755)
             config_path = write_config(tmp, [str(executable), "exec", "--json"])
 
@@ -73,6 +74,84 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(str(Path(tmp) / "tasks"), report["paths"]["queue_dir"])
             self.assertEqual(str(Path(tmp) / "logs"), report["paths"]["log_dir"])
             self.assertTrue(report["codex_command"]["available"])
+            self.assertEqual(str(executable.resolve()), report["codex_command"]["resolved_executable"])
+            self.assertEqual("codex-cli 1.2.3", report["codex_command"]["version_output"])
+            self.assertIsNone(report["codex_command"]["version_error"])
+
+    def test_doctor_human_output_includes_codex_executable_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(tmp, [str(executable), "exec", "--json"])
+
+            code, output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            self.assertIn("codex_command:", output)
+            self.assertIn(f"configured_executable: {executable}", output)
+            self.assertIn(f"resolved_executable: {executable.resolve()}", output)
+            self.assertIn("available: true", output)
+            self.assertIn("version_output: codex-cli 2.0.0", output)
+
+    def test_doctor_warns_when_codex_version_fails_without_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'bad version\\n' >&2\nexit 7\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(tmp, [str(executable)])
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["ok"])
+            self.assertTrue(report["codex_command"]["available"])
+            self.assertIsNone(report["codex_command"]["version_output"])
+            self.assertIn("codex --version failed: bad version", report["codex_command"]["version_error"])
+            self.assertIn(
+                {"name": "codex_command_version", "level": "warning", "message": report["codex_command"]["version_error"]},
+                report["checks"],
+            )
+
+    def test_doctor_warns_when_codex_version_times_out_without_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(tmp, [str(executable)])
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["ok"])
+            self.assertIn("timed out", report["codex_command"]["version_error"])
+            self.assertIn(
+                {"name": "codex_command_version", "level": "warning", "message": report["codex_command"]["version_error"]},
+                report["checks"],
+            )
+
+    def test_doctor_resolves_path_command_without_macos_app_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bindir = root / "bin"
+            bindir.mkdir()
+            executable = bindir / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli path-test\\n'\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(tmp, ["codex", "exec", "--json"])
+
+            with mock.patch.dict(os.environ, {"PATH": str(bindir)}, clear=False):
+                code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual("codex", report["codex_command"]["configured_executable"])
+            self.assertEqual(str(executable.resolve()), report["codex_command"]["resolved_executable"])
+            self.assertEqual("codex-cli path-test", report["codex_command"]["version_output"])
+            self.assertNotIn("Codex.app", output)
+            self.assertNotIn("/Applications", output)
 
     @unittest.skipIf(shutil.which("git") is None, "git is not installed")
     def test_doctor_reports_clean_git_state(self) -> None:

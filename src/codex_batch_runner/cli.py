@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     events.add_argument("--json", action="store_true", help="print JSON")
     events.set_defaults(func=cmd_events)
 
-    doctor = sub.add_parser("doctor", help="check local cbr health without invoking Codex")
+    doctor = sub.add_parser("doctor", help="check local cbr health and Codex CLI version without running Codex exec")
     doctor.add_argument("--json", action="store_true", help="print JSON")
     doctor.set_defaults(func=cmd_doctor)
 

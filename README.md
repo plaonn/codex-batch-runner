@@ -166,7 +166,7 @@ PYTHONPATH=src python3 -m codex_batch_runner doctor
 PYTHONPATH=src python3 -m codex_batch_runner doctor --json
 ```
 
-`doctor`는 Codex를 실행하지 않고 config/runtime path, event directory, Codex command availability, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts를 점검합니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation은 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
+`doctor`는 config/runtime path, event directory, configured Codex executable path, resolved executable path, executable availability, bounded `codex --version` output, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts를 점검합니다. Version 확인은 configured executable에 `--version`만 붙여 짧은 timeout으로 실행하며, `codex exec`를 호출하거나 network operation을 수행한다고 가정하지 않습니다. Version command가 실패하거나 timeout되면 warning으로 보고하지만 doctor 실패로 취급하지 않습니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation은 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
 
 오래된 완료/보관 task 정리 후보 확인:
 
@@ -278,6 +278,19 @@ task와 state 파일은 같은 디렉터리에 임시 파일을 쓴 뒤 `os.repl
 Core state-changing commands also append sanitized audit events. Initial event types include `task_created`, `task_started`, `task_completed`, `task_failed`, `task_needs_resume`, `task_blocked_user`, `task_reviewed`, `task_resolved`, `task_archived`, and `rate_limit_detected`. Event payloads are intentionally small and redact prompt text, raw transcripts, session/thread ids, secrets, credentials, and token-like fields. Event write failures are warnings; queue operations continue to rely on canonical task JSON files.
 
 `prune`은 삭제 동작이 있는 명령이므로 기본값이 비파괴 dry-run입니다. `--apply`가 없으면 파일을 삭제하지 않습니다. `--apply`가 있어도 resolved path가 configured `queue_dir` 또는 `log_dir` 밖에 있는 파일은 삭제하지 않으며, report에 blocked 항목으로 남깁니다.
+
+## Codex CLI maintenance
+
+`codex-batch-runner` does not automatically update the Codex CLI. CLI updates can change JSONL event shape, resume behavior, permission and sandbox handling, or final response behavior. A bad update can also waste usage-limit tokens before the operator notices, and rollback may be unclear when the installed CLI came from a standalone package, an app bundle, or another local installation method.
+
+Recommended maintenance policy:
+
+- Check or update the Codex CLI only while the queue is idle.
+- Treat the queue as idle only when there is no runner lock, no active global cooldown, and no `runnable`, `needs_resume`, or `running` task.
+- Record `cbr doctor --json` output before and after a manual update so the configured path, resolved path, and `codex --version` output are visible.
+- After a manual update, run `cbr doctor` and the focused test or smoke command relevant to the runner deployment before allowing queued work to continue.
+- Do not compare against an app-bundled Codex binary by default. If a system has a bundled CLI inside an installed Codex application, inspect it only as an optional manual investigation.
+- Do not hash large binaries during routine checks. A hash could be added later as an explicit verbose/deep diagnostic, not as default doctor behavior.
 
 ## Rate-limit 처리
 

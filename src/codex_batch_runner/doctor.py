@@ -14,11 +14,14 @@ from .queue import RUNNABLE_STATUSES, dependency_status, is_in_cooldown
 from .state import load_state
 from .timeutil import parse_time, utc_now
 
+CODEX_VERSION_TIMEOUT_SECONDS = 2.0
+
 
 def build_doctor_report(config: Config) -> dict[str, Any]:
     tasks, task_warnings = load_tasks_for_doctor(config.queue_dir)
     by_id = {task.get("id"): task for task in tasks}
-    codex_check = check_codex_command(config.codex_command)
+    codex_info = inspect_codex_command(config.codex_command)
+    codex_checks = codex_command_checks(codex_info)
     git = git_summary(config.root)
     checks = [
         check_directory("queue_dir", config.queue_dir),
@@ -26,7 +29,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
         check_directory("event_dir", config.event_dir),
         check_parent("lock_file_parent", config.lock_file),
         check_parent("state_file_parent", config.state_file),
-        codex_check,
+        *codex_checks,
     ]
     checks.extend(task_warnings)
     checks.extend(warning("git", message) for message in git["warnings"])
@@ -40,11 +43,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
             "lock_file": str(config.lock_file),
             "state_file": str(config.state_file),
         },
-        "codex_command": {
-            "command": config.codex_command,
-            "executable": config.codex_command[0] if config.codex_command else None,
-            "available": codex_check["level"] != "error",
-        },
+        "codex_command": codex_info,
         "state": state_summary(config),
         "lock": lock_summary(config),
         "git": git,
@@ -99,19 +98,84 @@ def check_parent(name: str, path: Path) -> dict[str, str]:
     return ok(name, f"available: {parent}")
 
 
-def check_codex_command(command: list[str]) -> dict[str, str]:
+def inspect_codex_command(command: list[str]) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "command": command,
+        "configured_executable": command[0] if command else None,
+        "resolved_executable": None,
+        "available": False,
+        "version_output": None,
+        "version_error": None,
+        "version_timeout_seconds": CODEX_VERSION_TIMEOUT_SECONDS,
+    }
     if not command:
-        return error("codex_command", "codex_command is empty")
+        return info
     executable = command[0]
     if Path(executable).is_absolute() or "/" in executable:
         path = Path(executable).expanduser()
         if path.is_file() and os.access(path, os.X_OK):
-            return ok("codex_command", f"executable found: {path}")
-        return error("codex_command", f"executable not available: {path}")
+            info["resolved_executable"] = str(path.resolve())
+            info["available"] = True
+            add_codex_version_info(info)
+        return info
     resolved = shutil.which(executable)
     if resolved:
-        return ok("codex_command", f"executable found: {resolved}")
-    return error("codex_command", f"executable not found on PATH: {executable}")
+        info["resolved_executable"] = str(Path(resolved).resolve())
+        info["available"] = True
+        add_codex_version_info(info)
+    return info
+
+
+def add_codex_version_info(info: dict[str, Any]) -> None:
+    resolved = info.get("resolved_executable")
+    if not resolved:
+        return
+    try:
+        result = subprocess.run(
+            [str(resolved), "--version"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=CODEX_VERSION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        info["version_error"] = f"codex --version timed out after {CODEX_VERSION_TIMEOUT_SECONDS:g}s"
+        return
+    except OSError as exc:
+        info["version_error"] = f"cannot run codex --version: {exc}"
+        return
+    if result.returncode == 0:
+        output = (result.stdout or result.stderr or "").strip()
+        info["version_output"] = output if output else None
+        if not output:
+            info["version_error"] = "codex --version produced no output"
+        return
+    message = (result.stderr or result.stdout or "").strip()
+    if message:
+        message = message.splitlines()[-1]
+    else:
+        message = f"exited with {result.returncode}"
+    info["version_error"] = f"codex --version failed: {message}"
+
+
+def codex_command_checks(info: dict[str, Any]) -> list[dict[str, str]]:
+    configured = info.get("configured_executable")
+    resolved = info.get("resolved_executable")
+    checks: list[dict[str, str]] = []
+    if not configured:
+        checks.append(error("codex_command", "codex_command is empty"))
+        return checks
+    if info.get("available"):
+        checks.append(ok("codex_command", f"executable found: {resolved}"))
+    elif Path(str(configured)).is_absolute() or "/" in str(configured):
+        checks.append(error("codex_command", f"executable not available: {Path(str(configured)).expanduser()}"))
+    else:
+        checks.append(error("codex_command", f"executable not found on PATH: {configured}"))
+    version_error = info.get("version_error")
+    if version_error:
+        checks.append(warning("codex_command_version", str(version_error)))
+    return checks
 
 
 def state_summary(config: Config) -> dict[str, Any]:
@@ -280,6 +344,19 @@ def render_doctor_report(report: dict[str, Any]) -> str:
     lines = ["cbr doctor", "", "paths:"]
     for name, path in report["paths"].items():
         lines.append(f"  {name}: {path}")
+    codex = report["codex_command"]
+    lines.extend(
+        [
+            "",
+            "codex_command:",
+            f"  configured_executable: {codex.get('configured_executable')}",
+            f"  resolved_executable: {codex.get('resolved_executable')}",
+            f"  available: {str(codex.get('available')).lower()}",
+            f"  version_output: {codex.get('version_output')}",
+        ]
+    )
+    if codex.get("version_error"):
+        lines.append(f"  version_warning: {codex.get('version_error')}")
     lines.extend(["", "checks:"])
     for check in report["checks"]:
         lines.append(f"  {check['level']}: {check['name']}: {check['message']}")
