@@ -621,7 +621,8 @@ hook은 durable task JSON write와 event emission이 끝난 뒤 실행함. `enqu
 }
 ```
 
-launchd wake-up 용도로는 active runner를 kill하지 않는 `launchctl kickstart gui/UID/LABEL` 형식을 사용함. `launchctl kickstart -k`는 실행 중인 runner를 종료할 수 있으므로 이 hook에 사용하지 않음.
+launchd wake-up 용도로는 active runner를 kill하지 않는 `launchctl kickstart gui/UID/LABEL` 형식을 사용함.
+`-k` force-kill option은 이 hook에 사용하지 않음. 해당 option은 task가 `status=running`으로 기록된 뒤 final result 처리 전에 실행 중인 runner를 종료해 running task 또는 lock state를 남길 수 있음.
 
 ```json
 {
@@ -874,7 +875,7 @@ macOS 기본 운영 방식은 launchd임.
 권장 모델:
 
 - `StartInterval = 600`
-- optional `post_mutation_trigger_command`로 queue mutation 직후 또는 eligible follow-up work가 남은 task 처리 직후 non-killing `launchctl kickstart` 호출 가능
+- optional `post_mutation_trigger_command`로 queue mutation 직후 또는 eligible follow-up work가 남은 task 처리 직후 `launchctl kickstart` 호출 가능
 - runner 내부에서 lock, dependency, cooldown, empty queue를 판단
 - 실행할 작업이 없으면 즉시 종료
 - rate-limit 발생 시 launchd interval을 바꾸지 않고 runner 내부 global cooldown으로 Codex 호출을 막음

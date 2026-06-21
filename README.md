@@ -243,13 +243,15 @@ launchctl load ~/Library/LaunchAgents/com.example.codex-batch-runner.plist
 
 사용 전 plist의 `ProgramArguments`, `WorkingDirectory`, config 경로는 로컬 환경에 맞게 수정해야 합니다. 개인 수정본은 `*.local.plist` 이름으로 두면 gitignore됩니다.
 
-Queue mutation 직후 또는 task 처리 후 eligible follow-up work가 있을 때 launchd job을 깨우려면 config에 generic hook을 추가할 수 있습니다. label은 로컬 환경에 맞게 바꿉니다. Active runner를 kill하지 않도록 `kickstart -k`는 사용하지 않습니다.
+Queue mutation 직후 또는 task 처리 후 eligible follow-up work가 있을 때 launchd job을 깨우려면 config에 generic hook을 추가할 수 있습니다. label은 로컬 환경에 맞게 바꿉니다. Active runner를 kill하지 않도록 `launchctl`의 force-kill option인 `-k`는 사용하지 않습니다. 해당 option은 task가 `status=running`으로 기록된 뒤 final result 처리 전에 active runner를 종료시켜 running task 또는 lock state를 남길 수 있습니다.
 
 ```json
 {
   "post_mutation_trigger_command": ["launchctl", "kickstart", "gui/UID/com.example.codex-batch-runner"]
 }
 ```
+
+이 hook은 latency를 줄이기 위한 보조 수단입니다. launchd `StartInterval` polling은 fallback으로 유지하는 것을 권장합니다. Duplicate non-killing wake-up은 안전합니다. `run-next`가 runner lock, cooldown, empty queue, dependency, single-task execution 규칙을 계속 강제하기 때문입니다.
 
 ## Linux systemd user service 예시
 
