@@ -252,19 +252,38 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
         tasks = [task for task in tasks if needs_review(task)]
     if not explicit_filter and not args.all:
         tasks = [task for task in tasks if visible_by_default(task)]
+    tasks.sort(key=list_sort_key)
     if args.json:
         print(json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     header = ["ID", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS"]
     if args.verbose:
         header.extend(["LAST_RESULT", "LAST_RUN", "LAST_ERROR"])
-    print("\t".join(header))
+    rows = []
     for task in tasks:
         row = list_table_row(task, by_id, config)
         if args.verbose:
             row.extend(verbose_table_cells(task))
-        print("\t".join(row))
+        rows.append(row)
+    print(render_table(header, rows))
     return 0
+
+
+def list_sort_key(task: dict) -> tuple[str, str]:
+    return (str(task.get("created_at") or ""), str(task.get("id") or ""))
+
+
+def render_table(header: list[str], rows: list[list[str]]) -> str:
+    widths = [
+        max(len(row[index]) for row in [header, *rows])
+        for index in range(len(header))
+    ]
+    return "\n".join(render_table_row(row, widths) for row in [header, *rows])
+
+
+def render_table_row(row: list[str], widths: list[int]) -> str:
+    padded = [cell.ljust(widths[index]) for index, cell in enumerate(row[:-1])]
+    return "  ".join([*padded, row[-1]])
 
 
 def list_table_row(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:

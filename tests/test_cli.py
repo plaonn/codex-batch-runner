@@ -67,6 +67,23 @@ def list_lines(output: str) -> list[str]:
     return output.strip().splitlines()
 
 
+def fixed_table_rows(output: str) -> list[dict[str, str]]:
+    lines = list_lines(output)
+    if not lines:
+        return []
+    headers = lines[0].split()
+    starts = [lines[0].index(header) for header in headers]
+    rows = []
+    for line in lines[1:]:
+        row = {}
+        for index, header in enumerate(headers):
+            start = starts[index]
+            end = starts[index + 1] if index + 1 < len(starts) else None
+            row[header] = line[start:end].strip()
+        rows.append(row)
+    return rows
+
+
 def git(cwd: Path, *args: str) -> str:
     result = subprocess.run(["git", "-C", str(cwd), *args], check=True, stdout=subprocess.PIPE, text=True)
     return result.stdout.strip()
@@ -258,9 +275,10 @@ class CliTests(unittest.TestCase):
                     code, output = run_cli(["--config", str(config_path), "list", *filter_args])
 
                     self.assertEqual(0, code)
-                    self.assertTrue(output.startswith("ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS\n"))
-                    self.assertIn("match\trunnable", output)
-                    self.assertNotIn("other\trunnable", output)
+                    self.assertEqual(["ID", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS"], list_lines(output)[0].split())
+                    rows = {row["ID"]: row for row in fixed_table_rows(output)}
+                    self.assertEqual("runnable", rows["match"]["STATUS"])
+                    self.assertNotIn("other", rows)
 
     def test_list_filters_legacy_task_by_cwd_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -274,13 +292,13 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--project", Path(tmp).name])
 
             self.assertEqual(0, code)
-            self.assertTrue(output.startswith("ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS\n"))
-            self.assertIn("legacy\trunnable", output)
+            self.assertEqual(["ID", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS"], list_lines(output)[0].split())
+            self.assertEqual("runnable", fixed_table_rows(output)[0]["STATUS"])
 
             code, output = run_cli(["--config", str(config_path), "list", "--project-root", tmp])
 
             self.assertEqual(0, code)
-            self.assertIn("legacy\trunnable", output)
+            self.assertEqual("runnable", fixed_table_rows(output)[0]["STATUS"])
 
     def test_list_default_shows_reviewable_completed_and_hides_accepted_and_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -313,19 +331,17 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list"])
 
             self.assertEqual(0, code)
-            self.assertIn("runnable\trunnable", output)
-            self.assertIn("resume\tneeds_resume", output)
-            self.assertIn("running\trunning", output)
-            self.assertIn("blocked\tblocked_user", output)
-            self.assertIn("failed\tfailed", output)
-            self.assertIn("completed\tcompleted\t", output)
-            self.assertIn("\t0\t-\treview=unreviewed", output)
-            self.assertIn("rejected\tcompleted\t", output)
-            self.assertIn("\t0\t-\treview=rejected", output)
-            self.assertIn("needs-followup\tcompleted\t", output)
-            self.assertIn("\t0\t-\treview=needs_followup", output)
-            self.assertNotIn("accepted\tcompleted", output)
-            self.assertNotIn("archived\tarchived", output)
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            self.assertEqual("runnable", rows["runnable"]["STATUS"])
+            self.assertEqual("needs_resume", rows["resume"]["STATUS"])
+            self.assertEqual("running", rows["running"]["STATUS"])
+            self.assertEqual("blocked_user", rows["blocked"]["STATUS"])
+            self.assertEqual("failed", rows["failed"]["STATUS"])
+            self.assertEqual("review=unreviewed", rows["completed"]["FLAGS"])
+            self.assertEqual("review=rejected", rows["rejected"]["FLAGS"])
+            self.assertEqual("review=needs_followup", rows["needs-followup"]["FLAGS"])
+            self.assertNotIn("accepted", rows)
+            self.assertNotIn("archived", rows)
 
     def test_list_review_filters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -347,18 +363,20 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--unreviewed"])
 
             self.assertEqual(0, code)
-            self.assertIn("unreviewed\tcompleted", output)
-            self.assertNotIn("accepted\tcompleted", output)
-            self.assertNotIn("rejected\tcompleted", output)
-            self.assertNotIn("followup\tcompleted", output)
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            self.assertEqual("completed", rows["unreviewed"]["STATUS"])
+            self.assertNotIn("accepted", rows)
+            self.assertNotIn("rejected", rows)
+            self.assertNotIn("followup", rows)
 
             code, output = run_cli(["--config", str(config_path), "list", "--needs-review"])
 
             self.assertEqual(0, code)
-            self.assertIn("unreviewed\tcompleted", output)
-            self.assertIn("rejected\tcompleted", output)
-            self.assertIn("followup\tcompleted", output)
-            self.assertNotIn("accepted\tcompleted", output)
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            self.assertEqual("completed", rows["unreviewed"]["STATUS"])
+            self.assertEqual("completed", rows["rejected"]["STATUS"])
+            self.assertEqual("completed", rows["followup"]["STATUS"])
+            self.assertNotIn("accepted", rows)
 
     def test_list_all_includes_completed_and_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -372,9 +390,10 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
 
             self.assertEqual(0, code)
-            self.assertTrue(output.startswith("ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS\n"))
-            self.assertIn("completed\tcompleted", output)
-            self.assertIn("archived\tarchived", output)
+            self.assertEqual(["ID", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS"], list_lines(output)[0].split())
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            self.assertEqual("completed", rows["completed"]["STATUS"])
+            self.assertEqual("archived", rows["archived"]["STATUS"])
 
     def test_status_filter_can_show_archived_without_all(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -387,9 +406,10 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--status", "archived"])
 
             self.assertEqual(0, code)
-            self.assertTrue(output.startswith("ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS\n"))
-            self.assertIn("archived\tarchived", output)
-            self.assertNotIn("runnable\trunnable", output)
+            self.assertEqual(["ID", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS"], list_lines(output)[0].split())
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            self.assertEqual("archived", rows["archived"]["STATUS"])
+            self.assertNotIn("runnable", rows)
 
     def test_list_failed_task_shows_one_line_last_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -440,13 +460,15 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list"])
 
             self.assertEqual(0, code)
-            self.assertNotIn("failed\tfailed", output)
+            self.assertNotIn("failed", {row["ID"] for row in fixed_table_rows(output)})
 
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
 
             self.assertEqual(0, code)
-            self.assertIn("failed\tfailed\t", output)
-            self.assertIn("\t0\t-\tlast_error=not worth retrying resolution=wont_fix", output)
+            self.assertEqual("failed", rows["failed"]["STATUS"])
+            self.assertEqual("-", rows["failed"]["DEPS"])
+            self.assertEqual("last_error=not worth retrying resolution=wont_fix", rows["failed"]["FLAGS"])
 
             code, output = run_cli(["--config", str(config_path), "summary", "failed"])
 
@@ -986,8 +1008,9 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
 
             self.assertEqual(0, code)
-            self.assertIn("done\tcompleted\t", output)
-            self.assertIn("\t0\t-\treview=unreviewed", output)
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+            self.assertEqual("completed", rows["done"]["STATUS"])
+            self.assertEqual("review=unreviewed", rows["done"]["FLAGS"])
 
     def test_list_table_output_includes_header_project_deps_and_empty_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1003,11 +1026,46 @@ class CliTests(unittest.TestCase):
 
             code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a"])
             lines = list_lines(output)
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
 
             self.assertEqual(0, code)
-            self.assertEqual("ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS", lines[0])
-            self.assertIn("plain\trunnable\tproject-a\t0\t-\t-", lines)
-            self.assertIn("child\trunnable\tproject-a\t0\tparent\t-", lines)
+            self.assertEqual(["ID", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS"], lines[0].split())
+            self.assertNotIn("\t", output)
+            self.assertEqual(
+                {"STATUS": "runnable", "PROJECT": "project-a", "ATTEMPTS": "0", "DEPS": "-", "FLAGS": "-"},
+                {key: rows["plain"][key] for key in ("STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS")},
+            )
+            self.assertEqual("parent", rows["child"]["DEPS"])
+            self.assertEqual("-", rows["child"]["FLAGS"])
+
+    def test_list_table_aligns_columns_and_sorts_by_created_at_then_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            for task_id, created_at, project_id in (
+                ("later", "2026-06-20T12:00:00+09:00", "project-a"),
+                ("same-b", "2026-06-19T12:00:00+09:00", "project-b"),
+                ("same-a", "2026-06-19T12:00:00+09:00", "project-c"),
+            ):
+                task = create_task(config, "work", tmp, task_id=task_id, project_id=project_id)
+                task["created_at"] = created_at
+                save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--all"])
+            lines = list_lines(output)
+            rows = fixed_table_rows(output)
+            json_code, json_output = run_cli(["--config", str(config_path), "list", "--all", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, json_code)
+            self.assertNotIn("\t", output)
+            self.assertEqual(["same-a", "same-b", "later"], [row["ID"] for row in rows])
+            self.assertEqual(["same-a", "same-b", "later"], [task["id"] for task in json.loads(json_output)])
+            status_start = lines[0].index("STATUS")
+            project_start = lines[0].index("PROJECT")
+            for line in lines[1:]:
+                self.assertEqual(status_start, line.index("runnable"))
+                self.assertGreaterEqual(line.index("project-"), project_start)
 
     def test_list_summary_and_review_next_report_unaccepted_dependency_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1048,10 +1106,12 @@ class CliTests(unittest.TestCase):
             save_task(config, task)
 
             code, output = run_cli(["--config", str(config_path), "list"])
-            lines = list_lines(output)
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
 
             self.assertEqual(0, code)
-            self.assertIn(f"legacy\trunnable\t{Path(tmp).name}\t0\t-\t-", lines)
+            self.assertEqual(Path(tmp).name, rows["legacy"]["PROJECT"])
+            self.assertEqual("-", rows["legacy"]["DEPS"])
+            self.assertEqual("-", rows["legacy"]["FLAGS"])
 
     def test_list_verbose_adds_compact_summary_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1074,19 +1134,18 @@ class CliTests(unittest.TestCase):
 
             code, output = run_cli(["--config", str(config_path), "list", "--verbose"])
             lines = list_lines(output)
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
 
             self.assertEqual(0, code)
             self.assertEqual(
-                "ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS\tLAST_RESULT\tLAST_RUN\tLAST_ERROR",
-                lines[0],
+                ["ID", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS", "LAST_RESULT", "LAST_RUN", "LAST_ERROR"],
+                lines[0].split(),
             )
-            self.assertIn(
-                "verbose\tfailed\tproject-a\t0\t-\tlast_error=error line one line two"
-                "\tstatus=failed summary=first line second line"
-                "\tcommand=exec returncode=1 duration=2.5s"
-                "\terror line one line two",
-                lines,
-            )
+            self.assertEqual("failed", rows["verbose"]["STATUS"])
+            self.assertEqual("last_error=error line one line two", rows["verbose"]["FLAGS"])
+            self.assertEqual("status=failed summary=first line second line", rows["verbose"]["LAST_RESULT"])
+            self.assertEqual("command=exec returncode=1 duration=2.5s", rows["verbose"]["LAST_RUN"])
+            self.assertEqual("error line one line two", rows["verbose"]["LAST_ERROR"])
 
     def test_list_verbose_includes_result_push_and_git_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1110,16 +1169,18 @@ class CliTests(unittest.TestCase):
             save_task(config, task)
 
             code, output = run_cli(["--config", str(config_path), "list", "--verbose", "--all"])
-            lines = list_lines(output)
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
 
             self.assertEqual(0, code)
-            self.assertIn(
-                "push-meta\tcompleted\tproject-a\t0\t-\treview=unreviewed"
-                "\tstatus=completed summary=done commits=1 push_status=ahead=1 behind=0 "
-                "git=branch=main compare=origin/main ahead=1 behind=0 dirty=false"
-                "\t-\t-",
-                lines,
+            self.assertEqual("completed", rows["push-meta"]["STATUS"])
+            self.assertEqual("review=unreviewed", rows["push-meta"]["FLAGS"])
+            self.assertEqual(
+                "status=completed summary=done commits=1 push_status=ahead=1 behind=0 "
+                "git=branch=main compare=origin/main ahead=1 behind=0 dirty=false",
+                rows["push-meta"]["LAST_RESULT"],
             )
+            self.assertEqual("-", rows["push-meta"]["LAST_RUN"])
+            self.assertEqual("-", rows["push-meta"]["LAST_ERROR"])
 
     def test_list_verbose_uses_dash_for_missing_summary_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1128,16 +1189,21 @@ class CliTests(unittest.TestCase):
             create_task(config, "work", tmp, task_id="plain", project_id="project-a")
 
             code, output = run_cli(["--config", str(config_path), "list", "--verbose"])
-            lines = list_lines(output)
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
 
             self.assertEqual(0, code)
-            self.assertIn("plain\trunnable\tproject-a\t0\t-\t-\t-\t-\t-", lines)
+            self.assertEqual("-", rows["plain"]["DEPS"])
+            self.assertEqual("-", rows["plain"]["FLAGS"])
+            self.assertEqual("-", rows["plain"]["LAST_RESULT"])
+            self.assertEqual("-", rows["plain"]["LAST_RUN"])
+            self.assertEqual("-", rows["plain"]["LAST_ERROR"])
 
     def test_list_verbose_does_not_change_json_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
             task = create_task(config, "work", tmp, task_id="json-task", project_id="project-a")
+            task["depends_on"] = []
             task["last_result"] = {"status": "completed", "summary": "done"}
             task["last_run"] = {"command_kind": "exec", "returncode": 0, "duration_seconds": 1.25}
             save_task(config, task)
@@ -1148,6 +1214,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, plain_code)
             self.assertEqual(0, verbose_code)
             self.assertEqual(json.loads(plain_output), json.loads(verbose_output))
+            self.assertEqual([], json.loads(plain_output)[0]["depends_on"])
 
     def test_transcript_prints_sanitized_readable_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
