@@ -319,6 +319,127 @@ Rough roadmap:
 - `cbr run-next`: runnable/needs_resume task가 없고 config `auto_review_mechanical_accept=true` 또는 `auto_review_codex_enabled=true`이면 같은 auto-review path를 순차 fallback phase로 한 번 실행함.
 - Reviewer Codex call: bundle만 prompt로 전달해 decision schema JSON을 받음. 실패하거나 schema가 맞지 않으면 `failed_review` 또는 `needs_human`으로 보고함.
 
+## Bounded automatic review-fix loop
+
+이 section은 reviewer Codex 자동 검토 이후의 다음 phase 설계입니다. 현재 구현은 reviewer가 `needs_fix`와 `suggested_fix_prompt`를 남겨도 follow-up task를 자동 생성하지 않습니다. 다음 phase의 목표는 reviewer가 직접 파일을 수정하지 않는 원칙을 유지하면서, 수정 범위가 작고 명확한 경우에만 runner가 별도 fix task를 제한적으로 enqueue하고 다시 review하는 것입니다.
+
+기본 workflow:
+
+1. Implementation task 실행: 원 task가 `runnable` 또는 `needs_resume`으로 실행되고 `completed + unreviewed` 상태가 됩니다.
+2. Mechanical review: final JSON, verification, changed files, dependency readiness, git cleanliness, public/private safety policy, stale state를 결정적 gate로 검사합니다.
+3. Reviewer Codex review: sanitized review bundle만 입력으로 받아 structured findings를 반환합니다. Reviewer Codex는 review phase에서 파일을 수정하거나 queue를 직접 변경하지 않습니다.
+4. Accept 또는 escalation: reviewer decision이 high-confidence `pass`이고 모든 gate가 통과하면 `accepted`가 될 수 있습니다. `needs_human`, `failed_review`, high-risk blocker, stale state, limit 초과는 자동 loop를 중단합니다.
+5. Needs-fix auto enqueue: reviewer decision이 `needs_fix`이고 `auto_fix_allowed=true`이며 confidence/risk/limit gate가 모두 통과한 경우에만 runner가 별도 fix task를 생성합니다.
+6. Fix task 실행: fix task는 원 task의 child로 실행되며 reviewer의 bounded fix prompt만 수행합니다.
+7. Review again: fix task 완료 후 같은 mechanical review와 reviewer Codex review를 다시 수행합니다. cycle limit 안에서 pass하면 chain을 `accepted`로 닫고, 다시 `needs_fix`가 나오면 limit과 repeated finding gate를 먼저 확인합니다.
+
+상태 label은 실행 status와 review metadata를 조합해 표시합니다.
+
+- `awaiting_review`: implementation 또는 fix task가 완료되어 review 대기 중입니다.
+- `reviewing`: runner가 queue lock 아래에서 mechanical review 또는 reviewer Codex call을 수행 중입니다.
+- `needs_fix`: reviewer가 자동 또는 수동 follow-up 수정 필요를 판단했습니다.
+- `fixing`: 자동 생성된 fix task가 실행 중이거나 실행 후보입니다.
+- `accepted`: chain의 최신 결과가 review gate를 통과했습니다.
+- `needs_human`: 자동 판단 또는 자동 수정에 필요한 조건이 부족합니다.
+- `loop_limit_reached`: cycle, Codex call, wall time, repeated finding 중 하나의 hard limit에 도달했습니다.
+
+Task chain metadata는 원 task와 fix task 모두에 저장할 수 있어야 합니다. 기존 task schema와 호환되도록 모두 optional field로 시작합니다.
+
+- `root_task_id`: review/fix chain의 최초 implementation task id입니다. 원 task에서는 자기 id입니다.
+- `parent_task_id`: 현재 task를 만든 직전 task id입니다. 원 task에서는 `null`입니다.
+- `review_cycle`: implementation 결과를 cycle 0으로 보고, fix task가 생성될 때마다 1씩 증가합니다.
+- `review_attempts`: 현재 chain에서 reviewer Codex review를 시도한 횟수입니다.
+- `fix_attempts`: 현재 chain에서 자동 fix task를 생성한 횟수입니다.
+- `chain_status`: `awaiting_review`, `reviewing`, `needs_fix`, `fixing`, `accepted`, `needs_human`, `loop_limit_reached` 중 하나입니다.
+- `review_findings`: sanitized reviewer finding 요약입니다. raw transcript, raw log, secret, session id, thread id는 저장하지 않습니다.
+- `last_review_decision`: 최신 reviewer decision입니다.
+- `auto_fix_allowed`: reviewer가 fix task 생성을 허용한다고 명시했는지 나타냅니다. 기본값은 `false`입니다.
+- `auto_fix_budget`: 현재 chain의 남은 fix budget과 limit snapshot입니다. 예: `max_cycles`, `max_fix_attempts`, `max_codex_calls`, `deadline_at`, `remaining_fix_attempts`.
+- `last_auto_fix_task_id`: 자동 생성된 최신 fix task id입니다.
+- `finding_fingerprints`: 반복 finding 감지를 위한 normalized finding hash 목록입니다.
+
+Reviewer Codex result schema는 다음 phase에서 아래 field를 추가합니다. 기존 reviewer result를 읽는 코드는 field가 없으면 보수적으로 `false` 또는 `null`로 해석해야 합니다.
+
+```json
+{
+  "task_id": "string",
+  "decision": "pass | needs_fix | needs_human | failed_review",
+  "confidence": "low | medium | high",
+  "reason": "string",
+  "findings": [
+    {
+      "severity": "info | warning | error",
+      "summary": "string",
+      "evidence": "string",
+      "fingerprint": "string optional"
+    }
+  ],
+  "required_human_checks": ["string"],
+  "suggested_fix_prompt": "string",
+  "auto_fix_allowed": false,
+  "auto_fix_risk": "low | medium | high",
+  "reviewer_limits": {
+    "calls_used_this_run": 1,
+    "fix_loops_used_for_task": 0,
+    "cooldown_recommended_seconds": 0
+  }
+}
+```
+
+Auto-fix enqueue는 모든 조건이 동시에 충족될 때만 허용합니다.
+
+- Config 또는 CLI에서 auto-fix loop가 명시적으로 enabled입니다. 기본값은 disabled입니다.
+- Reviewer decision이 `needs_fix`입니다.
+- `auto_fix_allowed=true`입니다.
+- Confidence가 `high`이고, 허용 정책을 넓히더라도 최소 `medium` 이상입니다.
+- `auto_fix_risk=low`입니다.
+- `suggested_fix_prompt`가 구체적이고 bounded합니다.
+- Mechanical gates가 fatal blocker 없이 통과했으며 stale state 재확인이 통과했습니다.
+- `auto_review_codex_max_fix_loops_per_task`, chain-level `max_cycles`, `max_codex_calls`, `deadline_at`의 남은 예산이 있습니다.
+- Finding fingerprint가 같은 chain에서 반복 실패로 판정되지 않았습니다.
+- Global cooldown, reviewer cooldown, rate-limit evidence, lock contention이 없습니다.
+
+자동 fix task prompt는 reviewer의 `suggested_fix_prompt`를 그대로 신뢰하지 않고 runner가 wrapper를 붙여 제한합니다. Prompt에는 root/parent task id, review cycle, sanitized findings, 허용된 변경 범위, 요구 verification, 금지 항목, final JSON schema를 포함합니다. Fix task는 원칙적으로 parent task의 `cwd`, `project_id`, `category`, `labels`를 상속하고 `depends_on=[parent_task_id]`를 기록합니다. `dependency_requires_accepted_review=true`인 환경에서는 fix task만 예외적으로 parent의 unaccepted completed 상태를 internal chain dependency로 인정하는 별도 rule이 필요합니다. 이 예외는 root chain 내부에만 적용하고 일반 dependent task에는 적용하지 않습니다.
+
+Hard limits:
+
+- Max cycles: 기본 0, opt-in 시에도 초기 권장값은 1입니다. 2 이상은 별도 운영 판단이 필요합니다.
+- Max Codex calls: 한 runner invocation과 한 chain 전체 모두에 별도 상한을 둡니다. Reviewer call과 fix task execution call을 모두 계산합니다.
+- Max wall time/deadline: root task completion 또는 첫 review 시작 시점 기준 deadline을 저장하고, deadline이 지나면 `needs_human` 또는 `loop_limit_reached`로 종료합니다.
+- Repeated same finding detection: finding `fingerprint` 또는 severity/summary/evidence normalized hash가 같은 chain에서 다시 나타나면 자동 fix를 중단합니다.
+- Rate-limit/cooldown handling: rate-limit evidence가 있으면 해당 invocation에서 retry하지 않고 reviewer 또는 global cooldown을 기록합니다. Cooldown이 활성화된 동안 자동 fix enqueue를 수행하지 않습니다.
+- Failure escalation: invalid reviewer schema, empty reason, missing fix prompt, fix task failure, `blocked_user`, `failed`, verification 누락, stale state, lock loss는 자동 loop를 중단하고 human review로 남깁니다.
+
+High-risk blocker는 자동 fix를 금지하고 human review를 요구합니다.
+
+- Destructive edit: 삭제, 대량 이동, history rewrite, cleanup, prune, reset, migration rollback처럼 되돌리기 어렵거나 범위가 큰 변경
+- Auth/security: credential, token, 권한, signing, encryption, secret handling, network auth, access policy 변경
+- Dependency upgrades: runtime dependency 추가/업그레이드, lockfile 대규모 변경, toolchain version 변경
+- Migration: DB/schema/data migration, queue format migration, backward compatibility가 불명확한 schema 변경
+- Broad public API change: CLI option 의미 변경, public task schema/status 의미 변경, README/spec의 사용자 계약 변경
+- Product/policy ambiguity: reviewer가 의도, 정책, UX, 운영 판단을 bundle만으로 확정할 수 없는 경우
+- Repeated identical failure: 같은 finding이나 같은 verification failure가 chain에서 반복되는 경우
+
+Audit trail은 append-only event log와 task metadata 양쪽에 남깁니다. 저장하는 정보는 sanitized summary와 decision evidence로 제한합니다.
+
+- `task_review_started`: review 대상, cycle, attempt, gate snapshot summary
+- `task_reviewer_codex_reviewed`: decision, confidence, finding count, sanitized finding summaries, `auto_fix_allowed`, risk
+- `task_auto_fix_enqueued`: root/parent/fix task id, cycle, budget snapshot, finding fingerprints, sanitized prompt summary
+- `task_auto_fix_skipped`: skip reason, failed gate, limit, high-risk blocker
+- `task_review_chain_closed`: final `chain_status`, accepted/needs_human/loop_limit reason
+
+Event payload에는 raw private logs, full JSONL transcript, full prompt, credentials, token, session id, thread id, private queue contents, operator-local path를 넣지 않습니다. 필요한 경우 존재 여부, count, hash, sanitized excerpt만 저장합니다.
+
+구현 단계는 보수적으로 나눕니다.
+
+1. Spec only: 이 section으로 bounded loop의 상태, gate, audit model을 확정합니다.
+2. Schema placeholders: task optional fields와 reviewer result optional fields를 파싱/보존하지만 자동 enqueue는 하지 않습니다. Focused tests는 backward compatibility와 sanitization을 확인합니다.
+3. Dry-run planner: `needs_fix` reviewer result에서 생성될 fix task draft와 skip reason을 report-only로 출력합니다.
+4. Apply enqueue: explicit opt-in과 hard limit을 통과한 경우에만 separate fix task를 enqueue합니다. Fix task는 일반 `run-next`가 처리하며 reviewer phase는 직접 파일을 수정하지 않습니다.
+5. Chain review integration: fix task 완료 후 root chain metadata를 갱신하고 다시 review candidate로 선택합니다.
+
+현재 다음 구현 task는 2단계 또는 3단계 중 하나가 적절합니다. 자동 enqueue apply는 reviewer result, queue mutation, dependency policy, event audit이 충분히 검증된 뒤 별도 task로 진행합니다.
+
 ## Queue mutation and replan control plane
 
 Queue mutation은 사람이 task JSON을 편집하기 쉽게 만드는 기능이 주목적이 아님. 핵심 목적은 Codex 또는 operator workflow가 설계 변경, review 결과, dependency 재정렬, 운영 중단 같은 control-plane 결정을 안전하고 감사 가능하게 queue에 반영하는 것임. 특히 이미 여러 batch task가 enqueued된 뒤 spec이나 roadmap이 바뀌면, 기존 prompt를 지우거나 task를 임의로 삭제하는 대신 변경 이유와 적용 결과가 남는 replan 흐름이 필요함.
