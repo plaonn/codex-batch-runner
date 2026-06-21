@@ -238,12 +238,12 @@ Decision 의미:
 - `reject`: 결과가 명확히 실패했거나 task 목표와 충돌함
 - `follow_up`: 기본 방향은 맞지만 추가 Codex 작업이 필요함. 이 경우 `suggested_follow_up_prompt`를 구체적으로 작성함
 
-초기 구현은 반드시 dry-run/report-only로 시작함. `cbr review-next --dry-run`은 reviewer decision과 근거를 출력하되 `review_status`를 바꾸거나 follow-up task를 만들지 않음. Auto-accept는 별도 후속 phase이며, mechanical gates를 모두 통과하고 reviewer decision이 `accept`, confidence가 `high`, `required_human_checks`가 비어 있는 경우에만 선택적으로 허용할 수 있음. Auto-apply phase에서도 기본값은 비활성화하고, rejected/follow_up 결정은 자동으로 새 task를 enqueue하지 않음.
+초기 구현은 반드시 dry-run/report-only로 시작함. `cbr review-next --dry-run`은 다음 검토 대상과 mechanical gate 근거를 출력하되 `review_status`를 바꾸거나 follow-up task를 만들지 않음. Auto-accept는 별도 후속 phase이며, mechanical gates를 모두 통과하고 reviewer decision이 `accept`, confidence가 `high`, `required_human_checks`가 비어 있는 경우에만 선택적으로 허용할 수 있음. Auto-apply phase에서도 기본값은 비활성화하고, rejected/follow_up 결정은 자동으로 새 task를 enqueue하지 않음.
 
 Rough roadmap:
 
 - `cbr review-bundle TASK_ID`: bundle을 stdout 또는 지정 파일로 생성함. raw transcript 없이 self-contained report를 만들고, private/public 안전 policy를 항상 포함함.
-- `cbr review-next --dry-run`: `completed + unreviewed` task 중 하나를 선택해 bundle을 만들고 mechanical gates와 reviewer decision report를 출력함.
+- `cbr review-next --dry-run`: `completed + unreviewed/rejected/needs_followup` task 중 하나를 선택해 bundle을 만들고 mechanical gates report를 출력함. Reviewer Codex 호출과 auto-apply는 아직 수행하지 않음.
 - Reviewer Codex call: bundle만 prompt로 전달해 decision schema JSON을 받음. 실패하거나 schema가 맞지 않으면 `needs_human`으로 보고함.
 - Later optional auto-apply: config로 명시적으로 켠 경우에만 high-confidence `accept`를 `cbr accept`와 동일한 상태 변경으로 반영함. `follow_up`은 report에 follow-up prompt를 남기되 task 생성은 operator가 별도로 수행함.
 
@@ -809,6 +809,10 @@ Successful queue mutations run the optional `post_mutation_trigger_command` afte
 `cbr summary TASK_ID`는 task metadata, dependency blocked 상태, `last_result.summary`, optional commits/push_status, changed files, verification, task `git_status`, last_error, next_prompt, log path를 transcript보다 짧은 Markdown 형식으로 표시합니다.
 
 `cbr review-bundle TASK_ID`는 현재 대화 context 없이 task 결과를 재검토하기 위한 read-only bundle을 stdout에 생성합니다. 기본 출력은 Markdown-like human report이고, `--json`은 같은 정보를 structured JSON으로 출력합니다. 포함 정보는 task metadata, sanitized prompt excerpt, status/review/resolution, dependencies와 blockers, `last_result`, `last_run`, changed files, verification, `last_error`, relevant log paths, task `git_status`, local git repository state, inferable commit information, safely scoped commit 또는 working tree diff/stat, public/private safety policy입니다. commit hash를 명확히 하나로 추론할 수 있으면 해당 commit의 subject/stat/diff를 포함하고, 추론이 여러 개이거나 모호하면 diff를 생략하고 ambiguity를 보고합니다. commit을 추론할 수 없고 task repository의 working tree가 dirty이면 working tree diff/stat만 포함합니다. repository가 아니거나 git metadata를 읽을 수 없으면 fallback warning을 보고합니다. 원본 JSONL transcript 내용은 기본적으로 포함하지 않고, 명령은 Codex 호출, enqueue, accept/reject, task state 변경을 수행하지 않습니다.
+
+`cbr review-next --dry-run`은 `status=completed`이고 `review_status`가 `unreviewed`, `rejected`, `needs_followup`인 task 중 가장 오래된 항목 하나를 선택해 concise review report를 출력합니다. 선택 기준 timestamp는 `completed_at`, fallback으로 `updated_at`, `created_at`, `id`를 사용합니다. `--project`, `--project-root`, `--category`, `--label`은 `list`와 같은 metadata fallback 규칙으로 후보를 좁힙니다. `--json`은 human report와 같은 정보를 structured JSON으로 출력합니다.
+
+`review-next --dry-run` report는 selected 여부, candidate count, task id, review status, dependency summary, review bundle 핵심 요약, mechanical gates를 포함합니다. Gate는 task status completed, final result status completed, `last_error` 없음, verification list 존재, changed_files list 존재, dependency ready, git working tree clean, unpushed commit 없음 여부를 확인합니다. 이 명령은 read-only이며 task JSON, review_status, event log, post-mutation trigger를 변경하지 않고, follow-up task를 enqueue하지 않으며, Codex 또는 reviewer Codex를 호출하지 않습니다. `--dry-run` 없이 실행하면 auto-apply가 아직 구현되지 않았다는 명확한 오류로 종료합니다.
 
 runner는 각 Codex 호출 후 task에 `last_run` metadata를 저장합니다. 필드는 `command_kind`, `returncode`, `started_at`, `finished_at`, `duration_seconds`, `resume_id_used`, `log_path`입니다. task-level counters로 `run_count`, `resume_count`, `rate_limit_count`, `failure_count`도 유지합니다.
 

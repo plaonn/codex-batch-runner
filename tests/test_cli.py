@@ -1234,6 +1234,147 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("/Users/alice", output)
             self.assertIn("[REDACTED]", output)
 
+    def test_review_next_dry_run_selects_oldest_review_needed_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            for task_id, completed_at in (("newer", "2026-01-02T00:00:00+00:00"), ("older", "2026-01-01T00:00:00+00:00")):
+                task = create_task(config, "work", tmp, task_id=task_id)
+                task["status"] = "completed"
+                task["review_status"] = "unreviewed"
+                task["completed_at"] = completed_at
+                task["last_result"] = {
+                    "task_id": task_id,
+                    "status": "completed",
+                    "summary": f"{task_id} done",
+                    "changed_files": ["README.md"],
+                    "verification": ["unit tests"],
+                }
+                task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
+                save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--dry-run"])
+
+            self.assertEqual(0, code)
+            self.assertIn("selected: true", output)
+            self.assertIn("task_id: older", output)
+            self.assertIn("dry_run: no task state changed", output)
+
+    def test_review_next_dry_run_noops_when_no_review_needed_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="accepted")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--dry-run"])
+
+            self.assertEqual(0, code)
+            self.assertIn("selected: false", output)
+            self.assertIn("no completed task needs review", output)
+
+    def test_review_next_dry_run_filters_by_project_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            other_root = Path(tmp) / "other"
+            other_root.mkdir()
+            for task_id, cwd, project_id, category, labels in (
+                ("match", tmp, "project-a", "implementation", ["queue"]),
+                ("other", str(other_root), "project-b", "docs", ["readme"]),
+            ):
+                task = create_task(config, "work", cwd, task_id=task_id, project_id=project_id, category=category, labels=labels)
+                task["status"] = "completed"
+                task["review_status"] = "unreviewed"
+                task["last_result"] = {
+                    "task_id": task_id,
+                    "status": "completed",
+                    "summary": "done",
+                    "changed_files": [],
+                    "verification": ["unit tests"],
+                }
+                task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
+                save_task(config, task)
+
+            filters = (
+                ["--project", "project-a"],
+                ["--project-root", tmp],
+                ["--category", "implementation"],
+                ["--label", "queue"],
+            )
+            for filter_args in filters:
+                with self.subTest(filter_args=filter_args):
+                    code, output = run_cli(["--config", str(config_path), "review-next", "--dry-run", *filter_args])
+
+                    self.assertEqual(0, code)
+                    self.assertIn("task_id: match", output)
+                    self.assertNotIn("task_id: other", output)
+
+    def test_review_next_json_output_is_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="json-review", project_id="project-a")
+            task["status"] = "completed"
+            task["review_status"] = "needs_followup"
+            task["last_result"] = {
+                "task_id": "json-review",
+                "status": "completed",
+                "summary": "done",
+                "changed_files": ["README.md"],
+                "verification": ["unit tests"],
+            }
+            task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--dry-run", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["selected"])
+            self.assertEqual("json-review", report["task_id"])
+            self.assertEqual("needs_followup", report["review_status"])
+            self.assertFalse(report["mutated"])
+            self.assertIn("gates", report)
+            self.assertIn("bundle", report)
+            self.assertEqual("json-review", report["bundle"]["task"]["id"])
+
+    def test_review_next_dry_run_does_not_mutate_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="readonly")
+            task["status"] = "completed"
+            task["review_status"] = "rejected"
+            task["last_result"] = {
+                "task_id": "readonly",
+                "status": "completed",
+                "summary": "done",
+                "changed_files": [],
+                "verification": ["unit tests"],
+            }
+            task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
+            save_task(config, task)
+            before = load_task(config, "readonly")
+
+            code, _ = run_cli(["--config", str(config_path), "review-next", "--dry-run"])
+            after = load_task(config, "readonly")
+
+            self.assertEqual(0, code)
+            self.assertEqual(before, after)
+
+    def test_review_next_requires_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output, stderr = run_cli_with_stderr(["--config", str(config_path), "review-next"])
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("auto-apply is not implemented yet", stderr)
+
     def test_transcript_includes_codex_session_log_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
