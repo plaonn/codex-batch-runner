@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import socket
 import subprocess
@@ -21,7 +23,7 @@ from codex_batch_runner.state import load_state
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_codex.py"
 
 
-def make_config(tmp: str, mode: str) -> Config:
+def make_config(tmp: str, mode: str, trigger_command: list[str] | None = None) -> Config:
     base = Config.load(root=Path(tmp))
     return Config(
         root=base.root,
@@ -32,7 +34,7 @@ def make_config(tmp: str, mode: str) -> Config:
         state_file=base.state_file,
         codex_command=[sys.executable, str(FIXTURE), mode],
         codex_resume_command=[sys.executable, str(FIXTURE), mode, "resume", "{session_id}"],
-        post_mutation_trigger_command=[],
+        post_mutation_trigger_command=trigger_command or [],
         stale_lock_seconds=base.stale_lock_seconds,
         rate_limit_cooldown_seconds=1800,
         default_max_attempts=base.default_max_attempts,
@@ -68,6 +70,100 @@ def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_run_next_processes_one_task_and_triggers_after_lock_release_when_follow_up_is_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; import sys; "
+                    "Path(sys.argv[1]).write_text("
+                    "'locked\\n' if Path(sys.argv[2]).exists() else 'unlocked\\n', encoding='utf-8')"
+                ),
+                str(marker),
+                str(Path(tmp) / ".codex-batch-runner" / "runner.lock"),
+            ]
+            config = make_config(tmp, "success", trigger)
+            create_task(config, "first", tmp, task_id="task-1")
+            create_task(config, "second", tmp, task_id="task-2")
+
+            outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("task-1", outcome.task_id)
+            self.assertEqual("completed", load_task(config, "task-1")["status"])
+            second = load_task(config, "task-2")
+            self.assertEqual("runnable", second["status"])
+            self.assertEqual(0, second["attempts"])
+            self.assertEqual("unlocked\n", marker.read_text(encoding="utf-8"))
+
+    def test_run_next_does_not_trigger_without_eligible_follow_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('x\\n', encoding='utf-8')",
+                str(marker),
+            ]
+            config = make_config(tmp, "success", trigger)
+            create_task(config, "first", tmp, task_id="task-1")
+            create_task(config, "blocked", tmp, task_id="task-2", depends_on=["missing-dependency"])
+
+            outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("task-1", outcome.task_id)
+            self.assertFalse(marker.exists())
+
+    def test_run_next_does_not_trigger_when_global_cooldown_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('x\\n', encoding='utf-8')",
+                str(marker),
+            ]
+            config = make_config(tmp, "success", trigger)
+            create_task(config, "work", tmp, task_id="task-1")
+            task = load_task(config, "task-1")
+            task["status"] = "running"
+            result = CodexResult(
+                returncode=1,
+                log_path=Path(tmp) / "attempt.jsonl",
+                command_kind="exec",
+                resume_id_used=None,
+                stderr="usage limit reached, try again later",
+                events=[],
+                final_response=None,
+                session_id=None,
+                thread_id=None,
+                rate_limited=True,
+                rate_limit_markers=["usage limit", "try again"],
+            )
+
+            apply_codex_result(config, task, result)
+            outcome = run_next(config)
+
+            self.assertEqual("cooldown", outcome.status)
+            self.assertFalse(marker.exists())
+
+    def test_post_run_trigger_failure_is_non_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success", [sys.executable, "-c", "import sys; sys.exit(7)"])
+            create_task(config, "first", tmp, task_id="task-1")
+            create_task(config, "second", tmp, task_id="task-2")
+
+            with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("completed", load_task(config, "task-1")["status"])
+            self.assertEqual("runnable", load_task(config, "task-2")["status"])
+            self.assertIn("warning: post-run trigger exited with status 7", stderr.getvalue())
+
     def test_run_next_completes_task_and_writes_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")

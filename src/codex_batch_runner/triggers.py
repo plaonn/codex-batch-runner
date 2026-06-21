@@ -9,6 +9,14 @@ POST_MUTATION_TRIGGER_TIMEOUT_SECONDS = 5
 
 
 def run_post_mutation_trigger(config: Config) -> None:
+    run_trigger_command(config, "post-mutation trigger")
+
+
+def run_post_run_trigger(config: Config) -> None:
+    run_trigger_command(config, "post-run trigger")
+
+
+def run_trigger_command(config: Config, label: str) -> None:
     command = config.post_mutation_trigger_command
     if not command:
         return
@@ -21,10 +29,10 @@ def run_post_mutation_trigger(config: Config) -> None:
             check=False,
         )
     except subprocess.TimeoutExpired:
-        print("warning: post-mutation trigger timed out", file=sys.stderr)
+        print(f"warning: {label} timed out", file=sys.stderr)
         return
     except OSError as exc:
-        print(f"warning: post-mutation trigger failed: {exc}", file=sys.stderr)
+        print(f"warning: {label} failed: {exc}", file=sys.stderr)
         return
     if result.returncode != 0:
-        print(f"warning: post-mutation trigger exited with status {result.returncode}", file=sys.stderr)
+        print(f"warning: {label} exited with status {result.returncode}", file=sys.stderr)

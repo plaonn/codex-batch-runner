@@ -13,9 +13,10 @@ from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
 from .lock import FileLock
 from .prompts import build_prompt
-from .queue import recover_stale_running_tasks, save_task, select_next_task
+from .queue import is_in_cooldown, recover_stale_running_tasks, save_task, select_next_task
 from .state import in_global_cooldown, mark_rate_limit, mark_run, mark_success
 from .timeutil import add_seconds, iso_now, parse_time
+from .triggers import run_post_run_trigger
 
 
 @dataclass
@@ -36,12 +37,14 @@ def run_next(config: Config) -> RunOutcome:
         return RunOutcome(status="locked", message="another runner is active")
 
     task: dict[str, Any] | None = None
+    outcome: RunOutcome | None = None
     try:
         recover_stale_running_tasks(config)
         task = select_next_task(config)
         if not task:
             mark_run(config, None)
-            return RunOutcome(status="empty", message="no runnable task")
+            outcome = RunOutcome(status="empty", message="no runnable task")
+            return outcome
 
         started_at = iso_now()
         resume_requested = task.get("status") == "needs_resume"
@@ -74,9 +77,22 @@ def run_next(config: Config) -> RunOutcome:
 
         result = run_codex(config, task, prompt, task["attempts"])
         apply_codex_result(config, task, result)
-        return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
+        outcome = RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
+        return outcome
     finally:
         lock.release()
+        if outcome and outcome.task_id and should_trigger_post_run_wake(config, task):
+            run_post_run_trigger(config)
+
+
+def should_trigger_post_run_wake(config: Config, processed_task: dict[str, Any] | None) -> bool:
+    if not processed_task:
+        return False
+    if in_global_cooldown(config):
+        return False
+    if is_in_cooldown(processed_task):
+        return False
+    return select_next_task(config) is not None
 
 
 def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:

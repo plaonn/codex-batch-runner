@@ -131,7 +131,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(["x", "x"], marker.read_text(encoding="utf-8").splitlines())
 
-    def test_post_mutation_trigger_is_not_called_for_read_only_or_run_next(self) -> None:
+    def test_post_mutation_trigger_is_not_called_for_read_only_or_run_next_without_follow_up(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "trigger.log"
             trigger = [
