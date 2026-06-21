@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -116,6 +117,22 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("completed", outcome.status)
             self.assertEqual("task-1", outcome.task_id)
             self.assertFalse(marker.exists())
+
+    def test_run_next_skips_child_with_unaccepted_completed_dependency_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(make_config(tmp, "success"), dependency_requires_accepted_review=True)
+            dep = create_task(config, "dep", tmp, task_id="dep")
+            dep["status"] = "completed"
+            dep["review_status"] = "unreviewed"
+            save_task(config, dep)
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+            create_task(config, "ready", tmp, task_id="ready")
+
+            outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("ready", outcome.task_id)
+            self.assertEqual("runnable", load_task(config, "child")["status"])
 
     def test_run_next_does_not_trigger_when_global_cooldown_is_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

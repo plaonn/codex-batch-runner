@@ -48,7 +48,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
         "state": state_summary(config),
         "lock": lock_summary(config),
         "git": git,
-        "tasks": task_summary(tasks, by_id),
+        "tasks": task_summary(tasks, by_id, config),
         "checks": checks,
     }
     return report
@@ -287,7 +287,7 @@ def clean_git_error(result: subprocess.CompletedProcess[str]) -> str:
     return text.splitlines()[-1] if text else f"git exited with {result.returncode}"
 
 
-def task_summary(tasks: list[dict[str, Any]], by_id: dict[Any, dict[str, Any]]) -> dict[str, Any]:
+def task_summary(tasks: list[dict[str, Any]], by_id: dict[Any, dict[str, Any]], config: Config) -> dict[str, Any]:
     status_counts = Counter(str(task.get("status") or "unknown") for task in tasks)
     needs_review_count = 0
     resolved_count = 0
@@ -302,7 +302,11 @@ def task_summary(tasks: list[dict[str, Any]], by_id: dict[Any, dict[str, Any]]) 
         if is_in_cooldown(task):
             cooldown_count += 1
             continue
-        deps_ready, _ = dependency_status(task, by_id)
+        deps_ready, _ = dependency_status(
+            task,
+            by_id,
+            require_accepted_review=config.dependency_requires_accepted_review,
+        )
         if status in RUNNABLE_STATUSES and deps_ready:
             runnable_count += 1
     return {

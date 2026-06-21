@@ -17,6 +17,7 @@ from .queue import (
     RESOLUTIONS,
     archive_task,
     create_task,
+    dependency_blockers,
     dependency_status,
     is_in_cooldown,
     list_tasks,
@@ -253,21 +254,21 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
         header.extend(["LAST_RESULT", "LAST_RUN", "LAST_ERROR"])
     print("\t".join(header))
     for task in tasks:
-        row = list_table_row(task, by_id)
+        row = list_table_row(task, by_id, config)
         if args.verbose:
             row.extend(verbose_table_cells(task))
         print("\t".join(row))
     return 0
 
 
-def list_table_row(task: dict, by_id: dict[str, dict]) -> list[str]:
+def list_table_row(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
     return [
         scalar_cell(task.get("id")),
         scalar_cell(task.get("status")),
         scalar_cell(task_project_id(task)),
         scalar_cell(task.get("attempts", 0)),
         deps_cell(task.get("depends_on")),
-        flags_cell(task, by_id),
+        flags_cell(task, by_id, config),
     ]
 
 
@@ -283,13 +284,17 @@ def deps_cell(depends_on: object) -> str:
     return ",".join(str(dep_id) for dep_id in depends_on)
 
 
-def flags_cell(task: dict, by_id: dict[str, dict]) -> str:
-    deps_ready, blocked_by = dependency_status(task, by_id)
+def flags_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
+    deps_ready, blocked_by = dependency_status(
+        task,
+        by_id,
+        require_accepted_review=config.dependency_requires_accepted_review,
+    )
     flags = []
     if is_in_cooldown(task):
         flags.append("cooldown")
     if not deps_ready:
-        flags.append("blocked_by=" + ",".join(blocked_by))
+        flags.append("blocked_by=" + ",".join(dependency_blocker_labels(task, by_id, config)))
     if task.get("status") == "failed" and task.get("last_error"):
         flags.append("last_error=" + one_line(task.get("last_error")))
     if task.get("resolution"):
@@ -297,6 +302,17 @@ def flags_cell(task: dict, by_id: dict[str, dict]) -> str:
     if task.get("status") == "completed":
         flags.append("review=" + review_status(task))
     return " ".join(flags) if flags else "-"
+
+
+def dependency_blocker_labels(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
+    return [
+        blocker["id"] if blocker["reason"] == "not_completed" else f"{blocker['id']}:{blocker['reason']}"
+        for blocker in dependency_blockers(
+            task,
+            by_id,
+            require_accepted_review=config.dependency_requires_accepted_review,
+        )
+    ]
 
 
 def verbose_table_cells(task: dict) -> list[str]:
@@ -444,14 +460,25 @@ def cmd_summary(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     by_id = {item.get("id"): item for item in list_tasks(config)}
-    print(render_task_summary(task, by_id=by_id), end="")
+    print(
+        render_task_summary(
+            task,
+            by_id=by_id,
+            require_accepted_review=config.dependency_requires_accepted_review,
+        ),
+        end="",
+    )
     return 0
 
 
 def cmd_review_bundle(config: Config, args: argparse.Namespace) -> int:
     task = load_task(config, args.task_id)
     by_id = {item.get("id"): item for item in list_tasks(config)}
-    bundle = build_review_bundle(task, by_id=by_id)
+    bundle = build_review_bundle(
+        task,
+        by_id=by_id,
+        require_accepted_review=config.dependency_requires_accepted_review,
+    )
     if args.json:
         print(json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True))
         return 0

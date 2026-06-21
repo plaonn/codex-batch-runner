@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from .queue import dependency_status, is_in_cooldown, task_labels, task_project_id, task_project_root
+from .queue import dependency_blockers, dependency_status, is_in_cooldown, task_labels, task_project_id, task_project_root
 from .transcript import sanitize
 
 
-def render_task_summary(task: dict, by_id: dict[str, dict] | None = None) -> str:
+def render_task_summary(
+    task: dict,
+    by_id: dict[str, dict] | None = None,
+    *,
+    require_accepted_review: bool = False,
+) -> str:
     lines = [
         f"# task {task.get('id')}",
         f"status: {task.get('status')}",
@@ -39,13 +44,20 @@ def render_task_summary(task: dict, by_id: dict[str, dict] | None = None) -> str
             lines.append(f"resume_unavailable_attempts: {task.get('resume_unavailable_attempts')}")
 
     if by_id is not None:
-        deps_ready, blocked_by = dependency_status(task, by_id)
+        deps_ready, blocked_by = dependency_status(
+            task,
+            by_id,
+            require_accepted_review=require_accepted_review,
+        )
+        blockers = dependency_blockers(task, by_id, require_accepted_review=require_accepted_review)
         deps = task.get("depends_on") or []
         if deps:
             lines.append(f"dependencies: {', '.join(str(dep) for dep in deps)}")
             lines.append(f"dependencies_ready: {str(deps_ready).lower()}")
         if blocked_by:
             lines.append(f"blocked_by: {', '.join(blocked_by)}")
+            lines.append("dependency_blockers:")
+            lines.extend(f"- {blocker['id']}: {blocker['reason']}" for blocker in blockers)
 
     append_multiline_section(lines, "last_result", render_last_result(task.get("last_result")))
     append_multiline_section(lines, "git_status", render_git_status(task.get("git_status")))

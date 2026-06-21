@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from codex_batch_runner.config import Config
 from codex_batch_runner.queue import (
     archive_task,
     create_task,
+    dependency_status,
     load_task,
     recover_stale_running_tasks,
     save_task,
@@ -34,6 +36,59 @@ class QueueTests(unittest.TestCase):
             dep = create_task(config, "dep", tmp, task_id="dep")
             dep["status"] = "completed"
 
+            save_task(config, dep)
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+
+            selected = select_next_task(config)
+
+            self.assertEqual("child", selected["id"])
+
+    def test_dependency_status_preserves_completed_dependency_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            dep = create_task(config, "dep", tmp, task_id="dep")
+            dep["status"] = "completed"
+            save_task(config, dep)
+            child = create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+
+            ready, blocked_by = dependency_status(child, {"dep": dep})
+
+            self.assertTrue(ready)
+            self.assertEqual([], blocked_by)
+
+    def test_dependency_status_can_require_accepted_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            dep = create_task(config, "dep", tmp, task_id="dep")
+            dep["status"] = "completed"
+            save_task(config, dep)
+            child = create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+
+            ready, blocked_by = dependency_status(child, {"dep": dep}, require_accepted_review=True)
+
+            self.assertFalse(ready)
+            self.assertEqual(["dep"], blocked_by)
+
+    def test_select_skips_completed_unaccepted_dependency_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(Config.load(root=Path(tmp)), dependency_requires_accepted_review=True)
+            dep = create_task(config, "dep", tmp, task_id="dep")
+            dep["status"] = "completed"
+            dep["review_status"] = "unreviewed"
+            save_task(config, dep)
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+            ready = create_task(config, "ready", tmp, task_id="ready")
+
+            selected = select_next_task(config)
+
+            self.assertEqual(ready["id"], selected["id"])
+
+    def test_select_allows_completed_accepted_dependency_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(Config.load(root=Path(tmp)), dependency_requires_accepted_review=True)
+            dep = create_task(config, "dep", tmp, task_id="dep")
+            dep["status"] = "completed"
+            dep["review_status"] = "accepted"
             save_task(config, dep)
             create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
 

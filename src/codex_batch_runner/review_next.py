@@ -40,9 +40,17 @@ def build_review_next_report(config: Config, filters: Namespace | None = None) -
         }
 
     task = candidates[0]
-    bundle = build_review_bundle(task, by_id=by_id)
+    bundle = build_review_bundle(
+        task,
+        by_id=by_id,
+        require_accepted_review=config.dependency_requires_accepted_review,
+    )
     gates = mechanical_gates(task, bundle)
-    deps_ready, blocked_by = dependency_status(task, by_id)
+    deps_ready, blocked_by = dependency_status(
+        task,
+        by_id,
+        require_accepted_review=config.dependency_requires_accepted_review,
+    )
     return {
         "mode": "dry-run",
         "selected": True,
@@ -55,6 +63,8 @@ def build_review_next_report(config: Config, filters: Namespace | None = None) -
         "dependencies": {
             "ready": deps_ready,
             "blocked_by": blocked_by,
+            "blockers": bundle.get("dependencies", {}).get("blockers", []),
+            "requires_accepted_review": config.dependency_requires_accepted_review,
             "items": bundle.get("dependencies", {}).get("items", []),
         },
         "review_status": review_status(task),
@@ -153,6 +163,11 @@ def gate(name: str, ok: bool, detail: str) -> dict[str, Any]:
 
 
 def dependency_detail(deps: dict[str, Any]) -> str:
+    blockers = deps.get("blockers") or []
+    if blockers:
+        return "blocked_by=" + ",".join(
+            f"{item.get('id')}:{item.get('reason')}" if isinstance(item, dict) else str(item) for item in blockers
+        )
     blocked_by = deps.get("blocked_by") or []
     if blocked_by:
         return "blocked_by=" + ",".join(str(item) for item in blocked_by)
@@ -235,8 +250,19 @@ def render_review_next_report(report: dict[str, Any]) -> str:
         status = "pass" if item["ok"] else "fail"
         lines.append(f"- {item['name']}: {status} ({item['detail']})")
     deps = report.get("dependencies") or {}
-    blocked_by = ",".join(deps.get("blocked_by") or []) or "-"
-    lines.append(f"dependencies: ready={str(bool(deps.get('ready'))).lower()} blocked_by={blocked_by}")
+    blockers = deps.get("blockers") or []
+    if blockers:
+        blocked_by = ",".join(
+            f"{item.get('id')}:{item.get('reason')}" if isinstance(item, dict) else str(item) for item in blockers
+        )
+    else:
+        blocked_by = ",".join(deps.get("blocked_by") or []) or "-"
+    lines.append(
+        "dependencies: "
+        f"ready={str(bool(deps.get('ready'))).lower()} "
+        f"requires_accepted_review={str(bool(deps.get('requires_accepted_review'))).lower()} "
+        f"blocked_by={blocked_by}"
+    )
     append_result_summary(lines, bundle)
     lines.append("dry_run: no task state changed; reviewer Codex not invoked; auto-apply not implemented")
     return "\n".join(lines).rstrip() + "\n"

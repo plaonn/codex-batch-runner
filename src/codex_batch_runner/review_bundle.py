@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .queue import dependency_status, task_labels, task_project_id, task_project_root
+from .queue import dependency_blockers, dependency_status, task_labels, task_project_id, task_project_root
 from .summary import review_status
 from .transcript import sanitize
 
@@ -15,9 +15,18 @@ MAX_PROMPT_EXCERPT_CHARS = 2000
 COMMIT_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 
 
-def build_review_bundle(task: dict, by_id: dict[str, dict] | None = None) -> dict[str, Any]:
+def build_review_bundle(
+    task: dict,
+    by_id: dict[str, dict] | None = None,
+    *,
+    require_accepted_review: bool = False,
+) -> dict[str, Any]:
     by_id = by_id or {}
-    deps_ready, blocked_by = dependency_status(task, by_id)
+    deps_ready, blocked_by = dependency_status(
+        task,
+        by_id,
+        require_accepted_review=require_accepted_review,
+    )
     last_result = sanitize_value(task.get("last_result")) if isinstance(task.get("last_result"), dict) else None
     repo = inspect_repo(task)
     git_diff = build_git_diff(task, repo)
@@ -29,7 +38,13 @@ def build_review_bundle(task: dict, by_id: dict[str, dict] | None = None) -> dic
         "status": task.get("status"),
         "review_status": review_status(task),
         "resolution": resolution_summary(task),
-        "dependencies": dependency_summary(task, by_id, deps_ready, blocked_by),
+        "dependencies": dependency_summary(
+            task,
+            by_id,
+            deps_ready,
+            blocked_by,
+            require_accepted_review=require_accepted_review,
+        ),
         "blockers": blocked_by,
         "last_result": last_result,
         "last_run": sanitize_value(task.get("last_run")) if isinstance(task.get("last_run"), dict) else None,
@@ -82,20 +97,34 @@ def resolution_summary(task: dict) -> dict[str, Any] | None:
     }
 
 
-def dependency_summary(task: dict, by_id: dict[str, dict], deps_ready: bool, blocked_by: list[str]) -> dict[str, Any]:
+def dependency_summary(
+    task: dict,
+    by_id: dict[str, dict],
+    deps_ready: bool,
+    blocked_by: list[str],
+    *,
+    require_accepted_review: bool = False,
+) -> dict[str, Any]:
+    blockers = dependency_blockers(task, by_id, require_accepted_review=require_accepted_review)
+    blockers_by_id = {blocker["id"]: blocker for blocker in blockers}
     dependencies = []
     for dep_id in task.get("depends_on") or []:
         dep = by_id.get(dep_id)
+        blocker = blockers_by_id.get(str(dep_id))
         dependencies.append(
             {
                 "id": sanitize(dep_id),
                 "status": sanitize(dep.get("status")) if dep else "missing",
                 "review_status": review_status(dep) if dep else "",
+                "ready": blocker is None,
+                "blocker_reason": blocker["reason"] if blocker else "",
             }
         )
     return {
         "ready": deps_ready,
         "blocked_by": sanitize_value(blocked_by),
+        "blockers": sanitize_value(blockers),
+        "requires_accepted_review": require_accepted_review,
         "items": dependencies,
     }
 

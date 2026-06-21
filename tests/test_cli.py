@@ -20,7 +20,11 @@ from codex_batch_runner.fs import write_json_atomic
 from codex_batch_runner.queue import create_task, load_task, save_task
 
 
-def write_config(tmp: str, trigger_command: list[str] | None = None) -> Path:
+def write_config(
+    tmp: str,
+    trigger_command: list[str] | None = None,
+    dependency_requires_accepted_review: bool = False,
+) -> Path:
     root = Path(tmp)
     data = {
         "queue_dir": str(root / "tasks"),
@@ -28,6 +32,7 @@ def write_config(tmp: str, trigger_command: list[str] | None = None) -> Path:
         "event_dir": str(root / "events"),
         "lock_file": str(root / "runner.lock"),
         "state_file": str(root / "state.json"),
+        "dependency_requires_accepted_review": dependency_requires_accepted_review,
     }
     if trigger_command is not None:
         data["post_mutation_trigger_command"] = trigger_command
@@ -898,6 +903,36 @@ class CliTests(unittest.TestCase):
             self.assertEqual("ID\tSTATUS\tPROJECT\tATTEMPTS\tDEPS\tFLAGS", lines[0])
             self.assertIn("plain\trunnable\tproject-a\t0\t-\t-", lines)
             self.assertIn("child\trunnable\tproject-a\t0\tparent\t-", lines)
+
+    def test_list_summary_and_review_next_report_unaccepted_dependency_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, dependency_requires_accepted_review=True)
+            config = Config.load(str(config_path))
+            dep = create_task(config, "dep", tmp, task_id="dep")
+            dep["status"] = "completed"
+            dep["review_status"] = "unreviewed"
+            save_task(config, dep)
+            child = create_task(config, "child", tmp, task_id="child", depends_on=["dep"], project_id="project-a")
+            child["status"] = "completed"
+            child["review_status"] = "unreviewed"
+            child["last_result"] = {"status": "completed", "changed_files": [], "verification": ["unit"]}
+            save_task(config, child)
+
+            list_code, list_output = run_cli(["--config", str(config_path), "list", "--all"])
+            summary_code, summary_output = run_cli(["--config", str(config_path), "summary", "child"])
+            review_code, review_output = run_cli(
+                ["--config", str(config_path), "review-next", "--dry-run", "--project", "project-a"]
+            )
+
+            self.assertEqual(0, list_code)
+            self.assertIn("blocked_by=dep:not_accepted", list_output)
+            self.assertEqual(0, summary_code)
+            self.assertIn("dependency_blockers:\n- dep: not_accepted", summary_output)
+            self.assertEqual(0, review_code)
+            self.assertIn(
+                "dependencies: ready=false requires_accepted_review=true blocked_by=dep:not_accepted",
+                review_output,
+            )
 
     def test_list_table_project_column_uses_legacy_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

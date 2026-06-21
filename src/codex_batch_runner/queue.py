@@ -218,13 +218,54 @@ def task_labels(task: dict) -> list[str]:
     return [str(label) for label in labels] if isinstance(labels, list) else []
 
 
-def dependency_status(task: dict, by_id: dict[str, dict]) -> tuple[bool, list[str]]:
-    blocked: list[str] = []
+def dependency_status(
+    task: dict,
+    by_id: dict[str, dict],
+    *,
+    require_accepted_review: bool = False,
+) -> tuple[bool, list[str]]:
+    blocked = [item["id"] for item in dependency_blockers(task, by_id, require_accepted_review=require_accepted_review)]
+    return not blocked, blocked
+
+
+def dependency_blockers(
+    task: dict,
+    by_id: dict[str, dict],
+    *,
+    require_accepted_review: bool = False,
+) -> list[dict[str, str]]:
+    blockers: list[dict[str, str]] = []
     for dep_id in task.get("depends_on", []):
         dep = by_id.get(dep_id)
+        dep_status = str(dep.get("status") or "") if dep else "missing"
+        dep_review_status = dependency_review_status(dep)
         if not dep or dep.get("status") != "completed":
-            blocked.append(dep_id)
-    return not blocked, blocked
+            blockers.append(
+                {
+                    "id": str(dep_id),
+                    "reason": "not_completed",
+                    "status": dep_status,
+                    "review_status": dep_review_status,
+                }
+            )
+        elif require_accepted_review and dep.get("review_status") != "accepted":
+            blockers.append(
+                {
+                    "id": str(dep_id),
+                    "reason": "not_accepted",
+                    "status": dep_status,
+                    "review_status": dep_review_status,
+                }
+            )
+    return blockers
+
+
+def dependency_review_status(task: dict | None) -> str:
+    if not task:
+        return ""
+    if task.get("status") == "completed":
+        return str(task.get("review_status") or "unreviewed")
+    return str(task.get("review_status") or "")
 
 
 def is_in_cooldown(task: dict) -> bool:
@@ -241,7 +282,11 @@ def select_next_task(config: Config) -> dict | None:
             continue
         if is_in_cooldown(task):
             continue
-        deps_ready, _ = dependency_status(task, by_id)
+        deps_ready, _ = dependency_status(
+            task,
+            by_id,
+            require_accepted_review=config.dependency_requires_accepted_review,
+        )
         if not deps_ready:
             continue
         candidates.append(task)

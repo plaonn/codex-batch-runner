@@ -67,7 +67,25 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(cwd.resolve() / ".codex-batch-runner" / "tasks", config.queue_dir)
             self.assertEqual(cwd.resolve() / ".codex-batch-runner" / "events", config.event_dir)
+            self.assertFalse(config.dependency_requires_accepted_review)
             self.assertIsNone(resolve_config_path(include_user_config=False))
+
+    def test_dependency_requires_accepted_review_can_be_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"dependency_requires_accepted_review": True}), encoding="utf-8")
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertTrue(config.dependency_requires_accepted_review)
+
+    def test_dependency_requires_accepted_review_must_be_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"dependency_requires_accepted_review": "true"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "dependency_requires_accepted_review must be a boolean"):
+                Config.load(str(config_path), root=Path(tmp))
 
     def test_post_mutation_trigger_command_defaults_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
