@@ -119,6 +119,8 @@ PYTHONPATH=src python3 -m codex_batch_runner review-next --apply --mechanical-au
 
 `review-next --apply`는 runner와 같은 queue lock 아래에서 실행되는 순차 자동 검토 phase입니다. 기본적으로는 적용을 거부하고 `needs_human`을 보고합니다. `--mechanical-auto-accept`를 함께 지정하거나 config에서 `"auto_review_mechanical_accept": true`를 명시한 경우에만 모든 local mechanical gate가 통과한 task를 `review_status=accepted`로 변경합니다. Gate가 실패하거나 상태가 모호하면 reviewer Codex를 호출하지 않고 `review_status`를 그대로 둡니다. Reviewer Codex 경로는 기본값이 `"auto_review_codex_enabled": false`인 별도 선택 기능으로 남겨 두며, 현재 local apply path는 Codex token을 소비하지 않습니다. 적용 직전에는 task `updated_at`, `last_result`, current repository head/dirty/ahead 상태, inferred commit 정보가 gate 계산 시점과 같은지 다시 확인하여 stale state이면 accept를 적용하지 않습니다.
 
+Reviewer Codex 안전 모델은 [docs/spec.md](docs/spec.md)에 정리되어 있습니다. Reviewer Codex는 명시적 config opt-in, per-run 호출 한도, task별 fix loop 한도, cooldown, bundle/diff 크기 제한이 모두 충족될 때만 향후 호출할 수 있습니다. Reviewer 입력은 review bundle, sanitized prompt/result, commit diff/stat, verification summary로 제한하며 raw logs, secrets, session/thread ids는 기본적으로 전달하지 않습니다. Reviewer decision은 `pass`, `needs_fix`, `needs_human`, `failed_review` 중 하나이고, 자동 accept는 high-confidence `pass`와 mechanical/stale-state gate 통과가 모두 확인될 때만 별도 opt-in으로 허용할 수 있습니다. 현재 구현은 reviewer Codex를 호출하지 않습니다.
+
 `run-next`는 기본적으로 runnable/needs_resume 구현 작업만 처리합니다. Config에서 `"auto_review_mechanical_accept": true`를 명시하면 runnable 구현 작업이 없을 때 같은 queue lock 안에서 `review-next --apply --mechanical-auto-accept`와 동일한 local-only 검토를 최대 한 건 실행할 수 있습니다. Runnable 구현 작업은 자동 검토보다 우선하며, 자동 검토가 dependent task를 새로 runnable하게 만들면 기존 post-run trigger 규칙에 따라 scheduler wake-up hook이 실행될 수 있습니다.
 
 로그 확인:

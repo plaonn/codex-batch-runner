@@ -192,13 +192,15 @@ runner는 Codex 최종 응답이 `completed`이면 `review_status=unreviewed`를
 
 ## Automatic review bundle and reviewer Codex
 
-규칙만으로 `completed` task를 자동 accept하는 방식은 충분하지 않음. 파일 변경, 테스트 명령, commit/push 상태 같은 기계적 신호는 누락과 모순을 찾는 데 유용하지만, 원래 prompt 의도 충족 여부, 문서/코드 변경의 적절성, 공개 저장소 안전 정책 준수 여부, 후속 작업 필요성은 task마다 문맥 판단이 필요함. 따라서 review는 아래 단계로 분리함.
+규칙만으로 `completed` task를 자동 accept하는 방식은 충분하지 않습니다. 파일 변경, 테스트 명령, commit/push 상태 같은 기계적 신호는 누락과 모순을 찾는 데 유용하지만, 원래 prompt 의도 충족 여부, 문서/코드 변경의 적절성, 공개 저장소 안전 정책 준수 여부, 후속 작업 필요성은 task마다 문맥 판단이 필요합니다. 따라서 review는 아래 단계로 분리합니다.
 
-- Mechanical gates: task 상태, dependency 상태, final JSON schema, verification 유무, git dirty/unpushed 상태, diff 크기, 금지된 runtime/private 파일 포함 여부 같은 결정적 검사를 수행함.
-- Reviewer Codex: 독립적으로 생성한 review bundle만 읽고 작업 결과를 평가함. 현재 대화 context나 작업 실행 thread 기억에 의존하지 않음.
-- Human fallback: confidence가 낮거나 private/public 안전성, 의도 충족, 큰 diff, 실패한 검증, credential 가능성처럼 사람이 봐야 하는 항목이 있으면 accept하지 않고 확인 대상으로 남김.
+- Mechanical gates: task 상태, dependency 상태, final JSON schema, verification 유무, git dirty/unpushed 상태, diff 크기, 금지된 runtime/private 파일 포함 여부 같은 결정적 검사를 수행합니다.
+- Reviewer Codex: 독립적으로 생성한 review bundle만 읽고 작업 결과를 평가합니다. 현재 대화 context나 작업 실행 thread 기억에 의존하지 않습니다.
+- Human fallback: confidence가 낮거나 private/public 안전성, 의도 충족, 큰 diff, 실패한 검증, credential 가능성처럼 사람이 봐야 하는 항목이 있으면 accept하지 않고 확인 대상으로 남깁니다.
 
-Review bundle은 특정 task의 결과를 재검토하기 위한 self-contained artifact임. 생성 시점의 현재 대화 context, Codex transcript 전체, operator 개인 메모에 의존하지 않고, task JSON과 대상 git repository의 현재 local state에서 다시 만들 수 있어야 함. bundle은 기본적으로 report-only 입력이며, 첫 구현은 파일 저장 또는 stdout 출력만 수행하고 review status를 변경하지 않음.
+Reviewer Codex는 선택 기능이며 기본값은 비활성화입니다. 토큰을 소비하고 실행 thread의 전체 대화 context를 갖지 못할 수 있으므로, local mechanical review와 human review fallback이 안정적으로 동작하는 것을 전제로 별도 opt-in해야 합니다. 구현 전 안전 모델은 “호출하지 않는 것이 기본이며, 호출하더라도 한 번의 runner 실행 안에서 작고 감사 가능한 판단만 수행한다”는 원칙을 따릅니다.
+
+Review bundle은 특정 task의 결과를 재검토하기 위한 self-contained artifact입니다. 생성 시점의 현재 대화 context, Codex transcript 전체, operator 개인 메모에 의존하지 않고, task JSON과 대상 git repository의 현재 local state에서 다시 만들 수 있어야 합니다. bundle은 기본적으로 report-only 입력이며, 첫 구현은 파일 저장 또는 stdout 출력만 수행하고 review status를 변경하지 않습니다.
 
 필수 입력:
 
@@ -222,27 +224,91 @@ Bundle에 기본 포함하지 않는 정보:
 - session id/thread id 원문. 필요한 경우 존재 여부만 표시하거나 sanitized placeholder 사용
 - `.codex-batch-runner/` runtime state contents, 실제 queue contents, operator-local `*.local.md` 세부 내용
 
+Reviewer Codex가 받을 수 있는 context는 review bundle, sanitized prompt/result, commit diff/stat, verification summary로 제한합니다. Raw log, raw transcript, secret, credential, session id, thread id, 개인 절대 경로는 기본 입력에서 제외합니다. Reviewer가 원래 실행 대화의 숨은 의도나 중간 합의를 모르는 위험은 task prompt, `next_prompt` 요약, `last_result`, changed files, verification, git snapshot/current state, safety policy를 한 묶음으로 제공해 줄입니다. 그래도 bundle만으로 의도를 재구성할 수 없으면 reviewer는 통과 결정을 내리지 말고 `needs_human`을 반환해야 합니다.
+
+Reviewer Codex 호출 허용 조건:
+
+- config `auto_review_codex_enabled=true`가 명시되어 있어야 합니다.
+- `auto_review_codex_max_calls_per_run`이 1 이상이어야 하며, 한 번의 `run-next` 또는 `review-next --apply` 실행에서 이 한도를 넘기면 안 됩니다.
+- 대상 task가 `status=completed`이고 `review_status`가 `unreviewed`, `rejected`, `needs_followup` 중 하나여야 합니다.
+- Mechanical gates가 reviewer 호출 전 단계까지 치명적 오류 없이 통과해야 합니다. 예를 들어 final result 누락, verification 누락, 공개 금지 파일 의심, dirty/unpushed 상태 모호성, dependency 미충족은 reviewer 호출 없이 human review로 남길 수 있습니다.
+- Global cooldown 또는 reviewer 전용 cooldown이 활성 상태가 아니어야 합니다.
+- Review bundle 크기와 diff 크기가 configured limit 안에 있어야 합니다. 초과하면 bundle을 임의로 크게 잘라 자동 판단하지 않고 `needs_human`으로 남깁니다.
+
+Reviewer Codex 호출 금지 조건:
+
+- 명시 opt-in이 없거나 `auto_review_codex_max_calls_per_run=0`인 경우
+- task가 실행 중이거나 stale state check가 실패한 경우
+- raw log/transcript, credential, token, session id, thread id, private queue contents 없이는 판단할 수 없는 경우
+- 공개 저장소 안전 위반 가능성이 감지된 경우
+- rate-limit/usage-limit evidence, global cooldown, reviewer cooldown, lock contention이 있는 경우
+- 이미 같은 task에서 허용된 fix loop 한도를 사용한 경우
+- reviewer 응답 schema가 invalid하거나 confidence가 낮거나 결정 근거가 비어 있는 경우
+
+Opt-in placeholder config:
+
+```json
+{
+  "auto_review_codex_enabled": false,
+  "auto_review_codex_max_calls_per_run": 0,
+  "auto_review_codex_max_fix_loops_per_task": 0,
+  "auto_review_codex_cooldown_seconds": 1800,
+  "auto_review_codex_max_bundle_chars": 120000,
+  "auto_review_codex_max_diff_chars": 60000
+}
+```
+
+`auto_review_codex_enabled=false`와 `auto_review_codex_max_calls_per_run=0`은 reviewer Codex 호출이 불가능한 기본값입니다. `auto_review_codex_max_fix_loops_per_task=0`은 reviewer가 후속 수정 필요성을 발견해도 runner가 자동 follow-up 실행 loop를 시작하지 않는다는 뜻입니다. 구현 전 단계에서는 이 값들이 config schema와 예시에만 존재하며 Codex review 호출 경로를 만들지 않습니다.
+
 Reviewer Codex decision schema:
 
 ```json
 {
   "task_id": "string",
-  "decision": "accept | needs_human | reject | follow_up",
+  "decision": "pass | needs_fix | needs_human | failed_review",
   "confidence": "low | medium | high",
   "reason": "string",
+  "findings": [
+    {
+      "severity": "info | warning | error",
+      "summary": "string",
+      "evidence": "string"
+    }
+  ],
   "required_human_checks": ["string"],
-  "suggested_follow_up_prompt": "string"
+  "suggested_fix_prompt": "string",
+  "reviewer_limits": {
+    "calls_used_this_run": 1,
+    "fix_loops_used_for_task": 0,
+    "cooldown_recommended_seconds": 0
+  }
 }
 ```
 
 Decision 의미:
 
-- `accept`: bundle만으로 prompt 충족, 검증, 공개 안전 정책을 high confidence로 확인함
-- `needs_human`: 자동 판단에는 정보가 부족하거나 사람이 봐야 할 위험이 있음
-- `reject`: 결과가 명확히 실패했거나 task 목표와 충돌함
-- `follow_up`: 기본 방향은 맞지만 추가 Codex 작업이 필요함. 이 경우 `suggested_follow_up_prompt`를 구체적으로 작성함
+- `pass`: bundle만으로 prompt 충족, 검증, 공개 안전 정책을 high confidence로 확인했습니다.
+- `needs_fix`: 기본 방향은 맞지만 추가 수정이 필요합니다. 이 경우 `suggested_fix_prompt`를 구체적으로 작성합니다.
+- `needs_human`: 자동 판단에는 정보가 부족하거나 사람이 봐야 할 위험이 있습니다.
+- `failed_review`: reviewer 호출 자체가 실패했거나 schema 검증, rate-limit, timeout, cooldown, bundle 해석에 실패했습니다.
 
-초기 구현은 dry-run/report-only에서 시작하고, 다음 phase는 local-only auto-accept로 제한함. `cbr review-next` 또는 `cbr review-next --dry-run`은 다음 검토 대상과 mechanical gate 근거를 출력하되 `review_status`를 바꾸거나 follow-up task를 만들지 않음. `cbr review-next --apply`는 runner와 같은 queue lock 아래에서만 실행하며, 기본값은 적용 거부와 `needs_human` 보고임. `--mechanical-auto-accept` 또는 config `auto_review_mechanical_accept=true`가 명시되고 모든 mechanical gate가 통과할 때만 reviewer Codex 호출 없이 `review_status=accepted`를 적용할 수 있음. 같은 config가 켜져 있으면 `run-next`도 runnable 구현 task가 없을 때 같은 lock 안에서 최대 한 건의 mechanical auto-review pass를 실행할 수 있음. Runnable 구현 task는 자동 검토보다 우선함. Reviewer Codex 경로는 `auto_review_codex_enabled=false`가 기본값인 별도 선택 기능으로 남기며, rejected/follow_up 결정은 자동으로 새 task를 enqueue하지 않음.
+자동 accept 조건은 보수적으로 제한합니다. Mechanical gates가 모두 통과하고, stale state 재확인이 통과하고, reviewer decision이 `pass`이며 `confidence=high`이고, findings에 `error`가 없고, required human check가 비어 있을 때만 accepted 반영 후보가 될 수 있습니다. 그 경우에도 reviewer-backed auto-apply는 별도 config로 명시적으로 켠 뒤에만 허용해야 합니다. 현재 구현된 local apply path는 reviewer Codex를 호출하지 않으며, mechanical auto-accept만 수행할 수 있습니다.
+
+후속 수정 조건은 `needs_fix` decision, high/medium confidence, 구체적인 `suggested_fix_prompt`, 남은 `auto_review_codex_max_fix_loops_per_task`가 모두 있을 때에만 자동 loop 후보가 됩니다. 하지만 follow-up task 생성이나 수정 실행은 비용과 loop 위험이 크므로 초기 reviewer Codex 구현에서는 report-only 또는 human-approved apply로 유지합니다. Fix loop 한도가 0이면 항상 human review로 남깁니다.
+
+Human escalation 조건은 넓게 잡습니다. Reviewer decision이 `needs_human` 또는 `failed_review`인 경우, confidence가 low/medium인 `pass`, required human check 존재, 공개/비공개 안전 의심, verification 실패/누락, 큰 diff, ambiguous commit inference, stale repository state, rate-limit/cooldown, schema invalid response는 모두 자동 accept하지 않습니다.
+
+Token, loop, rate-limit, cooldown safeguards:
+
+- Reviewer Codex 호출은 runner queue lock 아래에서 한 번에 하나의 task만 다룹니다.
+- 한 번의 runner 실행당 reviewer 호출 수는 `auto_review_codex_max_calls_per_run`으로 제한하고 기본값은 0입니다.
+- task별 자동 fix loop는 `auto_review_codex_max_fix_loops_per_task`로 제한하고 기본값은 0입니다.
+- Reviewer 호출에서 rate-limit 또는 usage-limit evidence가 나오면 sanitized event만 기록하고 `auto_review_codex_cooldown_seconds` 또는 global cooldown 중 더 보수적인 값을 적용합니다.
+- Reviewer timeout, invalid JSON, schema mismatch, empty reason은 retry loop를 만들지 않고 `failed_review` 또는 `needs_human`으로 종료합니다.
+- Bundle/diff size limit을 넘으면 truncation된 내용으로 pass를 허용하지 않고 human review로 남깁니다.
+- Reviewer Codex는 follow-up task를 직접 enqueue하지 않습니다. `needs_fix`는 report와 suggested prompt만 남기며, task 생성은 operator 또는 별도 승인된 control-plane 흐름이 수행합니다.
+
+초기 구현은 dry-run/report-only에서 시작하고, 다음 phase는 local-only auto-accept로 제한합니다. `cbr review-next` 또는 `cbr review-next --dry-run`은 다음 검토 대상과 mechanical gate 근거를 출력하되 `review_status`를 바꾸거나 follow-up task를 만들지 않습니다. `cbr review-next --apply`는 runner와 같은 queue lock 아래에서만 실행하며, 기본값은 적용 거부와 `needs_human` 보고입니다. `--mechanical-auto-accept` 또는 config `auto_review_mechanical_accept=true`가 명시되고 모든 mechanical gate가 통과할 때만 reviewer Codex 호출 없이 `review_status=accepted`를 적용할 수 있습니다. 같은 config가 켜져 있으면 `run-next`도 runnable 구현 task가 없을 때 같은 lock 안에서 최대 한 건의 mechanical auto-review pass를 실행할 수 있습니다. Runnable 구현 task는 자동 검토보다 우선합니다. Reviewer Codex 경로는 `auto_review_codex_enabled=false`가 기본값인 별도 선택 기능으로 남기며, `needs_fix`와 `failed_review` 결정은 자동으로 새 task를 enqueue하지 않습니다.
 
 Rough roadmap:
 
@@ -250,8 +316,8 @@ Rough roadmap:
 - `cbr review-next` 또는 `cbr review-next --dry-run`: `completed + unreviewed/rejected/needs_followup` task 중 하나를 선택해 bundle을 만들고 mechanical gates report를 출력함. Reviewer Codex 호출과 auto-apply는 수행하지 않음.
 - `cbr review-next --apply`: 같은 queue lock을 획득한 뒤 local mechanical gates를 다시 계산함. 명시적으로 mechanical auto-accept가 enabled이고 stale state check가 통과하면 accept를 적용하고, 그 외에는 `needs_human`으로 보고함.
 - `cbr run-next`: runnable/needs_resume task가 없고 config `auto_review_mechanical_accept=true`이면 같은 local mechanical accept path를 순차 fallback phase로 한 번 실행함. Reviewer Codex는 호출하지 않음.
-- Reviewer Codex call: bundle만 prompt로 전달해 decision schema JSON을 받음. 실패하거나 schema가 맞지 않으면 `needs_human`으로 보고함.
-- Later optional reviewer-backed auto-apply: config로 명시적으로 켠 경우에만 high-confidence `accept`를 `cbr accept`와 동일한 상태 변경으로 반영함. `follow_up`은 report에 follow-up prompt를 남기되 task 생성은 operator가 별도로 수행함.
+- Reviewer Codex call: bundle만 prompt로 전달해 decision schema JSON을 받음. 실패하거나 schema가 맞지 않으면 `failed_review` 또는 `needs_human`으로 보고함.
+- Later optional reviewer-backed auto-apply: config로 명시적으로 켠 경우에만 high-confidence `pass`를 `cbr accept`와 동일한 상태 변경으로 반영함. `needs_fix`는 report에 suggested fix prompt를 남기되 task 생성은 operator가 별도로 수행함.
 
 ## Queue mutation and replan control plane
 

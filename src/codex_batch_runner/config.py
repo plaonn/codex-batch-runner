@@ -28,6 +28,11 @@ class Config:
     dependency_requires_accepted_review: bool = False
     auto_review_mechanical_accept: bool = False
     auto_review_codex_enabled: bool = False
+    auto_review_codex_max_calls_per_run: int = 0
+    auto_review_codex_max_fix_loops_per_task: int = 0
+    auto_review_codex_cooldown_seconds: int = 1800
+    auto_review_codex_max_bundle_chars: int = 120000
+    auto_review_codex_max_diff_chars: int = 60000
     worktree_mode: str = "disabled"
     worktree_root: Path | None = None
     codex_startup_stall_seconds: int = 240
@@ -96,6 +101,26 @@ class Config:
                 "auto_review_codex_enabled",
                 data.get("auto_review_codex_enabled", False),
             ),
+            auto_review_codex_max_calls_per_run=non_negative_int_value(
+                "auto_review_codex_max_calls_per_run",
+                data.get("auto_review_codex_max_calls_per_run", 0),
+            ),
+            auto_review_codex_max_fix_loops_per_task=non_negative_int_value(
+                "auto_review_codex_max_fix_loops_per_task",
+                data.get("auto_review_codex_max_fix_loops_per_task", 0),
+            ),
+            auto_review_codex_cooldown_seconds=non_negative_int_value(
+                "auto_review_codex_cooldown_seconds",
+                data.get("auto_review_codex_cooldown_seconds", 1800),
+            ),
+            auto_review_codex_max_bundle_chars=non_negative_int_value(
+                "auto_review_codex_max_bundle_chars",
+                data.get("auto_review_codex_max_bundle_chars", 120000),
+            ),
+            auto_review_codex_max_diff_chars=non_negative_int_value(
+                "auto_review_codex_max_diff_chars",
+                data.get("auto_review_codex_max_diff_chars", 60000),
+            ),
             worktree_mode=worktree_mode_value(data.get("worktree_mode", "disabled")),
             worktree_root=path_value("worktree_root", ".codex-batch-runner/worktrees"),
             codex_startup_stall_seconds=int(data.get("codex_startup_stall_seconds", 240)),
@@ -154,6 +179,13 @@ def optional_int_value(value: object) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def non_negative_int_value(key: str, value: object) -> int:
+    result = int(value)
+    if result < 0:
+        raise ValueError(f"{key} must be a non-negative integer")
+    return result
 
 
 def resolve_config_path(config_path: str | None = None, include_user_config: bool = True) -> Path | None:

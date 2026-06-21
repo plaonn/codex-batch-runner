@@ -70,6 +70,12 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual("disabled", config.worktree_mode)
             self.assertEqual(cwd.resolve() / ".codex-batch-runner" / "worktrees", config.worktree_root)
             self.assertFalse(config.dependency_requires_accepted_review)
+            self.assertFalse(config.auto_review_codex_enabled)
+            self.assertEqual(0, config.auto_review_codex_max_calls_per_run)
+            self.assertEqual(0, config.auto_review_codex_max_fix_loops_per_task)
+            self.assertEqual(1800, config.auto_review_codex_cooldown_seconds)
+            self.assertEqual(120000, config.auto_review_codex_max_bundle_chars)
+            self.assertEqual(60000, config.auto_review_codex_max_diff_chars)
             self.assertIsNone(resolve_config_path(include_user_config=False))
             self.assertEqual("disabled", config.manual_cooldown_wake_scheduler)
             self.assertEqual([], config.manual_cooldown_wake_command)
@@ -97,6 +103,32 @@ class ConfigTests(unittest.TestCase):
 
             self.assertTrue(config.auto_review_mechanical_accept)
             self.assertTrue(config.auto_review_codex_enabled)
+
+    def test_reviewer_codex_limit_placeholders_can_be_enabled_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "auto_review_codex_enabled": True,
+                        "auto_review_codex_max_calls_per_run": 1,
+                        "auto_review_codex_max_fix_loops_per_task": 1,
+                        "auto_review_codex_cooldown_seconds": 900,
+                        "auto_review_codex_max_bundle_chars": 50000,
+                        "auto_review_codex_max_diff_chars": 20000,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertTrue(config.auto_review_codex_enabled)
+            self.assertEqual(1, config.auto_review_codex_max_calls_per_run)
+            self.assertEqual(1, config.auto_review_codex_max_fix_loops_per_task)
+            self.assertEqual(900, config.auto_review_codex_cooldown_seconds)
+            self.assertEqual(50000, config.auto_review_codex_max_bundle_chars)
+            self.assertEqual(20000, config.auto_review_codex_max_diff_chars)
 
     def test_worktree_placeholders_can_be_enabled_explicitly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -160,6 +192,14 @@ class ConfigTests(unittest.TestCase):
             config_path.write_text(json.dumps({"auto_review_mechanical_accept": "true"}), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "auto_review_mechanical_accept must be a boolean"):
+                Config.load(str(config_path), root=Path(tmp))
+
+    def test_reviewer_codex_limits_must_be_non_negative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"auto_review_codex_max_calls_per_run": -1}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "auto_review_codex_max_calls_per_run must be a non-negative integer"):
                 Config.load(str(config_path), root=Path(tmp))
 
     def test_worktree_mode_must_be_known_value(self) -> None:
