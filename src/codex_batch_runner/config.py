@@ -24,6 +24,13 @@ class Config:
     rate_limit_cooldown_seconds: int
     default_max_attempts: int
     dependency_requires_accepted_review: bool = False
+    codex_startup_stall_seconds: int = 240
+    codex_first_meaningful_timeout_seconds: int = 420
+    codex_mid_run_idle_seconds: int = 1800
+    codex_mid_run_idle_kill_enabled: bool = False
+    codex_total_runtime_timeout_seconds: int | None = None
+    codex_watchdog_grace_seconds: int = 5
+    codex_startup_stall_cooldown_seconds: int = 60
 
     @classmethod
     def load(cls, config_path: str | None = None, root: Path | None = None) -> "Config":
@@ -61,7 +68,20 @@ class Config:
             stale_lock_seconds=int(data.get("stale_lock_seconds", 21600)),
             rate_limit_cooldown_seconds=int(data.get("rate_limit_cooldown_seconds", 1800)),
             default_max_attempts=int(data.get("default_max_attempts", 5)),
-            dependency_requires_accepted_review=bool_value(data.get("dependency_requires_accepted_review", False)),
+            dependency_requires_accepted_review=bool_value(
+                "dependency_requires_accepted_review",
+                data.get("dependency_requires_accepted_review", False),
+            ),
+            codex_startup_stall_seconds=int(data.get("codex_startup_stall_seconds", 240)),
+            codex_first_meaningful_timeout_seconds=int(data.get("codex_first_meaningful_timeout_seconds", 420)),
+            codex_mid_run_idle_seconds=int(data.get("codex_mid_run_idle_seconds", 1800)),
+            codex_mid_run_idle_kill_enabled=bool_value(
+                "codex_mid_run_idle_kill_enabled",
+                data.get("codex_mid_run_idle_kill_enabled", False),
+            ),
+            codex_total_runtime_timeout_seconds=optional_int_value(data.get("codex_total_runtime_timeout_seconds")),
+            codex_watchdog_grace_seconds=int(data.get("codex_watchdog_grace_seconds", 5)),
+            codex_startup_stall_cooldown_seconds=int(data.get("codex_startup_stall_cooldown_seconds", 60)),
         )
 
 
@@ -86,10 +106,16 @@ def path_list_value(key: str, data: dict[str, Any], base: Path) -> list[Path]:
     return paths
 
 
-def bool_value(value: object) -> bool:
+def bool_value(key: str, value: object) -> bool:
     if isinstance(value, bool):
         return value
-    raise ValueError("dependency_requires_accepted_review must be a boolean")
+    raise ValueError(f"{key} must be a boolean")
+
+
+def optional_int_value(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(value)
 
 
 def resolve_config_path(config_path: str | None = None, include_user_config: bool = True) -> Path | None:

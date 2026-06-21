@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 
 
 def emit(value: dict) -> None:
@@ -17,7 +18,42 @@ def main() -> int:
             task_id = line.split(":", 1)[1].strip()
             break
 
+    if mode == "hang_empty":
+        time.sleep(60)
+        return 0
+
     emit({"type": "session.started", "session_id": "synthetic-session", "thread_id": "synthetic-thread"})
+
+    if mode == "hang_startup":
+        emit({"type": "thread.started", "thread_id": "synthetic-thread"})
+        emit({"type": "turn.started"})
+        time.sleep(60)
+        return 0
+
+    if mode == "meaningful_then_hang":
+        emit({"type": "turn.started"})
+        emit({"type": "agent.message", "message": "working"})
+        time.sleep(1)
+        emit(
+            {
+                "type": "turn.completed",
+                "response": {
+                    "task_id": task_id,
+                    "status": "completed",
+                    "summary": "done after idle",
+                    "next_prompt": "",
+                    "changed_files": [],
+                    "verification": ["synthetic verification"],
+                },
+            }
+        )
+        return 0
+
+    if mode == "meaningful_idle_forever":
+        emit({"type": "turn.started"})
+        emit({"type": "agent.message", "message": "working"})
+        time.sleep(2)
+        return 0
 
     if mode == "success":
         emit(

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .codex import CodexResult, run_codex
+from .codex import FIRST_MEANINGFUL_STALL_REASON, STARTUP_STALL_REASON, CodexResult, run_codex
 from .config import Config
 from .events import emit_task_event, result_summary_payload, transition_payload
 from .evidence import capture_rate_limit_evidence
@@ -106,6 +106,10 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
         task["thread_id"] = result.thread_id
 
     previous_runnable_status = resumable_status(task)
+
+    if result.watchdog_reason in {STARTUP_STALL_REASON, FIRST_MEANINGFUL_STALL_REASON}:
+        mark_startup_stall(config, task, result, previous_runnable_status)
+        return
 
     final_response = result.final_response
     if not final_response:
@@ -241,6 +245,51 @@ def mark_non_rate_failure(config: Config, task: dict, result: CodexResult, reaso
         )
 
 
+def mark_startup_stall(
+    config: Config,
+    task: dict,
+    result: CodexResult,
+    previous_runnable_status: str,
+) -> None:
+    progress = result.progress or {}
+    reason = result.watchdog_reason or "startup_stall"
+    now = iso_now()
+    if previous_runnable_status == "needs_resume":
+        task["status"] = "needs_resume"
+        task["cooldown_until"] = None
+    else:
+        task["status"] = "runnable"
+        task["cooldown_until"] = add_seconds(config.codex_startup_stall_cooldown_seconds)
+    task["last_error"] = startup_stall_error(reason, progress)
+    task["last_progress"] = progress
+    task["startup_stalled_at"] = now
+    task["startup_stall_count"] = int(task.get("startup_stall_count", 0)) + 1
+    save_task(config, task)
+    payload = transition_payload(
+        task,
+        reason=reason,
+        cooldown_until=task.get("cooldown_until"),
+        startup_stall_count=task.get("startup_stall_count"),
+        progress=progress,
+    )
+    emit_task_event(
+        config,
+        "task_startup_stalled",
+        task,
+        source="run-next",
+        summary=startup_stall_error(reason, progress),
+        payload=payload,
+    )
+
+
+def startup_stall_error(reason: str, progress: dict[str, Any]) -> str:
+    if reason == FIRST_MEANINGFUL_STALL_REASON:
+        return "codex turn stalled before meaningful JSONL events"
+    if progress.get("stdout_empty"):
+        return "codex startup stalled before any JSONL output"
+    return "codex startup stalled before meaningful JSONL events"
+
+
 def record_last_run(task: dict, result: CodexResult) -> None:
     finished_at = iso_now()
     started_at = task.get("started_at")
@@ -253,6 +302,8 @@ def record_last_run(task: dict, result: CodexResult) -> None:
         "resume_id_used": result.resume_id_used,
         "log_path": str(result.log_path),
     }
+    if result.watchdog_reason:
+        task["last_run"]["watchdog_reason"] = result.watchdog_reason
 
 
 def duration_seconds(started_at: object, finished_at: object) -> float | None:

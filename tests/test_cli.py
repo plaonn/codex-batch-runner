@@ -1433,6 +1433,43 @@ class CliTests(unittest.TestCase):
             self.assertIn("## logs", output)
             self.assertNotIn("private-value", output)
 
+    def test_summary_and_list_show_startup_stall_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "prompt", tmp, task_id="task-stalled")
+            task["status"] = "runnable"
+            task["startup_stalled_at"] = "2026-06-20T12:00:00+00:00"
+            task["startup_stall_count"] = 1
+            task["last_error"] = "codex startup stalled before meaningful JSONL events"
+            task["last_progress"] = {
+                "first_jsonl_event_at": "2026-06-20T12:00:01+00:00",
+                "last_jsonl_event_at": "2026-06-20T12:00:02+00:00",
+                "first_meaningful_event_at": None,
+                "last_meaningful_event_type": None,
+                "stdout_empty": False,
+                "only_startup_events": True,
+                "jsonl_event_count": 2,
+                "startup_event_count": 2,
+                "meaningful_event_count": 0,
+                "terminated_by_watchdog": True,
+                "watchdog_reason": "startup_stall",
+                "termination_signal": "SIGTERM",
+            }
+            save_task(config, task)
+
+            list_code, list_output = run_cli(["--config", str(config_path), "list", "--all"])
+            summary_code, summary_output = run_cli(["--config", str(config_path), "summary", "task-stalled"])
+
+            self.assertEqual(0, list_code)
+            rows = {row["ID"]: row for row in fixed_table_rows(list_output)}
+            self.assertIn("startup_stalled", rows["task-stalled"]["FLAGS"])
+            self.assertEqual(0, summary_code)
+            self.assertIn("startup_stalled_at: 2026-06-20T12:00:00+00:00", summary_output)
+            self.assertIn("## last_progress", summary_output)
+            self.assertIn("only_startup_events: True", summary_output)
+            self.assertIn("watchdog_reason: startup_stall", summary_output)
+
     def test_summary_shows_dependency_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

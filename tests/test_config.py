@@ -79,6 +79,41 @@ class ConfigTests(unittest.TestCase):
 
             self.assertTrue(config.dependency_requires_accepted_review)
 
+    def test_codex_watchdog_config_defaults_and_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            default_config = Config.load(root=Path(tmp) / "default")
+            self.assertEqual(240, default_config.codex_startup_stall_seconds)
+            self.assertEqual(420, default_config.codex_first_meaningful_timeout_seconds)
+            self.assertEqual(1800, default_config.codex_mid_run_idle_seconds)
+            self.assertFalse(default_config.codex_mid_run_idle_kill_enabled)
+            self.assertIsNone(default_config.codex_total_runtime_timeout_seconds)
+
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "codex_startup_stall_seconds": 180,
+                        "codex_first_meaningful_timeout_seconds": 300,
+                        "codex_mid_run_idle_seconds": 900,
+                        "codex_mid_run_idle_kill_enabled": True,
+                        "codex_total_runtime_timeout_seconds": 7200,
+                        "codex_watchdog_grace_seconds": 2,
+                        "codex_startup_stall_cooldown_seconds": 120,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertEqual(180, config.codex_startup_stall_seconds)
+            self.assertEqual(300, config.codex_first_meaningful_timeout_seconds)
+            self.assertEqual(900, config.codex_mid_run_idle_seconds)
+            self.assertTrue(config.codex_mid_run_idle_kill_enabled)
+            self.assertEqual(7200, config.codex_total_runtime_timeout_seconds)
+            self.assertEqual(2, config.codex_watchdog_grace_seconds)
+            self.assertEqual(120, config.codex_startup_stall_cooldown_seconds)
+
     def test_dependency_requires_accepted_review_must_be_boolean(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"

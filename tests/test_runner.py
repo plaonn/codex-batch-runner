@@ -16,6 +16,7 @@ from codex_batch_runner.config import Config
 import codex_batch_runner.runner as runner_module
 from codex_batch_runner.codex import CodexResult
 from codex_batch_runner.evidence import list_rate_limit_evidence
+from codex_batch_runner.events import list_events
 from codex_batch_runner.queue import create_task, load_task, save_task
 from codex_batch_runner.runner import apply_codex_result, run_next
 from codex_batch_runner.state import load_state
@@ -508,6 +509,102 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("runnable", task["status"])
             self.assertIn("No such file", task["last_error"])
             self.assertTrue(task["log_paths"])
+
+    def test_watchdog_terminates_empty_stdout_startup_stall_as_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                make_config(tmp, "hang_empty"),
+                codex_startup_stall_seconds=1,
+                codex_first_meaningful_timeout_seconds=5,
+                codex_watchdog_grace_seconds=1,
+            )
+            create_task(config, "do it", tmp, task_id="task-empty-stall")
+
+            outcome = run_next(config)
+            task = load_task(config, "task-empty-stall")
+
+            self.assertEqual("runnable", outcome.status)
+            self.assertEqual("runnable", task["status"])
+            self.assertIn("codex startup stalled before any JSONL output", task["last_error"])
+            self.assertTrue(task["last_progress"]["stdout_empty"])
+            self.assertTrue(task["last_progress"]["terminated_by_watchdog"])
+            self.assertEqual("startup_stall", task["last_progress"]["watchdog_reason"])
+            self.assertIsNotNone(task["cooldown_until"])
+
+    def test_watchdog_terminates_startup_only_jsonl_as_resumable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                make_config(tmp, "hang_startup"),
+                codex_startup_stall_seconds=5,
+                codex_first_meaningful_timeout_seconds=1,
+                codex_watchdog_grace_seconds=1,
+            )
+            create_task(config, "do it", tmp, task_id="task-startup-stall")
+
+            outcome = run_next(config)
+            task = load_task(config, "task-startup-stall")
+
+            self.assertEqual("needs_resume", outcome.status)
+            self.assertEqual("needs_resume", task["status"])
+            self.assertEqual("synthetic-session", task["session_id"])
+            self.assertIn("codex turn stalled before meaningful JSONL events", task["last_error"])
+            self.assertFalse(task["last_progress"]["stdout_empty"])
+            self.assertTrue(task["last_progress"]["only_startup_events"])
+            self.assertEqual(3, task["last_progress"]["jsonl_event_count"])
+            self.assertEqual("first_meaningful_timeout", task["last_progress"]["watchdog_reason"])
+
+    def test_watchdog_allows_meaningful_progress_before_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                make_config(tmp, "meaningful_then_hang"),
+                codex_startup_stall_seconds=1,
+                codex_first_meaningful_timeout_seconds=1,
+                codex_mid_run_idle_seconds=1,
+            )
+            create_task(config, "do it", tmp, task_id="task-progress")
+
+            outcome = run_next(config)
+            task = load_task(config, "task-progress")
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("completed", task["status"])
+            self.assertNotIn("last_progress", task)
+            self.assertNotIn("watchdog_reason", task["last_run"])
+
+    def test_watchdog_warns_but_does_not_kill_mid_run_idle_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                make_config(tmp, "meaningful_idle_forever"),
+                codex_startup_stall_seconds=1,
+                codex_first_meaningful_timeout_seconds=1,
+                codex_mid_run_idle_seconds=1,
+                codex_mid_run_idle_kill_enabled=False,
+            )
+            create_task(config, "do it", tmp, task_id="task-idle")
+
+            outcome = run_next(config)
+            task = load_task(config, "task-idle")
+
+            self.assertEqual("needs_resume", outcome.status)
+            self.assertEqual("needs_resume", task["status"])
+            self.assertNotIn("watchdog_reason", task["last_run"])
+            self.assertIn("missing final JSON response", task["last_error"])
+
+    def test_startup_stall_event_is_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(make_config(tmp, "hang_startup"), codex_first_meaningful_timeout_seconds=1)
+            create_task(config, "prompt token=private-value", tmp, task_id="task-stall-event")
+
+            run_next(config)
+            events = list_events(config, task_id="task-stall-event", limit=10)
+            stall_events = [event for event in events if event["event_type"] == "task_startup_stalled"]
+
+            self.assertEqual(1, len(stall_events))
+            text = json.dumps(stall_events[0], ensure_ascii=False)
+            self.assertIn("codex turn stalled before meaningful JSONL events", text)
+            self.assertNotIn("prompt token=private-value", text)
+            self.assertNotIn("synthetic-session", text)
+            self.assertNotIn("synthetic-thread", text)
 
     def test_run_next_recovers_dead_pid_lock_and_stale_running_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

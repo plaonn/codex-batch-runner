@@ -42,6 +42,9 @@ def render_task_summary(
             lines.append(f"resume_unavailable_at: {task.get('resume_unavailable_at')}")
         if task.get("resume_unavailable_attempts"):
             lines.append(f"resume_unavailable_attempts: {task.get('resume_unavailable_attempts')}")
+    if task.get("startup_stalled_at"):
+        lines.append(f"startup_stalled_at: {task.get('startup_stalled_at')}")
+        lines.append(f"startup_stall_count: {task.get('startup_stall_count', 0)}")
 
     if by_id is not None:
         deps_ready, blocked_by = dependency_status(
@@ -62,6 +65,7 @@ def render_task_summary(
     append_multiline_section(lines, "last_result", render_last_result(task.get("last_result")))
     append_multiline_section(lines, "git_status", render_git_status(task.get("git_status")))
     append_multiline_section(lines, "last_run", render_last_run(task.get("last_run")))
+    append_multiline_section(lines, "last_progress", render_last_progress(task.get("last_progress")))
     append_section(lines, "last_error", task.get("last_error"))
     append_section(lines, "next_prompt", task.get("next_prompt"))
 
@@ -157,9 +161,35 @@ def render_last_run(last_run: object) -> str:
         "duration_seconds",
         "resume_id_used",
         "log_path",
+        "watchdog_reason",
     ):
         if key in last_run:
             lines.append(f"{key}: {display_value(last_run.get(key))}")
+    return "\n".join(lines)
+
+
+def render_last_progress(last_progress: object) -> str:
+    if not isinstance(last_progress, dict):
+        return ""
+    lines = []
+    for key in (
+        "first_jsonl_event_at",
+        "last_jsonl_event_at",
+        "first_meaningful_event_at",
+        "last_meaningful_event_at",
+        "last_meaningful_event_type",
+        "stdout_empty",
+        "only_startup_events",
+        "jsonl_event_count",
+        "startup_event_count",
+        "meaningful_event_count",
+        "idle_warning",
+        "terminated_by_watchdog",
+        "watchdog_reason",
+        "termination_signal",
+    ):
+        if key in last_progress:
+            lines.append(f"{key}: {display_value(last_progress.get(key))}")
     return "\n".join(lines)
 
 

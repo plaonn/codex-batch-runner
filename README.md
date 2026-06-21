@@ -147,6 +147,20 @@ Codex가 `completed`를 반환하면 실행은 완료되지만, 검토 상태는
 
 각 Codex 실행 뒤에는 task에 `last_run` metadata가 기록됩니다. 여기에는 `command_kind`, `returncode`, 시작/종료 시각, `duration_seconds`, 사용한 resume id, log path가 포함됩니다. `run_count`, `resume_count`, `rate_limit_count`, `failure_count` counters도 함께 유지됩니다.
 
+Runner는 Codex stdout JSONL을 저장하는 동안 startup/no-progress watchdog도 함께 실행합니다. 이 watchdog은 일반적인 긴 작업 timeout이 아닙니다. 장시간 테스트나 실제 작업은 JSONL에서 의미 있는 진행 신호가 나온 뒤라면 기본적으로 종료하지 않습니다. 기본 동작은 Codex가 시작 후 아무 stdout도 쓰지 않거나, `session.started`/`thread.started`/`turn.started` 같은 startup event만 쓰고 의미 있는 event를 내지 않는 경우를 보수적으로 감지하는 것입니다. 기본값은 startup stall 약 4분, `turn.started` 이후 첫 meaningful event 약 7분이며, mid-run idle은 warning metadata만 남기고 자동 종료하지 않습니다.
+
+Meaningful progress includes assistant/agent messages, command/tool execution start or completion, file change events, `turn.completed`, `turn.failed`, `error`, and the final JSON result. Startup/no-progress stall이 감지되면 runner는 Codex child에 `SIGTERM`을 보내고 짧은 grace period 뒤 필요할 때만 `SIGKILL`을 보냅니다. 이 class는 기본적으로 permanent failure로 처리하지 않습니다. session/thread id가 있으면 `needs_resume`, 없으면 짧은 cooldown이 붙은 `runnable` 상태로 되돌리고 `last_error`에는 `codex startup stalled before meaningful JSONL events` 같은 명확한 메시지를 기록합니다. task에는 `last_progress` metadata가 저장되고, sanitized `task_startup_stalled` event가 append-only event log에 기록됩니다.
+
+Watchdog 관련 config key:
+
+- `codex_startup_stall_seconds` default `240`
+- `codex_first_meaningful_timeout_seconds` default `420`
+- `codex_mid_run_idle_seconds` default `1800`
+- `codex_mid_run_idle_kill_enabled` default `false`
+- `codex_total_runtime_timeout_seconds` default `null`
+- `codex_watchdog_grace_seconds` default `5`
+- `codex_startup_stall_cooldown_seconds` default `60`
+
 rate-limit evidence 확인:
 
 ```bash
@@ -177,7 +191,7 @@ PYTHONPATH=src python3 -m codex_batch_runner doctor
 PYTHONPATH=src python3 -m codex_batch_runner doctor --json
 ```
 
-`doctor`는 config/runtime path, event directory, configured Codex executable path, resolved executable path, executable availability, bounded `codex --version` output, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts를 점검합니다. Lock metadata에 현재 host의 pid가 있으면 pid와 liveness도 표시합니다. Version 확인은 configured executable에 `--version`만 붙여 짧은 timeout으로 실행하며, `codex exec`를 호출하거나 network operation을 수행한다고 가정하지 않습니다. Version command가 실패하거나 timeout되면 warning으로 보고하지만 doctor 실패로 취급하지 않습니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation은 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
+`doctor`는 config/runtime path, event directory, configured Codex executable path, resolved executable path, executable availability, bounded `codex --version` output, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts, startup/no-progress stall evidence를 점검합니다. Lock metadata에 현재 host의 pid가 있으면 pid와 liveness도 표시합니다. Version 확인은 configured executable에 `--version`만 붙여 짧은 timeout으로 실행하며, `codex exec`를 호출하거나 network operation을 수행한다고 가정하지 않습니다. Version command가 실패하거나 timeout되면 warning으로 보고하지만 doctor 실패로 취급하지 않습니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation은 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
 
 오래된 완료/보관 task 정리 후보 확인:
 
@@ -310,7 +324,7 @@ Codex를 호출하지 않는 조건:
 
 task와 state 파일은 같은 디렉터리에 임시 파일을 쓴 뒤 `os.replace`로 교체합니다. Codex JSONL 로그는 attempt별 파일로 저장합니다.
 
-Core state-changing commands also append sanitized audit events. Initial event types include `task_created`, `task_started`, `task_completed`, `task_failed`, `task_needs_resume`, `task_blocked_user`, `task_reviewed`, `task_resolved`, `task_archived`, and `rate_limit_detected`. Event payloads are intentionally small and redact prompt text, raw transcripts, session/thread ids, secrets, credentials, and token-like fields. Event write failures are warnings; queue operations continue to rely on canonical task JSON files.
+Core state-changing commands also append sanitized audit events. Initial event types include `task_created`, `task_started`, `task_completed`, `task_failed`, `task_needs_resume`, `task_blocked_user`, `task_reviewed`, `task_resolved`, `task_archived`, `task_startup_stalled`, and `rate_limit_detected`. Event payloads are intentionally small and redact prompt text, raw transcripts, session/thread ids, secrets, credentials, and token-like fields. Event write failures are warnings; queue operations continue to rely on canonical task JSON files.
 
 `prune`은 삭제 동작이 있는 명령이므로 기본값이 비파괴 dry-run입니다. `--apply`가 없으면 파일을 삭제하지 않습니다. `--apply`가 있어도 resolved path가 configured `queue_dir`, `log_dir`, 또는 `event_dir` 밖에 있는 파일은 삭제하지 않으며, report에 blocked 항목으로 남깁니다. Event pruning only considers `*.jsonl` files under `event_dir`; notifier cursor/state files and other non-JSONL files are skipped. When notifier cursor state is configured, old event files that may not be fully consumed are reported with a skipped reason instead of being deleted.
 

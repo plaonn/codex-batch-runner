@@ -251,6 +251,42 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(1, report["tasks"]["resolved_failed_or_blocked"])
             self.assertEqual(1, report["tasks"]["runnable"])
             self.assertEqual(1, report["tasks"]["cooldown"])
+            self.assertEqual(0, report["tasks"]["startup_stalled"])
+
+    def test_doctor_reports_startup_stall_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(tmp, [str(executable)])
+            config = Config.load(str(config_path))
+            stalled = create_task(config, "stalled", tmp, task_id="stalled")
+            stalled["last_error"] = "codex startup stalled before meaningful JSONL events"
+            stalled["startup_stalled_at"] = "2026-06-20T12:00:00+00:00"
+            stalled["last_progress"] = {
+                "watchdog_reason": "startup_stall",
+                "stdout_empty": False,
+                "only_startup_events": True,
+                "jsonl_event_count": 2,
+                "first_meaningful_event_at": None,
+            }
+            save_task(config, stalled)
+            running = create_task(config, "running", tmp, task_id="running")
+            running["status"] = "running"
+            running["started_at"] = "2000-01-01T00:00:00+00:00"
+            save_task(config, running)
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            self.assertEqual(1, report["tasks"]["startup_stalled"])
+            self.assertEqual("stalled", report["tasks"]["recently_stalled"][0]["id"])
+            self.assertEqual("running", report["tasks"]["running_no_progress"][0]["id"])
+            self.assertEqual(0, human_code)
+            self.assertIn("startup_stalled: 1", human_output)
+            self.assertIn("running_no_progress: 1", human_output)
 
     def test_doctor_lock_summary_includes_same_host_pid_liveness(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

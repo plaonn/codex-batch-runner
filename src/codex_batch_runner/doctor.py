@@ -293,8 +293,16 @@ def task_summary(tasks: list[dict[str, Any]], by_id: dict[Any, dict[str, Any]], 
     resolved_count = 0
     runnable_count = 0
     cooldown_count = 0
+    startup_stalled_count = 0
+    running_no_progress: list[dict[str, Any]] = []
+    recently_stalled: list[dict[str, Any]] = []
     for task in tasks:
         status = task.get("status")
+        if task.get("startup_stalled_at") or startup_watchdog_progress(task):
+            startup_stalled_count += 1
+            recently_stalled.append(stall_evidence(task))
+        if status == "running" and running_no_progress_candidate(task, config):
+            running_no_progress.append(stall_evidence(task))
         if status == "completed" and review_status(task) in {"unreviewed", "rejected", "needs_followup"}:
             needs_review_count += 1
         if status in {"failed", "blocked_user"} and task.get("resolution"):
@@ -316,6 +324,44 @@ def task_summary(tasks: list[dict[str, Any]], by_id: dict[Any, dict[str, Any]], 
         "resolved_failed_or_blocked": resolved_count,
         "runnable": runnable_count,
         "cooldown": cooldown_count,
+        "startup_stalled": startup_stalled_count,
+        "running_no_progress": running_no_progress[:10],
+        "recently_stalled": recently_stalled[:10],
+    }
+
+
+def startup_watchdog_progress(task: dict[str, Any]) -> bool:
+    progress = task.get("last_progress")
+    return isinstance(progress, dict) and bool(progress.get("watchdog_reason"))
+
+
+def running_no_progress_candidate(task: dict[str, Any], config: Config) -> bool:
+    started = parse_time(task.get("started_at"))
+    if not started:
+        return False
+    if (utc_now() - started).total_seconds() < config.codex_startup_stall_seconds:
+        return False
+    progress = task.get("last_progress")
+    return not isinstance(progress, dict) or not progress.get("first_meaningful_event_at")
+
+
+def stall_evidence(task: dict[str, Any]) -> dict[str, Any]:
+    progress = task.get("last_progress")
+    progress = progress if isinstance(progress, dict) else {}
+    return {
+        "id": task.get("id"),
+        "status": task.get("status"),
+        "started_at": task.get("started_at"),
+        "startup_stalled_at": task.get("startup_stalled_at"),
+        "last_error": task.get("last_error"),
+        "watchdog_reason": progress.get("watchdog_reason"),
+        "stdout_empty": progress.get("stdout_empty"),
+        "only_startup_events": progress.get("only_startup_events"),
+        "jsonl_event_count": progress.get("jsonl_event_count"),
+        "first_jsonl_event_at": progress.get("first_jsonl_event_at"),
+        "last_jsonl_event_at": progress.get("last_jsonl_event_at"),
+        "first_meaningful_event_at": progress.get("first_meaningful_event_at"),
+        "last_meaningful_event_type": progress.get("last_meaningful_event_type"),
     }
 
 
@@ -395,8 +441,30 @@ def render_doctor_report(report: dict[str, Any]) -> str:
             f"  resolved_failed_or_blocked: {tasks['resolved_failed_or_blocked']}",
             f"  runnable: {tasks['runnable']}",
             f"  cooldown: {tasks['cooldown']}",
+            f"  startup_stalled: {tasks['startup_stalled']}",
+            f"  running_no_progress: {len(tasks['running_no_progress'])}",
         ]
     )
+    if tasks["recently_stalled"]:
+        lines.append("  recently_stalled:")
+        for item in tasks["recently_stalled"]:
+            lines.append(
+                "    - "
+                + " ".join(
+                    str(part)
+                    for part in (
+                        item.get("id"),
+                        f"status={item.get('status')}",
+                        f"reason={item.get('watchdog_reason')}",
+                        f"stdout_empty={format_optional_bool(item.get('stdout_empty'))}",
+                        f"only_startup_events={format_optional_bool(item.get('only_startup_events'))}",
+                    )
+                )
+            )
+    if tasks["running_no_progress"]:
+        lines.append("  running_no_progress_tasks:")
+        for item in tasks["running_no_progress"]:
+            lines.append(f"    - {item.get('id')} started_at={item.get('started_at')}")
     return "\n".join(lines) + "\n"
 
 

@@ -318,6 +318,8 @@ def flags_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
     flags = []
     if is_in_cooldown(task):
         flags.append("cooldown")
+    if startup_stalled(task):
+        flags.append("startup_stalled")
     if not deps_ready:
         flags.append("blocked_by=" + ",".join(dependency_blocker_labels(task, by_id, config)))
     if task.get("status") == "failed" and task.get("last_error"):
@@ -327,6 +329,11 @@ def flags_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
     if task.get("status") == "completed":
         flags.append("review=" + review_status(task))
     return " ".join(flags) if flags else "-"
+
+
+def startup_stalled(task: dict) -> bool:
+    progress = task.get("last_progress")
+    return bool(task.get("startup_stalled_at") or (isinstance(progress, dict) and progress.get("watchdog_reason")))
 
 
 def dependency_blocker_labels(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
