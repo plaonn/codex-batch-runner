@@ -4,8 +4,11 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .events import emit_task_event
 from .fs import read_json
-from .queue import list_tasks
+from .lock import FileLock
+from .queue import list_tasks, load_task, save_task
+from .triggers import run_post_mutation_trigger
 
 
 SUPPORTED_OPERATIONS = {
@@ -50,6 +53,26 @@ REFERENCE_IDS_FIELDS = {
     "source_task_ids",
     "child_task_ids",
     "merged_task_ids",
+}
+
+APPLY_MUTATION_FIELDS = {
+    "title",
+    "description",
+    "category",
+    "labels",
+    "depends_on",
+    "status",
+}
+SAFE_STATUS_VALUES = {
+    "runnable",
+    "needs_resume",
+    "blocked_user",
+    "failed",
+    "completed",
+    "archived",
+    "paused",
+    "cancelled",
+    "superseded",
 }
 
 
@@ -150,11 +173,163 @@ def validate_operation(
             continue
         if task.get("status") == "running":
             add_op_error(report, op_report, f"operation targets running task: {task_id}")
+            continue
+        validate_expected_state(raw_operation, task, op_report, report)
+        validate_safe_field_updates(raw_operation, task_id, op_report, report)
 
     validate_dependency_references(raw_operation, by_id, created_ids, op_report, report)
     apply_dependency_simulation(raw_operation, by_id, graph, created_ids, op_report, report)
     op_report["would_change"] = not op_report["errors"] and op in SUPPORTED_OPERATIONS
     return op_report
+
+
+def apply_queue_mutation_plan(config: Config, plan_path: str | Path) -> dict:
+    lock = FileLock(config.lock_file, config.stale_lock_seconds)
+    if not lock.acquire():
+        return {
+            "mode": "apply",
+            "ok": False,
+            "plan": {},
+            "operation_count": 0,
+            "operations": [],
+            "warnings": [],
+            "errors": [f"another runner is active: {config.lock_file}"],
+            "applied": False,
+            "mutated_task_ids": [],
+        }
+
+    try:
+        report = build_apply_plan_report(config, plan_path)
+        report["mode"] = "apply"
+        report["applied"] = False
+        report["mutated_task_ids"] = []
+        if not report["ok"]:
+            return report
+
+        plan = read_json(Path(plan_path).expanduser().resolve())
+        apply_errors = validate_apply_supported_operations(plan)
+        if apply_errors:
+            report["ok"] = False
+            report["errors"].extend(apply_errors)
+            return report
+        operations = plan.get("operations", []) if isinstance(plan, dict) else []
+        mutated_task_ids: set[str] = set()
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            for task_id in sorted(operation_target_ids(operation)):
+                task = load_task(config, task_id)
+                before = mutation_summary(task)
+                changed_fields = apply_operation_to_task(task, operation)
+                if not changed_fields:
+                    continue
+                save_task(config, task)
+                mutated_task_ids.add(task_id)
+                emit_task_event(
+                    config,
+                    "task_mutated",
+                    task,
+                    actor=actor_summary(plan.get("actor")),
+                    source="apply-plan",
+                    summary=f"applied {operation.get('op')} to {task_id}",
+                    payload={
+                        "plan_id": plan.get("plan_id"),
+                        "op": operation.get("op"),
+                        "reason": operation_reason(plan, operation),
+                        "changed_fields": changed_fields,
+                        "before": before,
+                        "after": mutation_summary(task),
+                    },
+                )
+
+        report["applied"] = True
+        report["mutated_task_ids"] = sorted(mutated_task_ids)
+        if mutated_task_ids:
+            run_post_mutation_trigger(config)
+        return report
+    finally:
+        lock.release()
+
+
+def apply_operation_to_task(task: dict[str, Any], operation: dict[str, Any]) -> list[str]:
+    before = {field: task.get(field) for field in APPLY_MUTATION_FIELDS}
+    op = operation.get("op")
+    fields = operation.get("fields")
+    field_updates = fields if isinstance(fields, dict) else {}
+
+    for field, value in normalized_field_updates(field_updates).items():
+        task[field] = value
+
+    if op == "dependency_changes":
+        task["depends_on"] = sorted(mutated_dependencies(task.get("depends_on"), operation))
+    elif op == "pause":
+        if task.get("status") != "paused":
+            task["previous_status"] = task.get("status")
+            task["status"] = "paused"
+    elif op == "unpause":
+        if task.get("status") == "paused":
+            previous = task.get("previous_status")
+            task["status"] = previous if previous in RUNNABLE_UNPAUSE_STATUSES else "runnable"
+    elif op == "supersede":
+        task["status"] = "superseded"
+
+    return [field for field in sorted(APPLY_MUTATION_FIELDS) if task.get(field) != before.get(field)]
+
+
+RUNNABLE_UNPAUSE_STATUSES = {"runnable", "needs_resume", "blocked_user", "failed"}
+
+
+def normalized_field_updates(fields: dict[str, Any]) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    for field in APPLY_MUTATION_FIELDS:
+        if field not in fields:
+            continue
+        value = fields[field]
+        if field in {"title", "description", "category"}:
+            updates[field] = None if value is None else str(value)
+        elif field == "labels":
+            updates[field] = [str(item) for item in value] if isinstance(value, list) else []
+        elif field == "depends_on":
+            updates[field] = [str(item) for item in value] if isinstance(value, list) else []
+        elif field == "status":
+            updates[field] = str(value)
+    return updates
+
+
+def mutated_dependencies(current: object, operation: dict[str, Any]) -> set[str]:
+    current_deps = {str(item) for item in current if isinstance(item, str) and item} if isinstance(current, list) else set()
+    replacement = replacement_dependencies(operation)
+    if replacement is not None:
+        current_deps = set(replacement)
+    current_deps.update(add_dependencies(operation))
+    current_deps.difference_update(remove_dependencies(operation))
+    return current_deps
+
+
+def mutation_summary(task: dict[str, Any]) -> dict[str, Any]:
+    return sanitize(
+        {
+            "title": task.get("title"),
+            "description_present": has_text(task.get("description")),
+            "status": task.get("status"),
+            "category": task.get("category"),
+            "labels": task.get("labels"),
+            "depends_on": task.get("depends_on"),
+        }
+    )
+
+
+def actor_summary(actor: object) -> str:
+    if isinstance(actor, dict):
+        actor_type = actor.get("type") or "actor"
+        actor_id = actor.get("id") or ""
+        return sanitize_string(f"{actor_type}:{actor_id}".strip(":"))
+    return sanitize_string(str(actor or "cbr"))
+
+
+def operation_reason(plan: dict[str, Any], operation: dict[str, Any]) -> str:
+    reason = operation.get("reason") or plan.get("reason") or ""
+    return sanitize_string(str(reason))
 
 
 def operation_target_ids(operation: dict) -> set[str]:
@@ -166,6 +341,61 @@ def operation_target_ids(operation: dict) -> set[str]:
     if isinstance(task_ids, list):
         ids.update(item for item in task_ids if isinstance(item, str) and item)
     return ids
+
+
+def validate_expected_state(operation: dict, task: dict, op_report: dict, report: dict) -> None:
+    expected = operation.get("expected")
+    if not isinstance(expected, dict):
+        return
+    task_id = str(task.get("id") or "")
+    for field, expected_value in sorted(expected.items()):
+        actual_value = task.get(field)
+        if actual_value != expected_value:
+            add_op_error(
+                report,
+                op_report,
+                f"stale task target: {task_id} expected {field}={sanitize(expected_value)!r}, found {sanitize(actual_value)!r}",
+            )
+
+
+def validate_safe_field_updates(operation: dict, task_id: str, op_report: dict, report: dict) -> None:
+    fields = operation.get("fields")
+    if not isinstance(fields, dict):
+        return
+    if fields.get("status") == "running":
+        add_op_error(report, op_report, f"status mutation cannot set running task: {task_id}")
+    elif "status" in fields and str(fields.get("status")) not in SAFE_STATUS_VALUES:
+        add_op_error(report, op_report, f"unsupported status mutation for {task_id}: {fields.get('status')}")
+
+
+def validate_apply_supported_operations(plan: object) -> list[str]:
+    if not isinstance(plan, dict):
+        return ["plan must be a JSON object"]
+    errors: list[str] = []
+    operations = plan.get("operations", [])
+    if not isinstance(operations, list):
+        return ["operations must be a list"]
+    for index, operation in enumerate(operations):
+        if not isinstance(operation, dict):
+            continue
+        op = operation.get("op")
+        fields = operation.get("fields")
+        allowed_extra = {"add", "add_depends_on", "add_dependencies", "remove", "remove_depends_on", "remove_dependencies"}
+        if op == "dependency_changes":
+            allowed = APPLY_MUTATION_FIELDS | allowed_extra
+        else:
+            allowed = APPLY_MUTATION_FIELDS
+        if isinstance(fields, dict):
+            unsupported = sorted(str(field) for field in fields if str(field) not in allowed)
+            if unsupported:
+                errors.append(f"op[{index}]: unsupported apply field(s): {', '.join(unsupported)}")
+        elif fields is not None:
+            errors.append(f"op[{index}]: fields must be an object when provided")
+        if op in {"split", "merge", "create_followup"}:
+            errors.append(f"op[{index}]: apply is not implemented for operation: {op}")
+        if op in {"replan", "append_note"} and not isinstance(fields, dict):
+            errors.append(f"op[{index}]: apply for {op} requires fields with supported metadata keys")
+    return errors
 
 
 def validate_dependency_references(

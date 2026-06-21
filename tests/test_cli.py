@@ -18,6 +18,7 @@ from pathlib import Path
 from codex_batch_runner.cli import main
 from codex_batch_runner.config import Config
 from codex_batch_runner.evidence import rate_limit_dir
+from codex_batch_runner.events import list_events
 from codex_batch_runner.fs import write_json_atomic
 from codex_batch_runner.queue import create_task, load_task, save_task
 from codex_batch_runner.review_bundle import build_review_bundle
@@ -1078,7 +1079,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, code)
             self.assertIn("dependency graph would contain a cycle", output)
 
-    def test_apply_plan_requires_dry_run_until_apply_is_implemented(self) -> None:
+    def test_apply_plan_defaults_to_dry_run_without_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             plan_path = write_plan(
@@ -1093,9 +1094,141 @@ class CliTests(unittest.TestCase):
 
             code, output, stderr = run_cli_with_stderr(["--config", str(config_path), "apply-plan", str(plan_path)])
 
+            self.assertEqual(0, code)
+            self.assertIn("mode: dry-run", output)
+            self.assertEqual("", stderr)
+
+    def test_apply_plan_apply_updates_metadata_dependencies_emits_event_and_runs_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).open('a', encoding='utf-8').write('x\\n')",
+                str(marker),
+            ]
+            config_path = write_config(tmp, trigger)
+            config = Config.load(str(config_path))
+            create_task(config, "synthetic work", tmp, task_id="task-a")
+            create_task(config, "synthetic work", tmp, task_id="task-b")
+            original = load_task(config, "task-b")
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "plan_id": "plan-1",
+                    "actor": {"type": "operator", "id": "test"},
+                    "reason": "implementation order changed",
+                    "operations": [
+                        {
+                            "op": "retarget_metadata",
+                            "task_id": "task-b",
+                            "expected": {"status": "runnable", "updated_at": original["updated_at"]},
+                            "fields": {
+                                "title": "Updated title",
+                                "description": "Updated description",
+                                "category": "docs",
+                                "labels": ["safe", "mutation"],
+                                "depends_on": ["task-a"],
+                                "status": "paused",
+                            },
+                        }
+                    ],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--apply", "--json"])
+            report = json.loads(output)
+            task = load_task(config, "task-b")
+            events = list_events(config, task_id="task-b", limit=10)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["ok"])
+            self.assertTrue(report["applied"])
+            self.assertEqual(["task-b"], report["mutated_task_ids"])
+            self.assertEqual("Updated title", task["title"])
+            self.assertEqual("Updated description", task["description"])
+            self.assertEqual("docs", task["category"])
+            self.assertEqual(["safe", "mutation"], task["labels"])
+            self.assertEqual(["task-a"], task["depends_on"])
+            self.assertEqual("paused", task["status"])
+            self.assertEqual(["x"], marker.read_text(encoding="utf-8").splitlines())
+            self.assertEqual("task_mutated", events[0]["event_type"])
+            self.assertEqual(["category", "depends_on", "description", "labels", "status", "title"], events[0]["payload"]["changed_fields"])
+
+    def test_apply_plan_apply_rejects_stale_expected_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "synthetic work", tmp, task_id="task-a")
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "actor": "operator",
+                    "reason": "stale update",
+                    "operations": [
+                        {
+                            "op": "retarget_metadata",
+                            "task_id": "task-a",
+                            "expected": {"status": "failed"},
+                            "fields": {"title": "Must not apply"},
+                        }
+                    ],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--apply", "--json"])
+            report = json.loads(output)
+
             self.assertEqual(1, code)
-            self.assertEqual("", output)
-            self.assertIn("apply mode is not implemented yet", stderr)
+            self.assertFalse(report["ok"])
+            self.assertIn("stale task target", output)
+            self.assertNotEqual("Must not apply", load_task(config, "task-a")["title"])
+
+    def test_apply_plan_apply_rejects_running_task_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "synthetic work", tmp, task_id="running-task")
+            set_status(config, "running-task", "running")
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "actor": "operator",
+                    "reason": "replan current work",
+                    "operations": [{"op": "retarget_metadata", "task_id": "running-task", "fields": {"title": "no"}}],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--apply"])
+
+            self.assertEqual(1, code)
+            self.assertIn("operation targets running task: running-task", output)
+            self.assertNotEqual("no", load_task(config, "running-task")["title"])
+
+    def test_apply_plan_apply_rejects_dependency_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "synthetic work", tmp, task_id="task-a", depends_on=["task-b"])
+            create_task(config, "synthetic work", tmp, task_id="task-b")
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "actor": "operator",
+                    "reason": "bad dependency rewrite",
+                    "operations": [{"op": "dependency_changes", "task_id": "task-b", "fields": {"add": ["task-a"]}}],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--apply"])
+
+            self.assertEqual(1, code)
+            self.assertIn("dependency graph would contain a cycle", output)
+            self.assertEqual([], load_task(config, "task-b")["depends_on"])
 
     def test_apply_plan_json_output_is_machine_readable_and_sanitized(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

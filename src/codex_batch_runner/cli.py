@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from .apply_plan import build_apply_plan_report, render_apply_plan_report
+from .apply_plan import apply_queue_mutation_plan, build_apply_plan_report, render_apply_plan_report
 from .config import Config
 from .cooldown import MANUAL_COOLDOWN_SAFETY_OFFSET_SECONDS, cooldown_status, format_duration, parse_manual_cooldown
 from .doctor import build_doctor_report, render_doctor_report
@@ -214,7 +214,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     apply_plan = sub.add_parser("apply-plan", help="validate or apply a queue mutation plan")
     apply_plan.add_argument("plan_path", help="queue plan JSON path")
-    apply_plan.add_argument("--dry-run", action="store_true", help="validate and report without queue mutations")
+    apply_mode = apply_plan.add_mutually_exclusive_group()
+    apply_mode.add_argument("--dry-run", action="store_true", help="validate and report without queue mutations; this is the default")
+    apply_mode.add_argument("--apply", action="store_true", help="apply validated safe queue mutations under the queue lock")
     apply_plan.add_argument("--json", action="store_true", help="print JSON")
     apply_plan.set_defaults(func=cmd_apply_plan)
     return parser
@@ -795,10 +797,10 @@ def cmd_prune(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_apply_plan(config: Config, args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        print("error: apply mode is not implemented yet; rerun with --dry-run", file=sys.stderr)
-        return 1
-    report = build_apply_plan_report(config, args.plan_path)
+    if args.apply:
+        report = apply_queue_mutation_plan(config, args.plan_path)
+    else:
+        report = build_apply_plan_report(config, args.plan_path)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:

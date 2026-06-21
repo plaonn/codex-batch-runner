@@ -295,12 +295,14 @@ cbr queue deps TASK_ID --add DEP_ID --remove OLD_DEP_ID --reason "implementation
 cbr queue replan TASK_ID --prompt-file replan.md --reason "spec updated"
 cbr queue plan --from review-bundle.json --out queue-plan.json
 cbr apply-plan queue-plan.json --dry-run
-cbr apply-plan queue-plan.json
+cbr apply-plan queue-plan.json --apply
 ```
 
-작은 수동 operation은 `cbr queue ...` subcommand로 표현하고, Codex/operator workflow가 여러 task를 함께 바꾸는 경우에는 구조화된 `cbr apply-plan queue-plan.json`을 기본 경로로 둠. 첫 구현은 `apply-plan --dry-run`만 제공해 validation report를 출력하고 task 파일을 쓰지 않음.
+작은 수동 operation은 `cbr queue ...` subcommand로 표현하고, Codex/operator workflow가 여러 task를 함께 바꾸는 경우에는 구조화된 `cbr apply-plan queue-plan.json`을 기본 경로로 둠. `apply-plan`은 기본값이 dry-run이며, `--apply`가 명시된 경우에만 task 파일을 변경함.
 
-현재 구현된 `cbr apply-plan QUEUE_PLAN.json --dry-run`은 read-only validator임. `--dry-run` 없이 실행하면 apply mode가 아직 구현되지 않았다는 명확한 오류로 종료함. 지원 operation 이름은 `pause`, `unpause`, `replan`, `supersede`, `split`, `merge`, `retarget_metadata`, `dependency_changes`, `append_note`, `create_followup`임. Dry-run은 plan JSON을 읽고 `schema_version`, `actor`, `operations`, plan 또는 operation 단위 `reason`, 대상 task 존재 여부, running task 대상 금지, dependency_changes와 생성 draft가 만드는 dependency cycle을 검증함. 결과는 human report 또는 `--json` structured report로 출력함. 이 단계는 queue 파일을 변경하지 않고 Codex를 호출하지 않으며 mutation trigger도 실행하지 않음. Report에는 raw prompt, log path, session/thread id, credential/token 같은 민감한 plan 값을 redaction해야 함.
+현재 구현된 `cbr apply-plan QUEUE_PLAN.json`과 `--dry-run`은 read-only validator임. 지원 operation 이름은 `pause`, `unpause`, `replan`, `supersede`, `split`, `merge`, `retarget_metadata`, `dependency_changes`, `append_note`, `create_followup`임. Dry-run은 plan JSON을 읽고 `schema_version`, `actor`, `operations`, plan 또는 operation 단위 `reason`, 대상 task 존재 여부, operation별 `expected` stale check, running task 대상 금지, dependency_changes와 생성 draft가 만드는 dependency cycle을 검증함. 결과는 human report 또는 `--json` structured report로 출력함. 이 단계는 queue 파일을 변경하지 않고 Codex를 호출하지 않으며 mutation trigger도 실행하지 않음. Report에는 raw prompt, log path, session/thread id, credential/token 같은 민감한 plan 값을 redaction해야 함.
+
+`cbr apply-plan QUEUE_PLAN.json --apply`는 runner와 같은 queue lock을 잡은 뒤 dry-run validation을 즉시 다시 실행함. 검증 실패, stale `expected` mismatch, active lock, running task 대상, `status=running` 전환, dependency cycle은 모두 적용 전에 거부함. 첫 apply 범위는 사람이 읽을 수 있는 task JSON의 제한된 field 변경으로 둠: `title`, `description`, `category`, `labels`, `depends_on`, `status`. `dependency_changes`는 `depends_on` add/remove/replace를 지원하고, `pause`, `unpause`, `supersede`는 status 중심의 작은 전환만 수행함. `split`, `merge`, `create_followup`처럼 task 생성이나 다중 재구성이 필요한 operation은 apply 대상이 아니며, 명확히 설계되고 테스트되기 전까지 거부함. 변경된 task마다 sanitized `task_mutated` event를 남기고, durable write와 event 기록 이후 optional `post_mutation_trigger_command`를 실행함.
 
 Plan patch schema의 상위 형태:
 
@@ -348,7 +350,7 @@ Plan patch schema의 상위 형태:
 }
 ```
 
-각 operation은 바꿀 task id, 변경하려는 field, operation별 reason, 기대하는 현재 상태(`expected`)를 포함해야 함. `expected`는 stale plan 방지용 optimistic validation으로 사용함. 적용 전 validation은 schema, task existence, allowed status transition, dependency graph, public/private safety, task creation limit, atomic write 가능 여부를 검사하고, dry-run report에 `would_change`, `warnings`, `errors`를 구분해 출력함.
+각 operation은 바꿀 task id, 변경하려는 field, operation별 reason, 기대하는 현재 상태(`expected`)를 포함할 수 있음. `expected`는 stale plan 방지용 optimistic validation으로 사용하며, 지정된 field 값이 현재 task JSON과 정확히 다르면 dry-run과 apply 모두 실패함. 적용 전 validation은 schema, task existence, allowed status transition, dependency graph, public/private safety, task creation limit, atomic write 가능 여부를 검사하고, dry-run report에 `would_change`, `warnings`, `errors`를 구분해 출력함.
 
 Audit 요구사항:
 
@@ -360,8 +362,8 @@ Audit 요구사항:
 Rough roadmap:
 
 - Spec first: 이 section을 기준으로 operation, validation, audit model을 확정함.
-- Read-only validation/dry-run: `cbr apply-plan --dry-run`이 queue를 읽고 plan patch의 schema와 dependency graph, safety rule 위반을 보고함.
-- Limited mutations: `pause`, `unpause`, `append_note`, `dependency_changes`, metadata retarget처럼 blast radius가 작은 operation부터 적용함.
+- Read-only validation/dry-run: `cbr apply-plan` 또는 `cbr apply-plan --dry-run`이 queue를 읽고 plan patch의 schema와 dependency graph, safety rule 위반을 보고함.
+- Limited mutations: `cbr apply-plan --apply`가 queue lock 아래에서 metadata retarget, dependency rewrite, 작은 status 전환처럼 blast radius가 작은 operation부터 적용함.
 - Replan/supersede/split/merge: review bundle과 operator 확인 흐름이 충분히 안정된 뒤 task prompt revision과 task creation을 제한적으로 허용함.
 - Codex-generated plan patches: reviewer gates와 human fallback이 존재한 뒤에만 Codex가 plan patch를 생성하게 하고, 기본은 dry-run 또는 human-approved apply로 유지함.
 
@@ -656,7 +658,7 @@ launchd 같은 scheduler는 사용자 shell `PATH`를 그대로 상속하지 않
 
 `post_mutation_trigger_command`는 queue mutation 이후, 그리고 `run-next`가 task 하나를 처리한 뒤 eligible follow-up work가 있을 때 외부 scheduler/runner를 즉시 깨우기 위한 optional hook임. 값은 shell string이 아니라 argv string list이며 기본값은 빈 list로 disabled임. 구현은 shell expansion을 하지 않고 짧은 timeout으로 실행함. 실패, non-zero exit, timeout은 stderr warning으로만 표시하고 원래 mutation 또는 처리된 task 결과를 되돌리지 않음.
 
-hook은 durable task JSON/state write와 event emission이 끝난 뒤 실행함. `enqueue`, `accept`, `reject`, `resolve`, `archive`, `cooldown clear` 같은 queue 또는 runnable-state mutation command에서 호출함. `run-next`는 task 하나를 terminal/resumable state로 갱신하거나 completed task 하나를 mechanically accepted로 변경하고 lock을 해제한 뒤, global cooldown이 없고 `select_next_task` 기준 eligible `runnable` 또는 `needs_resume` task가 있을 때만 hook을 호출함. Empty queue, active global cooldown, dependency-blocked-only queue, task cooldown뿐인 queue, 방금 처리한 task가 아직 cooldown 중인 경우, mutation 없는 auto-review 시도에는 호출하지 않음. `list`, `show`, `summary`, `review-bundle`, `logs`, `transcript`, `doctor`, `events`, `rate-limits`, `cooldown show`, `cooldown set`, `prune` 같은 read-only, cooldown-setting, 또는 cleanup command에서는 호출하지 않음. 목적은 polling interval로 인한 latency를 줄이는 것이며, polling은 fallback으로 계속 유지함. duplicate wake-up은 안전해야 함. `run-next`가 lock, cooldown, empty queue, dependency, single-task execution 규칙을 계속 강제하기 때문임.
+hook은 durable task JSON/state write와 event emission이 끝난 뒤 실행함. `enqueue`, `accept`, `reject`, `resolve`, `archive`, `cooldown clear`, 성공한 `apply-plan --apply` 같은 queue 또는 runnable-state mutation command에서 호출함. `run-next`는 task 하나를 terminal/resumable state로 갱신하거나 completed task 하나를 mechanically accepted로 변경하고 lock을 해제한 뒤, global cooldown이 없고 `select_next_task` 기준 eligible `runnable` 또는 `needs_resume` task가 있을 때만 hook을 호출함. Empty queue, active global cooldown, dependency-blocked-only queue, task cooldown뿐인 queue, 방금 처리한 task가 아직 cooldown 중인 경우, mutation 없는 auto-review 시도에는 호출하지 않음. `list`, `show`, `summary`, `review-bundle`, `logs`, `transcript`, `doctor`, `events`, `rate-limits`, `cooldown show`, `cooldown set`, `prune`, `apply-plan` dry-run 같은 read-only, cooldown-setting, 또는 cleanup command에서는 호출하지 않음. 목적은 polling interval로 인한 latency를 줄이는 것이며, polling은 fallback으로 계속 유지함. duplicate wake-up은 안전해야 함. `run-next`가 lock, cooldown, empty queue, dependency, single-task execution 규칙을 계속 강제하기 때문임.
 
 예시:
 
@@ -860,7 +862,7 @@ config 탐색 순서:
 
 `cbr archive TASK_ID`는 task 파일을 삭제하지 않고 `status=archived`, `previous_status`, `archived_at`을 기록함.
 
-Successful queue mutations run the optional `post_mutation_trigger_command` after durable writes. This includes `enqueue`, `accept`, `reject`, `resolve`, `archive`, and `cooldown clear`. After `run-next` processes one task and releases the runner lock, it may run the same wake-up hook when eligible follow-up work remains and no global cooldown is active. Read-only commands, `cooldown show`, `cooldown set`, empty or cooldown `run-next` exits, and `prune` do not run the trigger.
+Successful queue mutations run the optional `post_mutation_trigger_command` after durable writes. This includes `enqueue`, `accept`, `reject`, `resolve`, `archive`, `cooldown clear`, and successful `apply-plan --apply` mutations. After `run-next` processes one task and releases the runner lock, it may run the same wake-up hook when eligible follow-up work remains and no global cooldown is active. Read-only commands, `apply-plan` dry-runs, `cooldown show`, `cooldown set`, empty or cooldown `run-next` exits, and `prune` do not run the trigger.
 
 `cbr summary TASK_ID`는 task metadata, dependency blocked 상태, dependency blocker reason, `last_result.summary`, optional commits/push_status, changed files, verification, task `git_status`, last_error, next_prompt, log path를 transcript보다 짧은 Markdown 형식으로 표시합니다.
 
