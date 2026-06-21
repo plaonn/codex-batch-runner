@@ -175,7 +175,7 @@ PYTHONPATH=src python3 -m codex_batch_runner prune
 PYTHONPATH=src python3 -m codex_batch_runner prune --older-than-days 60 --json
 ```
 
-`prune`은 기본적으로 dry-run입니다. `archived` task와 `completed + review_status=accepted` task 중 지정한 age보다 오래된 항목만 후보로 보고하며, task JSON 파일과 task에 기록된 log path를 함께 표시합니다. 실제 삭제는 `--apply`를 명시한 경우에만 수행합니다. Event retention pruning is a follow-up; current `prune` does not delete event JSONL files.
+`prune`은 기본적으로 dry-run입니다. `archived` task와 `completed + review_status=accepted` task 중 지정한 age보다 오래된 항목을 task/log 후보로 보고하며, task JSON 파일과 task에 기록된 log path를 함께 표시합니다. configured `event_dir` 아래의 오래된 `*.jsonl` event log 파일은 별도의 event 후보로 보고합니다. 실제 삭제는 `--apply`를 명시한 경우에만 수행합니다.
 
 ## 설정
 
@@ -277,7 +277,7 @@ task와 state 파일은 같은 디렉터리에 임시 파일을 쓴 뒤 `os.repl
 
 Core state-changing commands also append sanitized audit events. Initial event types include `task_created`, `task_started`, `task_completed`, `task_failed`, `task_needs_resume`, `task_blocked_user`, `task_reviewed`, `task_resolved`, `task_archived`, and `rate_limit_detected`. Event payloads are intentionally small and redact prompt text, raw transcripts, session/thread ids, secrets, credentials, and token-like fields. Event write failures are warnings; queue operations continue to rely on canonical task JSON files.
 
-`prune`은 삭제 동작이 있는 명령이므로 기본값이 비파괴 dry-run입니다. `--apply`가 없으면 파일을 삭제하지 않습니다. `--apply`가 있어도 resolved path가 configured `queue_dir` 또는 `log_dir` 밖에 있는 파일은 삭제하지 않으며, report에 blocked 항목으로 남깁니다.
+`prune`은 삭제 동작이 있는 명령이므로 기본값이 비파괴 dry-run입니다. `--apply`가 없으면 파일을 삭제하지 않습니다. `--apply`가 있어도 resolved path가 configured `queue_dir`, `log_dir`, 또는 `event_dir` 밖에 있는 파일은 삭제하지 않으며, report에 blocked 항목으로 남깁니다. Event pruning only considers `*.jsonl` files under `event_dir`; notifier cursor/state files and other non-JSONL files are skipped. Notifier cursor-aware retention is not implemented yet, so event pruning currently uses age and `event_dir` containment only.
 
 ## Codex CLI maintenance
 

@@ -542,8 +542,12 @@ def render_prune_report(report: dict) -> str:
         f"mode: {report['mode']}",
         f"older_than_days: {report['age_days']}",
         f"candidates: {report['candidate_count']}",
+        f"task_candidates: {report.get('task_candidate_count', len(report['candidates']))}",
+        f"event_candidates: {report.get('event_candidate_count', len(report.get('event_candidates', [])))}",
         f"deleted_files: {report['deleted_files']}",
     ]
+    if report["candidates"]:
+        lines.append("task/log candidates:")
     for candidate in report["candidates"]:
         lines.append(f"{candidate['task_id']}\t{candidate['reason']}\t{candidate['timestamp']}")
         for file in candidate["files"]:
@@ -558,6 +562,20 @@ def render_prune_report(report: dict) -> str:
                 flags.append(f"blocked={file['reason']}")
             flag_text = ",".join(flags) if flags else "-"
             lines.append(f"  {file['kind']}\t{flag_text}\t{file['path']}")
+    if report.get("event_candidates"):
+        lines.append("event candidates:")
+    for file in report.get("event_candidates", []):
+        flags = []
+        if file["deleted"]:
+            flags.append("deleted")
+        elif not file["exists"]:
+            flags.append("missing")
+        elif report["dry_run"]:
+            flags.append("would-delete")
+        if not file["safe"]:
+            flags.append(f"blocked={file['reason']}")
+        flag_text = ",".join(flags) if flags else "-"
+        lines.append(f"  {file['kind']}\t{flag_text}\t{file['path']}")
     return "\n".join(lines) + "\n"
 
 

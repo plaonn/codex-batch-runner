@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -567,6 +568,84 @@ class CliTests(unittest.TestCase):
             self.assertFalse(outside["safe"])
             self.assertFalse(outside["deleted"])
             self.assertEqual("outside configured log_dir", outside["reason"])
+
+    def test_prune_dry_run_reports_old_event_jsonl_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            config.event_dir.mkdir(parents=True)
+            old_event = config.event_dir / "2000-01-01.jsonl"
+            old_event.write_text('{"event_type":"task_created"}\n', encoding="utf-8")
+            os.utime(old_event, (946684800, 946684800))
+
+            code, output = run_cli(["--config", str(config_path), "prune", "--older-than-days", "30"])
+
+            self.assertEqual(0, code)
+            self.assertIn("mode: dry-run", output)
+            self.assertIn("event candidates:", output)
+            self.assertIn(f"event\twould-delete\t{old_event.resolve()}", output)
+            self.assertTrue(old_event.exists())
+
+    def test_prune_apply_deletes_safe_old_event_jsonl_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            config.event_dir.mkdir(parents=True)
+            old_event = config.event_dir / "2000-01-01.jsonl"
+            old_event.write_text('{"event_type":"task_created"}\n', encoding="utf-8")
+            os.utime(old_event, (946684800, 946684800))
+
+            code, output = run_cli(["--config", str(config_path), "prune", "--apply", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertFalse(old_event.exists())
+            self.assertEqual(1, report["event_candidate_count"])
+            self.assertTrue(report["event_candidates"][0]["deleted"])
+            self.assertEqual("event", report["event_candidates"][0]["kind"])
+
+    def test_prune_does_not_delete_event_jsonl_resolved_outside_event_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            config.event_dir.mkdir(parents=True)
+            outside_event = Path(tmp) / "outside-event.jsonl"
+            outside_event.write_text('{"event_type":"task_created"}\n', encoding="utf-8")
+            os.utime(outside_event, (946684800, 946684800))
+            event_link = config.event_dir / "linked.jsonl"
+            event_link.symlink_to(outside_event)
+
+            code, output = run_cli(["--config", str(config_path), "prune", "--apply", "--json"])
+            report = json.loads(output)
+            event = report["event_candidates"][0]
+
+            self.assertEqual(0, code)
+            self.assertTrue(outside_event.exists())
+            self.assertTrue(event_link.exists())
+            self.assertFalse(event["safe"])
+            self.assertFalse(event["deleted"])
+            self.assertEqual(str(outside_event.resolve()), event["path"])
+            self.assertEqual("outside configured event_dir", event["reason"])
+
+    def test_prune_skips_non_jsonl_event_dir_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            config.event_dir.mkdir(parents=True)
+            cursor = config.event_dir / "notify-state.json"
+            cursor.write_text('{"offset":0}\n', encoding="utf-8")
+            text_log = config.event_dir / "2000-01-01.log"
+            text_log.write_text("not jsonl\n", encoding="utf-8")
+            for path in (cursor, text_log):
+                os.utime(path, (946684800, 946684800))
+
+            code, output = run_cli(["--config", str(config_path), "prune", "--apply", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, report["event_candidate_count"])
+            self.assertTrue(cursor.exists())
+            self.assertTrue(text_log.exists())
 
     def test_accept_and_reject_update_review_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

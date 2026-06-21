@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -38,8 +38,10 @@ def build_prune_report(config: Config, age_days: int, apply: bool = False) -> di
 
     queue_dir = config.queue_dir.expanduser().resolve()
     log_dir = config.log_dir.expanduser().resolve()
+    event_dir = config.event_dir.expanduser().resolve()
     cutoff = utc_now() - timedelta(days=age_days)
     ensure_dir(queue_dir)
+    ensure_dir(event_dir)
 
     candidates = []
     deleted_files = 0
@@ -66,6 +68,11 @@ def build_prune_report(config: Config, age_days: int, apply: bool = False) -> di
             }
         )
 
+    event_candidates = event_candidate_files(event_dir, cutoff)
+    if apply:
+        event_candidates = [delete_file(file) for file in event_candidates]
+    deleted_files += sum(1 for file in event_candidates if file.deleted)
+
     return {
         "mode": "apply" if apply else "dry-run",
         "dry_run": not apply,
@@ -73,9 +80,13 @@ def build_prune_report(config: Config, age_days: int, apply: bool = False) -> di
         "cutoff": cutoff.isoformat(),
         "queue_dir": str(queue_dir),
         "log_dir": str(log_dir),
-        "candidate_count": len(candidates),
+        "event_dir": str(event_dir),
+        "candidate_count": len(candidates) + len(event_candidates),
+        "task_candidate_count": len(candidates),
+        "event_candidate_count": len(event_candidates),
         "deleted_files": deleted_files,
         "candidates": candidates,
+        "event_candidates": [file.as_dict() for file in event_candidates],
     }
 
 
@@ -116,6 +127,20 @@ def task_log_paths(task: dict) -> list[str]:
         if isinstance(path, str) and path:
             paths.append(path)
     return list(dict.fromkeys(paths))
+
+
+def event_candidate_files(event_dir: Path, cutoff: datetime) -> list[PruneFile]:
+    files: list[PruneFile] = []
+    for path in sorted(event_dir.rglob("*.jsonl")):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        modified_at = datetime.fromtimestamp(mtime, tz=cutoff.tzinfo)
+        if modified_at > cutoff:
+            continue
+        files.append(safe_file("event", path, event_dir, "event_dir"))
+    return files
 
 
 def safe_file(kind: str, path: Path, root: Path, root_name: str) -> PruneFile:
