@@ -99,7 +99,11 @@ PYTHONPATH=src python3 -m codex_batch_runner run-next
 ```bash
 PYTHONPATH=src python3 -m codex_batch_runner show task-a
 PYTHONPATH=src python3 -m codex_batch_runner summary task-a
+PYTHONPATH=src python3 -m codex_batch_runner review-bundle task-a
+PYTHONPATH=src python3 -m codex_batch_runner review-bundle task-a --json
 ```
+
+`review-bundle`은 향후 reviewer Codex 또는 사람 검토자가 현재 대화 문맥 없이 task 결과를 재검토할 수 있도록 Markdown-like report를 출력합니다. 기본 출력과 `--json` 모두 task metadata, sanitized prompt excerpt, status/review/resolution, dependencies/blockers, `last_result`, `last_run`, changed files, verification, `last_error`, relevant log paths, git status, inferable commit information, safely scoped commit or working tree diff/stat, and public/private safety policy를 포함합니다. 원본 JSONL transcript 내용은 기본적으로 포함하지 않으며, 명령은 read-only이고 Codex를 호출하거나 task를 accept/reject하지 않습니다.
 
 로그 확인:
 

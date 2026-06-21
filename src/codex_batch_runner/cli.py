@@ -24,6 +24,7 @@ from .queue import (
     task_project_id,
     task_project_root,
 )
+from .review_bundle import build_review_bundle, render_review_bundle
 from .runner import run_next
 from .state import load_state
 from .summary import render_task_summary
@@ -86,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
     summary.add_argument("task_id")
     summary.add_argument("--json", action="store_true", help="print raw JSON")
     summary.set_defaults(func=cmd_summary)
+
+    review_bundle = sub.add_parser("review-bundle", help="show a self-contained review bundle")
+    review_bundle.add_argument("task_id")
+    review_bundle.add_argument("--json", action="store_true", help="print JSON")
+    review_bundle.set_defaults(func=cmd_review_bundle)
 
     logs = sub.add_parser("logs", help="show task log paths or log contents")
     logs.add_argument("task_id")
@@ -400,6 +406,17 @@ def cmd_summary(config: Config, args: argparse.Namespace) -> int:
         return 0
     by_id = {item.get("id"): item for item in list_tasks(config)}
     print(render_task_summary(task, by_id=by_id), end="")
+    return 0
+
+
+def cmd_review_bundle(config: Config, args: argparse.Namespace) -> int:
+    task = load_task(config, args.task_id)
+    by_id = {item.get("id"): item for item in list_tasks(config)}
+    bundle = build_review_bundle(task, by_id=by_id)
+    if args.json:
+        print(json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    print(render_review_bundle(bundle), end="")
     return 0
 
 

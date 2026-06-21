@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -48,6 +49,17 @@ def set_status(config: Config, task_id: str, status: str, last_error: str | None
 
 def list_lines(output: str) -> list[str]:
     return output.strip().splitlines()
+
+
+def git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(["git", "-C", str(cwd), *args], check=True, stdout=subprocess.PIPE, text=True)
+    return result.stdout.strip()
+
+
+def init_repo(path: Path) -> None:
+    subprocess.run(["git", "init", "-b", "main", str(path)], check=True, stdout=subprocess.PIPE)
+    git(path, "config", "user.email", "test@example.invalid")
+    git(path, "config", "user.name", "Test User")
 
 
 class CliTests(unittest.TestCase):
@@ -726,6 +738,126 @@ class CliTests(unittest.TestCase):
             self.assertIn("dependencies: dep", output)
             self.assertIn("dependencies_ready: false", output)
             self.assertIn("blocked_by: dep", output)
+
+    def test_review_bundle_prints_human_report_with_working_tree_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            (repo / "file.txt").write_text("base\nchange\n", encoding="utf-8")
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            dep = create_task(config, "dependency", str(repo), task_id="dep")
+            dep["status"] = "completed"
+            dep["review_status"] = "accepted"
+            save_task(config, dep)
+            task = create_task(config, "Implement token=private-value handling.", str(repo), task_id="bundle", depends_on=["dep"])
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["last_result"] = {
+                "task_id": "bundle",
+                "status": "completed",
+                "summary": "Changed token=private-value handling.",
+                "next_prompt": "",
+                "changed_files": ["file.txt"],
+                "verification": ["python3 -m unittest"],
+            }
+            task["last_run"] = {"command_kind": "exec", "returncode": 0, "duration_seconds": 1.2}
+            task["log_paths"] = ["/Users/example/.codex-batch-runner/logs/attempt.jsonl"]
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "review-bundle", "bundle"])
+
+            self.assertEqual(0, code)
+            self.assertIn("# review bundle bundle", output)
+            self.assertIn("## prompt_excerpt", output)
+            self.assertIn("token [REDACTED]", output)
+            self.assertIn('"kind": "working_tree"', output)
+            self.assertIn("+change", output)
+            self.assertIn("python3 -m unittest", output)
+            self.assertIn("transcript_contents_included: False", output)
+            self.assertNotIn("private-value", output)
+            self.assertNotIn("/Users/example", output)
+
+    def test_review_bundle_json_output_is_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="bundle-json", project_id="project-a")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["last_result"] = {
+                "task_id": "bundle-json",
+                "status": "completed",
+                "summary": "done",
+                "changed_files": ["README.md"],
+                "verification": ["unit tests"],
+            }
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "review-bundle", "bundle-json", "--json"])
+            bundle = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual("bundle-json", bundle["task"]["id"])
+            self.assertEqual("completed", bundle["status"])
+            self.assertEqual(["unit tests"], bundle["verification"])
+            self.assertFalse(bundle["transcript_contents_included"])
+            self.assertIn("git_repository", bundle)
+            self.assertIn("safety_policy", bundle)
+
+    def test_review_bundle_reports_missing_git_fallback_without_guessing_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="no-git")
+            task["status"] = "completed"
+            task["last_result"] = {
+                "task_id": "no-git",
+                "status": "completed",
+                "summary": "done",
+                "commits": ["local change without hash"],
+                "changed_files": [],
+                "verification": [],
+            }
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "review-bundle", "no-git", "--json"])
+            bundle = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertFalse(bundle["git_repository"]["available"])
+            self.assertEqual("unavailable", bundle["commit_information"]["status"])
+            self.assertIn("git repository unavailable", bundle["git_diff"]["warnings"])
+
+    def test_review_bundle_sanitizes_obvious_secret_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "Use api_key=abc123 and bearer secret-token in /Users/alice/repo.", tmp, task_id="sanitize")
+            task["status"] = "failed"
+            task["last_error"] = "password=hunter2 in /Users/alice/repo"
+            task["last_result"] = {
+                "task_id": "sanitize",
+                "status": "failed",
+                "summary": "secret=private-value",
+                "changed_files": [],
+                "verification": ["TOKEN=private-value command"],
+            }
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "review-bundle", "sanitize", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertNotIn("abc123", output)
+            self.assertNotIn("hunter2", output)
+            self.assertNotIn("private-value", output)
+            self.assertNotIn("/Users/alice", output)
+            self.assertIn("[REDACTED]", output)
 
     def test_transcript_includes_codex_session_log_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
