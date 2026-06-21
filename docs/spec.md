@@ -254,6 +254,49 @@ runner는 아래 조건을 모두 만족하는 task 하나만 실행함.
 - 오래된 `accepted`/`archived` task와 로그는 추후 `cbr prune`으로 정리할 수 있게 합니다.
 - 초기 `cbr prune`은 dry-run report를 기본값으로 두고, 명시적인 `--apply`가 있을 때만 삭제합니다.
 
+## Notification event model
+
+향후 notification과 dashboard adapter는 현재 task 파일을 주기적으로 polling하는 방식만으로 동작하지 않고, append-only state-change event를 기준으로 동작해야 합니다. Task 파일은 최신 상태를 보여 주는 source of truth이고, event log는 notifier가 중복 없이 변경을 따라가기 위한 stream입니다.
+
+Event log는 runtime directory 아래 date-partitioned JSONL 파일로 저장합니다.
+
+```text
+.codex-batch-runner/events/YYYY-MM-DD.jsonl
+```
+
+초기 event type은 다음 상태 전이를 다룹니다.
+
+- `task.started`: runner가 task 실행을 시작함
+- `task.completed`: Codex final JSON이 `completed`를 반환함
+- `task.failed`: task가 실패 상태로 전환됨
+- `task.blocked_user`: 사용자 입력이 필요해 자동 처리가 중단됨
+- `task.needs_resume`: Codex가 후속 실행을 요청함
+- `task.rate_limited`: rate-limit 또는 usage-limit cooldown이 설정됨
+- `task.accepted`: 운영자가 결과를 승인함
+- `task.rejected`: 운영자가 결과를 반려하거나 follow-up 필요로 표시함
+- `task.resolved`: failed/blocked task에 운영상 resolution이 기록됨
+- `lock.stale_recovered`: stale lock 또는 stale running task가 복구됨
+
+각 event payload는 notifier에 필요한 최소 안전 필드만 포함합니다.
+
+- `event_id`: 중복 처리 방지용 고유 id
+- `occurred_at`: event 발생 시각
+- `task_id`: task 관련 event일 때의 task id
+- `project_id`: project routing metadata
+- `status`: task 상태 전이와 관련 있을 때의 status
+- `review_status`: accept/reject/follow-up review 상태와 관련 있을 때의 review state
+- `resolution`: resolved task의 운영상 처리 결정
+- `attempts`: event 시점의 task attempt count
+- `summary_excerpt`: 사람이 알림에서 읽을 수 있는 짧은 요약
+
+Event에는 transcript, raw Codex JSONL log, prompt 원문, session id, thread id, credential, Telegram token/chat id, 환경 변수 값, secret으로 볼 수 있는 문자열을 넣지 않습니다. 알림에서 더 자세한 확인이 필요하면 operator가 로컬에서 `cbr summary` 또는 `cbr transcript`를 직접 실행합니다.
+
+Notifier는 각자 cursor와 전송 상태를 public repository 밖에 저장합니다. 예를 들어 Telegram notifier는 `.codex-batch-runner/notify-state.json`이나 사용자 local config/state 파일에 마지막 처리 event file, byte offset, 마지막 event id, 전송 실패 retry metadata를 저장할 수 있습니다. Notifier state는 adapter별로 독립적이어야 하며, 한 notifier의 장애가 다른 notifier의 cursor를 변경하지 않아야 합니다.
+
+Event log retention 기본값은 60일입니다. `cbr prune`은 향후 60일보다 오래된 event file을 cleanup 후보에 포함해야 합니다. 초기 구현은 dry-run 후보로만 보고하고, 이후 `--apply`가 있을 때 삭제합니다. Notifier state상 아직 처리되지 않은 event file은 삭제하지 않고 skip하거나 warning으로 보고해야 합니다.
+
+Telegram integration은 future optional adapter입니다. Core runner는 Telegram에 직접 의존하지 않고 append-only event log만 기록합니다. Telegram token, chat id, enable flag, rate limit, formatting option은 local-only config나 runtime state에만 저장하며 public docs와 examples에는 실제 값을 포함하지 않습니다.
+
 ## Runner execution policy
 
 `run-next`는 1회 실행당 runnable task 하나만 처리함.
