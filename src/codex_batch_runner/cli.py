@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .apply_plan import build_apply_plan_report, render_apply_plan_report
 from .config import Config
 from .doctor import build_doctor_report, render_doctor_report
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human
@@ -159,6 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
     prune_mode.add_argument("--dry-run", action="store_true", help="report only; this is the default")
     prune.add_argument("--json", action="store_true", help="print JSON")
     prune.set_defaults(func=cmd_prune)
+
+    apply_plan = sub.add_parser("apply-plan", help="validate or apply a queue mutation plan")
+    apply_plan.add_argument("plan_path", help="queue plan JSON path")
+    apply_plan.add_argument("--dry-run", action="store_true", help="validate and report without queue mutations")
+    apply_plan.add_argument("--json", action="store_true", help="print JSON")
+    apply_plan.set_defaults(func=cmd_apply_plan)
     return parser
 
 
@@ -535,6 +542,18 @@ def cmd_prune(config: Config, args: argparse.Namespace) -> int:
     else:
         print(render_prune_report(report), end="")
     return 0
+
+
+def cmd_apply_plan(config: Config, args: argparse.Namespace) -> int:
+    if not args.dry_run:
+        print("error: apply mode is not implemented yet; rerun with --dry-run", file=sys.stderr)
+        return 1
+    report = build_apply_plan_report(config, args.plan_path)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_apply_plan_report(report), end="")
+    return 0 if report["ok"] else 1
 
 
 def render_prune_report(report: dict) -> str:

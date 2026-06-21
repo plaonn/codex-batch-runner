@@ -178,6 +178,15 @@ PYTHONPATH=src python3 -m codex_batch_runner prune --older-than-days 60 --json
 
 `prune`은 기본적으로 dry-run입니다. `archived` task와 `completed + review_status=accepted` task 중 지정한 age보다 오래된 항목을 task/log 후보로 보고하며, task JSON 파일과 task에 기록된 log path를 함께 표시합니다. configured `event_dir` 아래의 오래된 `*.jsonl` event log 파일은 별도의 event 후보로 보고합니다. 실제 삭제는 `--apply`를 명시한 경우에만 수행합니다.
 
+queue mutation plan 검증:
+
+```bash
+PYTHONPATH=src python3 -m codex_batch_runner apply-plan queue-plan.json --dry-run
+PYTHONPATH=src python3 -m codex_batch_runner apply-plan queue-plan.json --dry-run --json
+```
+
+`apply-plan`은 현재 read-only dry-run validator만 제공합니다. `--dry-run` 없이 실행하면 apply mode가 아직 구현되지 않았다는 오류로 종료합니다. Dry-run은 plan schema, 지원 operation 이름, 대상 task 존재 여부, running task 대상 금지, dependency cycle 가능성, plan 또는 operation 단위 `reason` 존재 여부를 확인하고 human report 또는 JSON report를 출력합니다. Task JSON 파일을 쓰지 않고 Codex를 실행하지 않으며 post-mutation hook도 호출하지 않습니다. Report는 raw prompt, log path, session/thread id, credential/token 같은 민감한 plan 값을 redaction합니다.
+
 ## 설정
 
 config 탐색 순서는 다음과 같습니다.

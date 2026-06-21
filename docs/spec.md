@@ -292,7 +292,9 @@ cbr apply-plan queue-plan.json --dry-run
 cbr apply-plan queue-plan.json
 ```
 
-작은 수동 operation은 `cbr queue ...` subcommand로 표현하고, Codex/operator workflow가 여러 task를 함께 바꾸는 경우에는 구조화된 `cbr apply-plan queue-plan.json`을 기본 경로로 둠. 첫 구현은 `apply-plan --dry-run`만 제공해 validation report를 출력하고 task 파일을 쓰지 않는 것이 좋음.
+작은 수동 operation은 `cbr queue ...` subcommand로 표현하고, Codex/operator workflow가 여러 task를 함께 바꾸는 경우에는 구조화된 `cbr apply-plan queue-plan.json`을 기본 경로로 둠. 첫 구현은 `apply-plan --dry-run`만 제공해 validation report를 출력하고 task 파일을 쓰지 않음.
+
+현재 구현된 `cbr apply-plan QUEUE_PLAN.json --dry-run`은 read-only validator임. `--dry-run` 없이 실행하면 apply mode가 아직 구현되지 않았다는 명확한 오류로 종료함. 지원 operation 이름은 `pause`, `unpause`, `replan`, `supersede`, `split`, `merge`, `retarget_metadata`, `dependency_changes`, `append_note`, `create_followup`임. Dry-run은 plan JSON을 읽고 `schema_version`, `actor`, `operations`, plan 또는 operation 단위 `reason`, 대상 task 존재 여부, running task 대상 금지, dependency_changes와 생성 draft가 만드는 dependency cycle을 검증함. 결과는 human report 또는 `--json` structured report로 출력함. 이 단계는 queue 파일을 변경하지 않고 Codex를 호출하지 않으며 mutation trigger도 실행하지 않음. Report에는 raw prompt, log path, session/thread id, credential/token 같은 민감한 plan 값을 redaction해야 함.
 
 Plan patch schema의 상위 형태:
 

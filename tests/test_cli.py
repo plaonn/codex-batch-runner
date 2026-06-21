@@ -71,6 +71,12 @@ def init_repo(path: Path) -> None:
     git(path, "config", "user.name", "Test User")
 
 
+def write_plan(tmp: str, data: dict) -> Path:
+    path = Path(tmp) / "queue-plan.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
 class CliTests(unittest.TestCase):
     def test_post_mutation_trigger_runs_after_enqueue_and_review_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -626,6 +632,158 @@ class CliTests(unittest.TestCase):
             self.assertFalse(event["deleted"])
             self.assertEqual(str(outside_event.resolve()), event["path"])
             self.assertEqual("outside configured event_dir", event["reason"])
+
+    def test_apply_plan_dry_run_accepts_valid_dependency_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "synthetic work", tmp, task_id="task-a")
+            create_task(config, "synthetic work", tmp, task_id="task-b")
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "actor": {"type": "operator", "id": "test"},
+                    "reason": "implementation order changed",
+                    "operations": [
+                        {
+                            "op": "dependency_changes",
+                            "task_id": "task-b",
+                            "fields": {"add": ["task-a"]},
+                        }
+                    ],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--dry-run"])
+
+            self.assertEqual(0, code)
+            self.assertIn("mode: dry-run", output)
+            self.assertIn("valid: true", output)
+            self.assertIn("op[0]\tdependency_changes\ttasks=task-b\twould_change=yes", output)
+            self.assertEqual("runnable", load_task(config, "task-b")["status"])
+
+    def test_apply_plan_dry_run_rejects_missing_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "actor": "operator",
+                    "reason": "pause stale task",
+                    "operations": [{"op": "pause", "task_id": "missing"}],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--dry-run"])
+
+            self.assertEqual(1, code)
+            self.assertIn("valid: false", output)
+            self.assertIn("task not found: missing", output)
+
+    def test_apply_plan_dry_run_rejects_running_task_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "synthetic work", tmp, task_id="running-task")
+            set_status(config, "running-task", "running")
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "actor": "operator",
+                    "reason": "replan current work",
+                    "operations": [{"op": "replan", "task_id": "running-task"}],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--dry-run"])
+
+            self.assertEqual(1, code)
+            self.assertIn("operation targets running task: running-task", output)
+
+    def test_apply_plan_dry_run_rejects_dependency_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "synthetic work", tmp, task_id="task-a", depends_on=["task-b"])
+            create_task(config, "synthetic work", tmp, task_id="task-b")
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "actor": "operator",
+                    "reason": "bad dependency rewrite",
+                    "operations": [
+                        {
+                            "op": "dependency_changes",
+                            "task_id": "task-b",
+                            "fields": {"add": ["task-a"]},
+                        }
+                    ],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--dry-run"])
+
+            self.assertEqual(1, code)
+            self.assertIn("dependency graph would contain a cycle", output)
+
+    def test_apply_plan_requires_dry_run_until_apply_is_implemented(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "actor": "operator",
+                    "reason": "validate only",
+                    "operations": [],
+                },
+            )
+
+            code, output, stderr = run_cli_with_stderr(["--config", str(config_path), "apply-plan", str(plan_path)])
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("apply mode is not implemented yet", stderr)
+
+    def test_apply_plan_json_output_is_machine_readable_and_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "synthetic work", tmp, task_id="task-a")
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "actor": {"type": "operator", "id": "test"},
+                    "reason": "record safe note",
+                    "operations": [
+                        {
+                            "op": "append_note",
+                            "task_id": "task-a",
+                            "fields": {
+                                "note": "public-safe summary",
+                                "next_prompt": "raw prompt must not appear",
+                                "session_id": "session-must-not-appear",
+                            },
+                        }
+                    ],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--dry-run", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["ok"])
+            self.assertEqual("dry-run", report["mode"])
+            self.assertEqual(["task-a"], report["operations"][0]["task_ids"])
+            self.assertEqual("[redacted]", report["operations"][0]["sanitized"]["fields"]["next_prompt"])
+            self.assertEqual("[redacted]", report["operations"][0]["sanitized"]["fields"]["session_id"])
+            self.assertNotIn("raw prompt must not appear", output)
 
     def test_prune_skips_non_jsonl_event_dir_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
