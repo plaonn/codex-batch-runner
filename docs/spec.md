@@ -367,16 +367,37 @@ Rough roadmap:
 - Replan/supersede/split/merge: review bundle과 operator 확인 흐름이 충분히 안정된 뒤 task prompt revision과 task creation을 제한적으로 허용함.
 - Codex-generated plan patches: reviewer gates와 human fallback이 존재한 뒤에만 Codex가 plan patch를 생성하게 하고, 기본은 dry-run 또는 human-approved apply로 유지함.
 
-## Optional git worktree execution isolation roadmap
+## Optional git worktree execution isolation plan
 
-Git worktree 기반 실행 격리는 향후 선택 기능으로 검토합니다. 현재 runner의 기본 모델은 계속 단일 task 순차 실행, 원래 `cwd`의 main worktree 실행, 기능 비활성화입니다. Worktree 격리는 stale git review gate의 즉시 해결책이 아니며, stale task `git_status` snapshot 문제는 review 시점의 current repository state를 다시 읽는 gate로 해결해야 합니다. Worktree를 사용하더라도 task 완료 뒤 branch, dirty 상태, ahead/behind, push 상태는 현재 상태 기준으로 다시 검토해야 하며, completion-time snapshot은 보조 evidence로만 사용합니다.
+Git worktree 기반 실행 격리는 task별 repository 상태를 분리하기 위한 core optional capability입니다. 기본값은 compatibility를 위해 계속 main worktree mode입니다. 즉, `worktree_mode=disabled`에서는 현재처럼 task의 원래 `cwd`에서 실행하고, queue lock, global cooldown, dependency policy, `run-next` 1회당 task 하나 실행 원칙도 그대로 유지합니다. Worktree는 state isolation을 위한 장치이지 기본 token parallelism 기능이 아닙니다.
+
+Opt-in placeholder config는 다음과 같습니다.
+
+```json
+{
+  "worktree_mode": "disabled",
+  "worktree_root": ".codex-batch-runner/worktrees"
+}
+```
+
+`worktree_mode`의 초기 허용값은 `disabled`와 `task`입니다. `task`는 향후 task별 worktree 실행을 뜻하지만, config placeholder 단계에서는 실행 동작을 바꾸지 않습니다. `worktree_root`는 relative path이면 runner root 기준으로 해석하며, 기본값은 runtime directory 아래 local-only 경로입니다. Public example에는 실제 absolute path, private queue path, 작업자 계정명을 넣지 않습니다.
+
+Worktree mode의 핵심 모델:
+
+- Main worktree는 stable baseline으로 유지합니다. Raw task execution은 기본적으로 main에 직접 commit/merge하지 않습니다.
+- 각 implementation task는 task-specific branch와 worktree에서 실행될 수 있습니다. 기본 branch 이름은 `cbr/<task-id>`이며, Git ref 규칙을 통과하도록 sanitize합니다.
+- Completed-but-unreviewed task는 자기 branch/worktree에 그대로 남을 수 있습니다. 그동안 독립 task는 다른 task branch/worktree에서 순차 실행할 수 있습니다.
+- Review, reject, follow-up fix, accept는 main worktree에 unrelated task commit을 섞지 않고 해당 task branch/worktree를 대상으로 동작해야 합니다.
+- Accepted dependency policy가 dependent task의 base를 결정합니다. 독립 task는 configured base branch 또는 main baseline에서 시작하고, accepted parent가 필요한 dependent task는 parent task branch 또는 parent가 explicit merge/apply phase로 main에 반영된 ref에서 시작합니다.
+- Accepted task의 main 반영은 raw execution phase가 아니라 explicit merge/apply phase에서 수행합니다. Fast-forward 또는 merge commit 허용 여부는 별도 config와 operator action으로 제한하며, 기본 raw execution은 main을 갱신하지 않습니다.
+- Runner는 기본적으로 push하지 않습니다. Remote push는 향후 helper가 추가되더라도 task branch 대상으로만 explicit opt-in이며, protected baseline branch 직접 push는 금지합니다.
 
 Worktree 격리가 도움을 주는 영역:
 
 - task별 작업 디렉터리를 분리해 main worktree의 dirty file과 충돌할 가능성을 줄입니다.
 - 같은 repository에서 여러 branch 또는 여러 project routing target을 다룰 때 작업 산출물을 task 단위로 추적하기 쉽게 합니다.
 - 실패한 task의 파일 상태를 보존해 후속 review, 수동 복구, 재시도 판단을 쉽게 합니다.
-- 향후 single-runner 정책을 완화하거나 multi-project 운영을 확장할 때, 실행 공간과 review bundle을 더 명확히 연결할 수 있습니다.
+- single-runner 정책을 유지하면서도 completed-but-unreviewed 산출물이 다른 독립 task 실행을 막지 않게 합니다.
 
 Worktree 격리가 해결하지 않는 영역:
 
@@ -386,27 +407,74 @@ Worktree 격리가 해결하지 않는 영역:
 - 같은 branch나 같은 파일을 여러 task가 수정할 때 생기는 semantic conflict를 자동으로 해결하지 않습니다.
 - credentials, runtime state, 실제 prompt/log/session id/thread id를 보호하는 public/private safety policy를 완화하지 않습니다.
 
-미래 모델 후보:
+Task metadata model:
 
-- Config: `execution_isolation` 또는 `git_worktree_isolation_enabled` 같은 명시적 boolean으로 opt-in합니다. 기본값은 `false`입니다. `worktree_root`를 지정하지 않으면 runtime directory 아래 local-only 경로를 사용하며, public repo에 commit하지 않습니다.
-- Per-task path: task마다 sanitized task id 기반 worktree path를 만듭니다. 예: `.codex-batch-runner/worktrees/task-.../`. Task JSON에는 `execution_worktree_path`, `execution_base_ref`, `execution_branch`, `execution_original_cwd` 같은 metadata를 저장할 수 있지만, 공개 문서와 event payload에는 개인 absolute path를 그대로 노출하지 않습니다.
-- Branch naming: 기본 후보는 `cbr/task/<task-id>` 형태의 local branch입니다. Branch 이름은 Git ref 규칙을 통과하도록 sanitize하고, 이미 존재하면 suffix를 붙이거나 existing branch 재사용 여부를 explicit stale check로 결정합니다.
-- Base ref: task 시작 시 원래 `cwd` repository의 current `HEAD`를 기록하고, 필요하면 upstream 또는 configured base branch를 함께 저장합니다. Worktree 생성 직전과 실행 직전에 base ref가 예상과 달라졌으면 실행을 거부하거나 operator review 대상으로 남깁니다.
-- Execution cwd: Codex는 worktree 안의 task `cwd` 대응 경로에서 실행합니다. 원래 `cwd`가 repository root 하위 디렉터리이면 같은 relative path를 worktree 안에서 재구성합니다.
-- Cleanup and retention: 성공 후 `review_status=accepted`까지 확인되면 cleanup 후보가 될 수 있습니다. 기본은 즉시 삭제가 아니라 보수적 retention입니다. Failed, `blocked_user`, `needs_resume`, `unreviewed`, `rejected`, `needs_followup` task의 worktree는 review와 recovery를 위해 보존합니다. `cbr prune --apply`가 명시된 경우에만 오래된 accepted/archived task의 worktree를 삭제합니다.
-- Conflict handling: worktree 생성 시 branch 존재, uncommitted change, base ref mismatch, checkout failure, submodule 상태, LFS 필요 여부를 warning/error로 구분합니다. Task 간 같은 branch push 경쟁이나 file-level conflict는 자동 merge하지 않고 review 또는 operator action으로 남깁니다.
-- Push behavior: runner는 기본적으로 push하지 않습니다. Worktree branch의 commit, ahead/behind, upstream 설정, push 필요 여부만 local inspection으로 보고합니다. 향후 push helper를 추가하더라도 명시적 opt-in이어야 하며, protected branch에 직접 push하지 않고 task branch push를 기본으로 해야 합니다.
-- Review bundle linkage: review bundle은 main repository state와 task worktree state를 분리해 표시합니다. Completion-time snapshot, review-time current state, worktree branch, base ref, inferred commits, retained worktree path 존재 여부를 각각 기록합니다. Bundle은 raw transcript나 private runtime contents를 포함하지 않습니다.
-- Failure recovery: Codex process 실패, startup stall, schema failure, runner crash가 발생하면 worktree metadata와 branch ref를 task에 남겨 재시도 또는 수동 점검이 가능해야 합니다. Resume은 기존 session/thread id 정책을 따르되, resume 실행 cwd가 같은 retained worktree인지 확인합니다. Worktree가 삭제되었거나 base가 맞지 않으면 새 worktree 생성 대신 recovery warning과 operator review를 우선합니다.
+- `execution_mode`: `main_worktree` 또는 `git_worktree`
+- `execution_original_cwd`: original task `cwd` 또는 sanitized relative reference
+- `execution_repo_root`: original repository root, report에는 sanitized 또는 relative 형태로 표시
+- `execution_worktree_path`: task worktree path, public report에는 absolute personal path를 그대로 표시하지 않음
+- `execution_worktree_root`: configured root의 resolved path 또는 redacted display value
+- `execution_branch`: sanitized task branch, 예: `cbr/task-20260620-001`
+- `execution_base_ref`: worktree 생성 기준 ref
+- `execution_base_head`: worktree 생성 기준 commit
+- `execution_parent_task_id`: parent branch 기반 실행이면 parent task id
+- `execution_merge_target`: accepted apply 대상 baseline, 예: `main`
+- `execution_worktree_status`: `prepared`, `running`, `retained`, `cleanup_candidate`, `cleaned`, `missing`, `recovery_required`
 
-구현 순서 후보:
+Branch naming and base policy:
 
-1. Spec and config shape: opt-in config, metadata field, path redaction, cleanup policy를 먼저 확정합니다.
-2. Read-only planning: `doctor`, `summary`, `review-bundle`이 worktree metadata가 있을 때 표시할 구조를 정의하되 worktree를 만들지 않습니다.
-3. Create/remove primitives: 안전한 `git worktree add/remove` wrapper, branch name sanitizer, base ref stale check, path cleanup guard를 테스트합니다.
-4. Isolated execution opt-in: enabled task만 worktree cwd에서 실행하고, 기존 main-worktree 실행 path는 유지합니다.
-5. Review/prune integration: review bundle, mechanical gates, prune retention이 worktree와 branch metadata를 함께 다룹니다.
-6. Later concurrency discussion: worktree 실행이 안정된 뒤에만 single-task-at-a-time 정책 완화 가능성을 별도 설계합니다.
+- 기본 branch pattern은 `cbr/<task-id>`입니다. Slash를 포함한 task id 충돌을 피하기 위해 invalid ref 문자는 `-`로 바꾸고, 연속 separator를 축약합니다.
+- Existing branch가 있으면 task metadata와 branch HEAD가 일치할 때만 재사용합니다. 다른 task가 만든 branch이거나 base가 맞지 않으면 실행하지 않고 recovery 또는 operator review로 남깁니다.
+- Independent task의 기본 base는 main worktree의 current `HEAD` 또는 configured baseline ref입니다. Worktree 생성 직전과 Codex 실행 직전에 baseline이 변했으면 stale base로 보고 실행을 거부합니다.
+- Dependent task는 dependency가 `accepted`이고 dependency policy가 branch inheritance를 요구할 때 parent branch를 base로 삼을 수 있습니다. Parent가 이미 explicit merge/apply phase로 main에 반영되었으면 main baseline에서 시작할 수 있습니다.
+- `dependency_requires_accepted_review=false`인 compatibility mode에서도 worktree branch inheritance는 completed-but-unaccepted parent를 자동 base로 쓰지 않습니다. Parent branch 기반 실행은 accepted parent 또는 explicit operator override가 필요합니다.
+
+Review, reject, follow-up, accept model:
+
+- `review-bundle`은 main repository state와 task worktree state를 분리해 표시합니다. Completion-time snapshot, review-time current main state, review-time task worktree state, branch, base ref, inferred commits, retained worktree path 존재 여부를 각각 기록합니다.
+- `reject`는 task branch/worktree를 보존하고 `review_status`만 갱신합니다. Reject 자체가 branch를 삭제하거나 main을 되돌리지 않습니다.
+- `reject --follow-up` 또는 future follow-up fix는 같은 task branch를 재사용하거나 `cbr/<task-id>-fix-N` branch를 만들 수 있습니다. 어떤 방식을 쓰든 review bundle은 원 task와 fix branch linkage를 표시해야 합니다.
+- `accept`는 task 결과를 완료로 인정하지만 자동으로 main에 merge하지 않습니다. Accepted task는 explicit merge/apply 후보가 됩니다.
+- Explicit merge/apply phase는 stale main baseline, dirty main worktree, dependency readiness, branch ancestry, public/private safety gate, verification evidence를 다시 확인한 뒤 fast-forward 또는 configured merge strategy를 적용합니다.
+
+Cleanup and retention:
+
+- 기본 retention은 보수적입니다. `failed`, `blocked_user`, `needs_resume`, `completed + unreviewed`, `completed + rejected`, `completed + needs_followup` task의 worktree는 review와 recovery를 위해 보존합니다.
+- `completed + accepted`이면서 merge/apply 완료 또는 operator가 branch retention을 명시적으로 해제한 task만 cleanup 후보가 됩니다.
+- `cbr prune`은 기본 dry-run에서 retained worktree, branch, task linkage를 보고합니다. `--apply`가 명시되고 cleanup guard가 통과한 경우에만 accepted/archived task의 worktree를 삭제합니다.
+- Cleanup guard는 target path가 configured `worktree_root` 아래인지, path가 비어 있지 않은지, Git worktree registry에 등록된 path인지, task metadata와 branch가 일치하는지 확인해야 합니다.
+- Branch deletion은 worktree 삭제와 별도 phase입니다. 기본은 local branch 보존이며, branch 삭제는 merged/applied 상태와 explicit option을 요구합니다.
+
+Stale worktree recovery and failure handling:
+
+- Worktree path가 존재하지만 Git registry에 없거나, registry에는 있으나 path가 없으면 `recovery_required`로 표시하고 raw execution을 중단합니다.
+- Branch HEAD가 task metadata의 expected head와 다르거나, worktree에 unexpected dirty changes가 있으면 자동 재사용하지 않습니다.
+- Codex process 실패, startup stall, final JSON schema failure, runner crash가 발생하면 worktree metadata와 branch ref를 task에 남겨 retry 또는 수동 점검이 가능하게 합니다.
+- Resume은 기존 session/thread id 정책을 따르되, resume cwd가 같은 retained worktree인지 확인합니다. Retained worktree가 없거나 base가 맞지 않으면 새 worktree를 만들지 않고 recovery warning과 operator review를 우선합니다.
+- Worktree prepare가 실패하면 Codex를 호출하지 않고 task를 `failed` 또는 retryable `runnable`로 돌릴지 phase별로 정합니다. 초기 prepare/cleanup command는 mutation 실패를 task execution 실패와 분리해 report-only로 시작합니다.
+
+Remote push policy:
+
+- Runner execution path는 push하지 않습니다.
+- Review bundle과 summary는 local branch ahead/behind, upstream 설정, inferred unpushed commits, optional task result `push_status`를 보고합니다.
+- Future push helper는 explicit command와 config opt-in이 필요합니다. 기본 대상은 task branch remote ref이며, main/protected branch push는 지원하지 않거나 별도 hard block을 둡니다.
+- Network operation은 `doctor`, `review-bundle`, `run-next` 기본 path에서 실행하지 않습니다.
+
+Concrete implementation phases:
+
+1. Config and schema placeholders: `worktree_mode=disabled|task`, `worktree_root`, task metadata field names, path redaction rules, branch naming rules, cleanup/retention rules를 문서화하고 config loader가 placeholder를 파싱합니다. Execution behavior는 바꾸지 않습니다.
+2. Prepare/cleanup primitives: `git worktree` wrapper, branch sanitizer, path guard, base ref stale check, existing branch/worktree recovery classifier를 구현합니다. 우선 직접 실행 명령 또는 internal helper 테스트로 검증하고 `run-next`에는 연결하지 않습니다.
+3. Read-only reporting integration: `doctor`, `summary`, `review-bundle`, `review-next`가 task worktree metadata를 표시합니다. Main state와 worktree state를 분리하고, stale/missing/recovery_required 상태를 mechanical gate warning으로 노출합니다.
+4. Explicit prepare/cleanup commands: `cbr worktree prepare TASK_ID --dry-run|--apply`와 `cbr worktree cleanup TASK_ID --dry-run|--apply`를 추가합니다. Queue lock 아래에서 metadata를 갱신하고 event를 남기되 Codex를 호출하지 않습니다.
+5. `run-next` worktree adapter: `worktree_mode=task`이고 task가 implementation category 또는 default-eligible이면 prepare된 worktree cwd에서 Codex를 실행합니다. Prepared worktree가 없으면 prepare를 수행하고, 실패하면 Codex를 호출하지 않습니다. Main-worktree mode는 기존 behavior를 유지합니다.
+6. Review and follow-up branch workflow: `review-bundle`, `reject`, `reject --follow-up`, `accept`가 task branch/worktree linkage를 보존합니다. Follow-up fix의 same-branch/replacement-branch 정책과 stale checks를 구현합니다.
+7. Explicit merge/apply phase: accepted task branch를 main baseline에 반영하는 command를 별도 추가합니다. Fast-forward를 우선하고, dirty main, stale base, dependency mismatch, safety gate 실패 시 중단합니다.
+8. Remote push helper: 필요하면 task branch push만 explicit opt-in으로 추가합니다. 기본 runner, doctor, review paths는 계속 local-only입니다.
+9. Concurrency discussion: 위 phase가 안정화된 뒤에만 여러 Codex 실행을 허용할지 별도 설계합니다. 기본 제품 원칙은 계속 single runner, one task per invocation입니다.
+
+Next minimal implementation task:
+
+- `worktree prepare/cleanup commands`: `run-next` 연결 없이 branch sanitizer, path guard, stale worktree classifier, dry-run/apply command, focused tests를 구현합니다. 이 단계가 완료된 뒤에 `run-next worktree adapter`를 별도 task로 진행합니다.
 
 ## Project routing metadata
 

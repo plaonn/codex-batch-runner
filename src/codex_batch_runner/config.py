@@ -26,6 +26,8 @@ class Config:
     dependency_requires_accepted_review: bool = False
     auto_review_mechanical_accept: bool = False
     auto_review_codex_enabled: bool = False
+    worktree_mode: str = "disabled"
+    worktree_root: Path | None = None
     codex_startup_stall_seconds: int = 240
     codex_first_meaningful_timeout_seconds: int = 420
     codex_mid_run_idle_seconds: int = 1800
@@ -82,6 +84,8 @@ class Config:
                 "auto_review_codex_enabled",
                 data.get("auto_review_codex_enabled", False),
             ),
+            worktree_mode=worktree_mode_value(data.get("worktree_mode", "disabled")),
+            worktree_root=path_value("worktree_root", ".codex-batch-runner/worktrees"),
             codex_startup_stall_seconds=int(data.get("codex_startup_stall_seconds", 240)),
             codex_first_meaningful_timeout_seconds=int(data.get("codex_first_meaningful_timeout_seconds", 420)),
             codex_mid_run_idle_seconds=int(data.get("codex_mid_run_idle_seconds", 1800)),
@@ -120,6 +124,12 @@ def bool_value(key: str, value: object) -> bool:
     if isinstance(value, bool):
         return value
     raise ValueError(f"{key} must be a boolean")
+
+
+def worktree_mode_value(value: object) -> str:
+    if value in {"disabled", "task"}:
+        return str(value)
+    raise ValueError("worktree_mode must be one of: disabled, task")
 
 
 def optional_int_value(value: object) -> int | None:

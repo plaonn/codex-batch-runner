@@ -8,6 +8,8 @@
   "codex_resume_command": ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"],
   "auto_review_mechanical_accept": false,
   "auto_review_codex_enabled": false,
+  "worktree_mode": "disabled",
+  "worktree_root": ".codex-batch-runner/worktrees",
   "stale_lock_seconds": 21600,
   "rate_limit_cooldown_seconds": 1800,
   "default_max_attempts": 5

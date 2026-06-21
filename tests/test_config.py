@@ -67,6 +67,8 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(cwd.resolve() / ".codex-batch-runner" / "tasks", config.queue_dir)
             self.assertEqual(cwd.resolve() / ".codex-batch-runner" / "events", config.event_dir)
+            self.assertEqual("disabled", config.worktree_mode)
+            self.assertEqual(cwd.resolve() / ".codex-batch-runner" / "worktrees", config.worktree_root)
             self.assertFalse(config.dependency_requires_accepted_review)
             self.assertIsNone(resolve_config_path(include_user_config=False))
 
@@ -93,6 +95,19 @@ class ConfigTests(unittest.TestCase):
 
             self.assertTrue(config.auto_review_mechanical_accept)
             self.assertTrue(config.auto_review_codex_enabled)
+
+    def test_worktree_placeholders_can_be_enabled_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps({"worktree_mode": "task", "worktree_root": "runtime/worktrees"}),
+                encoding="utf-8",
+            )
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertEqual("task", config.worktree_mode)
+            self.assertEqual(Path(tmp).resolve() / "runtime" / "worktrees", config.worktree_root)
 
     def test_codex_watchdog_config_defaults_and_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,6 +158,14 @@ class ConfigTests(unittest.TestCase):
             config_path.write_text(json.dumps({"auto_review_mechanical_accept": "true"}), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "auto_review_mechanical_accept must be a boolean"):
+                Config.load(str(config_path), root=Path(tmp))
+
+    def test_worktree_mode_must_be_known_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"worktree_mode": "enabled"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "worktree_mode must be one of: disabled, task"):
                 Config.load(str(config_path), root=Path(tmp))
 
     def test_notifier_cursor_state_paths_are_optional_local_paths(self) -> None:
