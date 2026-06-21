@@ -451,7 +451,7 @@ def cmd_transcript(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_accept(config: Config, args: argparse.Namespace) -> int:
-    task = set_review_status(config, args.task_id, "accepted", args.reason)
+    task = set_review_status(config, args.task_id, "accepted", args.reason, require_completed=True)
     run_post_mutation_trigger(config)
     if args.json:
         print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))

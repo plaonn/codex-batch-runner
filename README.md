@@ -131,6 +131,7 @@ PYTHONPATH=src python3 -m codex_batch_runner resolve task-a --resolution manual 
 ```
 
 Codex가 `completed`를 반환하면 실행은 완료되지만, 검토 상태는 `unreviewed`로 남습니다. 운영상 진짜 완료로 판단한 뒤 `accept`로 `review_status=accepted`를 기록하는 흐름을 권장합니다.
+`accept`는 `completed` task에만 사용할 수 있습니다. `reject`와 `reject --follow-up`은 운영자가 실행 중이거나 실패한 결과를 명시적으로 부정하거나 후속 처리가 필요하다고 표시할 수 있도록 더 넓은 상태에서 사용할 수 있습니다.
 
 `failed` 또는 `blocked_user` task를 운영상 더 추적하지 않아도 되면 `resolve`로 `resolution`을 기록할 수 있습니다. resolution이 기록된 failed/blocked task는 기본 `list`에서 숨겨지고, `list --all`이나 `summary`에서 확인할 수 있습니다.
 
@@ -166,7 +167,7 @@ PYTHONPATH=src python3 -m codex_batch_runner doctor
 PYTHONPATH=src python3 -m codex_batch_runner doctor --json
 ```
 
-`doctor`는 config/runtime path, event directory, configured Codex executable path, resolved executable path, executable availability, bounded `codex --version` output, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts를 점검합니다. Version 확인은 configured executable에 `--version`만 붙여 짧은 timeout으로 실행하며, `codex exec`를 호출하거나 network operation을 수행한다고 가정하지 않습니다. Version command가 실패하거나 timeout되면 warning으로 보고하지만 doctor 실패로 취급하지 않습니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation은 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
+`doctor`는 config/runtime path, event directory, configured Codex executable path, resolved executable path, executable availability, bounded `codex --version` output, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts를 점검합니다. Lock metadata에 현재 host의 pid가 있으면 pid와 liveness도 표시합니다. Version 확인은 configured executable에 `--version`만 붙여 짧은 timeout으로 실행하며, `codex exec`를 호출하거나 network operation을 수행한다고 가정하지 않습니다. Version command가 실패하거나 timeout되면 warning으로 보고하지만 doctor 실패로 취급하지 않습니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation은 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
 
 오래된 완료/보관 task 정리 후보 확인:
 
@@ -271,7 +272,7 @@ Codex를 호출하지 않는 조건:
 - 모든 task가 dependency blocked 상태입니다.
 - 모든 runnable task가 task cooldown 중입니다.
 
-동시 실행 방지는 `.codex-batch-runner/runner.lock` atomic create로 처리합니다. lock이 오래 남아 있으면 stale lock으로 보고 복구합니다. 기본 stale 기준은 6시간입니다.
+동시 실행 방지는 `.codex-batch-runner/runner.lock` atomic create로 처리합니다. lock metadata에 같은 host의 dead pid가 기록되어 있으면 즉시 복구하고, host나 pid를 확인할 수 없으면 age 기반 stale lock 기준으로 복구합니다. 기본 stale 기준은 6시간입니다.
 
 task와 state 파일은 같은 디렉터리에 임시 파일을 쓴 뒤 `os.replace`로 교체합니다. Codex JSONL 로그는 attempt별 파일로 저장합니다.
 

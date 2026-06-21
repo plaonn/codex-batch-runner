@@ -108,13 +108,32 @@ class QueueTests(unittest.TestCase):
     def test_set_review_status_records_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))
-            create_task(config, "done", tmp, task_id="done")
+            task = create_task(config, "done", tmp, task_id="done")
+            task["status"] = "completed"
+            save_task(config, task)
 
-            task = set_review_status(config, "done", "accepted", "verified")
+            task = set_review_status(config, "done", "accepted", "verified", require_completed=True)
 
             self.assertEqual("accepted", task["review_status"])
             self.assertEqual("verified", task["review_reason"])
             self.assertIsNotNone(task["reviewed_at"])
+
+    def test_accept_review_status_requires_completed_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            create_task(config, "work", tmp, task_id="running")
+
+            with self.assertRaisesRegex(ValueError, "requires completed task status"):
+                set_review_status(config, "running", "accepted", "verified", require_completed=True)
+
+    def test_reject_review_status_remains_available_for_non_completed_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            create_task(config, "work", tmp, task_id="running")
+
+            task = set_review_status(config, "running", "rejected", "operator stopped review")
+
+            self.assertEqual("rejected", task["review_status"])
 
     def test_set_resolution_records_failed_task_decision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -252,6 +252,35 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(1, report["tasks"]["runnable"])
             self.assertEqual(1, report["tasks"]["cooldown"])
 
+    def test_doctor_lock_summary_includes_same_host_pid_liveness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(tmp, [str(executable)])
+            config = Config.load(str(config_path))
+            config.lock_file.write_text(
+                json.dumps(
+                    {
+                        "created_at": "2999-01-01T00:00:00+00:00",
+                        "hostname": "test-host",
+                        "pid": 424242,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch("codex_batch_runner.lock.socket.gethostname", return_value="test-host"), mock.patch(
+                "codex_batch_runner.lock.pid_exists", return_value=False
+            ):
+                code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(424242, report["lock"]["pid"])
+            self.assertFalse(report["lock"]["pid_alive"])
+            self.assertTrue(report["lock"]["stale"])
+
 
 if __name__ == "__main__":
     unittest.main()

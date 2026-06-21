@@ -57,10 +57,19 @@ def archive_task(config: Config, task_id: str) -> dict:
     return task
 
 
-def set_review_status(config: Config, task_id: str, review_status: str, reason: str | None = None) -> dict:
+def set_review_status(
+    config: Config,
+    task_id: str,
+    review_status: str,
+    reason: str | None = None,
+    *,
+    require_completed: bool = False,
+) -> dict:
     if review_status not in REVIEW_STATUSES:
         raise ValueError(f"invalid review status: {review_status}")
     task = load_task(config, task_id)
+    if require_completed and task.get("status") != "completed":
+        raise ValueError(f"{review_status} review requires completed task status, found {task.get('status')}")
     task["review_status"] = review_status
     task["reviewed_at"] = iso_now()
     task["review_reason"] = reason

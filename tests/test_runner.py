@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import sys
 import tempfile
@@ -392,6 +393,37 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("runnable", task["status"])
             self.assertIn("No such file", task["last_error"])
             self.assertTrue(task["log_paths"])
+
+    def test_run_next_recovers_dead_pid_lock_and_stale_running_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            stale = create_task(config, "was running", tmp, task_id="stale-running")
+            stale["status"] = "running"
+            stale["started_at"] = "2000-01-01T00:00:00+00:00"
+            save_task(config, stale)
+            create_task(config, "do it", tmp, task_id="next-task")
+            config.lock_file.write_text(
+                json.dumps(
+                    {
+                        "created_at": "2999-01-01T00:00:00+00:00",
+                        "hostname": socket.gethostname(),
+                        "pid": 424242,
+                        "task_id": "stale-running",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("codex_batch_runner.lock.pid_exists", return_value=False):
+                outcome = run_next(config)
+
+            recovered = load_task(config, "stale-running")
+            processed = load_task(config, "next-task")
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("completed", recovered["status"])
+            self.assertEqual("runnable", processed["status"])
+            self.assertFalse(config.lock_file.exists())
 
 
 if __name__ == "__main__":

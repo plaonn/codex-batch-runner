@@ -10,6 +10,7 @@ from typing import Any
 
 from .config import Config
 from .fs import read_json
+from .lock import lock_status
 from .queue import RUNNABLE_STATUSES, dependency_status, is_in_cooldown
 from .state import load_state
 from .timeutil import parse_time, utc_now
@@ -189,33 +190,7 @@ def state_summary(config: Config) -> dict[str, Any]:
 
 
 def lock_summary(config: Config) -> dict[str, Any]:
-    path = config.lock_file
-    if not path.exists():
-        return {"exists": False, "path": str(path), "age_seconds": None, "stale": False}
-    created_at = None
-    try:
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            created_at = parse_time(data.get("created_at"))
-    except (OSError, json.JSONDecodeError):
-        created_at = None
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        mtime = None
-    if created_at:
-        age = max(0, int((utc_now() - created_at).total_seconds()))
-    elif mtime is not None:
-        age = max(0, int(utc_now().timestamp() - mtime))
-    else:
-        age = None
-    return {
-        "exists": True,
-        "path": str(path),
-        "age_seconds": age,
-        "stale": bool(age is None or age > config.stale_lock_seconds),
-    }
+    return lock_status(config.lock_file, config.stale_lock_seconds)
 
 
 def git_summary(root: Path) -> dict[str, Any]:
@@ -379,6 +354,10 @@ def render_doctor_report(report: dict[str, Any]) -> str:
             f"  stale: {str(lock.get('stale')).lower()}",
         ]
     )
+    if lock.get("pid") is not None:
+        lines.append(f"  pid: {lock.get('pid')}")
+    if lock.get("pid_alive") is not None:
+        lines.append(f"  pid_alive: {str(lock.get('pid_alive')).lower()}")
     git = report["git"]
     lines.extend(
         [

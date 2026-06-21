@@ -674,6 +674,37 @@ class CliTests(unittest.TestCase):
             self.assertEqual("needs_followup", rejected["review_status"])
             self.assertEqual("needs tests", rejected["review_reason"])
 
+    def test_accept_rejects_non_completed_task_without_mutating_review_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "work", tmp, task_id="running")
+            set_status(config, "running", "running")
+
+            code, output, stderr = run_cli_with_stderr(
+                ["--config", str(config_path), "accept", "running", "--reason", "too early"]
+            )
+            task = load_task(config, "running")
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("requires completed task status", stderr)
+            self.assertIsNone(task["review_status"])
+
+    def test_reject_remains_available_for_non_completed_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "work", tmp, task_id="running")
+            set_status(config, "running", "running")
+
+            code, output = run_cli(["--config", str(config_path), "reject", "running", "--reason", "bad state"])
+            task = load_task(config, "running")
+
+            self.assertEqual(0, code)
+            self.assertEqual("running\trejected\n", output)
+            self.assertEqual("rejected", task["review_status"])
+
     def test_list_all_shows_completed_review_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
