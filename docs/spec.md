@@ -587,7 +587,8 @@ codex exec --sandbox workspace-write resume "<session_id>" --json "<wrapped prom
 ```json
 {
   "codex_command": ["codex", "exec", "--sandbox", "workspace-write", "--json"],
-  "codex_resume_command": ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"]
+  "codex_resume_command": ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"],
+  "post_mutation_trigger_command": []
 }
 ```
 
@@ -603,6 +604,24 @@ Automation mode는 approval prompt 대기와 sandbox 권한 부족으로 인한 
 대신 실행 후 review 책임은 더 크며, `summary`, 필요한 경우 `transcript`, 대상 repository의 검증 명령, `doctor`를 이용해 결과와 runner 상태를 확인한 뒤 `accept`를 기록해야 함.
 
 launchd 같은 scheduler는 사용자 shell `PATH`를 그대로 상속하지 않을 수 있음. 운영 config에서는 `codex` 실행 파일을 절대 경로로 지정할 수 있어야 함.
+
+`post_mutation_trigger_command`는 queue mutation 이후 외부 scheduler/runner를 즉시 깨우기 위한 optional hook임. 값은 shell string이 아니라 argv string list이며 기본값은 빈 list로 disabled임. 구현은 shell expansion을 하지 않고 짧은 timeout으로 실행함. 실패, non-zero exit, timeout은 stderr warning으로만 표시하고 원래 mutation 성공을 되돌리지 않음.
+
+hook은 durable task JSON write와 event emission이 끝난 뒤 실행함. `enqueue`, `accept`, `reject`, `resolve`, `archive` 같은 queue-mutating command에서만 호출하고, `run-next`, `list`, `show`, `summary`, `review-bundle`, `logs`, `transcript`, `doctor`, `events`, `rate-limits`, `prune`에서는 호출하지 않음. 목적은 polling interval로 인한 latency를 줄이는 것이며, polling은 fallback으로 계속 유지함. duplicate wake-up은 안전해야 함. `run-next`가 lock, cooldown, empty queue, dependency, single-task execution 규칙을 계속 강제하기 때문임.
+
+예시:
+
+```json
+{
+  "post_mutation_trigger_command": ["launchctl", "kickstart", "-k", "gui/UID/com.example.codex-batch-runner"]
+}
+```
+
+```json
+{
+  "post_mutation_trigger_command": ["systemctl", "--user", "start", "codex-batch-runner.service"]
+}
+```
 
 Codex CLI 0.136 JSONL은 `thread.started.thread_id`를 내보내며, 이 값은 `codex exec resume <thread_id>`에 사용할 수 있음. runner는 명시적인 `session_id`가 없으면 `thread_id`를 resume id fallback으로 저장함.
 
@@ -782,6 +801,8 @@ config 탐색 순서:
 
 `cbr archive TASK_ID`는 task 파일을 삭제하지 않고 `status=archived`, `previous_status`, `archived_at`을 기록함.
 
+Successful queue mutations run the optional `post_mutation_trigger_command` after durable writes. This includes `enqueue`, `accept`, `reject`, `resolve`, and `archive`; read-only commands, `run-next`, and `prune` do not run the trigger.
+
 `cbr summary TASK_ID`는 task metadata, dependency blocked 상태, `last_result.summary`, optional commits/push_status, changed files, verification, task `git_status`, last_error, next_prompt, log path를 transcript보다 짧은 Markdown 형식으로 표시합니다.
 
 `cbr review-bundle TASK_ID`는 현재 대화 context 없이 task 결과를 재검토하기 위한 read-only bundle을 stdout에 생성합니다. 기본 출력은 Markdown-like human report이고, `--json`은 같은 정보를 structured JSON으로 출력합니다. 포함 정보는 task metadata, sanitized prompt excerpt, status/review/resolution, dependencies와 blockers, `last_result`, `last_run`, changed files, verification, `last_error`, relevant log paths, task `git_status`, local git repository state, inferable commit information, safely scoped commit 또는 working tree diff/stat, public/private safety policy입니다. commit hash를 명확히 하나로 추론할 수 있으면 해당 commit의 subject/stat/diff를 포함하고, 추론이 여러 개이거나 모호하면 diff를 생략하고 ambiguity를 보고합니다. commit을 추론할 수 없고 task repository의 working tree가 dirty이면 working tree diff/stat만 포함합니다. repository가 아니거나 git metadata를 읽을 수 없으면 fallback warning을 보고합니다. 원본 JSONL transcript 내용은 기본적으로 포함하지 않고, 명령은 Codex 호출, enqueue, accept/reject, task state 변경을 수행하지 않습니다.
@@ -827,11 +848,14 @@ macOS 기본 운영 방식은 launchd임.
 권장 모델:
 
 - `StartInterval = 600`
+- optional `post_mutation_trigger_command`로 queue mutation 직후 `launchctl kickstart` 호출 가능
 - runner 내부에서 lock, dependency, cooldown, empty queue를 판단
 - 실행할 작업이 없으면 즉시 종료
 - rate-limit 발생 시 launchd interval을 바꾸지 않고 runner 내부 global cooldown으로 Codex 호출을 막음
 
 cron 예시는 portable fallback으로만 문서화함.
+
+Linux systemd user service 운영에서는 같은 hook에 `["systemctl", "--user", "start", "codex-batch-runner.service"]`를 사용할 수 있음. timer/cron polling은 fallback으로 유지함.
 
 ## 최소 테스트
 

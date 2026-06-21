@@ -18,6 +18,7 @@ class Config:
     state_file: Path
     codex_command: list[str]
     codex_resume_command: list[str]
+    post_mutation_trigger_command: list[str]
     stale_lock_seconds: int
     rate_limit_cooldown_seconds: int
     default_max_attempts: int
@@ -52,10 +53,19 @@ class Config:
                     ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"],
                 )
             ),
+            post_mutation_trigger_command=argv_list(data.get("post_mutation_trigger_command", [])),
             stale_lock_seconds=int(data.get("stale_lock_seconds", 21600)),
             rate_limit_cooldown_seconds=int(data.get("rate_limit_cooldown_seconds", 1800)),
             default_max_attempts=int(data.get("default_max_attempts", 5)),
         )
+
+
+def argv_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("post_mutation_trigger_command must be a list of strings")
+    return value
 
 
 def resolve_config_path(config_path: str | None = None, include_user_config: bool = True) -> Path | None:

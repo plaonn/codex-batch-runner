@@ -69,6 +69,20 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cwd.resolve() / ".codex-batch-runner" / "events", config.event_dir)
             self.assertIsNone(resolve_config_path(include_user_config=False))
 
+    def test_post_mutation_trigger_command_defaults_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+
+            self.assertEqual([], config.post_mutation_trigger_command)
+
+    def test_post_mutation_trigger_command_must_be_argv_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"post_mutation_trigger_command": "echo unsafe"}), encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                Config.load(str(config_path), root=Path(tmp))
+
 
 if __name__ == "__main__":
     unittest.main()

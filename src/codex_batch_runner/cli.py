@@ -30,6 +30,7 @@ from .runner import run_next
 from .state import load_state
 from .summary import render_task_summary
 from .transcript import render_task_transcript
+from .triggers import run_post_mutation_trigger
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -176,6 +177,7 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         labels=args.label,
         created_by=args.created_by,
     )
+    run_post_mutation_trigger(config)
     print(task["id"])
     return 0
 
@@ -450,6 +452,7 @@ def cmd_transcript(config: Config, args: argparse.Namespace) -> int:
 
 def cmd_accept(config: Config, args: argparse.Namespace) -> int:
     task = set_review_status(config, args.task_id, "accepted", args.reason)
+    run_post_mutation_trigger(config)
     if args.json:
         print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
     else:
@@ -460,6 +463,7 @@ def cmd_accept(config: Config, args: argparse.Namespace) -> int:
 def cmd_reject(config: Config, args: argparse.Namespace) -> int:
     status = "needs_followup" if args.follow_up else "rejected"
     task = set_review_status(config, args.task_id, status, args.reason)
+    run_post_mutation_trigger(config)
     if args.json:
         print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
     else:
@@ -469,6 +473,7 @@ def cmd_reject(config: Config, args: argparse.Namespace) -> int:
 
 def cmd_archive(config: Config, args: argparse.Namespace) -> int:
     task = archive_task(config, args.task_id)
+    run_post_mutation_trigger(config)
     if args.json:
         print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
     else:
@@ -478,6 +483,7 @@ def cmd_archive(config: Config, args: argparse.Namespace) -> int:
 
 def cmd_resolve(config: Config, args: argparse.Namespace) -> int:
     task = set_resolution(config, args.task_id, args.resolution, args.reason)
+    run_post_mutation_trigger(config)
     if args.json:
         print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
     else:

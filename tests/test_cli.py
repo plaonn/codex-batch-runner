@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,21 +17,19 @@ from codex_batch_runner.fs import write_json_atomic
 from codex_batch_runner.queue import create_task, load_task, save_task
 
 
-def write_config(tmp: str) -> Path:
+def write_config(tmp: str, trigger_command: list[str] | None = None) -> Path:
     root = Path(tmp)
+    data = {
+        "queue_dir": str(root / "tasks"),
+        "log_dir": str(root / "logs"),
+        "event_dir": str(root / "events"),
+        "lock_file": str(root / "runner.lock"),
+        "state_file": str(root / "state.json"),
+    }
+    if trigger_command is not None:
+        data["post_mutation_trigger_command"] = trigger_command
     config_path = root / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "queue_dir": str(root / "tasks"),
-                "log_dir": str(root / "logs"),
-                "event_dir": str(root / "events"),
-                "lock_file": str(root / "runner.lock"),
-                "state_file": str(root / "state.json"),
-            }
-        ),
-        encoding="utf-8",
-    )
+    config_path.write_text(json.dumps(data), encoding="utf-8")
     return config_path
 
 
@@ -39,6 +38,14 @@ def run_cli(args: list[str]) -> tuple[int, str]:
     with contextlib.redirect_stdout(stdout):
         code = main(args)
     return code, stdout.getvalue()
+
+
+def run_cli_with_stderr(args: list[str]) -> tuple[int, str, str]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        code = main(args)
+    return code, stdout.getvalue(), stderr.getvalue()
 
 
 def set_status(config: Config, task_id: str, status: str, last_error: str | None = None) -> None:
@@ -64,6 +71,105 @@ def init_repo(path: Path) -> None:
 
 
 class CliTests(unittest.TestCase):
+    def test_post_mutation_trigger_runs_after_enqueue_and_review_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).open('a', encoding='utf-8').write('x\\n')",
+                str(marker),
+            ]
+            config_path = write_config(tmp, trigger)
+            config = Config.load(str(config_path))
+
+            self.assertEqual(
+                (0, "task\n"),
+                run_cli(["--config", str(config_path), "enqueue", "--cwd", tmp, "--id", "task", "--prompt", "work"]),
+            )
+            task = load_task(config, "task")
+            task["status"] = "completed"
+            save_task(config, task)
+
+            for args in (
+                ["accept", "task", "--reason", "verified"],
+                ["reject", "task", "--reason", "needs work"],
+                ["reject", "task", "--follow-up", "--reason", "needs more"],
+            ):
+                with self.subTest(args=args):
+                    code, _ = run_cli(["--config", str(config_path), *args])
+                    self.assertEqual(0, code)
+
+            self.assertEqual(["x", "x", "x", "x"], marker.read_text(encoding="utf-8").splitlines())
+
+    def test_post_mutation_trigger_runs_after_resolve_and_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).open('a', encoding='utf-8').write('x\\n')",
+                str(marker),
+            ]
+            config_path = write_config(tmp, trigger)
+            config = Config.load(str(config_path))
+            create_task(config, "work", tmp, task_id="task")
+            set_status(config, "task", "failed", "failed")
+
+            self.assertEqual(
+                0,
+                run_cli(["--config", str(config_path), "resolve", "task", "--resolution", "manual"])[0],
+            )
+            self.assertEqual(0, run_cli(["--config", str(config_path), "archive", "task"])[0])
+
+            self.assertEqual(["x", "x"], marker.read_text(encoding="utf-8").splitlines())
+
+    def test_post_mutation_trigger_is_not_called_for_read_only_or_run_next(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).open('a', encoding='utf-8').write('x\\n')",
+                str(marker),
+            ]
+            config_path = write_config(tmp, trigger)
+            config = Config.load(str(config_path))
+            create_task(config, "work", tmp, task_id="task")
+            set_status(config, "task", "completed")
+
+            for args in (
+                ["list"],
+                ["show", "task"],
+                ["summary", "task"],
+                ["review-bundle", "task"],
+                ["logs", "task"],
+                ["transcript", "task"],
+                ["doctor"],
+                ["events"],
+                ["rate-limits"],
+                ["prune"],
+                ["run-next"],
+            ):
+                with self.subTest(args=args):
+                    code, _ = run_cli(["--config", str(config_path), *args])
+                    self.assertIn(code, {0, 1})
+
+            self.assertFalse(marker.exists())
+
+    def test_post_mutation_trigger_failure_is_non_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, [sys.executable, "-c", "import sys; sys.exit(7)"])
+
+            code, output, stderr = run_cli_with_stderr(
+                ["--config", str(config_path), "enqueue", "--cwd", tmp, "--id", "task", "--prompt", "work"]
+            )
+
+            self.assertEqual(0, code)
+            self.assertEqual("task\n", output)
+            self.assertIn("warning: post-mutation trigger exited with status 7", stderr)
+            self.assertEqual("runnable", load_task(Config.load(str(config_path)), "task")["status"])
+
     def test_enqueue_records_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
