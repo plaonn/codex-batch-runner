@@ -10,6 +10,7 @@ from typing import Any
 from .queue import dependency_blockers, dependency_status, task_labels, task_project_id, task_project_root
 from .summary import review_status
 from .transcript import sanitize
+from .worktree import task_worktree_report
 
 MAX_PROMPT_EXCERPT_CHARS = 2000
 COMMIT_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
@@ -48,6 +49,7 @@ def build_review_bundle(
         "blockers": blocked_by,
         "last_result": last_result,
         "last_run": sanitize_value(task.get("last_run")) if isinstance(task.get("last_run"), dict) else None,
+        "task_worktree": sanitize_value(task_worktree_report(task)),
         "changed_files": changed_files,
         "verification": result_list(last_result, "verification"),
         "last_error": sanitize(task.get("last_error")) if task.get("last_error") else None,
@@ -387,6 +389,7 @@ def render_review_bundle(bundle: dict[str, Any]) -> str:
     append_object_section(lines, "resolution", bundle.get("resolution"))
     append_object_section(lines, "last_result", bundle.get("last_result"))
     append_object_section(lines, "last_run", bundle.get("last_run"))
+    append_object_section(lines, "task_worktree", bundle.get("task_worktree"))
     append_object_section(lines, "changed_files", bundle.get("changed_files"))
     append_list_section(lines, "verification", bundle.get("verification"))
     append_text_section(lines, "last_error", bundle.get("last_error"))

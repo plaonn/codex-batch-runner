@@ -14,6 +14,8 @@ from .lock import lock_status
 from .queue import RUNNABLE_STATUSES, dependency_status, is_in_cooldown
 from .state import load_state
 from .timeutil import parse_time, utc_now
+from .transcript import sanitize
+from .worktree import worktree_task_counts
 
 CODEX_VERSION_TIMEOUT_SECONDS = 2.0
 
@@ -48,6 +50,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
         "state": state_summary(config),
         "lock": lock_summary(config),
         "git": git,
+        "worktree": worktree_summary(config, tasks),
         "auto_review": auto_review_summary(tasks, config),
         "tasks": task_summary(tasks, by_id, config),
         "checks": checks,
@@ -344,6 +347,14 @@ def auto_review_summary(tasks: list[dict[str, Any]], config: Config) -> dict[str
     }
 
 
+def worktree_summary(config: Config, tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "mode": config.worktree_mode,
+        "root": sanitize(config.worktree_root) if config.worktree_root is not None else None,
+        "tasks": worktree_task_counts(tasks),
+    }
+
+
 def startup_watchdog_progress(task: dict[str, Any]) -> bool:
     progress = task.get("last_progress")
     return isinstance(progress, dict) and bool(progress.get("watchdog_reason"))
@@ -442,6 +453,24 @@ def render_doctor_report(report: dict[str, Any]) -> str:
         lines.append("  warnings:")
         for message in git["warnings"]:
             lines.append(f"    - {message}")
+    worktree = report["worktree"]
+    worktree_tasks = worktree.get("tasks") or {}
+    lines.extend(
+        [
+            "",
+            "worktree:",
+            f"  mode: {worktree.get('mode')}",
+            f"  root: {worktree.get('root')}",
+            f"  retained: {worktree_tasks.get('retained')}",
+            f"  recovery_required: {worktree_tasks.get('recovery_required')}",
+            f"  missing_metadata: {worktree_tasks.get('missing_metadata')}",
+        ]
+    )
+    by_status = worktree_tasks.get("by_status") or {}
+    if by_status:
+        lines.append("  by_status:")
+        for status, count in by_status.items():
+            lines.append(f"    {status}: {count}")
     auto_review = report["auto_review"]
     lines.extend(
         [

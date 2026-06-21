@@ -18,7 +18,12 @@ from codex_batch_runner.queue import create_task, save_task
 from codex_batch_runner.timeutil import add_seconds
 
 
-def write_config(tmp: str, codex_command: list[str], auto_review_mechanical_accept: bool = False) -> Path:
+def write_config(
+    tmp: str,
+    codex_command: list[str],
+    auto_review_mechanical_accept: bool = False,
+    worktree_mode: str = "disabled",
+) -> Path:
     root = Path(tmp)
     config_path = root / "config.json"
     config_path.write_text(
@@ -31,6 +36,8 @@ def write_config(tmp: str, codex_command: list[str], auto_review_mechanical_acce
                 "state_file": str(root / "state.json"),
                 "codex_command": codex_command,
                 "auto_review_mechanical_accept": auto_review_mechanical_accept,
+                "worktree_mode": worktree_mode,
+                "worktree_root": str(root / "worktrees"),
             }
         ),
         encoding="utf-8",
@@ -256,12 +263,42 @@ class DoctorTests(unittest.TestCase):
             self.assertTrue(report["auto_review"]["mechanical_auto_accept_enabled"])
             self.assertFalse(report["auto_review"]["reviewer_codex_enabled"])
             self.assertEqual(1, report["auto_review"]["reviewable_completed"])
+            self.assertEqual("disabled", report["worktree"]["mode"])
+            self.assertEqual(0, report["worktree"]["tasks"]["retained"])
 
             human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
             self.assertEqual(0, human_code)
             self.assertIn("auto_review:", human_output)
             self.assertIn("mechanical_auto_accept_enabled: true", human_output)
             self.assertIn("reviewable_completed: 1", human_output)
+            self.assertIn("worktree:", human_output)
+            self.assertIn("mode: disabled", human_output)
+
+    def test_doctor_reports_worktree_mode_and_recovery_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(tmp, [str(executable)], worktree_mode="task")
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="retained")
+            task["execution_mode"] = "git_worktree"
+            task["execution_branch"] = "cbr/retained"
+            task["execution_base_ref"] = "HEAD"
+            task["execution_base_head"] = "abc123"
+            task["execution_worktree_status"] = "retained"
+            task["execution_worktree_path"] = str(Path(tmp) / "worktrees" / "retained")
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual("task", report["worktree"]["mode"])
+            self.assertEqual(str(Path(tmp) / "worktrees"), report["worktree"]["root"])
+            self.assertEqual({"retained": 1}, report["worktree"]["tasks"]["by_status"])
+            self.assertEqual(1, report["worktree"]["tasks"]["retained"])
+            self.assertEqual(1, report["worktree"]["tasks"]["recovery_required"])
 
     def test_doctor_reports_startup_stall_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

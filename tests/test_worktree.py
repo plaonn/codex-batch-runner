@@ -24,6 +24,13 @@ def run_cli(args: list[str]) -> tuple[int, dict]:
     return code, json.loads(stdout.getvalue())
 
 
+def run_cli_text(args: list[str]) -> tuple[int, str]:
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        code = main(args)
+    return code, stdout.getvalue()
+
+
 def git(cwd: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(cwd), *args],
@@ -191,6 +198,81 @@ class WorktreeTests(unittest.TestCase):
             self.assertFalse(worktree_path.exists())
             self.assertEqual("cleaned", load_task(config, "cleanup")["execution_worktree_status"])
             self.assertIn("cbr/cleanup", git(repo, "branch", "--list", "cbr/cleanup"))
+
+    def test_summary_and_review_bundle_include_sanitized_worktree_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="reporting")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "reporting", "--apply", "--json"])[0])
+            task = load_task(config, "reporting")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["last_result"] = {
+                "task_id": "reporting",
+                "status": "completed",
+                "summary": "done",
+                "changed_files": ["file.txt"],
+                "verification": ["unit tests"],
+            }
+            save_task(config, task)
+
+            summary_code, summary = run_cli_text(["--config", str(config_path), "summary", "reporting"])
+            bundle_code, bundle_output = run_cli_text(["--config", str(config_path), "review-bundle", "reporting", "--json"])
+            bundle = json.loads(bundle_output)
+
+            self.assertEqual(0, summary_code)
+            self.assertIn("## worktree", summary)
+            self.assertIn("execution_mode: git_worktree", summary)
+            self.assertIn("branch: cbr/reporting", summary)
+            self.assertEqual(0, bundle_code)
+            self.assertEqual("git_worktree", bundle["task_worktree"]["metadata"]["execution_mode"])
+            self.assertEqual("cbr/reporting", bundle["task_worktree"]["metadata"]["branch"])
+            self.assertTrue(bundle["task_worktree"]["path_exists"])
+            self.assertNotIn("execution_worktree_path", bundle["task"])
+
+    def test_review_next_reports_worktree_warnings_without_failing_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", str(repo), task_id="stale-worktree")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["last_result"] = {
+                "task_id": "stale-worktree",
+                "status": "completed",
+                "summary": "done",
+                "changed_files": ["file.txt"],
+                "verification": ["unit tests"],
+            }
+            task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
+            task["execution_mode"] = "git_worktree"
+            task["execution_branch"] = "cbr/stale-worktree"
+            task["execution_base_ref"] = "HEAD"
+            task["execution_base_head"] = git(repo, "rev-parse", "HEAD")
+            task["execution_worktree_status"] = "retained"
+            task["execution_worktree_path"] = str(root / "worktrees" / "missing")
+            task["execution_worktree_root"] = str(root / "worktrees")
+            task["execution_repo_root"] = str(repo)
+            save_task(config, task)
+
+            code, output = run_cli_text(["--config", str(config_path), "review-next", "--dry-run", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["selected"])
+            self.assertIn("worktree_report", report)
+            self.assertTrue(report["worktree_report"]["recovery_required"])
+            self.assertIn("worktree_path", report["worktree_report"]["stale_metadata"])
+            self.assertTrue(report["gates_ok"])
 
 
 if __name__ == "__main__":

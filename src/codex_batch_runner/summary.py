@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .queue import dependency_blockers, dependency_status, is_in_cooldown, task_labels, task_project_id, task_project_root
 from .transcript import sanitize
+from .worktree import task_worktree_metadata
 
 
 def render_task_summary(
@@ -63,6 +64,7 @@ def render_task_summary(
             lines.extend(f"- {blocker['id']}: {blocker['reason']}" for blocker in blockers)
 
     append_multiline_section(lines, "last_result", render_last_result(task.get("last_result")))
+    append_multiline_section(lines, "worktree", render_worktree_metadata(task))
     append_multiline_section(lines, "git_status", render_git_status(task.get("git_status")))
     append_multiline_section(lines, "last_run", render_last_run(task.get("last_run")))
     append_multiline_section(lines, "last_progress", render_last_progress(task.get("last_progress")))
@@ -129,6 +131,26 @@ def render_git_status(git_status: object) -> str:
     if isinstance(warnings, list) and warnings:
         lines.append("warnings:")
         lines.extend(f"- {sanitize(item)}" for item in warnings)
+    return "\n".join(lines)
+
+
+def render_worktree_metadata(task: dict) -> str:
+    metadata = task_worktree_metadata(task)
+    if metadata == {"execution_mode": "main_worktree"}:
+        return ""
+    lines = []
+    for key in (
+        "execution_mode",
+        "branch",
+        "base_ref",
+        "base_head",
+        "worktree_status",
+        "worktree_path",
+        "worktree_root",
+        "repo_root",
+    ):
+        if key in metadata:
+            lines.append(f"{key}: {display_value(metadata.get(key))}")
     return "\n".join(lines)
 
 

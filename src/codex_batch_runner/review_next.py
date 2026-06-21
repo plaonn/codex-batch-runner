@@ -181,6 +181,7 @@ def select_review_next_report(config: Config, filters: Namespace | None = None, 
             "requires_accepted_review": config.dependency_requires_accepted_review,
             "items": bundle.get("dependencies", {}).get("items", []),
         },
+        "worktree_report": bundle.get("task_worktree"),
         "review_status": review_status(task),
         "bundle": concise_bundle(bundle),
         "_fingerprint": review_fingerprint(task, bundle),
@@ -354,6 +355,7 @@ def concise_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
         "dependencies": bundle.get("dependencies"),
         "last_result": bundle.get("last_result"),
         "last_run": bundle.get("last_run"),
+        "task_worktree": bundle.get("task_worktree"),
         "changed_files": bundle.get("changed_files"),
         "verification": bundle.get("verification"),
         "last_error": bundle.get("last_error"),
@@ -778,6 +780,7 @@ def render_review_next_report(report: dict[str, Any]) -> str:
         f"requires_accepted_review={str(bool(deps.get('requires_accepted_review'))).lower()} "
         f"blocked_by={blocked_by}"
     )
+    append_worktree_summary(lines, report.get("worktree_report"))
     append_result_summary(lines, bundle)
     lines.append("dry_run: no task state changed; reviewer Codex not invoked")
     return "\n".join(lines).rstrip() + "\n"
@@ -802,6 +805,27 @@ def append_result_summary(lines: list[str], bundle: dict[str, Any]) -> None:
     diff = bundle.get("git_diff_summary") if isinstance(bundle.get("git_diff_summary"), dict) else {}
     if diff:
         lines.append(f"git_diff: kind={diff.get('kind')} ref={diff.get('ref') or '-'}")
+
+
+def append_worktree_summary(lines: list[str], report: object) -> None:
+    if not isinstance(report, dict):
+        return
+    metadata = report.get("metadata") if isinstance(report.get("metadata"), dict) else {}
+    if metadata.get("execution_mode") == "main_worktree" and not report.get("warnings"):
+        return
+    missing = ",".join(report.get("missing_metadata") or []) or "-"
+    stale = ",".join(report.get("stale_metadata") or []) or "-"
+    warnings = len(report.get("warnings") or [])
+    lines.append(
+        "worktree: "
+        f"mode={metadata.get('execution_mode') or '-'} "
+        f"branch={metadata.get('branch') or '-'} "
+        f"status={metadata.get('worktree_status') or '-'} "
+        f"path_exists={report.get('path_exists')} "
+        f"branch_exists={report.get('branch_exists')} "
+        f"recovery_required={str(bool(report.get('recovery_required'))).lower()} "
+        f"missing={missing} stale={stale} warnings={warnings}"
+    )
 
 
 def one_line(value: object, limit: int) -> str:

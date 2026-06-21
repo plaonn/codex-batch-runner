@@ -14,6 +14,7 @@ from .timeutil import iso_now
 
 PREPARE_OK_STATUSES = {"runnable", "needs_resume"}
 CLEANUP_OK_STATUSES = {"archived"}
+WORKTREE_RETAINED_STATUSES = {"prepared", "running", "retained", "cleanup_candidate"}
 
 
 def sanitize_branch_name(task_id: str) -> str:
@@ -359,6 +360,126 @@ def git(cwd: Path, *args: str) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"execution_mode": task.get("execution_mode") or "main_worktree"}
+    for source, target in (
+        ("execution_branch", "branch"),
+        ("execution_base_ref", "base_ref"),
+        ("execution_base_head", "base_head"),
+        ("execution_worktree_status", "worktree_status"),
+        ("execution_worktree_path", "worktree_path"),
+        ("execution_worktree_root", "worktree_root"),
+        ("execution_repo_root", "repo_root"),
+        ("execution_original_cwd", "original_cwd"),
+        ("execution_parent_task_id", "parent_task_id"),
+        ("execution_merge_target", "merge_target"),
+    ):
+        value = task.get(source)
+        if value not in (None, ""):
+            metadata[target] = sanitize_report_value(value)
+    return metadata
+
+
+def task_worktree_report(task: dict[str, Any]) -> dict[str, Any]:
+    metadata = task_worktree_metadata(task)
+    report: dict[str, Any] = {
+        "metadata": metadata,
+        "warnings": [],
+        "missing_metadata": [],
+        "stale_metadata": [],
+        "recovery_required": False,
+        "path_exists": None,
+        "branch_exists": None,
+    }
+    if metadata.get("execution_mode") != "git_worktree":
+        return report
+
+    required = {
+        "execution_branch": "branch",
+        "execution_base_ref": "base_ref",
+        "execution_base_head": "base_head",
+        "execution_worktree_status": "worktree_status",
+        "execution_worktree_path": "worktree_path",
+    }
+    for source, public_name in required.items():
+        if not task.get(source):
+            report["missing_metadata"].append(public_name)
+    if report["missing_metadata"]:
+        report["warnings"].append("git_worktree task has incomplete worktree metadata")
+
+    status = str(task.get("execution_worktree_status") or "")
+    if status == "recovery_required":
+        report["recovery_required"] = True
+        report["warnings"].append("task worktree metadata is marked recovery_required")
+
+    path_value = task.get("execution_worktree_path")
+    if path_value:
+        try:
+            worktree_path = Path(str(path_value)).expanduser()
+            report["path_exists"] = worktree_path.exists()
+            if not report["path_exists"] and status in WORKTREE_RETAINED_STATUSES:
+                report["recovery_required"] = True
+                report["stale_metadata"].append("worktree_path")
+                report["warnings"].append("retained worktree metadata points to a missing path")
+        except OSError as exc:
+            report["recovery_required"] = True
+            report["stale_metadata"].append("worktree_path")
+            report["warnings"].append("cannot inspect worktree path: " + sanitize_report_value(exc))
+
+    repo_value = task.get("execution_repo_root") or task.get("project_root") or task.get("cwd")
+    branch = str(task.get("execution_branch") or "")
+    if repo_value and branch:
+        try:
+            repo_root = Path(str(repo_value)).expanduser()
+            branch_state = local_branch_state(repo_root, branch)
+            report["branch_exists"] = branch_state.get("exists")
+            if not branch_state.get("exists") and status in WORKTREE_RETAINED_STATUSES:
+                report["recovery_required"] = True
+                report["stale_metadata"].append("branch")
+                report["warnings"].append("retained worktree metadata points to a missing branch")
+            if branch_state.get("head"):
+                report["branch_head"] = sanitize_report_value(branch_state.get("head"))
+        except (OSError, subprocess.SubprocessError) as exc:
+            report["warnings"].append("cannot inspect worktree branch: " + sanitize_report_value(exc))
+
+    report["missing_metadata"] = sorted(set(report["missing_metadata"]))
+    report["stale_metadata"] = sorted(set(report["stale_metadata"]))
+    report["warnings"] = sorted(set(report["warnings"]))
+    return report
+
+
+def worktree_task_counts(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    by_status: dict[str, int] = {}
+    retained = 0
+    recovery_required = 0
+    missing_metadata = 0
+    for task in tasks:
+        status = str(task.get("execution_worktree_status") or "")
+        if status:
+            by_status[status] = by_status.get(status, 0) + 1
+        if status in WORKTREE_RETAINED_STATUSES:
+            retained += 1
+        report = task_worktree_report(task)
+        if report.get("missing_metadata"):
+            missing_metadata += 1
+        if report.get("recovery_required"):
+            recovery_required += 1
+    return {
+        "by_status": dict(sorted(by_status.items())),
+        "retained": retained,
+        "recovery_required": recovery_required,
+        "missing_metadata": missing_metadata,
+    }
+
+
+def sanitize_report_value(value: object) -> Any:
+    from .transcript import sanitize
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return sanitize(value)
 
 
 def render_worktree_report(report: dict[str, Any]) -> str:

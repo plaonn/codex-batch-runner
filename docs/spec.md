@@ -620,6 +620,9 @@ Branch naming and base policy:
 Review, reject, follow-up, accept model:
 
 - `review-bundle`은 main repository state와 task worktree state를 분리해 표시합니다. Completion-time snapshot, review-time current main state, review-time task worktree state, branch, base ref, inferred commits, retained worktree path 존재 여부를 각각 기록합니다.
+- `summary`, `review-bundle`, `review-next`, `doctor`는 worktree 준비/정리 단계가 저장한 task metadata를 read-only로 표시합니다. 표시 대상은 `execution_mode`, branch, base ref/head, worktree status, sanitized worktree path/root이며, 실제 개인 절대 경로는 공개 보고에 그대로 노출하지 않습니다.
+- `review-next`는 missing/stale/recovery_required worktree metadata를 별도 report field와 warning으로 표시합니다. 이 warning은 operator review를 돕기 위한 정보이며, 기존 review gate가 명시적으로 요구하지 않는 한 단독으로 fatal gate가 되지 않습니다.
+- `doctor`는 configured `worktree_mode`, `worktree_root`, retained/recovery_required/missing metadata task count를 가볍게 요약합니다. 이 점검은 worktree 실행을 시작하거나 정리 작업을 수행하지 않습니다.
 - `reject`는 task branch/worktree를 보존하고 `review_status`만 갱신합니다. Reject 자체가 branch를 삭제하거나 main을 되돌리지 않습니다.
 - `reject --follow-up` 또는 future follow-up fix는 같은 task branch를 재사용하거나 `cbr/<task-id>-fix-N` branch를 만들 수 있습니다. 어떤 방식을 쓰든 review bundle은 원 task와 fix branch linkage를 표시해야 합니다.
 - `accept`는 task 결과를 완료로 인정하지만 자동으로 main에 merge하지 않습니다. Accepted task는 explicit merge/apply 후보가 됩니다.
