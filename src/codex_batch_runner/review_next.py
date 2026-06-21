@@ -330,16 +330,12 @@ def concise_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
 
 def detectable_safety_violation(task: dict, bundle: dict[str, Any]) -> bool:
     values = [
-        task.get("cwd"),
-        task.get("project_root"),
-        task.get("prompt"),
         task.get("last_error"),
         task.get("last_result"),
-        task.get("log_paths"),
-        bundle.get("prompt_excerpt"),
         bundle.get("last_error"),
         bundle.get("last_result"),
-        bundle.get("relevant_log_paths"),
+        bundle.get("changed_files"),
+        bundle.get("verification"),
     ]
     for value in values:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True) if isinstance(value, (dict, list)) else str(value or "")

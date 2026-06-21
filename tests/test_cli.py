@@ -21,7 +21,7 @@ from codex_batch_runner.evidence import rate_limit_dir
 from codex_batch_runner.fs import write_json_atomic
 from codex_batch_runner.queue import create_task, load_task, save_task
 from codex_batch_runner.review_bundle import build_review_bundle
-from codex_batch_runner.review_next import apply_mechanical_accept, review_fingerprint
+from codex_batch_runner.review_next import apply_mechanical_accept, detectable_safety_violation, review_fingerprint
 
 
 def write_config(
@@ -1830,6 +1830,33 @@ class CliTests(unittest.TestCase):
             self.assertFalse(report["auto_review"]["follow_up_enqueued"])
             self.assertEqual("accepted", task["review_status"])
             self.assertEqual("auto-accepted by local mechanical review gates", task["review_reason"])
+
+    def test_review_next_safety_gate_ignores_private_operational_paths(self) -> None:
+        task = {
+            "cwd": "/Users/example/private-repo",
+            "project_root": "/Users/example/private-repo",
+            "prompt": "work in /Users/example/private-repo",
+            "log_paths": ["/Users/example/private-repo/.codex-batch-runner/logs/attempt-1.jsonl"],
+            "last_result": {
+                "summary": "done",
+                "changed_files": ["README.md"],
+                "verification": ["unit tests"],
+            },
+        }
+        bundle = {
+            "prompt_excerpt": "work in /Users/example/private-repo",
+            "relevant_log_paths": ["/Users/example/private-repo/.codex-batch-runner/logs/attempt-1.jsonl"],
+            "last_result": task["last_result"],
+            "changed_files": {"reported": ["README.md"]},
+            "verification": ["unit tests"],
+            "last_error": None,
+        }
+
+        self.assertFalse(detectable_safety_violation(task, bundle))
+
+        task["last_result"]["summary"] = "wrote /Users/example/private-repo/secret.txt"
+
+        self.assertTrue(detectable_safety_violation(task, bundle))
 
     def test_review_next_gate_failure_leaves_task_unaccepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
