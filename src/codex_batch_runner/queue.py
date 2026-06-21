@@ -126,6 +126,8 @@ def create_task(
     category: str | None = None,
     labels: list[str] | None = None,
     created_by: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
 ) -> dict:
     ensure_dir(config.queue_dir)
     now = iso_now()
@@ -141,6 +143,8 @@ def create_task(
     task = {
         "schema_version": SCHEMA_VERSION,
         "id": task_id,
+        "title": clean_optional_text(title) or title_from_prompt(prompt) or task_id,
+        "description": clean_optional_text(description),
         "status": "runnable",
         "review_status": None,
         "reviewed_at": None,
@@ -180,9 +184,42 @@ def create_task(
             category=task.get("category"),
             labels=task.get("labels"),
             created_by=task.get("created_by"),
+            title=task.get("title"),
+            has_description=bool(task.get("description")),
         ),
     )
     return task
+
+
+def clean_optional_text(value: object | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = " ".join(str(value).split())
+    return cleaned or None
+
+
+def title_from_prompt(prompt: str) -> str | None:
+    for line in str(prompt or "").splitlines():
+        cleaned = " ".join(line.split())
+        if cleaned:
+            return truncate_text(cleaned, 80)
+    return None
+
+
+def truncate_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)].rstrip() + "..."
+
+
+def task_title(task: dict) -> str:
+    title = clean_optional_text(task.get("title"))
+    if title:
+        return title
+    prompt_title = title_from_prompt(str(task.get("prompt") or ""))
+    if prompt_title:
+        return prompt_title
+    return str(task.get("id") or "task")
 
 
 def detect_project_root(cwd: Path) -> Path:

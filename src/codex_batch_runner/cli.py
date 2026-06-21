@@ -28,6 +28,7 @@ from .queue import (
     task_labels,
     task_project_id,
     task_project_root,
+    task_title,
 )
 from .review_bundle import build_review_bundle, render_review_bundle
 from .review_next import build_review_next_apply_report, build_review_next_report, render_review_next_report
@@ -65,6 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument("--category", help="task category")
     enqueue.add_argument("--label", action="append", default=[], help="task label, repeatable")
     enqueue.add_argument("--created-by", help="task creator")
+    enqueue.add_argument("--title", help="human-readable task title")
+    enqueue.add_argument("--description", help="optional human-readable task description")
     enqueue.set_defaults(func=cmd_enqueue)
 
     list_cmd = sub.add_parser("list", help="list tasks")
@@ -231,6 +234,8 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         category=args.category,
         labels=args.label,
         created_by=args.created_by,
+        title=args.title,
+        description=args.description,
     )
     run_post_mutation_trigger(config)
     print(task["id"])
@@ -274,7 +279,7 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
-    header = ["ID", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "FLAGS"]
+    header = ["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"]
     if args.verbose:
         header.extend(["LAST_RESULT", "LAST_RUN", "LAST_ERROR"])
     rows = []
@@ -307,11 +312,12 @@ def render_table_row(row: list[str], widths: list[int]) -> str:
 def list_table_row(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
     return [
         scalar_cell(task.get("id")),
-        scalar_cell(task.get("status")),
+        scalar_cell(truncate_table_text(task_title(task), 72)),
+        scalar_cell(status_cell(task)),
         scalar_cell(task_project_id(task)),
         scalar_cell(task.get("attempts", 0)),
-        deps_cell(task.get("depends_on")),
-        flags_cell(task, by_id, config),
+        deps_cell(task.get("depends_on"), by_id),
+        note_cell(task, by_id, config),
     ]
 
 
@@ -321,32 +327,57 @@ def scalar_cell(value: object) -> str:
     return str(value)
 
 
-def deps_cell(depends_on: object) -> str:
+def deps_cell(depends_on: object, by_id: dict[str, dict] | None = None) -> str:
     if not isinstance(depends_on, list) or not depends_on:
         return "-"
-    return ",".join(str(dep_id) for dep_id in depends_on)
+    return ",".join(dependency_label(str(dep_id), by_id or {}) for dep_id in depends_on)
 
 
-def flags_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
-    deps_ready, blocked_by = dependency_status(
+def status_cell(task: dict) -> str:
+    status = str(task.get("status") or "-")
+    if task.get("resolution") and status in {"failed", "blocked_user"}:
+        return "resolved"
+    if status == "completed":
+        review = review_status(task)
+        if review == "unreviewed":
+            return "awaiting_review"
+        if review == "rejected":
+            return "review_failed"
+        if review == "needs_followup":
+            return "needs_followup"
+        if review == "reviewing":
+            return "reviewing"
+    return status
+
+
+def note_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
+    deps_ready = dependency_status(
         task,
         by_id,
         require_accepted_review=config.dependency_requires_accepted_review,
-    )
-    flags = []
+    )[0]
+    notes = []
     if is_in_cooldown(task):
-        flags.append("cooldown")
+        notes.append("cooldown until " + scalar_cell(task.get("cooldown_until")))
     if startup_stalled(task):
-        flags.append("startup_stalled")
+        notes.append(startup_stall_note(task))
     if not deps_ready:
-        flags.append("blocked_by=" + ",".join(dependency_blocker_labels(task, by_id, config)))
+        notes.append("blocked by " + ",".join(dependency_blocker_labels(task, by_id, config)))
     if task.get("status") == "failed" and task.get("last_error"):
-        flags.append("last_error=" + one_line(task.get("last_error")))
+        notes.append("last error: " + one_line(task.get("last_error")))
     if task.get("resolution"):
-        flags.append("resolution=" + str(task.get("resolution")))
+        notes.append("resolution: " + str(task.get("resolution")))
     if task.get("status") == "completed":
-        flags.append("review=" + review_status(task))
-    return " ".join(flags) if flags else "-"
+        review = review_status(task)
+        if review == "unreviewed":
+            notes.append("awaiting review")
+        elif review == "rejected":
+            notes.append("review failed")
+        elif review == "needs_followup":
+            notes.append("needs follow-up")
+        elif review == "reviewing":
+            notes.append("reviewing")
+    return "; ".join(notes) if notes else "-"
 
 
 def startup_stalled(task: dict) -> bool:
@@ -354,15 +385,38 @@ def startup_stalled(task: dict) -> bool:
     return bool(task.get("startup_stalled_at") or (isinstance(progress, dict) and progress.get("watchdog_reason")))
 
 
+def startup_stall_note(task: dict) -> str:
+    status = str(task.get("status") or "")
+    if status in {"runnable", "needs_resume", "running"}:
+        return "startup stall retry evidence"
+    return "startup stall history"
+
+
 def dependency_blocker_labels(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
     return [
-        blocker["id"] if blocker["reason"] == "not_completed" else f"{blocker['id']}:{blocker['reason']}"
+        dependency_label(blocker["id"], by_id)
+        if blocker["reason"] == "not_completed"
+        else f"{dependency_label(blocker['id'], by_id)}:{blocker['reason']}"
         for blocker in dependency_blockers(
             task,
             by_id,
             require_accepted_review=config.dependency_requires_accepted_review,
         )
     ]
+
+
+def dependency_label(dep_id: str, by_id: dict[str, dict]) -> str:
+    dep = by_id.get(dep_id)
+    if not dep:
+        return dep_id
+    label = task_title(dep)
+    return truncate_table_text(label, 48)
+
+
+def truncate_table_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)].rstrip() + "..."
 
 
 def verbose_table_cells(task: dict) -> list[str]:

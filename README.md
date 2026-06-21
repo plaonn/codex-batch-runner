@@ -43,7 +43,7 @@ PYTHONPATH=src python3 -m unittest discover -v
 작업 등록:
 
 ```bash
-PYTHONPATH=src python3 -m codex_batch_runner enqueue --cwd /path/to/repo --prompt "README를 개선하고 테스트를 실행해"
+PYTHONPATH=src python3 -m codex_batch_runner enqueue --cwd /path/to/repo --title "README 개선" --prompt "README를 개선하고 테스트를 실행해"
 ```
 
 프로젝트 metadata를 함께 지정할 수 있습니다:
@@ -55,6 +55,8 @@ PYTHONPATH=src python3 -m codex_batch_runner enqueue \
   --category implementation \
   --label queue \
   --created-by operator \
+  --title "README 개선" \
+  --description "README와 관련 테스트를 함께 확인한다." \
   --prompt "README를 개선하고 테스트를 실행해"
 ```
 
@@ -84,9 +86,11 @@ PYTHONPATH=src python3 -m codex_batch_runner list --needs-review
 PYTHONPATH=src python3 -m codex_batch_runner list --verbose
 ```
 
-기본 `list` 출력은 fixed-width human table입니다. 열은 `ID`, `STATUS`, `PROJECT`, `ATTEMPTS`, `DEPS`, `FLAGS`이며, `DEPS`는 쉼표로 연결한 dependency id 또는 `-`, `FLAGS`는 `cooldown`, `blocked_by=...`, `last_error=...`, `resolution=...`, `review=...` 같은 운영 표시 또는 `-`를 보여줍니다. 스크립트에서는 사람이 읽는 table 대신 `--json` 출력을 사용해야 합니다.
+기본 `list` 출력은 fixed-width human table입니다. 열은 `ID`, `TITLE`, `STATUS`, `PROJECT`, `ATTEMPTS`, `DEPS`, `NOTE`입니다. `TITLE`은 task의 사람이 읽을 수 있는 제목이며, 명시되지 않은 기존 task는 prompt 첫 줄 또는 id를 fallback으로 사용합니다. `DEPS`는 dependency title을 우선 표시하고 없으면 dependency id를 표시하며, dependency가 없으면 `-`를 표시합니다. `NOTE`는 cooldown, dependency blocked 상태, review 상태, resolution, failed error, startup stall evidence 같은 운영 정보를 사람이 읽는 문장으로 표시하고 없으면 `-`를 표시합니다. 스크립트에서는 사람이 읽는 table 대신 `--json` 출력을 사용해야 합니다.
 
-`list --verbose`는 사람이 읽는 table에 `LAST_RESULT`, `LAST_RUN`, `LAST_ERROR` 열을 추가합니다. 이 열은 `last_result.status`, `last_result.summary`, optional commit/push metadata, task `git_status`, `last_run`의 command/returncode/duration, `last_error` 한 줄 요약을 표시하며, 값이 없으면 `-`를 표시합니다. `list --json` 출력은 `--verbose` 여부와 관계없이 기존 JSON task 배열을 그대로 출력합니다.
+`STATUS`는 내부 실행 상태를 기본으로 하되 `completed + unreviewed`는 `awaiting_review`, `completed + rejected`는 `review_failed`, `completed + needs_followup`은 `needs_followup`, resolution이 기록된 failed/blocked task는 `resolved`로 표시합니다. Startup stall evidence는 현재 재시도 대상이면 retry evidence로, 이미 완료되었거나 해결된 task이면 history로 `NOTE`에 표시해 과거 이력이 현재 장애처럼 보이지 않게 합니다.
+
+`list --verbose`는 사람이 읽는 table에 `LAST_RESULT`, `LAST_RUN`, `LAST_ERROR` 열을 추가합니다. 이 열은 `last_result.status`, `last_result.summary`, optional commit/push metadata, task `git_status`, `last_run`의 command/returncode/duration, `last_error` 한 줄 요약을 표시하며, 값이 없으면 `-`를 표시합니다. `list --json` 출력은 `--verbose` 여부와 관계없이 JSON task 배열을 그대로 출력하며, 새 task에는 `title`과 `description` metadata가 포함될 수 있습니다.
 
 다음 실행 가능한 작업 하나 처리:
 

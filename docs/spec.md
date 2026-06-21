@@ -106,6 +106,8 @@ codex-batch-runner/
 ```json
 {
   "id": "task-20260620-001",
+  "title": "작업 제목",
+  "description": "선택 설명",
   "status": "runnable",
   "review_status": null,
   "reviewed_at": null,
@@ -141,6 +143,8 @@ codex-batch-runner/
 
 선택 필드:
 
+- `title`
+- `description`
 - `next_prompt`
 - `session_id`
 - `thread_id`
@@ -372,17 +376,19 @@ Rough roadmap:
 - `category`: `implementation`, `review`, `smoke`, `maintenance`, `docs` 같은 운영 분류
 - `labels`: 사람이 지정하거나 skill이 추론한 짧은 태그 목록
 - `created_by`: `enqueue-codex-batch`, `operator`, `test` 같은 등록 주체
+- `title`: 사람이 목록에서 구분하기 쉬운 짧은 제목. 없으면 prompt 첫 줄, 그것도 없으면 id로 fallback합니다.
+- `description`: 사람이 읽는 선택 설명. 실행 prompt를 대체하지 않습니다.
 
 향후 후보 필드:
 
 - `source_thread_id`: 확인 가능한 경우 등록을 요청한 Codex thread id
 
-기존 task와 호환되어야 합니다. metadata가 없는 task는 `cwd`를 `project_root` fallback으로 사용하고, `project_id`는 fallback root의 basename으로 계산하며, `category`와 `labels`는 비워 둡니다.
+기존 task와 호환되어야 합니다. metadata가 없는 task는 `cwd`를 `project_root` fallback으로 사용하고, `project_id`는 fallback root의 basename으로 계산하며, `category`와 `labels`는 비워 둡니다. `title`이 없는 task는 list 표시에서 prompt 첫 줄 또는 id를 fallback으로 사용합니다.
 
 관련 CLI:
 
 ```bash
-cbr enqueue --cwd /path/to/repo --project codex-batch-runner --category implementation --label rate-limit --created-by enqueue-codex-batch --prompt-file task.md
+cbr enqueue --cwd /path/to/repo --project codex-batch-runner --category implementation --label rate-limit --created-by enqueue-codex-batch --title "Rate-limit handling" --description "Cooldown and retry behavior" --prompt-file task.md
 cbr list --project codex-batch-runner
 cbr list --project-root /path/to/repo
 cbr list --cwd /path/to/repo
@@ -565,7 +571,7 @@ Conservative default config:
 
 Startup/no-progress stall이 감지되면 runner는 Codex child process에 `SIGTERM`을 보내고 grace period 안에 종료되지 않을 때만 `SIGKILL`을 보냅니다. 이 class는 기본적으로 permanent failure가 아닙니다. session/thread id가 있으면 task는 `needs_resume`으로 남고, id가 없으면 짧은 cooldown이 있는 `runnable`로 되돌아갑니다. `last_error`는 `codex startup stalled before meaningful JSONL events` 또는 `codex startup stalled before any JSONL output`처럼 stderr-only noise보다 명확한 메시지를 사용합니다.
 
-Runner는 stall task에 `last_progress`, `startup_stalled_at`, `startup_stall_count`를 기록하고, sanitized append-only `task_startup_stalled` event를 남깁니다. Event payload는 raw prompt, raw transcript, session/thread id, credentials, token-like values를 포함하지 않습니다. `cbr summary`는 `last_progress`와 stall marker를 표시하고, `cbr list`는 compact flag `startup_stalled`를 표시할 수 있습니다. `cbr doctor`는 최근 startup stall evidence와 오래 running 상태로 남은 no-progress 후보를 operator diagnosis용으로 노출합니다.
+Runner는 stall task에 `last_progress`, `startup_stalled_at`, `startup_stall_count`를 기록하고, sanitized append-only `task_startup_stalled` event를 남깁니다. Event payload는 raw prompt, raw transcript, session/thread id, credentials, token-like values를 포함하지 않습니다. `cbr summary`는 `last_progress`와 stall marker를 표시하고, `cbr list`는 현재 재시도 대상의 startup stall retry evidence와 완료된 task의 startup stall history를 `NOTE`에서 구분해 표시할 수 있습니다. `cbr doctor`는 최근 startup stall evidence와 오래 running 상태로 남은 no-progress 후보를 operator diagnosis용으로 노출합니다.
 
 ## Lock policy
 
@@ -843,9 +849,11 @@ config 탐색 순서:
 
 `cbr list` 기본 출력은 운영자가 신경 써야 할 task 중심으로 유지함. `archived`와 `completed + accepted`는 기본 출력에서 숨기고, `completed + unreviewed/rejected/needs_followup`은 검토 대상이므로 표시함. 전체 조회가 필요하면 `--all`을 사용함. `failed` task는 한 줄짜리 `last_error` 요약을 함께 표시함.
 
-사람이 읽는 `cbr list` 출력은 header가 있는 fixed-width table입니다. 기본 list, `--all`, filter list에 같은 형식을 적용합니다. 최소 열은 `ID`, `STATUS`, `PROJECT`, `ATTEMPTS`, `DEPS`, `FLAGS`입니다. `PROJECT`는 task metadata fallback 규칙으로 계산한 project id입니다. `DEPS`는 `depends_on` id를 쉼표로 연결하고 없으면 `-`를 표시합니다. `FLAGS`는 `cooldown`, `blocked_by=...`, `last_error=...`, `resolution=...`, `review=...`를 공백으로 연결하고 없으면 `-`를 표시합니다. 열은 현재 출력 행에서 필요한 폭으로 padding하며 값을 자르지 않습니다. 자동화나 스크립트는 table format에 의존하지 말고 `--json`을 사용해야 합니다.
+사람이 읽는 `cbr list` 출력은 header가 있는 fixed-width table입니다. 기본 list, `--all`, filter list에 같은 형식을 적용합니다. 기본 열은 `ID`, `TITLE`, `STATUS`, `PROJECT`, `ATTEMPTS`, `DEPS`, `NOTE`입니다. `TITLE`은 task metadata fallback 규칙으로 계산한 사람이 읽는 제목입니다. `PROJECT`는 task metadata fallback 규칙으로 계산한 project id입니다. `DEPS`는 dependency task title을 우선 표시하고, title을 계산할 수 없으면 dependency id를 표시하며, 없으면 `-`를 표시합니다. `NOTE`는 cooldown, dependency blocked 상태, failed error, resolution, review 상태, startup stall evidence를 사람이 읽는 문장으로 표시하고 없으면 `-`를 표시합니다. 열은 현재 출력 행에서 필요한 폭으로 padding하며 값을 자르지 않습니다. 자동화나 스크립트는 table format에 의존하지 말고 `--json`을 사용해야 합니다.
 
-`cbr list --verbose`는 사람용 table에 `LAST_RESULT`, `LAST_RUN`, `LAST_ERROR` 열을 추가합니다. `LAST_RESULT`는 `last_result.status`, `last_result.summary`, optional `commits`/`push_status`, task `git_status`의 한 줄 요약을, `LAST_RUN`은 `last_run.command_kind`, `returncode`, `duration_seconds`를, `LAST_ERROR`는 `last_error`의 한 줄 요약을 표시합니다. 누락된 값은 `-`로 표시하고 transcript 또는 raw JSONL 내용은 출력하지 않습니다. `--json`을 함께 사용하면 verbose 열을 만들지 않고 기존 JSON 배열만 출력합니다.
+`STATUS`는 내부 실행 상태를 기본으로 하되 `completed + unreviewed`는 `awaiting_review`, `completed + rejected`는 `review_failed`, `completed + needs_followup`은 `needs_followup`, resolution이 기록된 failed/blocked task는 `resolved`로 표시합니다. Startup stall evidence는 현재 재시도 대상이면 retry evidence로, 이미 완료되었거나 해결된 task이면 history로 `NOTE`에 표시해 과거 이력이 현재 장애처럼 보이지 않게 합니다.
+
+`cbr list --verbose`는 사람용 table에 `LAST_RESULT`, `LAST_RUN`, `LAST_ERROR` 열을 추가합니다. `LAST_RESULT`는 `last_result.status`, `last_result.summary`, optional `commits`/`push_status`, task `git_status`의 한 줄 요약을, `LAST_RUN`은 `last_run.command_kind`, `returncode`, `duration_seconds`를, `LAST_ERROR`는 `last_error`의 한 줄 요약을 표시합니다. 누락된 값은 `-`로 표시하고 transcript 또는 raw JSONL 내용은 출력하지 않습니다. `--json`을 함께 사용하면 verbose 열을 만들지 않고 JSON 배열을 출력합니다.
 
 `cbr list --unreviewed`는 `completed + unreviewed` task만 표시함. `cbr list --needs-review`는 `completed + unreviewed/rejected/needs_followup` task를 표시함.
 
