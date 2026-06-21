@@ -29,7 +29,7 @@ from .queue import (
     task_project_root,
 )
 from .review_bundle import build_review_bundle, render_review_bundle
-from .review_next import build_review_next_report, render_review_next_report
+from .review_next import build_review_next_apply_report, build_review_next_report, render_review_next_report
 from .runner import run_next
 from .state import load_state
 from .summary import render_task_summary
@@ -99,8 +99,15 @@ def build_parser() -> argparse.ArgumentParser:
     review_bundle.add_argument("--json", action="store_true", help="print JSON")
     review_bundle.set_defaults(func=cmd_review_bundle)
 
-    review_next = sub.add_parser("review-next", help="dry-run review report for the next completed task needing review")
-    review_next.add_argument("--dry-run", action="store_true", help="report only; required because auto-apply is not implemented")
+    review_next = sub.add_parser("review-next", help="review report or opt-in local auto-review for the next completed task needing review")
+    review_mode = review_next.add_mutually_exclusive_group()
+    review_mode.add_argument("--dry-run", action="store_true", help="report only; this is the default")
+    review_mode.add_argument("--apply", action="store_true", help="run local auto-review under the queue lock")
+    review_next.add_argument(
+        "--mechanical-auto-accept",
+        action="store_true",
+        help="allow --apply to accept when every local mechanical gate passes",
+    )
     review_next.add_argument("--project", dest="project_id", help="filter by project id")
     review_next.add_argument("--project-root", help="filter by project root")
     review_next.add_argument("--category", help="filter by category")
@@ -519,10 +526,19 @@ def cmd_review_bundle(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_review_next(config: Config, args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        print("error: auto-apply is not implemented yet; rerun with --dry-run", file=sys.stderr)
+    if args.mechanical_auto_accept and not args.apply:
+        print("error: --mechanical-auto-accept requires --apply", file=sys.stderr)
         return 1
-    report = build_review_next_report(config, args)
+    if args.apply:
+        report = build_review_next_apply_report(
+            config,
+            args,
+            mechanical_auto_accept=args.mechanical_auto_accept,
+        )
+        if report.get("mutated"):
+            run_post_mutation_trigger(config)
+    else:
+        report = build_review_next_report(config, args)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:

@@ -1,43 +1,121 @@
 from __future__ import annotations
 
+import json
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .events import emit_task_event, transition_payload
+from .fs import ensure_dir
+from .lock import FileLock
 from .queue import (
     dependency_status,
     list_tasks,
+    load_task,
+    save_task,
     task_labels,
     task_project_id,
     task_project_root,
 )
 from .review_bundle import build_review_bundle
 from .summary import review_status
+from .timeutil import iso_now
 from .transcript import sanitize
 
 REVIEW_NEEDED_STATUSES = {"unreviewed", "rejected", "needs_followup"}
 
 
 def build_review_next_report(config: Config, filters: Namespace | None = None) -> dict[str, Any]:
+    report = select_review_next_report(config, filters, mode="dry-run")
+    report.pop("_fingerprint", None)
+    return report
+
+
+def build_review_next_apply_report(
+    config: Config,
+    filters: Namespace | None = None,
+    *,
+    mechanical_auto_accept: bool = False,
+) -> dict[str, Any]:
+    ensure_dir(config.queue_dir)
+    lock = FileLock(config.lock_file, config.stale_lock_seconds)
+    if not lock.acquire():
+        return no_selection_report(
+            mode="apply",
+            message="another runner is active",
+            filters=filter_summary(filters),
+            status="locked",
+        )
+
+    try:
+        report = select_review_next_report(config, filters, mode="apply")
+        expected = report.pop("_fingerprint", None)
+        report["auto_review"] = auto_review_summary(
+            decision="none",
+            reason="no completed task needs review" if not report["selected"] else "pending",
+            enabled=mechanical_auto_accept or config.auto_review_mechanical_accept,
+            reviewer_codex_enabled=config.auto_review_codex_enabled,
+        )
+        if not report["selected"]:
+            return report
+
+        enabled = mechanical_auto_accept or config.auto_review_mechanical_accept
+        if not enabled:
+            report["auto_review"] = auto_review_summary(
+                decision="needs_human",
+                reason="mechanical auto-accept is disabled",
+                enabled=False,
+                reviewer_codex_enabled=config.auto_review_codex_enabled,
+            )
+            return report
+
+        failed = [gate for gate in report.get("gates", []) if not gate.get("ok")]
+        if failed:
+            report["auto_review"] = auto_review_summary(
+                decision="needs_human",
+                reason="mechanical gates failed",
+                enabled=True,
+                reviewer_codex_enabled=config.auto_review_codex_enabled,
+                failing_gates=[gate.get("name") for gate in failed],
+            )
+            return report
+
+        task_id = str(report["task_id"])
+        if not isinstance(expected, dict):
+            report["auto_review"] = auto_review_summary(
+                decision="needs_human",
+                reason="review fingerprint unavailable",
+                enabled=True,
+                reviewer_codex_enabled=config.auto_review_codex_enabled,
+            )
+            return report
+        applied = apply_mechanical_accept(config, task_id, expected)
+        report["mutated"] = applied["mutated"]
+        report["review_status"] = applied.get("review_status", report.get("review_status"))
+        report["auto_review"] = auto_review_summary(
+            decision=applied["decision"],
+            reason=applied["reason"],
+            enabled=True,
+            reviewer_codex_enabled=config.auto_review_codex_enabled,
+        )
+        return report
+    finally:
+        lock.release()
+
+
+def select_review_next_report(config: Config, filters: Namespace | None = None, *, mode: str) -> dict[str, Any]:
     tasks = list_tasks(config)
     by_id = {task.get("id"): task for task in tasks}
     candidates = [task for task in tasks if is_review_needed(task)]
     candidates = apply_filters(candidates, filters)
     candidates.sort(key=review_sort_key)
     if not candidates:
-        return {
-            "mode": "dry-run",
-            "selected": False,
-            "task_id": None,
-            "candidate_count": 0,
-            "message": "no completed task needs review",
-            "filters": filter_summary(filters),
-            "gates": [],
-            "dependencies": None,
-            "bundle": None,
-            "mutated": False,
-        }
+        return no_selection_report(
+            mode=mode,
+            message="no completed task needs review",
+            filters=filter_summary(filters),
+        )
 
     task = candidates[0]
     bundle = build_review_bundle(
@@ -52,7 +130,7 @@ def build_review_next_report(config: Config, filters: Namespace | None = None) -
         require_accepted_review=config.dependency_requires_accepted_review,
     )
     return {
-        "mode": "dry-run",
+        "mode": mode,
         "selected": True,
         "task_id": task.get("id"),
         "candidate_count": len(candidates),
@@ -69,6 +147,31 @@ def build_review_next_report(config: Config, filters: Namespace | None = None) -
         },
         "review_status": review_status(task),
         "bundle": concise_bundle(bundle),
+        "_fingerprint": review_fingerprint(task, bundle),
+        "mutated": False,
+    }
+
+
+def no_selection_report(
+    *,
+    mode: str,
+    message: str,
+    filters: dict[str, Any],
+    status: str = "empty",
+) -> dict[str, Any]:
+    return {
+        "mode": mode,
+        "status": status,
+        "selected": False,
+        "task_id": None,
+        "candidate_count": 0,
+        "message": message,
+        "filters": filters,
+        "gates_ok": False,
+        "gates": [],
+        "dependencies": None,
+        "review_status": None,
+        "bundle": None,
         "mutated": False,
     }
 
@@ -155,6 +258,7 @@ def mechanical_gates(task: dict, bundle: dict[str, Any]) -> list[dict[str, Any]]
         gate("dependencies_ready", bool(deps.get("ready")), dependency_detail(deps)),
         gate("git_clean", repo.get("dirty") is False, git_clean_detail(repo)),
         gate("no_unpushed_commits", no_unpushed(git_status), unpushed_detail(git_status)),
+        gate("safety_metadata_clean", not detectable_safety_violation(task, bundle), safety_detail(task, bundle)),
     ]
 
 
@@ -224,6 +328,117 @@ def concise_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def detectable_safety_violation(task: dict, bundle: dict[str, Any]) -> bool:
+    values = [
+        task.get("cwd"),
+        task.get("project_root"),
+        task.get("prompt"),
+        task.get("last_error"),
+        task.get("last_result"),
+        task.get("log_paths"),
+        bundle.get("prompt_excerpt"),
+        bundle.get("last_error"),
+        bundle.get("last_result"),
+        bundle.get("relevant_log_paths"),
+    ]
+    for value in values:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True) if isinstance(value, (dict, list)) else str(value or "")
+        if sanitize(text) != " ".join(text.split()):
+            return True
+    return False
+
+
+def safety_detail(task: dict, bundle: dict[str, Any]) -> str:
+    return "no obvious secrets or local user paths detected" if not detectable_safety_violation(task, bundle) else "obvious secret or local user path detected"
+
+
+def review_fingerprint(task: dict, bundle: dict[str, Any]) -> dict[str, Any]:
+    repo = bundle.get("git_repository") if isinstance(bundle.get("git_repository"), dict) else {}
+    commit_info = bundle.get("commit_information") if isinstance(bundle.get("commit_information"), dict) else {}
+    return {
+        "updated_at": task.get("updated_at"),
+        "status": task.get("status"),
+        "review_status": review_status(task),
+        "completed_at": task.get("completed_at"),
+        "last_result": task.get("last_result"),
+        "git_status": task.get("git_status"),
+        "repo": {
+            "available": repo.get("available"),
+            "branch": repo.get("branch"),
+            "head": repo.get("head"),
+            "dirty": repo.get("dirty"),
+        },
+        "commit_information": {
+            "status": commit_info.get("status"),
+            "inferred_commits": commit_info.get("inferred_commits"),
+        },
+    }
+
+
+def apply_mechanical_accept(config: Config, task_id: str, expected_fingerprint: dict[str, Any]) -> dict[str, Any]:
+    task = load_task(config, task_id)
+    bundle = build_review_bundle(
+        task,
+        by_id={item.get("id"): item for item in list_tasks(config)},
+        require_accepted_review=config.dependency_requires_accepted_review,
+    )
+    current = review_fingerprint(task, bundle)
+    if current != expected_fingerprint:
+        return {
+            "mutated": False,
+            "decision": "needs_human",
+            "reason": "stale review state; task or git metadata changed after gates were computed",
+            "review_status": review_status(task),
+        }
+    gates = mechanical_gates(task, bundle)
+    if not all(gate["ok"] for gate in gates):
+        return {
+            "mutated": False,
+            "decision": "needs_human",
+            "reason": "mechanical gates no longer pass",
+            "review_status": review_status(task),
+        }
+    task["review_status"] = "accepted"
+    task["reviewed_at"] = iso_now()
+    task["review_reason"] = "auto-accepted by local mechanical review gates"
+    save_task(config, task)
+    emit_task_event(
+        config,
+        "task_reviewed",
+        task,
+        source="review-next",
+        summary=f"mechanically auto-accepted task {task_id}",
+        payload=transition_payload(task, review_status="accepted", reviewed_at=task.get("reviewed_at")),
+    )
+    return {
+        "mutated": True,
+        "decision": "accepted",
+        "reason": "all local mechanical gates passed",
+        "review_status": "accepted",
+    }
+
+
+def auto_review_summary(
+    *,
+    decision: str,
+    reason: str,
+    enabled: bool,
+    reviewer_codex_enabled: bool,
+    failing_gates: list[object] | None = None,
+) -> dict[str, Any]:
+    summary = {
+        "decision": decision,
+        "reason": sanitize(reason),
+        "mechanical_auto_accept_enabled": bool(enabled),
+        "reviewer_codex_enabled": bool(reviewer_codex_enabled),
+        "reviewer_codex_invoked": False,
+        "follow_up_enqueued": False,
+    }
+    if failing_gates:
+        summary["failing_gates"] = [sanitize(item) for item in failing_gates]
+    return summary
+
+
 def render_review_next_report(report: dict[str, Any]) -> str:
     lines = [
         f"mode: {report['mode']}",
@@ -249,6 +464,16 @@ def render_review_next_report(report: dict[str, Any]) -> str:
     for item in report.get("gates", []):
         status = "pass" if item["ok"] else "fail"
         lines.append(f"- {item['name']}: {status} ({item['detail']})")
+    auto_review = report.get("auto_review") or {}
+    if auto_review:
+        lines.extend(
+            [
+                "auto_review:",
+                f"- decision: {auto_review.get('decision')}",
+                f"- reason: {auto_review.get('reason')}",
+                f"- reviewer_codex_invoked: {str(bool(auto_review.get('reviewer_codex_invoked'))).lower()}",
+            ]
+        )
     deps = report.get("dependencies") or {}
     blockers = deps.get("blockers") or []
     if blockers:

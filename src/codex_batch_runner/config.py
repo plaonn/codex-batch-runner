@@ -24,6 +24,8 @@ class Config:
     rate_limit_cooldown_seconds: int
     default_max_attempts: int
     dependency_requires_accepted_review: bool = False
+    auto_review_mechanical_accept: bool = False
+    auto_review_codex_enabled: bool = False
     codex_startup_stall_seconds: int = 240
     codex_first_meaningful_timeout_seconds: int = 420
     codex_mid_run_idle_seconds: int = 1800
@@ -71,6 +73,14 @@ class Config:
             dependency_requires_accepted_review=bool_value(
                 "dependency_requires_accepted_review",
                 data.get("dependency_requires_accepted_review", False),
+            ),
+            auto_review_mechanical_accept=bool_value(
+                "auto_review_mechanical_accept",
+                data.get("auto_review_mechanical_accept", False),
+            ),
+            auto_review_codex_enabled=bool_value(
+                "auto_review_codex_enabled",
+                data.get("auto_review_codex_enabled", False),
             ),
             codex_startup_stall_seconds=int(data.get("codex_startup_stall_seconds", 240)),
             codex_first_meaningful_timeout_seconds=int(data.get("codex_first_meaningful_timeout_seconds", 420)),

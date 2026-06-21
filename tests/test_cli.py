@@ -4,12 +4,14 @@ import contextlib
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 from pathlib import Path
 
@@ -18,6 +20,8 @@ from codex_batch_runner.config import Config
 from codex_batch_runner.evidence import rate_limit_dir
 from codex_batch_runner.fs import write_json_atomic
 from codex_batch_runner.queue import create_task, load_task, save_task
+from codex_batch_runner.review_bundle import build_review_bundle
+from codex_batch_runner.review_next import apply_mechanical_accept, review_fingerprint
 
 
 def write_config(
@@ -93,6 +97,23 @@ def init_repo(path: Path) -> None:
     subprocess.run(["git", "init", "-b", "main", str(path)], check=True, stdout=subprocess.PIPE)
     git(path, "config", "user.email", "test@example.invalid")
     git(path, "config", "user.name", "Test User")
+
+
+def create_clean_completed_task(config: Config, repo: Path, task_id: str = "reviewable") -> dict:
+    task = create_task(config, "work", str(repo), task_id=task_id)
+    task["status"] = "completed"
+    task["review_status"] = "unreviewed"
+    task["completed_at"] = "2026-01-01T00:00:00+00:00"
+    task["last_result"] = {
+        "task_id": task_id,
+        "status": "completed",
+        "summary": "done",
+        "changed_files": ["file.txt"],
+        "verification": ["unit tests"],
+    }
+    task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
+    save_task(config, task)
+    return task
 
 
 def write_plan(tmp: str, data: dict) -> Path:
@@ -1735,15 +1756,179 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual(before, after)
 
-    def test_review_next_requires_dry_run(self) -> None:
+    def test_review_next_defaults_to_read_only_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", tmp, task_id="readonly-default")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            save_task(config, task)
 
             code, output, stderr = run_cli_with_stderr(["--config", str(config_path), "review-next"])
 
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr)
+            self.assertIn("mode: dry-run", output)
+            self.assertEqual("unreviewed", load_task(config, "readonly-default")["review_status"])
+
+    def test_review_next_mechanical_auto_accept_requires_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output, stderr = run_cli_with_stderr(
+                ["--config", str(config_path), "review-next", "--mechanical-auto-accept"]
+            )
+
             self.assertEqual(1, code)
             self.assertEqual("", output)
-            self.assertIn("auto-apply is not implemented yet", stderr)
+            self.assertIn("--mechanical-auto-accept requires --apply", stderr)
+
+    def test_review_next_apply_refuses_without_explicit_auto_accept(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "not-enabled")
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["mutated"])
+            self.assertEqual("needs_human", report["auto_review"]["decision"])
+            self.assertIn("disabled", report["auto_review"]["reason"])
+            self.assertEqual("unreviewed", load_task(config, "not-enabled")["review_status"])
+
+    def test_review_next_mechanical_auto_accept_marks_task_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "auto-accept")
+
+            code, output = run_cli(
+                ["--config", str(config_path), "review-next", "--apply", "--mechanical-auto-accept", "--json"]
+            )
+            report = json.loads(output)
+            task = load_task(config, "auto-accept")
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["mutated"])
+            self.assertEqual("accepted", report["auto_review"]["decision"])
+            self.assertFalse(report["auto_review"]["reviewer_codex_invoked"])
+            self.assertFalse(report["auto_review"]["follow_up_enqueued"])
+            self.assertEqual("accepted", task["review_status"])
+            self.assertEqual("auto-accepted by local mechanical review gates", task["review_reason"])
+
+    def test_review_next_gate_failure_leaves_task_unaccepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_clean_completed_task(config, repo, "gate-fail")
+            task["last_result"]["verification"] = []
+            save_task(config, task)
+
+            code, output = run_cli(
+                ["--config", str(config_path), "review-next", "--apply", "--mechanical-auto-accept", "--json"]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["mutated"])
+            self.assertEqual("needs_human", report["auto_review"]["decision"])
+            self.assertIn("verification_present", report["auto_review"]["failing_gates"])
+            self.assertEqual("unreviewed", load_task(config, "gate-fail")["review_status"])
+
+    def test_review_next_apply_is_stale_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_clean_completed_task(config, repo, "stale")
+            bundle = build_review_bundle(task, by_id={}, require_accepted_review=False)
+            expected = review_fingerprint(task, bundle)
+            task["last_result"]["summary"] = "changed after review gates"
+            save_task(config, task)
+
+            result = apply_mechanical_accept(config, "stale", expected)
+
+            self.assertFalse(result["mutated"])
+            self.assertEqual("needs_human", result["decision"])
+            self.assertIn("stale review state", result["reason"])
+            self.assertEqual("unreviewed", load_task(config, "stale")["review_status"])
+
+    def test_review_next_apply_respects_runner_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "locked-review")
+            config.lock_file.parent.mkdir(parents=True, exist_ok=True)
+            config.lock_file.write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "hostname": socket.gethostname(),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "task_id": "running-task",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(
+                ["--config", str(config_path), "review-next", "--apply", "--mechanical-auto-accept", "--json"]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual("locked", report["status"])
+            self.assertFalse(report["mutated"])
+            self.assertEqual("unreviewed", load_task(config, "locked-review")["review_status"])
+
+    def test_dependency_accepted_policy_blocks_dependent_run_next(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, dependency_requires_accepted_review=True)
+            config = Config.load(str(config_path))
+            dep = create_task(config, "dependency", tmp, task_id="dep")
+            dep["status"] = "completed"
+            dep["review_status"] = "unreviewed"
+            save_task(config, dep)
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+
+            code, output = run_cli(["--config", str(config_path), "run-next", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual("empty", report["status"])
+            self.assertEqual("runnable", load_task(config, "child")["status"])
 
     def test_transcript_includes_codex_session_log_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

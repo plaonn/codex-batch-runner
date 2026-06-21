@@ -78,6 +78,21 @@ class ConfigTests(unittest.TestCase):
             config = Config.load(str(config_path), root=Path(tmp))
 
             self.assertTrue(config.dependency_requires_accepted_review)
+            self.assertFalse(config.auto_review_mechanical_accept)
+            self.assertFalse(config.auto_review_codex_enabled)
+
+    def test_auto_review_options_can_be_enabled_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps({"auto_review_mechanical_accept": True, "auto_review_codex_enabled": True}),
+                encoding="utf-8",
+            )
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertTrue(config.auto_review_mechanical_accept)
+            self.assertTrue(config.auto_review_codex_enabled)
 
     def test_codex_watchdog_config_defaults_and_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +135,14 @@ class ConfigTests(unittest.TestCase):
             config_path.write_text(json.dumps({"dependency_requires_accepted_review": "true"}), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "dependency_requires_accepted_review must be a boolean"):
+                Config.load(str(config_path), root=Path(tmp))
+
+    def test_auto_review_options_must_be_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"auto_review_mechanical_accept": "true"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "auto_review_mechanical_accept must be a boolean"):
                 Config.load(str(config_path), root=Path(tmp))
 
     def test_notifier_cursor_state_paths_are_optional_local_paths(self) -> None:
