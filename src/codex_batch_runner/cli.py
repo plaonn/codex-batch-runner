@@ -7,8 +7,9 @@ from pathlib import Path
 
 from .apply_plan import build_apply_plan_report, render_apply_plan_report
 from .config import Config
+from .cooldown import MANUAL_COOLDOWN_SAFETY_OFFSET_SECONDS, cooldown_status, format_duration, parse_manual_cooldown
 from .doctor import build_doctor_report, render_doctor_report
-from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human
+from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write_event_nonfatal
 from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
 from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
@@ -31,7 +32,7 @@ from .queue import (
 from .review_bundle import build_review_bundle, render_review_bundle
 from .review_next import build_review_next_apply_report, build_review_next_report, render_review_next_report
 from .runner import run_next
-from .state import load_state
+from .state import clear_global_cooldown, load_state, set_global_cooldown
 from .summary import render_task_summary
 from .transcript import render_task_transcript
 from .triggers import run_post_mutation_trigger
@@ -164,6 +165,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     state = sub.add_parser("state", help="show runner state")
     state.set_defaults(func=cmd_state)
+
+    cooldown = sub.add_parser("cooldown", help="show, set, or clear global cooldown")
+    cooldown_sub = cooldown.add_subparsers(dest="cooldown_command", required=True)
+    cooldown_show = cooldown_sub.add_parser("show", help="show global cooldown status")
+    cooldown_show.set_defaults(func=cmd_cooldown_show)
+    cooldown_clear = cooldown_sub.add_parser("clear", help="clear global cooldown")
+    cooldown_clear.set_defaults(func=cmd_cooldown_clear)
+    cooldown_set = cooldown_sub.add_parser("set", help="set global cooldown reset time")
+    cooldown_set.add_argument("value", help="reset time such as 7:6, 6/21 7:06, 2026-06-21 07:06, +90m")
+    cooldown_set.set_defaults(func=cmd_cooldown_set)
 
     rate_limits = sub.add_parser("rate-limits", help="list sanitized rate-limit evidence")
     rate_limits.add_argument("--json", action="store_true", help="print JSON")
@@ -631,6 +642,58 @@ def cmd_resolve(config: Config, args: argparse.Namespace) -> int:
 def cmd_state(config: Config, args: argparse.Namespace) -> int:
     print(json.dumps(load_state(config), ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def cmd_cooldown_show(config: Config, args: argparse.Namespace) -> int:
+    print(render_cooldown_status(cooldown_status(load_state(config).get("global_cooldown_until"))), end="")
+    return 0
+
+
+def cmd_cooldown_clear(config: Config, args: argparse.Namespace) -> int:
+    previous = load_state(config).get("global_cooldown_until")
+    clear_global_cooldown(config)
+    write_event_nonfatal(
+        config,
+        "cooldown_updated",
+        summary="global cooldown cleared",
+        payload={"action": "clear", "previous_global_cooldown_until": previous},
+    )
+    run_post_mutation_trigger(config)
+    print("global cooldown cleared")
+    return 0
+
+
+def cmd_cooldown_set(config: Config, args: argparse.Namespace) -> int:
+    schedule = parse_manual_cooldown(args.value)
+    set_global_cooldown(config, schedule.effective_cooldown_until.isoformat())
+    write_event_nonfatal(
+        config,
+        "cooldown_updated",
+        summary="global cooldown set",
+        payload={
+            "action": "set",
+            "input_value": schedule.input_value,
+            "interpreted_reset_at": schedule.interpreted_reset_at.isoformat(),
+            "effective_cooldown_until": schedule.effective_cooldown_until.isoformat(),
+            "safety_offset_seconds": MANUAL_COOLDOWN_SAFETY_OFFSET_SECONDS,
+        },
+    )
+    print("global cooldown set")
+    print(f"input: {schedule.input_value}")
+    print(f"interpreted_reset_at: {schedule.interpreted_reset_at.isoformat()}")
+    print(f"effective_cooldown_until: {schedule.effective_cooldown_until.isoformat()}")
+    print(f"duration: {format_duration(schedule.duration_seconds)}")
+    return 0
+
+
+def render_cooldown_status(status: dict[str, object]) -> str:
+    lines = [
+        "global cooldown status",
+        f"global_cooldown_until: {status.get('global_cooldown_until') or '-'}",
+        f"active: {str(bool(status.get('active'))).lower()}",
+        f"remaining: {status.get('remaining')}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def cmd_rate_limits(config: Config, args: argparse.Namespace) -> int:

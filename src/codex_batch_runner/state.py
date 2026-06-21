@@ -53,3 +53,17 @@ def mark_rate_limit(config: Config, cooldown_until: str, task_id: str) -> None:
     state["last_rate_limit_at"] = iso_now()
     state["last_task_id"] = task_id
     save_state(config, state)
+
+
+def set_global_cooldown(config: Config, cooldown_until: str) -> dict:
+    state = load_state(config)
+    state["global_cooldown_until"] = cooldown_until
+    save_state(config, state)
+    return state
+
+
+def clear_global_cooldown(config: Config) -> dict:
+    state = load_state(config)
+    state["global_cooldown_until"] = None
+    save_state(config, state)
+    return state

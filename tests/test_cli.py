@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from pathlib import Path
 
@@ -123,6 +123,134 @@ def write_plan(tmp: str, data: dict) -> Path:
 
 
 class CliTests(unittest.TestCase):
+    def test_cooldown_set_time_only_zero_pads_and_stores_safety_offset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            fixed_now = datetime(2026, 6, 21, 20, 35, tzinfo=timezone(timedelta(hours=9)))
+
+            with patch("codex_batch_runner.cooldown.local_now", return_value=fixed_now):
+                code, output = run_cli(["--config", str(config_path), "cooldown", "set", "7:6"])
+
+            self.assertEqual(0, code)
+            self.assertIn("interpreted_reset_at: 2026-06-22T07:06:00+09:00", output)
+            self.assertIn("effective_cooldown_until: 2026-06-22T07:07:00+09:00", output)
+            state = json.loads((Path(tmp) / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual("2026-06-22T07:07:00+09:00", state["global_cooldown_until"])
+
+    def test_cooldown_set_time_only_future_uses_today_and_past_rolls_tomorrow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            fixed_now = datetime(2026, 6, 21, 7, 5, tzinfo=timezone(timedelta(hours=9)))
+
+            with patch("codex_batch_runner.cooldown.local_now", return_value=fixed_now):
+                today_code, today_output = run_cli(["--config", str(config_path), "cooldown", "set", "7:6"])
+                tomorrow_code, tomorrow_output = run_cli(["--config", str(config_path), "cooldown", "set", "7:4"])
+
+            self.assertEqual(0, today_code)
+            self.assertIn("interpreted_reset_at: 2026-06-21T07:06:00+09:00", today_output)
+            self.assertEqual(0, tomorrow_code)
+            self.assertIn("interpreted_reset_at: 2026-06-22T07:04:00+09:00", tomorrow_output)
+
+    def test_cooldown_set_parses_slash_and_dash_month_day_dates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            fixed_now = datetime(2026, 6, 21, 7, 5, tzinfo=timezone(timedelta(hours=9)))
+
+            with patch("codex_batch_runner.cooldown.local_now", return_value=fixed_now):
+                slash_code, slash_output = run_cli(["--config", str(config_path), "cooldown", "set", "6/22 7:6"])
+                dash_code, dash_output = run_cli(["--config", str(config_path), "cooldown", "set", "6-23 8:9"])
+
+            self.assertEqual(0, slash_code)
+            self.assertIn("interpreted_reset_at: 2026-06-22T07:06:00+09:00", slash_output)
+            self.assertEqual(0, dash_code)
+            self.assertIn("interpreted_reset_at: 2026-06-23T08:09:00+09:00", dash_output)
+
+    def test_cooldown_set_rejects_explicit_past_date(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            fixed_now = datetime(2026, 6, 21, 7, 5, tzinfo=timezone(timedelta(hours=9)))
+
+            with patch("codex_batch_runner.cooldown.local_now", return_value=fixed_now):
+                code, output, stderr = run_cli_with_stderr(
+                    ["--config", str(config_path), "cooldown", "set", "6/20 7:6"]
+                )
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("cooldown reset time is in the past", stderr)
+
+    def test_cooldown_set_rejects_more_than_seven_days_future(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            fixed_now = datetime(2026, 6, 21, 7, 5, tzinfo=timezone(timedelta(hours=9)))
+
+            with patch("codex_batch_runner.cooldown.local_now", return_value=fixed_now):
+                code, output, stderr = run_cli_with_stderr(
+                    ["--config", str(config_path), "cooldown", "set", "2026-06-29 7:6"]
+                )
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("within 7 days", stderr)
+
+    def test_cooldown_set_parses_relative_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            fixed_now = datetime(2026, 6, 21, 7, 5, tzinfo=timezone(timedelta(hours=9)))
+
+            with patch("codex_batch_runner.cooldown.local_now", return_value=fixed_now):
+                code, output = run_cli(["--config", str(config_path), "cooldown", "set", "+2h30m"])
+
+            self.assertEqual(0, code)
+            self.assertIn("interpreted_reset_at: 2026-06-21T09:35:00+09:00", output)
+            self.assertIn("effective_cooldown_until: 2026-06-21T09:36:00+09:00", output)
+
+    def test_cooldown_clear_removes_global_cooldown_and_runs_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).open('a', encoding='utf-8').write('x\\n')",
+                str(marker),
+            ]
+            config_path = write_config(tmp, trigger)
+            (Path(tmp) / "state.json").write_text(
+                json.dumps({"global_cooldown_until": "2026-06-22T07:07:00+09:00"}),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(["--config", str(config_path), "cooldown", "clear"])
+
+            self.assertEqual(0, code)
+            self.assertEqual("global cooldown cleared\n", output)
+            state = json.loads((Path(tmp) / "state.json").read_text(encoding="utf-8"))
+            self.assertIsNone(state["global_cooldown_until"])
+            self.assertEqual(["x"], marker.read_text(encoding="utf-8").splitlines())
+
+    def test_cooldown_show_reports_inactive_and_active_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            fixed_now = datetime(2026, 6, 21, 7, 5, tzinfo=timezone(timedelta(hours=9)))
+
+            with patch("codex_batch_runner.cooldown.local_now", return_value=fixed_now):
+                inactive_code, inactive_output = run_cli(["--config", str(config_path), "cooldown", "show"])
+            self.assertEqual(0, inactive_code)
+            self.assertIn("active: false", inactive_output)
+            self.assertIn("remaining: 0m", inactive_output)
+
+            (Path(tmp) / "state.json").write_text(
+                json.dumps({"global_cooldown_until": "2026-06-21T08:06:00+09:00"}),
+                encoding="utf-8",
+            )
+            with patch("codex_batch_runner.cooldown.local_now", return_value=fixed_now):
+                active_code, active_output = run_cli(["--config", str(config_path), "cooldown", "show"])
+
+            self.assertEqual(0, active_code)
+            self.assertIn("global_cooldown_until: 2026-06-21T08:06:00+09:00", active_output)
+            self.assertIn("active: true", active_output)
+            self.assertIn("remaining: 1h 1m", active_output)
+
     def test_post_mutation_trigger_runs_after_enqueue_and_review_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "trigger.log"
