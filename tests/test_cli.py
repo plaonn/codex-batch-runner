@@ -1317,7 +1317,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual("needs_followup", rows["followup"]["STATUS"])
             self.assertNotIn("accepted", rows)
 
-    def test_list_note_shows_when_mechanical_auto_review_is_enabled(self) -> None:
+    def test_list_note_hides_mechanical_auto_review_capability_noise(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp, auto_review_mechanical_accept=True)
             config = Config.load(str(config_path))
@@ -1331,7 +1331,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertIn("awaiting review", rows["reviewable"]["NOTE"])
-            self.assertIn("mechanical auto-review enabled", rows["reviewable"]["NOTE"])
+            self.assertNotIn("mechanical auto-review enabled", rows["reviewable"]["NOTE"])
 
     def test_list_all_includes_completed_and_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1489,11 +1489,13 @@ class CliTests(unittest.TestCase):
 
     def test_list_compact_splits_note_segments_onto_continuation_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(tmp, auto_review_mechanical_accept=True)
+            config_path = write_config(tmp)
             config = Config.load(str(config_path))
             task = create_task(config, "Review task title", tmp, task_id="reviewable", project_id="project-a")
             task["status"] = "completed"
             task["review_status"] = "unreviewed"
+            task["chain_status"] = "waiting_fix"
+            task["last_review_decision"] = "needs_fix"
             save_task(config, task)
 
             code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a"])
@@ -1501,12 +1503,12 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertIn("awaiting review", rows["reviewable"]["NOTE"])
-            self.assertIn("mechanical auto-review enabled", rows["reviewable"]["NOTE"])
-            self.assertRegex(output, r"Review task title\s+mechanical auto-review enabled")
+            self.assertIn("chain waiting_fix after needs_fix", rows["reviewable"]["NOTE"])
+            self.assertRegex(output, r"Review task title\s+chain waiting_fix after needs_fix")
 
     def test_list_compact_renders_title_deps_and_note_continuations_in_parallel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(tmp, auto_review_mechanical_accept=True)
+            config_path = write_config(tmp)
             config = Config.load(str(config_path))
             for dep_id in ("dep-one", "dep-two"):
                 dep = create_task(config, dep_id, tmp, task_id=dep_id)
@@ -1523,6 +1525,8 @@ class CliTests(unittest.TestCase):
             )
             task["status"] = "completed"
             task["review_status"] = "unreviewed"
+            task["chain_status"] = "waiting_fix"
+            task["last_review_decision"] = "needs_fix"
             save_task(config, task)
 
             code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
@@ -1531,7 +1535,7 @@ class CliTests(unittest.TestCase):
             lines = list_lines(output)
             detail = next(line for line in lines if "Review task title" in line)
             self.assertIn("dep-two (done)", detail)
-            self.assertIn("mechanical auto-review enabled", detail)
+            self.assertIn("chain waiting_fix after needs_fix", detail)
             self.assertNotIn("\n\n", output)
 
     def test_list_color_modes_respect_auto_no_color_and_json(self) -> None:

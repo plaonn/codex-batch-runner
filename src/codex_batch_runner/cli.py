@@ -1045,8 +1045,6 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
         worktree_note = worktree_apply_note(task)
         if worktree_note:
             notes.append(worktree_note)
-        if config.auto_review_mechanical_accept and needs_review(task):
-            notes.append("mechanical auto-review enabled")
     return notes or ["-"]
 
 
