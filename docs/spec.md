@@ -326,7 +326,7 @@ Token, loop, rate-limit, cooldown safeguards:
 - Bundle/diff size limit을 넘으면 truncation된 내용으로 pass를 허용하지 않고 human review로 남깁니다.
 - Reviewer Codex는 follow-up task를 직접 enqueue하지 않습니다. `needs_fix`는 report와 suggested prompt만 남기며, task 생성은 operator 또는 별도 승인된 control-plane 흐름이 수행합니다.
 
-초기 구현은 dry-run/report-only에서 시작하고, local-only auto-accept와 optional reviewer-backed auto-accept를 분리합니다. `cbr review-next` 또는 `cbr review-next --dry-run`은 다음 검토 대상과 mechanical gate 근거를 출력하되 `review_status`를 바꾸거나 follow-up task를 만들지 않습니다. `cbr review-next --apply`는 runner와 같은 queue lock 아래에서만 실행하며, 기본값은 적용 거부와 `needs_human` 보고입니다. `--mechanical-auto-accept` 또는 config `auto_review_mechanical_accept=true`가 명시되고 모든 mechanical gate가 통과할 때만 reviewer Codex 호출 없이 `review_status=accepted`를 적용할 수 있습니다. `--reviewer-codex` 또는 config `auto_review_codex_enabled=true`와 `auto_review_codex_max_calls_per_run >= 1`이 명시되고 모든 guardrail이 통과하면 reviewer Codex를 한 번 호출할 수 있습니다. 같은 config가 켜져 있으면 `run-next`도 runnable 구현 task가 없을 때 같은 lock 안에서 최대 한 건의 auto-review pass를 실행할 수 있습니다. Runnable 구현 task는 자동 검토보다 우선합니다. `needs_fix`와 `failed_review` 결정은 자동으로 새 task를 enqueue하지 않습니다.
+초기 구현은 dry-run/report-only에서 시작하고, local-only auto-accept와 optional reviewer-backed auto-accept를 분리합니다. `cbr review-next` 또는 `cbr review-next --dry-run`은 다음 검토 대상과 mechanical gate 근거를 출력하되 `review_status`를 바꾸거나 follow-up task를 만들지 않습니다. `cbr review-next --apply`는 runner와 같은 queue lock 아래에서만 실행하며, 기본값은 적용 거부와 `needs_human` 보고입니다. `--mechanical-auto-accept` 또는 config `auto_review_mechanical_accept=true`가 명시되고 모든 mechanical gate가 통과할 때만 reviewer Codex 호출 없이 `review_status=accepted`를 적용할 수 있습니다. `--reviewer-codex` 또는 config `auto_review_codex_enabled=true`와 `auto_review_codex_max_calls_per_run >= 1`이 명시되고 모든 guardrail이 통과하면 reviewer Codex를 한 번 호출할 수 있습니다. 같은 config가 켜져 있으면 `run-next`도 같은 lock 안에서 최대 한 건의 auto-review pass를 구현 task보다 먼저 시도할 수 있습니다. 자동 검토가 task를 accept하거나 reviewer Codex를 호출해 검토 작업을 소비한 경우 같은 invocation에서 구현 task를 시작하지 않습니다. Gate 실패처럼 task 상태를 변경하지 않는 비실행 가능한 검토 후보만 있으면 starvation guard로 runnable 구현 task 선택을 계속 진행할 수 있습니다. `needs_fix`와 `failed_review` 결정은 자동으로 새 task를 enqueue하지 않습니다.
 
 Rough roadmap:
 
@@ -334,7 +334,7 @@ Rough roadmap:
 - `cbr review-next` 또는 `cbr review-next --dry-run`: `completed + unreviewed/rejected/needs_followup` task 중 하나를 선택해 bundle을 만들고 mechanical gates report를 출력함. Reviewer Codex 호출과 auto-apply는 수행하지 않음.
 - `cbr review-next --apply`: 같은 queue lock을 획득한 뒤 local mechanical gates를 다시 계산함. 명시적으로 mechanical auto-accept가 enabled이고 stale state check가 통과하면 accept를 적용하고, 그 외에는 `needs_human`으로 보고함.
 - `cbr review-next --apply --reviewer-codex`: config call limit이 1 이상이고 cooldown과 bundle limit이 통과하면 reviewer Codex를 한 번 호출함. high-confidence `pass`만 accept하고, `needs_fix`, `needs_human`, invalid schema, rate-limit은 sanitized summary/evidence를 기록한 뒤 unaccepted 상태로 남김.
-- `cbr run-next`: runnable/needs_resume task가 없고 config `auto_review_mechanical_accept=true` 또는 `auto_review_codex_enabled=true`이면 같은 auto-review path를 순차 fallback phase로 한 번 실행함.
+- `cbr run-next`: config `auto_review_mechanical_accept=true` 또는 `auto_review_codex_enabled=true`이면 runnable/needs_resume task보다 먼저 같은 auto-review path를 한 번 시도함. Auto-review accept 또는 reviewer Codex 호출은 한 invocation의 작업 단위로 취급하며, gate failure처럼 mutation 없이 자동 처리 불가능한 후보는 runnable 구현 task를 영구적으로 굶기지 않도록 건너뛸 수 있음.
 - Reviewer Codex call: bundle만 prompt로 전달해 decision schema JSON을 받음. 실패하거나 schema가 맞지 않으면 `failed_review` 또는 `needs_human`으로 보고함.
 
 ## Bounded automatic review-fix loop
@@ -863,17 +863,18 @@ Telegram integration은 future optional adapter입니다. Core runner는 Telegra
 3. lock 획득 시도
 4. active lock이 있으면 즉시 종료
 5. stale lock이면 복구 후 lock 재시도
-6. 실행 가능한 task 하나 선택
-7. 없으면 config가 명시적으로 허용한 경우 completed review candidate 하나에 local mechanical auto-review를 시도하고, 허용되지 않았거나 mutation이 없으면 종료
-8. task를 `running`으로 atomic update
-9. Codex prompt wrapper 생성
-10. 실제 작업이 있을 때만 Codex CLI 호출
-11. Codex JSONL stdout을 attempt별 로그 파일에 저장하면서 progress watchdog metadata를 갱신
-12. `turn.completed`, `turn.failed`, `error` event와 meaningful progress signal 파싱
-13. 최종 JSON 응답 파싱
-14. task 상태 갱신
-15. lock 해제
-16. 다른 eligible task가 있고 global cooldown이 없으면 configured scheduler wake-up hook을 warning-only로 실행
+6. config가 명시적으로 허용한 경우 completed review candidate 하나에 auto-review를 먼저 시도함
+7. auto-review가 accept를 적용했거나 reviewer Codex를 호출해 검토 작업을 소비했으면 종료
+8. auto-review 후보가 없거나 gate failure처럼 mutation 없이 자동 처리 불가능하면 runnable/needs_resume 후보를 선택함
+9. task를 `running`으로 atomic update
+10. Codex prompt wrapper 생성
+11. 실제 작업이 있을 때만 Codex CLI 호출
+12. Codex JSONL stdout을 attempt별 로그 파일에 저장하면서 progress watchdog metadata를 갱신
+13. `turn.completed`, `turn.failed`, `error` event와 meaningful progress signal 파싱
+14. 최종 JSON 응답 파싱
+15. task 상태 갱신
+16. lock 해제
+17. 다른 eligible task가 있고 global cooldown이 없으면 configured scheduler wake-up hook을 warning-only로 실행
 
 ## Codex progress watchdog
 
@@ -1208,7 +1209,7 @@ Successful queue mutations run the optional `post_mutation_trigger_command` afte
 
 `review-next --apply --reviewer-codex`는 config의 reviewer call limit, global/reviewer cooldown, bundle/diff size limit을 통과한 경우에만 reviewer Codex를 한 번 호출합니다. Reviewer 입력은 sanitized review bundle로 제한하고 task 실행 raw log, session id, thread id, private queue contents를 전달하지 않습니다. Reviewer 응답은 decision schema를 엄격하게 검증합니다. `pass` + `confidence=high` + error finding 없음 + required human check 없음 + mechanical/stale-state 재확인 통과인 경우에만 `review_status=accepted`로 바꿉니다. `needs_fix`, `needs_human`, `failed_review`, invalid schema, rate-limit은 accept하지 않고 sanitized reviewer summary/evidence를 task metadata와 event log에 기록합니다. Rate-limit은 reviewer 전용 cooldown을 설정하며 같은 invocation에서 retry하지 않습니다.
 
-`run-next`의 sequential auto-review phase는 config `auto_review_mechanical_accept=true` 또는 `auto_review_codex_enabled=true`일 때만 켜집니다. Runner는 먼저 runnable/needs_resume 구현 task를 찾고, 없을 때만 같은 queue lock 보유 상태에서 completed review candidate 한 건에 대한 apply logic을 호출합니다. 한 번의 `run-next` invocation은 구현 task 하나 또는 review candidate 하나만 처리합니다. Auto-review accept가 dependency policy상 blocked된 child task를 runnable하게 만들면 lock 해제 뒤 기존 post-run trigger 조건으로 scheduler wake-up hook을 실행할 수 있습니다. Gate 실패나 human review가 필요한 경우에는 task를 변경하지 않으며 trigger도 실행하지 않습니다.
+`run-next`의 sequential auto-review phase는 config `auto_review_mechanical_accept=true` 또는 `auto_review_codex_enabled=true`일 때만 켜집니다. Runner는 같은 queue lock 보유 상태에서 completed review candidate 한 건에 대한 apply logic을 먼저 호출합니다. 한 번의 `run-next` invocation은 auto-review accept, reviewer Codex 검토 호출, 또는 구현 task 실행 중 하나만 처리합니다. Gate 실패나 human review가 필요한 상태처럼 task를 변경하지 않고 reviewer Codex도 호출하지 않는 후보는 starvation guard에 따라 해당 invocation에서 runnable/needs_resume 구현 task 선택으로 넘어갈 수 있습니다. 이 규칙은 오래된 비실행 가능 review candidate 하나가 runnable 구현 작업을 계속 막지 않도록 하기 위한 transient skip이며, manual `review-next` 선택 순서나 task JSON의 review 상태를 변경하지 않습니다. Auto-review accept가 dependency policy상 blocked된 child task를 runnable하게 만들면 lock 해제 뒤 기존 post-run trigger 조건으로 scheduler wake-up hook을 실행할 수 있습니다. Mutation 없는 auto-review skip은 trigger를 실행하지 않습니다.
 
 runner는 각 Codex 호출 후 task에 `last_run` metadata를 저장합니다. 필드는 `command_kind`, `returncode`, `started_at`, `finished_at`, `duration_seconds`, `resume_id_used`, `log_path`입니다. Watchdog이 Codex child를 종료한 경우 `watchdog_reason`도 포함합니다. task-level counters로 `run_count`, `resume_count`, `rate_limit_count`, `failure_count`도 유지합니다.
 

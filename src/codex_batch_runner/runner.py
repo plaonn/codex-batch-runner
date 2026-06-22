@@ -43,28 +43,39 @@ def run_next(config: Config) -> RunOutcome:
     outcome: RunOutcome | None = None
     try:
         recover_stale_running_tasks(config)
+        review_report: dict[str, Any] | None = None
+        if config.auto_review_mechanical_accept or config.auto_review_codex_enabled:
+            review_report = build_review_next_apply_report_locked(config)
+            if review_report.get("mutated"):
+                mark_run(config, None)
+                outcome = RunOutcome(
+                    status="review_accepted",
+                    message="auto-review accepted one completed task",
+                    task_id=str(review_report.get("task_id") or "") or None,
+                    review=review_report,
+                )
+                return outcome
+            if review_report_consumed_work(review_report):
+                mark_run(config, None)
+                outcome = RunOutcome(
+                    status="review_needed",
+                    message="completed task needs human review",
+                    task_id=str(review_report.get("task_id") or "") or None,
+                    review=review_report,
+                )
+                return outcome
+
         task = select_next_task(config)
         if not task:
-            if config.auto_review_mechanical_accept or config.auto_review_codex_enabled:
-                report = build_review_next_apply_report_locked(config)
-                if report.get("mutated"):
-                    mark_run(config, None)
-                    outcome = RunOutcome(
-                        status="review_accepted",
-                        message="mechanical auto-review accepted one completed task",
-                        task_id=str(report.get("task_id") or "") or None,
-                        review=report,
-                    )
-                    return outcome
-                if report.get("selected"):
-                    mark_run(config, None)
-                    outcome = RunOutcome(
-                        status="review_needed",
-                        message="completed task needs human review",
-                        task_id=str(report.get("task_id") or "") or None,
-                        review=report,
-                    )
-                    return outcome
+            if review_report and review_report.get("selected"):
+                mark_run(config, None)
+                outcome = RunOutcome(
+                    status="review_needed",
+                    message="completed task needs human review",
+                    task_id=str(review_report.get("task_id") or "") or None,
+                    review=review_report,
+                )
+                return outcome
             mark_run(config, None)
             outcome = RunOutcome(status="empty", message="no runnable task")
             return outcome
@@ -128,6 +139,11 @@ def run_next(config: Config) -> RunOutcome:
             run_post_run_trigger(config)
         elif outcome and outcome.status == "review_accepted" and should_trigger_post_review_wake(config):
             run_post_run_trigger(config)
+
+
+def review_report_consumed_work(report: dict[str, Any]) -> bool:
+    auto_review = report.get("auto_review") if isinstance(report.get("auto_review"), dict) else {}
+    return bool(auto_review.get("reviewer_codex_invoked"))
 
 
 def should_trigger_post_run_wake(config: Config, processed_task: dict[str, Any] | None) -> bool:

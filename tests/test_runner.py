@@ -146,6 +146,21 @@ class RunnerTests(unittest.TestCase):
             self.assertIsNone(outcome.task_id)
             self.assertEqual("unreviewed", load_task(config, "reviewable")["review_status"])
 
+    def test_run_next_auto_review_disabled_preserves_runnable_first_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = make_config(tmp, "success")
+            create_clean_completed_task(config, repo, "reviewable")
+            create_task(config, "implementation", tmp, task_id="implementation")
+
+            outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("implementation", outcome.task_id)
+            self.assertEqual("unreviewed", load_task(config, "reviewable")["review_status"])
+
     def test_run_next_auto_review_accepts_one_completed_task_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
@@ -164,13 +179,32 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("unreviewed", load_task(config, "reviewable-2")["review_status"])
             self.assertFalse(outcome.review["auto_review"]["reviewer_codex_invoked"])
 
-    def test_run_next_runnable_task_takes_precedence_over_auto_review(self) -> None:
+    def test_run_next_auto_review_takes_precedence_over_runnable_task_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
             repo.mkdir()
             init_repo(repo)
             config = replace(make_config(tmp, "success"), auto_review_mechanical_accept=True)
             create_clean_completed_task(config, repo, "reviewable")
+            create_task(config, "implementation", tmp, task_id="implementation")
+
+            with patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")):
+                outcome = run_next(config)
+
+            self.assertEqual("review_accepted", outcome.status)
+            self.assertEqual("reviewable", outcome.task_id)
+            self.assertEqual("accepted", load_task(config, "reviewable")["review_status"])
+            self.assertEqual("runnable", load_task(config, "implementation")["status"])
+
+    def test_run_next_non_actionable_auto_review_does_not_starve_runnable_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(make_config(tmp, "success"), auto_review_mechanical_accept=True)
+            reviewable = create_clean_completed_task(config, repo, "reviewable")
+            reviewable["last_result"]["verification"] = []
+            save_task(config, reviewable)
             create_task(config, "implementation", tmp, task_id="implementation")
 
             outcome = run_next(config)
