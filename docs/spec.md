@@ -275,7 +275,7 @@ Policy update는 traceable해야 합니다. 기준을 바꿀 때는 routing-repo
 
 ## Capacity and concurrency config
 
-Capacity config는 여러 worker 또는 여러 Codex profile/provider를 동시에 운영하기 위한 admission 정책입니다. 현재 runner 구현은 runner lock과 single `run-next` 처리 단위 때문에 실질적으로 한 번에 하나의 실행만 시작합니다. 따라서 이 section은 병렬 실행을 즉시 켜는 기능이 아니라, 이후 parallel executor와 provider/profile routing이 들어와도 같은 이름과 기본값을 유지하기 위한 config contract입니다.
+Capacity config는 여러 worker 또는 여러 Codex profile/provider를 동시에 운영하기 위한 admission 정책입니다. 현재 runner 구현은 runner lock과 single `run-next` 처리 단위 때문에 실질적으로 한 번에 하나의 실행만 시작합니다. 따라서 이 section은 병렬 실행을 즉시 켜는 기능이 아니라, 이후 parallel executor와 provider/profile routing이 들어와도 같은 이름과 기본값을 유지하기 위한 config contract입니다. 현재 구현은 config load validation과 `cbr doctor` read-only reporting까지만 제공합니다.
 
 기본값은 현재 동작과 같은 완전 순차 실행입니다.
 

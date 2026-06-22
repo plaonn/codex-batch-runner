@@ -309,6 +309,75 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("worktree:", human_output)
             self.assertIn("mode: disabled", human_output)
 
+    def test_doctor_reports_capacity_config_and_running_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(
+                tmp,
+                [str(executable)],
+                extra={
+                    "max_total_running": 2,
+                    "max_running_per_project": 1,
+                    "capacity_pools": {
+                        "codex": {"max_running": 1},
+                        "codex-spark": {"max_running": 1},
+                    },
+                },
+            )
+            config = Config.load(str(config_path))
+            running = create_task(config, "running", tmp, task_id="running")
+            running["status"] = "running"
+            running["project_id"] = "project-a"
+            save_task(config, running)
+            spark = create_task(config, "spark", tmp, task_id="spark")
+            spark["status"] = "running"
+            spark["project_id"] = "project-b"
+            spark["capacity_pool"] = "codex-spark"
+            save_task(config, spark)
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            self.assertEqual(2, report["capacity"]["max_total_running"])
+            self.assertEqual(1, report["capacity"]["max_running_per_project"])
+            self.assertEqual({"codex": 1, "codex-spark": 1}, report["capacity"]["running_by_pool"])
+            self.assertEqual(2, report["capacity"]["running_total"])
+            self.assertEqual(2, report["capacity"]["running_projects"])
+            self.assertFalse(report["capacity"]["over_capacity"])
+            self.assertEqual(0, human_code)
+            self.assertIn("capacity:", human_output)
+            self.assertIn("codex: max_running=1 running=1", human_output)
+            self.assertIn("codex-spark: max_running=1 running=1", human_output)
+
+    def test_doctor_reports_capacity_overages_without_mutating_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(tmp, [str(executable)])
+            config = Config.load(str(config_path))
+            first = create_task(config, "first", tmp, task_id="first")
+            first["status"] = "running"
+            first["project_id"] = "project-a"
+            save_task(config, first)
+            second = create_task(config, "second", tmp, task_id="second")
+            second["status"] = "running"
+            second["project_id"] = "project-a"
+            save_task(config, second)
+
+            report = build_doctor_report(config)
+            reloaded = json.loads((config.queue_dir / "second.json").read_text(encoding="utf-8"))
+
+            self.assertTrue(report["capacity"]["over_total_capacity"])
+            self.assertTrue(report["capacity"]["over_project_capacity"])
+            self.assertTrue(report["capacity"]["over_pool_capacity"])
+            self.assertTrue(report["capacity"]["over_capacity"])
+            self.assertEqual("running", reloaded["status"])
+
     def test_doctor_reports_worktree_mode_and_recovery_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executable = Path(tmp) / "codex"

@@ -389,7 +389,7 @@ Capacity config names are reserved for future multi-worker operation while prese
 }
 ```
 
-`max_total_running` limits all concurrent implementation task executions, `max_running_per_project` limits executions for the same project, and `capacity_pools` names scarce execution resources such as `codex`. These fields form the planning contract for future parallel admission; the current runner still starts one implementation task per `run-next` invocation under the runner lock. Detailed semantics are maintained in [docs/spec.md](docs/spec.md).
+`max_total_running` limits all concurrent implementation task executions, `max_running_per_project` limits executions for the same project, and `capacity_pools` names scarce execution resources such as `codex`. These fields are loaded, validated, and reported by `cbr doctor`, but they do not yet change `run-next` admission; the current runner still starts one implementation task per invocation under the runner lock. Detailed semantics are maintained in [docs/spec.md](docs/spec.md).
 
 Optional `post_mutation_trigger_command` can run a generic scheduler wake-up hook after successful queue mutations and after `run-next` finishes one task when another task is eligible to run. The value is an argv list, not a shell string, so it is not shell-expanded. It is disabled by default.
 

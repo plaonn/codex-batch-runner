@@ -61,6 +61,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
         "lock": lock_summary(config),
         "git": git,
         "worktree": worktree_summary(config, tasks),
+        "capacity": capacity_summary(config, tasks),
         "execution_profiles": profile,
         "auto_review": auto_review_summary(tasks, config),
         "tasks": task_summary(tasks, by_id, config),
@@ -403,6 +404,52 @@ def worktree_summary(config: Config, tasks: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+def capacity_summary(config: Config, tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    running_tasks = [task for task in tasks if task.get("status") == "running"]
+    running_by_pool = Counter(capacity_pool_name(task) for task in running_tasks)
+    running_by_project = Counter(capacity_project_key(task) for task in running_tasks)
+    configured_pools = {
+        name: {"max_running": pool["max_running"]} for name, pool in sorted(config.capacity_pools.items())
+    }
+    unknown_pools = sorted(name for name in running_by_pool if name not in configured_pools)
+    over_pool_capacity = any(
+        name not in configured_pools or count > configured_pools[name]["max_running"]
+        for name, count in running_by_pool.items()
+    )
+    max_running_single_project = max(running_by_project.values(), default=0)
+    over_total_capacity = len(running_tasks) > config.max_total_running
+    over_project_capacity = max_running_single_project > config.max_running_per_project
+    return {
+        "max_total_running": config.max_total_running,
+        "max_running_per_project": config.max_running_per_project,
+        "capacity_pools": configured_pools,
+        "running_total": len(running_tasks),
+        "running_by_pool": dict(sorted(running_by_pool.items())),
+        "running_projects": len(running_by_project),
+        "max_running_single_project": max_running_single_project,
+        "unknown_pools": unknown_pools,
+        "over_total_capacity": over_total_capacity,
+        "over_project_capacity": over_project_capacity,
+        "over_pool_capacity": over_pool_capacity,
+        "over_capacity": over_total_capacity or over_project_capacity or over_pool_capacity,
+    }
+
+
+def capacity_pool_name(task: dict[str, Any]) -> str:
+    value = task.get("capacity_pool")
+    if isinstance(value, str) and value.strip():
+        return value
+    return "codex"
+
+
+def capacity_project_key(task: dict[str, Any]) -> str:
+    for key in ("project_id", "project_root", "cwd"):
+        value = task.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return str(task.get("id") or "unknown")
+
+
 def startup_watchdog_progress(task: dict[str, Any]) -> bool:
     progress = task.get("last_progress")
     return isinstance(progress, dict) and bool(progress.get("watchdog_reason"))
@@ -519,6 +566,26 @@ def render_doctor_report(report: dict[str, Any]) -> str:
         lines.append("  by_status:")
         for status, count in by_status.items():
             lines.append(f"    {status}: {count}")
+    capacity = report["capacity"]
+    lines.extend(
+        [
+            "",
+            "capacity:",
+            f"  max_total_running: {capacity.get('max_total_running')}",
+            f"  max_running_per_project: {capacity.get('max_running_per_project')}",
+            f"  running_total: {capacity.get('running_total')}",
+            f"  running_projects: {capacity.get('running_projects')}",
+            f"  max_running_single_project: {capacity.get('max_running_single_project')}",
+            f"  over_capacity: {str(capacity.get('over_capacity')).lower()}",
+        ]
+    )
+    running_by_pool = capacity.get("running_by_pool") or {}
+    capacity_pools = capacity.get("capacity_pools") or {}
+    lines.append("  pools:")
+    for name, pool in capacity_pools.items():
+        lines.append(f"    {name}: max_running={pool.get('max_running')} running={running_by_pool.get(name, 0)}")
+    for name in capacity.get("unknown_pools") or []:
+        lines.append(f"    {name}: max_running=None running={running_by_pool.get(name, 0)}")
     auto_review = report["auto_review"]
     execution_profiles = report["execution_profiles"]
     lines.extend(

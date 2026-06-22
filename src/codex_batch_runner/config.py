@@ -36,6 +36,9 @@ class Config:
     auto_review_codex_max_diff_chars: int = 60000
     worktree_mode: str = "disabled"
     worktree_root: Path | None = None
+    max_total_running: int = 1
+    max_running_per_project: int = 1
+    capacity_pools: dict[str, dict[str, int]] = field(default_factory=lambda: {"codex": {"max_running": 1}})
     codex_startup_stall_seconds: int = 240
     codex_first_meaningful_timeout_seconds: int = 420
     codex_mid_run_idle_seconds: int = 1800
@@ -129,6 +132,12 @@ class Config:
             ),
             worktree_mode=worktree_mode_value(data.get("worktree_mode", "disabled")),
             worktree_root=path_value("worktree_root", ".codex-batch-runner/worktrees"),
+            max_total_running=positive_int_value("max_total_running", data.get("max_total_running", 1)),
+            max_running_per_project=positive_int_value(
+                "max_running_per_project",
+                data.get("max_running_per_project", 1),
+            ),
+            capacity_pools=capacity_pools_value(data.get("capacity_pools")),
             codex_startup_stall_seconds=int(data.get("codex_startup_stall_seconds", 240)),
             codex_first_meaningful_timeout_seconds=int(data.get("codex_first_meaningful_timeout_seconds", 420)),
             codex_mid_run_idle_seconds=int(data.get("codex_mid_run_idle_seconds", 1800)),
@@ -211,10 +220,46 @@ def optional_int_value(value: object) -> int | None:
 
 
 def non_negative_int_value(key: str, value: object) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be a non-negative integer")
     result = int(value)
     if result < 0:
         raise ValueError(f"{key} must be a non-negative integer")
     return result
+
+
+def positive_int_value(key: str, value: object) -> int:
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{key} must be a positive integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a positive integer") from exc
+    if result < 1:
+        raise ValueError(f"{key} must be a positive integer")
+    return result
+
+
+def capacity_pools_value(value: object) -> dict[str, dict[str, int]]:
+    if value is None:
+        return {"codex": {"max_running": 1}}
+    if not isinstance(value, dict):
+        raise ValueError("capacity_pools must be an object")
+    pools: dict[str, dict[str, int]] = {}
+    for name, pool in value.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("capacity_pools names must be non-empty strings")
+        if not isinstance(pool, dict):
+            raise ValueError(f"capacity_pools.{name} must be an object")
+        pools[name] = {
+            "max_running": positive_int_value(
+                f"capacity_pools.{name}.max_running",
+                pool.get("max_running"),
+            )
+        }
+    if "codex" not in pools:
+        raise ValueError("capacity_pools must define codex")
+    return pools
 
 
 def resolve_config_path(config_path: str | None = None, include_user_config: bool = True) -> Path | None:

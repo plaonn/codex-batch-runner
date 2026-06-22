@@ -41,6 +41,13 @@
   "auto_review_codex_max_diff_chars": 60000,
   "worktree_mode": "disabled",
   "worktree_root": ".codex-batch-runner/worktrees",
+  "max_total_running": 1,
+  "max_running_per_project": 1,
+  "capacity_pools": {
+    "codex": {
+      "max_running": 1
+    }
+  },
   "stale_lock_seconds": 21600,
   "rate_limit_cooldown_seconds": 1800,
   "default_max_attempts": 5

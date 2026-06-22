@@ -137,6 +137,9 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNone(resolve_config_path(include_user_config=False))
             self.assertEqual("disabled", config.manual_cooldown_wake_scheduler)
             self.assertEqual([], config.manual_cooldown_wake_command)
+            self.assertEqual(1, config.max_total_running)
+            self.assertEqual(1, config.max_running_per_project)
+            self.assertEqual({"codex": {"max_running": 1}}, config.capacity_pools)
 
     def test_dependency_requires_accepted_review_can_be_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -200,6 +203,48 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual("task", config.worktree_mode)
             self.assertEqual(Path(tmp).resolve() / "runtime" / "worktrees", config.worktree_root)
+
+    def test_capacity_config_can_be_enabled_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "max_total_running": 3,
+                        "max_running_per_project": 2,
+                        "capacity_pools": {
+                            "codex": {"max_running": 2},
+                            "codex-spark": {"max_running": 1},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertEqual(3, config.max_total_running)
+            self.assertEqual(2, config.max_running_per_project)
+            self.assertEqual(
+                {"codex": {"max_running": 2}, "codex-spark": {"max_running": 1}},
+                config.capacity_pools,
+            )
+
+    def test_capacity_config_must_be_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            invalid_cases = [
+                ({"max_total_running": 0}, "max_total_running must be a positive integer"),
+                ({"max_running_per_project": 0}, "max_running_per_project must be a positive integer"),
+                ({"capacity_pools": []}, "capacity_pools must be an object"),
+                ({"capacity_pools": {"spark": {"max_running": 1}}}, "capacity_pools must define codex"),
+                ({"capacity_pools": {"codex": {"max_running": 0}}}, "capacity_pools.codex.max_running must be a positive integer"),
+            ]
+            for data, message in invalid_cases:
+                with self.subTest(data=data):
+                    config_path.write_text(json.dumps(data), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, message):
+                        Config.load(str(config_path), root=Path(tmp))
 
     def test_codex_watchdog_config_defaults_and_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
