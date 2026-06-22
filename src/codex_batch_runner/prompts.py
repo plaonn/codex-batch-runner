@@ -15,8 +15,11 @@ FINAL_SCHEMA = {
 }
 
 
-def build_prompt(task: dict, resume_unavailable: bool = False) -> str:
+def build_prompt(task: dict, resume_unavailable: bool = False, execution_cwd: str | None = None) -> str:
     prompt = task.get("next_prompt") if task.get("status") == "needs_resume" and task.get("next_prompt") else task.get("prompt", "")
+    is_git_worktree = task.get("execution_mode") == "git_worktree"
+    worktree_path = execution_cwd or task.get("execution_worktree_path")
+    cwd = worktree_path if is_git_worktree and worktree_path else execution_cwd or task.get("cwd")
     parts = [
         "You are executing exactly one queued Codex batch task.",
         "",
@@ -29,8 +32,19 @@ def build_prompt(task: dict, resume_unavailable: bool = False) -> str:
         "- If user input is required, return status blocked_user.",
         "",
         f"task_id: {task.get('id')}",
-        f"cwd: {task.get('cwd')}",
+        f"cwd: {cwd}",
     ]
+    if is_git_worktree:
+        original_cwd = task.get("cwd")
+        parts.extend(
+            [
+                "execution_mode: git_worktree",
+                f"execution_worktree_path: {worktree_path or cwd}",
+                f"original_task_cwd: {original_cwd}",
+                "Use cwd/execution_worktree_path as the current process cwd for edits, tests, and commits.",
+                "Do not use original_task_cwd for repository commands during this task.",
+            ]
+        )
     if resume_unavailable:
         parts.append("resume_unavailable: true")
     parts.extend(

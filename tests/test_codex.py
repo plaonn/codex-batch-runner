@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import unittest
+import sys
 import tempfile
+import unittest
 from pathlib import Path
 
 from codex_batch_runner.config import Config
@@ -11,6 +12,7 @@ from codex_batch_runner.codex import (
     format_command,
     format_command_with_profile,
     is_meaningful_event,
+    run_codex,
     should_use_resume,
 )
 
@@ -177,6 +179,37 @@ class CodexParserTests(unittest.TestCase):
         task = {"status": "running", "resume_requested": True, "thread_id": "thread-123"}
 
         self.assertTrue(should_use_resume(task))
+
+    def test_run_codex_starts_subprocess_in_task_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            execution_cwd = root / "execution-worktree"
+            execution_cwd.mkdir()
+            config = Config.load(root=root)
+            config = Config(
+                **{
+                    **config.__dict__,
+                    "codex_command": [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import json, os; "
+                            "response = dict(task_id='task-cwd', status='completed', summary=os.getcwd(), "
+                            "next_prompt='', changed_files=[], verification=[os.getcwd()]); "
+                            "print(json.dumps(dict(type='turn.completed', response=response)), flush=True)"
+                        ),
+                    ],
+                }
+            )
+
+            result = run_codex(config, {"id": "task-cwd", "cwd": str(execution_cwd)}, "prompt", 1)
+
+            expected_cwd = str(execution_cwd.resolve())
+            self.assertEqual(0, result.returncode)
+            self.assertIsNotNone(result.final_response)
+            assert result.final_response is not None
+            self.assertEqual(expected_cwd, result.final_response["summary"])
+            self.assertEqual([expected_cwd], result.final_response["verification"])
 
     def test_item_progress_events_are_meaningful(self) -> None:
         self.assertTrue(is_meaningful_event({"type": "item.started", "item": {"type": "command_execution"}}))

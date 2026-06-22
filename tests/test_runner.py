@@ -579,9 +579,11 @@ class RunnerTests(unittest.TestCase):
             config = replace(make_config(tmp, "success"), worktree_mode="task", worktree_root=root / "worktrees")
             create_task(config, "do it", str(repo), task_id="task-worktree")
             seen_cwds = []
+            seen_prompts = []
 
             def fake_run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
                 seen_cwds.append(Path(task["cwd"]))
+                seen_prompts.append(prompt)
                 return CodexResult(
                     returncode=0,
                     log_path=root / "attempt.jsonl",
@@ -611,6 +613,16 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("completed", outcome.status)
             self.assertEqual(str(repo), task["cwd"])
             self.assertEqual([worktree_path], seen_cwds)
+            self.assertEqual(1, len(seen_prompts))
+            self.assertIn(f"cwd: {worktree_path}", seen_prompts[0])
+            self.assertIn("execution_mode: git_worktree", seen_prompts[0])
+            self.assertIn(f"execution_worktree_path: {worktree_path}", seen_prompts[0])
+            self.assertIn(f"original_task_cwd: {repo}", seen_prompts[0])
+            self.assertIn(
+                "Use cwd/execution_worktree_path as the current process cwd for edits, tests, and commits.",
+                seen_prompts[0],
+            )
+            self.assertNotIn(f"cwd: {repo}", seen_prompts[0].splitlines())
             self.assertEqual("git_worktree", task["execution_mode"])
             self.assertEqual("retained", task["execution_worktree_status"])
             self.assertTrue(worktree_path.is_dir())

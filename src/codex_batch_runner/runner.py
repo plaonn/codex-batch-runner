@@ -114,7 +114,11 @@ def run_next(config: Config) -> RunOutcome:
             execution_cwd = worktree_result["worktree_path"]
 
         resume_unavailable = bool(resume_requested and task.get("next_prompt") and not resume_id(task))
-        prompt = build_prompt(task, resume_unavailable=resume_unavailable)
+        prompt = build_prompt(
+            task,
+            resume_unavailable=resume_unavailable,
+            execution_cwd=str(execution_cwd) if execution_cwd else None,
+        )
         profile_error = validate_execution_profile(config, task)
         if profile_error:
             mark_profile_failure(config, task, profile_error)
