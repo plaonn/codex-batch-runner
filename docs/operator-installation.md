@@ -90,6 +90,10 @@ runtime state를 만들므로 빠른 local 실험에는 충분하지만 shared b
 macOS beta 운영에서는 long-running foreground process 대신 `launchd` 사용을
 권장합니다. Scheduler tick마다 `run-next`를 실행하고, runner는 최대 task 하나를
 처리하거나 처리할 작업이 없거나 cooldown/lock 상태를 감지하면 종료합니다.
+기본 capacity에서는 동시에 하나만 실행됩니다. 병렬 실행이 필요하면 config의
+capacity 값을 올리고 동일한 queue를 깨우는 scheduler worker를 여러 개 운영합니다.
+`run-next`는 Codex 실행 중 queue lock을 보유하지 않지만 한 invocation이 직접
+dispatcher가 되지는 않습니다.
 
 예시 plist는
 [examples/com.example.codex-batch-runner.plist](../examples/com.example.codex-batch-runner.plist)에

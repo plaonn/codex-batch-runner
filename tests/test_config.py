@@ -140,6 +140,9 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(1, config.max_total_running)
             self.assertEqual(1, config.max_running_per_project)
             self.assertEqual({"codex": {"max_running": 1}}, config.capacity_pools)
+            self.assertEqual({}, config.project_priorities)
+            self.assertEqual(100, config.default_project_priority)
+            self.assertEqual(24, config.project_priority_aging_hours)
 
     def test_dependency_requires_accepted_review_can_be_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -239,6 +242,47 @@ class ConfigTests(unittest.TestCase):
                 ({"capacity_pools": []}, "capacity_pools must be an object"),
                 ({"capacity_pools": {"spark": {"max_running": 1}}}, "capacity_pools must define codex"),
                 ({"capacity_pools": {"codex": {"max_running": 0}}}, "capacity_pools.codex.max_running must be a positive integer"),
+            ]
+            for data, message in invalid_cases:
+                with self.subTest(data=data):
+                    config_path.write_text(json.dumps(data), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, message):
+                        Config.load(str(config_path), root=Path(tmp))
+
+    def test_priority_config_can_be_enabled_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "project_priorities": {
+                            "alpha": 10,
+                            str(project_root): 20,
+                        },
+                        "default_project_priority": 50,
+                        "project_priority_aging_hours": 6,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertEqual(10, config.project_priorities["alpha"])
+            self.assertEqual(20, config.project_priorities[str(project_root.resolve())])
+            self.assertEqual(50, config.default_project_priority)
+            self.assertEqual(6, config.project_priority_aging_hours)
+
+    def test_priority_config_must_be_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            invalid_cases = [
+                ({"project_priorities": []}, "project_priorities must be an object"),
+                ({"project_priorities": {"": 1}}, "project_priorities keys must be non-empty strings"),
+                ({"project_priorities": {"alpha": "fast"}}, "project_priorities.alpha must be an integer"),
+                ({"default_project_priority": True}, "default_project_priority must be an integer"),
+                ({"project_priority_aging_hours": -1}, "project_priority_aging_hours must be a non-negative integer"),
             ]
             for data, message in invalid_cases:
                 with self.subTest(data=data):

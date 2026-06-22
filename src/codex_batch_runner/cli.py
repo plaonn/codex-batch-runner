@@ -26,7 +26,9 @@ from .queue import (
     DEFAULT_HIDDEN_LIST_STATUSES,
     RESOLUTIONS,
     RUNNABLE_STATUSES,
+    TASK_PRIORITIES,
     archive_task,
+    capacity_blockers,
     create_task,
     dependency_status,
     is_in_cooldown,
@@ -35,6 +37,8 @@ from .queue import (
     set_resolution,
     set_review_status,
     task_labels,
+    task_priority,
+    task_capacity_pool,
     task_project_id,
     task_project_root,
     task_title,
@@ -108,6 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument("--routing-reason", help="public-safe reason for the profile/provider routing decision")
     enqueue.add_argument("--routing-risk-factor", action="append", default=[], help="public-safe routing risk factor, repeatable")
     enqueue.add_argument("--routing-experiment", help="routing experiment label such as baseline, downshift_probe, upshift_guard, or manual")
+    enqueue.add_argument("--capacity-pool", default="codex", help="capacity pool for scheduler admission (default: codex)")
+    enqueue.add_argument("--priority", choices=TASK_PRIORITIES, default="normal", help="task priority within a project (default: normal)")
     enqueue.set_defaults(func=cmd_enqueue)
 
     list_cmd = sub.add_parser("list", help="list tasks")
@@ -370,6 +376,8 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         execution_backend=args.backend,
         shell_command=shell_command,
         shell_timeout_seconds=args.shell_timeout_seconds,
+        capacity_pool=args.capacity_pool,
+        task_priority=args.priority,
     )
     run_post_mutation_trigger(config)
     print(task["id"])
@@ -825,6 +833,10 @@ def note_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
 
 def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
     notes = []
+    if task.get("status") in RUNNABLE_STATUSES:
+        blockers = capacity_blockers(config, task)
+        if blockers:
+            notes.append("capacity blocked: " + ",".join(blockers))
     if is_in_cooldown(task):
         notes.append("cooldown until " + scalar_cell(task.get("cooldown_until")))
     if startup_stalled(task):
@@ -842,6 +854,9 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
     backend_note = execution_backend_note(task)
     if backend_note:
         notes.append(backend_note)
+    scheduling_note = scheduling_note_cell(task)
+    if scheduling_note:
+        notes.append(scheduling_note)
     if task.get("resolution"):
         notes.append("resolution: " + str(task.get("resolution")))
     if task.get("status") == "completed" and not task.get("resolution"):
@@ -863,6 +878,17 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
         if config.auto_review_mechanical_accept and needs_review(task):
             notes.append("mechanical auto-review enabled")
     return notes or ["-"]
+
+
+def scheduling_note_cell(task: dict) -> str:
+    fields = []
+    pool = task_capacity_pool(task)
+    priority = task_priority(task)
+    if pool != "codex":
+        fields.append(f"pool={pool}")
+    if priority != "normal":
+        fields.append(f"priority={priority}")
+    return "scheduling: " + ", ".join(fields) if fields else ""
 
 
 def worktree_apply_note(task: dict) -> str:

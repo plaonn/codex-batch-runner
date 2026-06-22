@@ -131,6 +131,140 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(0, second["attempts"])
             self.assertEqual("unlocked\n", marker.read_text(encoding="utf-8"))
 
+    def test_concurrent_run_next_can_claim_different_project_after_first_claim_releases_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_1 = Path(tmp) / "project-1"
+            project_2 = Path(tmp) / "project-2"
+            project_1.mkdir()
+            project_2.mkdir()
+            config = replace(
+                make_config(tmp, "success"),
+                max_total_running=2,
+                max_running_per_project=1,
+                capacity_pools={"codex": {"max_running": 2}},
+            )
+            create_task(config, "first", str(project_1), task_id="task-1")
+            create_task(config, "second", str(project_2), task_id="task-2")
+            nested_outcomes = []
+
+            def fake_run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
+                self.assertFalse(config.lock_file.exists())
+                if task["id"] == "task-1":
+                    nested_outcomes.append(run_next(config))
+                return CodexResult(
+                    returncode=0,
+                    log_path=Path(tmp) / f"{task['id']}.jsonl",
+                    command_kind="exec",
+                    resume_id_used=None,
+                    stderr="",
+                    events=[],
+                    final_response={
+                        "task_id": task["id"],
+                        "status": "completed",
+                        "summary": "done",
+                        "changed_files": [],
+                        "verification": [],
+                    },
+                    session_id=None,
+                    thread_id=None,
+                    rate_limited=False,
+                    rate_limit_markers=[],
+                )
+
+            with patch.object(runner_module, "run_codex", fake_run_codex):
+                outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("task-1", outcome.task_id)
+            self.assertEqual(1, len(nested_outcomes))
+            self.assertEqual("completed", nested_outcomes[0].status)
+            self.assertEqual("task-2", nested_outcomes[0].task_id)
+            self.assertEqual("completed", load_task(config, "task-1")["status"])
+            self.assertEqual("completed", load_task(config, "task-2")["status"])
+
+    def test_concurrent_run_next_respects_per_project_capacity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                make_config(tmp, "success"),
+                max_total_running=2,
+                max_running_per_project=1,
+                capacity_pools={"codex": {"max_running": 2}},
+            )
+            create_task(config, "first", tmp, task_id="task-1")
+            create_task(config, "second", tmp, task_id="task-2")
+            nested_outcomes = []
+
+            def fake_run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
+                self.assertFalse(config.lock_file.exists())
+                if task["id"] == "task-1":
+                    nested_outcomes.append(run_next(config))
+                return CodexResult(
+                    returncode=0,
+                    log_path=Path(tmp) / f"{task['id']}.jsonl",
+                    command_kind="exec",
+                    resume_id_used=None,
+                    stderr="",
+                    events=[],
+                    final_response={
+                        "task_id": task["id"],
+                        "status": "completed",
+                        "summary": "done",
+                        "changed_files": [],
+                        "verification": [],
+                    },
+                    session_id=None,
+                    thread_id=None,
+                    rate_limited=False,
+                    rate_limit_markers=[],
+                )
+
+            with patch.object(runner_module, "run_codex", fake_run_codex):
+                outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("task-1", outcome.task_id)
+            self.assertEqual(1, len(nested_outcomes))
+            self.assertEqual("empty", nested_outcomes[0].status)
+            self.assertEqual("runnable", load_task(config, "task-2")["status"])
+
+    def test_finalize_guard_skips_result_when_active_run_id_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(config, "work", tmp, task_id="task-1")
+
+            def fake_run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
+                claimed = load_task(config, task["id"])
+                claimed["active_run_id"] = "newer-run"
+                save_task(config, claimed)
+                return CodexResult(
+                    returncode=0,
+                    log_path=Path(tmp) / "task-1.jsonl",
+                    command_kind="exec",
+                    resume_id_used=None,
+                    stderr="",
+                    events=[],
+                    final_response={
+                        "task_id": task["id"],
+                        "status": "completed",
+                        "summary": "done",
+                        "changed_files": [],
+                        "verification": [],
+                    },
+                    session_id=None,
+                    thread_id=None,
+                    rate_limited=False,
+                    rate_limit_markers=[],
+                )
+
+            with patch.object(runner_module, "run_codex", fake_run_codex):
+                outcome = run_next(config)
+
+            task = load_task(config, "task-1")
+            self.assertEqual("stale_finalization", outcome.status)
+            self.assertEqual("running", task["status"])
+            self.assertEqual("newer-run", task["active_run_id"])
+            self.assertNotEqual("completed", task.get("last_result", {}).get("status"))
+
     def test_invalid_task_execution_profile_fails_before_codex_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")

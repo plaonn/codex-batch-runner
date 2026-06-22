@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 from .config import Config
@@ -16,6 +17,8 @@ REVIEW_STATUSES = {"unreviewed", "accepted", "rejected", "needs_followup"}
 RESOLUTIONS = {"wont_fix", "superseded", "manual", "smoke", "duplicate"}
 RESOLVABLE_COMPLETED_REVIEW_STATUSES = {"rejected", "needs_followup"}
 EXECUTION_BACKENDS = {"codex", "shell"}
+TASK_PRIORITIES = ("asap", "high", "normal", "low", "background")
+TASK_PRIORITY_RANK = {name: index for index, name in enumerate(TASK_PRIORITIES)}
 CHAIN_STATUSES = {
     "awaiting_review",
     "reviewing",
@@ -205,6 +208,8 @@ def create_task(
     execution_backend: str = "codex",
     shell_command: list[str] | None = None,
     shell_timeout_seconds: int | None = None,
+    capacity_pool: str = "codex",
+    task_priority: str = "normal",
     subtask_type: str | None = None,
     subtask_for: str | None = None,
     blocks_root_completion: bool = False,
@@ -220,6 +225,8 @@ def create_task(
     if execution_profile and execution_profile not in config.execution_profiles:
         raise ValueError(f"unknown execution profile: {execution_profile}")
     execution_backend = validate_execution_backend(execution_backend)
+    capacity_pool = validate_capacity_pool(capacity_pool)
+    task_priority = validate_task_priority(task_priority)
     if execution_backend == "codex" and shell_command:
         raise ValueError("shell_command requires execution_backend=shell")
     shell_command = validate_shell_command(shell_command) if execution_backend == "shell" else None
@@ -265,6 +272,8 @@ def create_task(
         "next_prompt": None,
         "cwd": str(cwd_path),
         "execution_backend": execution_backend,
+        "capacity_pool": capacity_pool,
+        "task_priority": task_priority,
         "shell_command": shell_command,
         "shell_timeout_seconds": shell_timeout_seconds,
         "session_id": None,
@@ -328,6 +337,22 @@ def validate_execution_backend(value: object) -> str:
     if backend not in EXECUTION_BACKENDS:
         raise ValueError(f"invalid execution backend: {backend}")
     return backend
+
+
+def validate_capacity_pool(value: object) -> str:
+    if value is None:
+        return "codex"
+    pool = str(value).strip()
+    if not pool:
+        raise ValueError("capacity_pool must be a non-empty string")
+    return pool
+
+
+def validate_task_priority(value: object) -> str:
+    priority = str(value or "normal").strip()
+    if priority not in TASK_PRIORITY_RANK:
+        raise ValueError("task_priority must be one of: " + ", ".join(TASK_PRIORITIES))
+    return priority
 
 
 def validate_shell_command(value: object) -> list[str]:
@@ -427,6 +452,17 @@ def task_project_id(task: dict) -> str:
     return Path(root).name if root else ""
 
 
+def task_capacity_pool(task: dict) -> str:
+    return validate_capacity_pool(task.get("capacity_pool") or "codex")
+
+
+def task_priority(task: dict) -> str:
+    try:
+        return validate_task_priority(task.get("task_priority") or "normal")
+    except ValueError:
+        return "normal"
+
+
 def task_labels(task: dict) -> list[str]:
     labels = task.get("labels") or []
     return [str(label) for label in labels] if isinstance(labels, list) else []
@@ -506,24 +542,160 @@ def is_in_cooldown(task: dict) -> bool:
 
 
 def select_next_task(config: Config) -> dict | None:
+    report = selection_report(config)
+    candidates = [item for item in report["tasks"] if item["admissible"]]
+    candidates.sort(key=selection_entry_sort_key)
+    return candidates[0]["task"] if candidates else None
+
+
+def selection_report(config: Config) -> dict:
     tasks = list_tasks(config)
     by_id = {task.get("id"): task for task in tasks}
-    candidates = []
+    running = running_capacity(tasks)
+    preselected: list[tuple[dict, list[str]]] = []
+    project_oldest: dict[str, str] = {}
+    entries = []
     for task in tasks:
+        reasons: list[str] = []
         if task.get("status") not in RUNNABLE_STATUSES:
-            continue
+            reasons.append("not_runnable_status")
         if is_in_cooldown(task):
-            continue
+            reasons.append("cooldown")
         deps_ready, _ = dependency_status(
             task,
             by_id,
             require_accepted_review=config.dependency_requires_accepted_review,
         )
         if not deps_ready:
-            continue
-        candidates.append(task)
-    candidates.sort(key=lambda item: (item.get("created_at") or "", item.get("id") or ""))
-    return candidates[0] if candidates else None
+            reasons.append("dependency")
+        preselected.append((task, reasons))
+        if not reasons:
+            project_key = priority_project_key(task)
+            created_at = str(task.get("created_at") or "")
+            if project_key not in project_oldest or created_at < project_oldest[project_key]:
+                project_oldest[project_key] = created_at
+    for task, reasons in preselected:
+        if not reasons:
+            reasons.extend(capacity_blockers(config, task, running))
+        raw_priority = raw_project_priority(config, task)
+        entries.append(
+            {
+                "task": task,
+                "task_id": task.get("id"),
+                "project_id": task_project_id(task),
+                "project_root": task_project_root(task),
+                "capacity_pool": task_capacity_pool(task),
+                "task_priority": task_priority(task),
+                "admissible": not reasons,
+                "reasons": reasons,
+                "raw_project_priority": raw_priority,
+                "effective_project_priority": effective_project_priority(
+                    config,
+                    task,
+                    raw_priority=raw_priority,
+                    created_at=project_oldest.get(priority_project_key(task)),
+                ),
+            }
+        )
+    return {
+        "capacity": capacity_evidence(config, tasks),
+        "tasks": entries,
+    }
+
+
+def running_capacity(tasks: list[dict]) -> dict[str, Counter[str] | int]:
+    running = [task for task in tasks if task.get("status") == "running"]
+    return {
+        "total": len(running),
+        "by_project": Counter(capacity_project_key(task) for task in running),
+        "by_pool": Counter(task_capacity_pool(task) for task in running),
+    }
+
+
+def capacity_evidence(config: Config, tasks: list[dict]) -> dict:
+    running = running_capacity(tasks)
+    return {
+        "max_total_running": config.max_total_running,
+        "max_running_per_project": config.max_running_per_project,
+        "capacity_pools": {name: dict(pool) for name, pool in sorted(config.capacity_pools.items())},
+        "running_total": running["total"],
+        "running_by_project": dict(sorted(running["by_project"].items())),  # type: ignore[union-attr]
+        "running_by_pool": dict(sorted(running["by_pool"].items())),  # type: ignore[union-attr]
+    }
+
+
+def capacity_blockers(config: Config, task: dict, running: dict[str, Counter[str] | int] | None = None) -> list[str]:
+    running = running or running_capacity(list_tasks(config))
+    blockers: list[str] = []
+    pool = task_capacity_pool(task)
+    pools = config.capacity_pools
+    if pool not in pools:
+        blockers.append("unknown_capacity_pool")
+    if int(running["total"]) >= config.max_total_running:
+        blockers.append("max_total_running")
+    by_project = running["by_project"]
+    if isinstance(by_project, Counter) and by_project[capacity_project_key(task)] >= config.max_running_per_project:
+        blockers.append("max_running_per_project")
+    by_pool = running["by_pool"]
+    if pool in pools and isinstance(by_pool, Counter) and by_pool[pool] >= int(pools[pool]["max_running"]):
+        blockers.append("capacity_pool_full")
+    return blockers
+
+
+def capacity_project_key(task: dict) -> str:
+    return task_project_id(task) or task_project_root(task) or str(task.get("id") or "unknown")
+
+
+def selection_sort_key(config: Config, task: dict) -> tuple[int, int, int, str, str]:
+    raw_priority = raw_project_priority(config, task)
+    return (
+        effective_project_priority(config, task, raw_priority=raw_priority),
+        raw_priority,
+        TASK_PRIORITY_RANK[task_priority(task)],
+        str(task.get("created_at") or ""),
+        str(task.get("id") or ""),
+    )
+
+
+def selection_entry_sort_key(entry: dict) -> tuple[int, int, int, str, str]:
+    return (
+        int(entry["effective_project_priority"]),
+        int(entry["raw_project_priority"]),
+        TASK_PRIORITY_RANK[validate_task_priority(entry.get("task_priority") or "normal")],
+        str(entry["task"].get("created_at") or ""),
+        str(entry["task"].get("id") or ""),
+    )
+
+
+def priority_project_key(task: dict) -> str:
+    return task_project_id(task) or task_project_root(task) or str(task.get("id") or "unknown")
+
+
+def raw_project_priority(config: Config, task: dict) -> int:
+    project_id = task_project_id(task)
+    project_root = task_project_root(task)
+    if project_id in config.project_priorities:
+        return config.project_priorities[project_id]
+    if project_root in config.project_priorities:
+        return config.project_priorities[project_root]
+    return config.default_project_priority
+
+
+def effective_project_priority(
+    config: Config,
+    task: dict,
+    *,
+    raw_priority: int | None = None,
+    created_at: object | None = None,
+) -> int:
+    raw = raw_project_priority(config, task) if raw_priority is None else raw_priority
+    if config.project_priority_aging_hours <= 0:
+        return raw
+    created = parse_time(task.get("created_at") if created_at is None else created_at)
+    if not created:
+        return raw
+    age_hours = max(0.0, (utc_now() - created).total_seconds() / 3600.0)
+    return raw - int(age_hours // config.project_priority_aging_hours)
 
 
 def recover_stale_running_tasks(config: Config) -> list[str]:
@@ -537,6 +709,18 @@ def recover_stale_running_tasks(config: Config) -> list[str]:
             continue
         task["status"] = "needs_resume" if task.get("next_prompt") else "runnable"
         task["last_error"] = "recovered stale running task"
+        clear_active_run_metadata(task)
         save_task(config, task)
         recovered.append(task["id"])
     return recovered
+
+
+def clear_active_run_metadata(task: dict) -> None:
+    for key in (
+        "active_run_id",
+        "active_runner_hostname",
+        "active_runner_pid",
+        "active_run_attempt",
+        "active_run_started_at",
+    ):
+        task.pop(key, None)

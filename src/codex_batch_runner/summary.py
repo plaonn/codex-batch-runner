@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from .queue import dependency_blockers, dependency_status, is_in_cooldown, task_labels, task_project_id, task_project_root, task_title
+from .queue import (
+    dependency_blockers,
+    dependency_status,
+    is_in_cooldown,
+    task_capacity_pool,
+    task_labels,
+    task_priority,
+    task_project_id,
+    task_project_root,
+    task_title,
+)
 from .transcript import sanitize
 from .worktree import task_worktree_metadata
 
@@ -29,6 +39,7 @@ def render_task_summary(
     if task.get("cwd"):
         lines.append(f"cwd: {task.get('cwd')}")
     append_execution_profile_summary(lines, task)
+    append_scheduling_summary(lines, task)
     append_routing_summary(lines, task)
     append_counters(lines, task)
     append_chain_summary(lines, task)
@@ -80,6 +91,14 @@ def render_task_summary(
         lines.append("## logs")
         lines.extend(str(path) for path in log_paths)
     return "\n".join(lines).rstrip() + "\n"
+
+
+def append_scheduling_summary(lines: list[str], task: dict) -> None:
+    fields = [
+        f"capacity_pool={task_capacity_pool(task)}",
+        f"task_priority={task_priority(task)}",
+    ]
+    lines.append("scheduling: " + ", ".join(fields))
 
 
 def render_last_result(last_result: object) -> str:

@@ -764,6 +764,34 @@ class CliTests(unittest.TestCase):
             self.assertEqual("work", task["title"])
             self.assertIsNone(task["description"])
 
+    def test_enqueue_records_scheduling_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "enqueue",
+                    "--cwd",
+                    tmp,
+                    "--id",
+                    "scheduled",
+                    "--capacity-pool",
+                    "spark",
+                    "--priority",
+                    "high",
+                    "--prompt",
+                    "work",
+                ]
+            )
+            task = load_task(Config.load(str(config_path)), "scheduled")
+
+            self.assertEqual(0, code)
+            self.assertEqual("scheduled\n", output)
+            self.assertEqual("spark", task["capacity_pool"])
+            self.assertEqual("high", task["task_priority"])
+
     def test_enqueue_records_title_and_description(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

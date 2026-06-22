@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import shutil
+import os
+import socket
 import subprocess
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any
@@ -23,12 +27,33 @@ from .triggers import run_post_run_trigger
 from .worktree import prepare_task_worktree_for_run_locked
 
 
+ACTIVE_RUN_FIELDS = (
+    "active_run_id",
+    "active_runner_hostname",
+    "active_runner_pid",
+    "active_run_attempt",
+    "active_run_started_at",
+)
+
+
 @dataclass
 class RunOutcome:
     status: str
     message: str
     task_id: str | None = None
     review: dict[str, Any] | None = None
+
+
+@dataclass
+class ClaimedRun:
+    task: dict[str, Any]
+    run_task: dict[str, Any]
+    prompt: str
+    attempt: int
+    active_run_id: str
+    execution_backend: str
+    execution_cwd: Path | None
+    execution_settings: ExecutionSettings | None
 
 
 def run_next(config: Config) -> RunOutcome:
@@ -43,15 +68,15 @@ def run_next(config: Config) -> RunOutcome:
 
     task: dict[str, Any] | None = None
     outcome: RunOutcome | None = None
+    claimed: ClaimedRun | None = None
     try:
         recover_stale_running_tasks(config)
         if is_runner_paused(config):
             pause = get_runner_pause(config)
             mark_run(config, None)
             outcome = RunOutcome(status="paused", message=runner_pause_message(pause))
-            return outcome
         review_report: dict[str, Any] | None = None
-        if config.auto_review_mechanical_accept or config.auto_review_codex_enabled:
+        if outcome is None and (config.auto_review_mechanical_accept or config.auto_review_codex_enabled):
             review_report = build_review_next_apply_report_locked(config, auto_mode=True)
             if review_report.get("mutated"):
                 auto_review = review_report.get("auto_review") if isinstance(review_report.get("auto_review"), dict) else {}
@@ -63,8 +88,7 @@ def run_next(config: Config) -> RunOutcome:
                         task_id=str(review_report.get("task_id") or "") or None,
                         review=review_report,
                     )
-                    return outcome
-                if auto_review.get("decision") != "accepted":
+                elif auto_review.get("decision") != "accepted":
                     mark_run(config, None)
                     outcome = RunOutcome(
                         status="review_needed",
@@ -72,16 +96,15 @@ def run_next(config: Config) -> RunOutcome:
                         task_id=str(review_report.get("task_id") or "") or None,
                         review=review_report,
                     )
-                    return outcome
-                mark_run(config, None)
-                outcome = RunOutcome(
-                    status="review_accepted",
-                    message="auto-review accepted one completed task",
-                    task_id=str(review_report.get("task_id") or "") or None,
-                    review=review_report,
-                )
-                return outcome
-            if review_report_consumed_work(review_report):
+                else:
+                    mark_run(config, None)
+                    outcome = RunOutcome(
+                        status="review_accepted",
+                        message="auto-review accepted one completed task",
+                        task_id=str(review_report.get("task_id") or "") or None,
+                        review=review_report,
+                    )
+            elif review_report_consumed_work(review_report):
                 mark_run(config, None)
                 outcome = RunOutcome(
                     status="review_needed",
@@ -89,112 +112,201 @@ def run_next(config: Config) -> RunOutcome:
                     task_id=str(review_report.get("task_id") or "") or None,
                     review=review_report,
                 )
-                return outcome
 
-        task = select_next_task(config)
-        if not task:
-            if review_report and review_report.get("selected"):
-                mark_run(config, None)
-                outcome = RunOutcome(
-                    status="review_needed",
-                    message="completed task needs human review",
-                    task_id=str(review_report.get("task_id") or "") or None,
-                    review=review_report,
-                )
-                return outcome
+        if outcome is None:
+            claimed, outcome = claim_next_implementation_task_locked(config, review_report)
+        if outcome is None and not claimed:
             mark_run(config, None)
             outcome = RunOutcome(status="empty", message="no runnable task")
-            return outcome
-
-        started_at = iso_now()
-        execution_backend = task_execution_backend(task)
-        resume_requested = execution_backend == "codex" and task.get("status") == "needs_resume"
-        execution_cwd: Path | None = None
-        if config.worktree_mode == "task":
-            worktree_result = prepare_task_worktree_for_run_locked(config, task)
-            task = worktree_result["task"]
-            if worktree_result["report"].get("errors"):
-                mark_worktree_prepare_failure(config, task, worktree_result["report"])
-                mark_run(config, task["id"])
-                outcome = RunOutcome(status=task["status"], message="worktree preparation failed", task_id=task["id"])
-                return outcome
-            execution_cwd = worktree_result["worktree_path"]
-
-        backend_error = validate_task_backend(task)
-        if backend_error:
-            mark_backend_failure(config, task, backend_error)
-            mark_run(config, task["id"])
-            outcome = RunOutcome(status=task["status"], message=backend_error, task_id=task["id"])
-            return outcome
-        prompt = ""
-        profile_settings: ExecutionSettings | None = None
-        resume_unavailable = False
-        if execution_backend == "codex":
-            resume_unavailable = bool(resume_requested and task.get("next_prompt") and not resume_id(task))
-            prompt = build_prompt(
-                task,
-                resume_unavailable=resume_unavailable,
-                execution_cwd=str(execution_cwd) if execution_cwd else None,
-            )
-            profile_settings, profile_error = validate_execution_profile(config, task)
-            if profile_error:
-                mark_profile_failure(config, task, profile_error)
-                mark_run(config, task["id"])
-                outcome = RunOutcome(status=task["status"], message=profile_error, task_id=task["id"])
-                return outcome
-        task["status"] = "running"
-        task["started_at"] = started_at
-        task["execution_backend"] = execution_backend
-        task["resume_requested"] = resume_requested
-        task["resume_unavailable"] = resume_unavailable
-        task["resume_unavailable_at"] = started_at if resume_unavailable else None
-        if resume_unavailable:
-            task["resume_unavailable_attempts"] = int(task.get("resume_unavailable_attempts", 0)) + 1
-        task["attempts"] = int(task.get("attempts", 0)) + 1
-        task["run_count"] = int(task.get("run_count", 0)) + 1
-        if execution_cwd:
-            task["execution_worktree_status"] = "running"
-            task["execution_started_at"] = started_at
-        save_task(config, task)
-        emit_task_event(
-            config,
-            "task_started",
-            task,
-            source="run-next",
-            summary=f"started task {task['id']}",
-            payload=transition_payload(
-                task,
-                started_at=started_at,
-                resume_requested=resume_requested,
-                resume_unavailable=resume_unavailable,
-            ),
-        )
-        mark_run(config, task["id"])
-
-        run_task = dict(task)
-        if execution_cwd:
-            run_task["cwd"] = str(execution_cwd)
-        if execution_backend == "shell":
-            result = run_shell_task(config, run_task, task["attempts"])
-            if execution_cwd:
-                task["execution_worktree_status"] = "retained"
-                task["execution_retained_at"] = iso_now()
-            apply_shell_result(config, task, result, git_status_cwd=execution_cwd)
-        else:
-            result = run_codex(config, run_task, prompt, task["attempts"])
-            if execution_cwd:
-                task["execution_worktree_status"] = "retained"
-                task["execution_retained_at"] = iso_now()
-                auto_commit_worktree_result(config, task, result, execution_cwd)
-            apply_codex_result(config, task, result, git_status_cwd=execution_cwd, execution_settings=profile_settings)
-        outcome = RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
-        return outcome
     finally:
         lock.release()
-        if outcome and outcome.task_id and should_trigger_post_run_wake(config, task):
+
+    if not claimed:
+        if outcome and outcome.status in {"review_accepted", "review_fix_enqueued"} and should_trigger_post_review_wake(config):
             run_post_run_trigger(config)
-        elif outcome and outcome.status in {"review_accepted", "review_fix_enqueued"} and should_trigger_post_review_wake(config):
-            run_post_run_trigger(config)
+        return outcome or RunOutcome(status="empty", message="no runnable task")
+
+    task = claimed.task
+    if should_trigger_post_claim_wake(config, task):
+        run_post_run_trigger(config)
+
+    if claimed.execution_backend == "shell":
+        result = run_shell_task(config, claimed.run_task, claimed.attempt)
+        outcome = finalize_shell_run(config, claimed, result)
+    else:
+        result = run_codex(config, claimed.run_task, claimed.prompt, claimed.attempt)
+        outcome = finalize_codex_run(config, claimed, result)
+
+    if outcome and outcome.task_id and should_trigger_post_run_wake(config, task):
+        run_post_run_trigger(config)
+    return outcome
+
+
+def claim_next_implementation_task_locked(
+    config: Config,
+    review_report: dict[str, Any] | None = None,
+) -> tuple[ClaimedRun | None, RunOutcome | None]:
+    task = select_next_task(config)
+    if not task:
+        if review_report and review_report.get("selected"):
+            mark_run(config, None)
+            return None, RunOutcome(
+                status="review_needed",
+                message="completed task needs human review",
+                task_id=str(review_report.get("task_id") or "") or None,
+                review=review_report,
+            )
+        mark_run(config, None)
+        return None, RunOutcome(status="empty", message="no runnable task")
+
+    started_at = iso_now()
+    execution_backend = task_execution_backend(task)
+    resume_requested = execution_backend == "codex" and task.get("status") == "needs_resume"
+    execution_cwd: Path | None = None
+    if config.worktree_mode == "task":
+        worktree_result = prepare_task_worktree_for_run_locked(config, task)
+        task = worktree_result["task"]
+        if worktree_result["report"].get("errors"):
+            mark_worktree_prepare_failure(config, task, worktree_result["report"])
+            mark_run(config, task["id"])
+            return None, RunOutcome(status=task["status"], message="worktree preparation failed", task_id=task["id"])
+        execution_cwd = worktree_result["worktree_path"]
+
+    backend_error = validate_task_backend(task)
+    if backend_error:
+        mark_backend_failure(config, task, backend_error)
+        mark_run(config, task["id"])
+        return None, RunOutcome(status=task["status"], message=backend_error, task_id=task["id"])
+    prompt = ""
+    profile_settings: ExecutionSettings | None = None
+    resume_unavailable = False
+    if execution_backend == "codex":
+        resume_unavailable = bool(resume_requested and task.get("next_prompt") and not resume_id(task))
+        prompt = build_prompt(
+            task,
+            resume_unavailable=resume_unavailable,
+            execution_cwd=str(execution_cwd) if execution_cwd else None,
+        )
+        profile_settings, profile_error = validate_execution_profile(config, task)
+        if profile_error:
+            mark_profile_failure(config, task, profile_error)
+            mark_run(config, task["id"])
+            return None, RunOutcome(status=task["status"], message=profile_error, task_id=task["id"])
+
+    active_run_id = uuid.uuid4().hex
+    task["status"] = "running"
+    task["started_at"] = started_at
+    task["execution_backend"] = execution_backend
+    task["resume_requested"] = resume_requested
+    task["resume_unavailable"] = resume_unavailable
+    task["resume_unavailable_at"] = started_at if resume_unavailable else None
+    if resume_unavailable:
+        task["resume_unavailable_attempts"] = int(task.get("resume_unavailable_attempts", 0)) + 1
+    task["attempts"] = int(task.get("attempts", 0)) + 1
+    task["run_count"] = int(task.get("run_count", 0)) + 1
+    task["active_run_id"] = active_run_id
+    task["active_runner_hostname"] = socket.gethostname()
+    task["active_runner_pid"] = os.getpid()
+    task["active_run_attempt"] = task["attempts"]
+    task["active_run_started_at"] = started_at
+    if execution_cwd:
+        task["execution_worktree_status"] = "running"
+        task["execution_started_at"] = started_at
+    save_task(config, task)
+    emit_task_event(
+        config,
+        "task_started",
+        task,
+        source="run-next",
+        summary=f"started task {task['id']}",
+        payload=transition_payload(
+            task,
+            started_at=started_at,
+            resume_requested=resume_requested,
+            resume_unavailable=resume_unavailable,
+            active_run_id=active_run_id,
+        ),
+    )
+    mark_run(config, task["id"])
+
+    run_task = dict(task)
+    if execution_cwd:
+        run_task["cwd"] = str(execution_cwd)
+    return ClaimedRun(
+        task=task,
+        run_task=run_task,
+        prompt=prompt,
+        attempt=task["attempts"],
+        active_run_id=active_run_id,
+        execution_backend=execution_backend,
+        execution_cwd=execution_cwd,
+        execution_settings=profile_settings,
+    ), None
+
+
+def finalize_codex_run(config: Config, claimed: ClaimedRun, result: CodexResult) -> RunOutcome:
+    lock = acquire_finalize_lock(config)
+    try:
+        task = load_claimed_task_for_finalize(config, claimed)
+        if not task:
+            return RunOutcome(status="stale_finalization", message="active run id no longer matches", task_id=claimed.task["id"])
+        if claimed.execution_cwd:
+            task["execution_worktree_status"] = "retained"
+            task["execution_retained_at"] = iso_now()
+            auto_commit_worktree_result(config, task, result, claimed.execution_cwd)
+        apply_codex_result(config, task, result, git_status_cwd=claimed.execution_cwd, execution_settings=claimed.execution_settings)
+        claimed.task = task
+        return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
+    finally:
+        lock.release()
+
+
+def finalize_shell_run(config: Config, claimed: ClaimedRun, result: ShellResult) -> RunOutcome:
+    lock = acquire_finalize_lock(config)
+    try:
+        task = load_claimed_task_for_finalize(config, claimed)
+        if not task:
+            return RunOutcome(status="stale_finalization", message="active run id no longer matches", task_id=claimed.task["id"])
+        if claimed.execution_cwd:
+            task["execution_worktree_status"] = "retained"
+            task["execution_retained_at"] = iso_now()
+        apply_shell_result(config, task, result, git_status_cwd=claimed.execution_cwd)
+        claimed.task = task
+        return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
+    finally:
+        lock.release()
+
+
+def load_claimed_task_for_finalize(config: Config, claimed: ClaimedRun) -> dict[str, Any] | None:
+    from .queue import load_task
+
+    task = load_task(config, str(claimed.task["id"]))
+    if task.get("active_run_id") != claimed.active_run_id:
+        return None
+    return task
+
+
+def acquire_finalize_lock(config: Config) -> FileLock:
+    deadline = time.monotonic() + 30.0
+    while True:
+        lock = FileLock(config.lock_file, config.stale_lock_seconds)
+        if lock.acquire():
+            return lock
+        if time.monotonic() >= deadline:
+            raise RuntimeError("could not acquire queue lock to finalize task result")
+        time.sleep(0.1)
+
+
+def should_trigger_post_claim_wake(config: Config, processed_task: dict[str, Any] | None) -> bool:
+    if not processed_task:
+        return False
+    if in_global_cooldown(config):
+        return False
+    if select_next_task(config) is None:
+        return False
+    if is_runner_paused(config):
+        return False
+    return True
 
 
 def review_report_consumed_work(report: dict[str, Any]) -> bool:
@@ -301,6 +413,7 @@ def apply_codex_result(
     git_status_cwd: Path | None = None,
     execution_settings: ExecutionSettings | None = None,
 ) -> None:
+    clear_active_run_metadata(task)
     task.setdefault("log_paths", []).append(str(result.log_path))
     record_last_run(task, result, execution_settings=execution_settings)
     if result.command_kind == "resume":
@@ -440,6 +553,7 @@ def apply_shell_result(
     *,
     git_status_cwd: Path | None = None,
 ) -> None:
+    clear_active_run_metadata(task)
     task.setdefault("log_paths", []).append(str(result.log_path))
     record_shell_last_run(task, result)
     task["last_result"] = shell_last_result(task, result)
@@ -507,6 +621,11 @@ def record_shell_last_run(task: dict, result: ShellResult) -> None:
         "stdout_bytes": result.stdout_bytes,
         "stderr_bytes": result.stderr_bytes,
     }
+
+
+def clear_active_run_metadata(task: dict[str, Any]) -> None:
+    for key in ACTIVE_RUN_FIELDS:
+        task.pop(key, None)
 
 
 def shell_last_result(task: dict, result: ShellResult) -> dict[str, Any]:

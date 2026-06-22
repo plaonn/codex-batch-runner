@@ -39,6 +39,9 @@ class Config:
     max_total_running: int = 1
     max_running_per_project: int = 1
     capacity_pools: dict[str, dict[str, int]] = field(default_factory=lambda: {"codex": {"max_running": 1}})
+    project_priorities: dict[str, int] = field(default_factory=dict)
+    default_project_priority: int = 100
+    project_priority_aging_hours: int = 24
     codex_startup_stall_seconds: int = 240
     codex_first_meaningful_timeout_seconds: int = 420
     codex_mid_run_idle_seconds: int = 1800
@@ -139,6 +142,15 @@ class Config:
                 data.get("max_running_per_project", 1),
             ),
             capacity_pools=capacity_pools_value(data.get("capacity_pools")),
+            project_priorities=project_priorities_value(data.get("project_priorities", {})),
+            default_project_priority=int_value(
+                "default_project_priority",
+                data.get("default_project_priority", 100),
+            ),
+            project_priority_aging_hours=non_negative_int_value(
+                "project_priority_aging_hours",
+                data.get("project_priority_aging_hours", 24),
+            ),
             codex_startup_stall_seconds=int(data.get("codex_startup_stall_seconds", 240)),
             codex_first_meaningful_timeout_seconds=int(data.get("codex_first_meaningful_timeout_seconds", 420)),
             codex_mid_run_idle_seconds=int(data.get("codex_mid_run_idle_seconds", 1800)),
@@ -245,6 +257,15 @@ def positive_int_value(key: str, value: object) -> int:
     return result
 
 
+def int_value(key: str, value: object) -> int:
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer") from exc
+
+
 def capacity_pools_value(value: object) -> dict[str, dict[str, int]]:
     if value is None:
         return {"codex": {"max_running": 1}}
@@ -265,6 +286,28 @@ def capacity_pools_value(value: object) -> dict[str, dict[str, int]]:
     if "codex" not in pools:
         raise ValueError("capacity_pools must define codex")
     return pools
+
+
+def project_priorities_value(value: object) -> dict[str, int]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("project_priorities must be an object")
+    priorities: dict[str, int] = {}
+    for key, raw_priority in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("project_priorities keys must be non-empty strings")
+        priorities[normalize_project_priority_key(key)] = int_value(f"project_priorities.{key}", raw_priority)
+    return priorities
+
+
+def normalize_project_priority_key(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return text
+    if text.startswith("~") or "/" in text:
+        return str(Path(text).expanduser().resolve())
+    return text
 
 
 def resolve_config_path(config_path: str | None = None, include_user_config: bool = True) -> Path | None:

@@ -48,6 +48,9 @@
       "max_running": 1
     }
   },
+  "project_priorities": {},
+  "default_project_priority": 100,
+  "project_priority_aging_hours": 24,
   "stale_lock_seconds": 21600,
   "rate_limit_cooldown_seconds": 1800,
   "default_max_attempts": 5

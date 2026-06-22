@@ -198,8 +198,154 @@ class QueueTests(unittest.TestCase):
             self.assertIsNone(task["last_auto_fix_task_id"])
             self.assertEqual([], task["finding_fingerprints"])
             self.assertEqual("codex", task["execution_backend"])
+            self.assertEqual("codex", task["capacity_pool"])
+            self.assertEqual("normal", task["task_priority"])
             self.assertIsNone(task["shell_command"])
             self.assertIsNone(task["shell_timeout_seconds"])
+
+    def test_create_task_accepts_scheduling_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+
+            task = create_task(config, "work", tmp, task_id="scheduled", capacity_pool="spark", task_priority="high")
+
+            self.assertEqual("spark", task["capacity_pool"])
+            self.assertEqual("high", task["task_priority"])
+
+    def test_create_task_rejects_invalid_task_priority_and_capacity_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+
+            with self.assertRaisesRegex(ValueError, "task_priority must be one of"):
+                create_task(config, "work", tmp, task_id="bad-priority", task_priority="urgent")
+            with self.assertRaisesRegex(ValueError, "capacity_pool must be a non-empty string"):
+                create_task(config, "work", tmp, task_id="bad-pool", capacity_pool="")
+
+    def test_select_orders_by_project_priority_then_task_priority_then_fifo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                Config.load(root=Path(tmp)),
+                max_total_running=4,
+                max_running_per_project=4,
+                capacity_pools={"codex": {"max_running": 4}},
+                project_priorities={"high-project": 10, "low-project": 20},
+            )
+            create_task(config, "low asap", tmp, task_id="low-asap", project_id="low-project", task_priority="asap")
+            create_task(config, "high normal", tmp, task_id="high-normal", project_id="high-project")
+
+            selected = select_next_task(config)
+
+            self.assertEqual("high-normal", selected["id"])
+
+    def test_select_orders_same_project_by_task_priority_then_fifo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                Config.load(root=Path(tmp)),
+                max_total_running=4,
+                max_running_per_project=4,
+                capacity_pools={"codex": {"max_running": 4}},
+            )
+            normal = create_task(config, "normal", tmp, task_id="normal", project_id="project")
+            high = create_task(config, "high", tmp, task_id="high", project_id="project", task_priority="high")
+            asap = create_task(config, "asap", tmp, task_id="asap", project_id="project", task_priority="asap")
+            for task, created in (
+                (normal, "2026-01-01T00:00:00+00:00"),
+                (high, "2026-01-02T00:00:00+00:00"),
+                (asap, "2026-01-03T00:00:00+00:00"),
+            ):
+                task["created_at"] = created
+                save_task(config, task)
+
+            selected = select_next_task(config)
+
+            self.assertEqual("asap", selected["id"])
+
+    def test_project_priority_aging_prevents_starvation_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                Config.load(root=Path(tmp)),
+                max_total_running=4,
+                max_running_per_project=4,
+                capacity_pools={"codex": {"max_running": 4}},
+                project_priorities={"older-low": 100, "newer-high": 99},
+                project_priority_aging_hours=24,
+            )
+            old = create_task(config, "old", tmp, task_id="old", project_id="older-low")
+            new = create_task(config, "new", tmp, task_id="new", project_id="newer-high")
+            old["created_at"] = "2000-01-01T00:00:00+00:00"
+            new["created_at"] = "2026-01-01T00:00:00+00:00"
+            save_task(config, old)
+            save_task(config, new)
+
+            selected = select_next_task(config)
+
+            self.assertEqual("old", selected["id"])
+
+    def test_project_priority_aging_zero_uses_strict_tiers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                Config.load(root=Path(tmp)),
+                max_total_running=4,
+                max_running_per_project=4,
+                capacity_pools={"codex": {"max_running": 4}},
+                project_priorities={"older-low": 100, "newer-high": 99},
+                project_priority_aging_hours=0,
+            )
+            old = create_task(config, "old", tmp, task_id="old", project_id="older-low")
+            new = create_task(config, "new", tmp, task_id="new", project_id="newer-high")
+            old["created_at"] = "2000-01-01T00:00:00+00:00"
+            new["created_at"] = "2026-01-01T00:00:00+00:00"
+            save_task(config, old)
+            save_task(config, new)
+
+            selected = select_next_task(config)
+
+            self.assertEqual("new", selected["id"])
+
+    def test_select_skips_full_capacity_without_mutating_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            other = Path(tmp) / "other"
+            other.mkdir()
+            config = replace(
+                Config.load(root=Path(tmp)),
+                max_total_running=2,
+                max_running_per_project=1,
+                capacity_pools={"codex": {"max_running": 2}},
+            )
+            running = create_task(config, "running", tmp, task_id="running")
+            running["status"] = "running"
+            save_task(config, running)
+            blocked = create_task(config, "blocked same project", tmp, task_id="blocked")
+            ready = create_task(config, "ready other project", str(other), task_id="ready")
+
+            selected = select_next_task(config)
+
+            self.assertEqual("ready", selected["id"])
+            self.assertEqual("runnable", load_task(config, blocked["id"])["status"])
+
+    def test_select_skips_unknown_or_full_capacity_pool_without_mutating_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            spark = Path(tmp) / "spark"
+            spark.mkdir()
+            config = replace(
+                Config.load(root=Path(tmp)),
+                max_total_running=3,
+                max_running_per_project=3,
+                capacity_pools={"codex": {"max_running": 1}, "spark": {"max_running": 1}},
+            )
+            running = create_task(config, "running", tmp, task_id="running")
+            running["status"] = "running"
+            save_task(config, running)
+            full_pool = create_task(config, "full", tmp, task_id="full-pool")
+            unknown = create_task(config, "unknown", tmp, task_id="unknown", capacity_pool="missing")
+            ready = create_task(config, "ready", str(spark), task_id="spark-ready", capacity_pool="spark")
+
+            selected = select_next_task(config)
+
+            self.assertEqual("spark-ready", selected["id"])
+            self.assertEqual("runnable", load_task(config, full_pool["id"])["status"])
+            self.assertEqual("runnable", load_task(config, unknown["id"])["status"])
+            self.assertEqual("runnable", load_task(config, ready["id"])["status"])
 
     def test_create_task_accepts_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

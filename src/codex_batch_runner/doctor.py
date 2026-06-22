@@ -12,7 +12,7 @@ from .config import Config
 from .execution_profiles import SAFE_CONFIG_OVERRIDE_KEYS, command_options, resolve_execution_settings
 from .fs import read_json
 from .lock import lock_status
-from .queue import RUNNABLE_STATUSES, dependency_status, is_in_cooldown
+from .queue import RUNNABLE_STATUSES, capacity_blockers, dependency_status, is_in_cooldown
 from .state import load_state
 from .timeutil import parse_time, utc_now
 from .transcript import sanitize
@@ -436,6 +436,18 @@ def capacity_summary(config: Config, tasks: list[dict[str, Any]]) -> dict[str, A
     max_running_single_project = max(running_by_project.values(), default=0)
     over_total_capacity = len(running_tasks) > config.max_total_running
     over_project_capacity = max_running_single_project > config.max_running_per_project
+    capacity_blocked: Counter[str] = Counter()
+    admissible_runnable = 0
+    capacity_blocked_count = 0
+    for task in tasks:
+        if task.get("status") not in RUNNABLE_STATUSES or is_in_cooldown(task):
+            continue
+        blockers = capacity_blockers(config, task)
+        if blockers:
+            capacity_blocked_count += 1
+            capacity_blocked.update(blockers)
+        else:
+            admissible_runnable += 1
     return {
         "max_total_running": config.max_total_running,
         "max_running_per_project": config.max_running_per_project,
@@ -445,6 +457,9 @@ def capacity_summary(config: Config, tasks: list[dict[str, Any]]) -> dict[str, A
         "running_projects": len(running_by_project),
         "max_running_single_project": max_running_single_project,
         "unknown_pools": unknown_pools,
+        "admissible_runnable": admissible_runnable,
+        "capacity_blocked_runnable": capacity_blocked_count,
+        "capacity_blocked_reasons": dict(sorted(capacity_blocked.items())),
         "over_total_capacity": over_total_capacity,
         "over_project_capacity": over_project_capacity,
         "over_pool_capacity": over_pool_capacity,
@@ -597,9 +612,16 @@ def render_doctor_report(report: dict[str, Any]) -> str:
             f"  running_total: {capacity.get('running_total')}",
             f"  running_projects: {capacity.get('running_projects')}",
             f"  max_running_single_project: {capacity.get('max_running_single_project')}",
+            f"  admissible_runnable: {capacity.get('admissible_runnable')}",
+            f"  capacity_blocked_runnable: {capacity.get('capacity_blocked_runnable')}",
             f"  over_capacity: {str(capacity.get('over_capacity')).lower()}",
         ]
     )
+    blocked_reasons = capacity.get("capacity_blocked_reasons") or {}
+    if blocked_reasons:
+        lines.append("  blocked_reasons:")
+        for reason, count in blocked_reasons.items():
+            lines.append(f"    {reason}: {count}")
     running_by_pool = capacity.get("running_by_pool") or {}
     capacity_pools = capacity.get("capacity_pools") or {}
     lines.append("  pools:")
