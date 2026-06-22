@@ -262,6 +262,33 @@ class QueueTests(unittest.TestCase):
             self.assertEqual("handled outside cbr", resolved["resolution_reason"])
             self.assertIsNotNone(resolved["resolved_at"])
 
+    def test_set_resolution_records_completed_review_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            task = create_task(config, "work", tmp, task_id="superseded")
+            task["status"] = "completed"
+            task["review_status"] = "needs_followup"
+            save_task(config, task)
+
+            resolved = set_resolution(config, "superseded", "superseded", "handled by follow-up task")
+
+            self.assertEqual("completed", resolved["status"])
+            self.assertEqual("needs_followup", resolved["review_status"])
+            self.assertEqual("superseded", resolved["resolution"])
+            self.assertEqual("handled by follow-up task", resolved["resolution_reason"])
+            self.assertIsNotNone(resolved["resolved_at"])
+
+    def test_set_resolution_rejects_completed_unreviewed_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            task = create_task(config, "work", tmp, task_id="unreviewed")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            save_task(config, task)
+
+            with self.assertRaises(ValueError):
+                set_resolution(config, "unreviewed", "manual", "skip review")
+
     def test_set_resolution_rejects_runnable_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))

@@ -1586,6 +1586,54 @@ class CliTests(unittest.TestCase):
             self.assertIn("resolution: wont_fix", output)
             self.assertIn("resolution_reason: obsolete", output)
 
+    def test_resolve_command_records_completed_review_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "task", tmp, task_id="parent")
+            task["status"] = "completed"
+            task["review_status"] = "needs_followup"
+            save_task(config, task)
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "resolve",
+                    "parent",
+                    "--resolution",
+                    "superseded",
+                    "--reason",
+                    "fixed by follow-up",
+                ]
+            )
+            task = load_task(config, "parent")
+
+            self.assertEqual(0, code)
+            self.assertEqual("parent\tresolved\tsuperseded\n", output)
+            self.assertEqual("completed", task["status"])
+            self.assertEqual("needs_followup", task["review_status"])
+            self.assertEqual("superseded", task["resolution"])
+            self.assertEqual("fixed by follow-up", task["resolution_reason"])
+
+            code, output = run_cli(["--config", str(config_path), "list"])
+
+            self.assertEqual(0, code)
+            self.assertNotIn("parent", {row["ID"] for row in compact_list_rows(output)})
+
+            code, output = run_cli(["--config", str(config_path), "list", "--all"])
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertEqual("resolved", rows["parent"]["STATUS"])
+            self.assertEqual("resolution: superseded", rows["parent"]["NOTE"])
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--dry-run"])
+
+            self.assertEqual(0, code)
+            self.assertIn("selected: false", output)
+            self.assertIn("no completed task needs review", output)
+
     def test_rate_limits_lists_sanitized_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

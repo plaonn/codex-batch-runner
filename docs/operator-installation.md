@@ -131,7 +131,7 @@ PYTHONPATH=src python3 -m codex_batch_runner --config /path/to/cbr-config.json d
 
 `doctor`는 Codex를 호출하지 않습니다. Resolved runtime path, directory와 parent
 접근성, Codex command availability, global cooldown, lock state, task count,
-runnable count, review count, resolved failed/blocked count를 점검합니다.
+runnable count, review count, resolved failed/blocked count, resolved completed-review count를 점검합니다.
 Unattended execution에 의존하기 전에 `error` check를 해결합니다. Warning은 exit
 code를 실패로 만들지 않지만 확인해야 합니다.
 

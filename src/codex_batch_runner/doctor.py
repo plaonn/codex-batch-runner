@@ -344,6 +344,7 @@ def task_summary(tasks: list[dict[str, Any]], by_id: dict[Any, dict[str, Any]], 
     status_counts = Counter(str(task.get("status") or "unknown") for task in tasks)
     needs_review_count = 0
     resolved_count = 0
+    resolved_review_completed_count = 0
     runnable_count = 0
     cooldown_count = 0
     startup_stalled_count = 0
@@ -356,10 +357,16 @@ def task_summary(tasks: list[dict[str, Any]], by_id: dict[Any, dict[str, Any]], 
             recently_stalled.append(stall_evidence(task))
         if status == "running" and running_no_progress_candidate(task, config):
             running_no_progress.append(stall_evidence(task))
-        if status == "completed" and review_status(task) in {"unreviewed", "rejected", "needs_followup"}:
+        if (
+            status == "completed"
+            and not task.get("resolution")
+            and review_status(task) in {"unreviewed", "rejected", "needs_followup"}
+        ):
             needs_review_count += 1
         if status in {"failed", "blocked_user"} and task.get("resolution"):
             resolved_count += 1
+        if status == "completed" and task.get("resolution"):
+            resolved_review_completed_count += 1
         if is_in_cooldown(task):
             cooldown_count += 1
             continue
@@ -375,6 +382,7 @@ def task_summary(tasks: list[dict[str, Any]], by_id: dict[Any, dict[str, Any]], 
         "by_status": dict(sorted(status_counts.items())),
         "needs_review_completed": needs_review_count,
         "resolved_failed_or_blocked": resolved_count,
+        "resolved_review_completed": resolved_review_completed_count,
         "runnable": runnable_count,
         "cooldown": cooldown_count,
         "startup_stalled": startup_stalled_count,
@@ -387,7 +395,9 @@ def auto_review_summary(tasks: list[dict[str, Any]], config: Config) -> dict[str
     reviewable_count = sum(
         1
         for task in tasks
-        if task.get("status") == "completed" and review_status(task) in {"unreviewed", "rejected", "needs_followup"}
+        if task.get("status") == "completed"
+        and not task.get("resolution")
+        and review_status(task) in {"unreviewed", "rejected", "needs_followup"}
     )
     return {
         "mechanical_auto_accept_enabled": config.auto_review_mechanical_accept,
@@ -630,6 +640,7 @@ def render_doctor_report(report: dict[str, Any]) -> str:
         [
             f"  needs_review_completed: {tasks['needs_review_completed']}",
             f"  resolved_failed_or_blocked: {tasks['resolved_failed_or_blocked']}",
+            f"  resolved_review_completed: {tasks['resolved_review_completed']}",
             f"  runnable: {tasks['runnable']}",
             f"  cooldown: {tasks['cooldown']}",
             f"  startup_stalled: {tasks['startup_stalled']}",

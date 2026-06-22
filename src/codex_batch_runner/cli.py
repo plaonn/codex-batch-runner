@@ -214,7 +214,10 @@ def build_parser() -> argparse.ArgumentParser:
     archive.add_argument("--json", action="store_true", help="print raw JSON")
     archive.set_defaults(func=cmd_archive)
 
-    resolve = sub.add_parser("resolve", help="record an operational resolution for failed or blocked tasks")
+    resolve = sub.add_parser(
+        "resolve",
+        help="record an operational resolution for failed, blocked, or completed rejected/follow-up tasks",
+    )
     resolve.add_argument("task_id")
     resolve.add_argument("--resolution", required=True, choices=sorted(RESOLUTIONS), help="resolution decision")
     resolve.add_argument("--reason", help="resolution note")
@@ -705,7 +708,7 @@ def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config
         )[0]
     ):
         return "blocked_dependency"
-    if task.get("resolution") and status in {"failed", "blocked_user"}:
+    if task.get("resolution") and status in {"failed", "blocked_user", "completed"}:
         return "resolved"
     if by_id is not None and config is not None:
         subtask_status = blocking_subtask_effective_status(task, by_id, config)
@@ -752,7 +755,7 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
         notes.append(profile_note)
     if task.get("resolution"):
         notes.append("resolution: " + str(task.get("resolution")))
-    if task.get("status") == "completed":
+    if task.get("status") == "completed" and not task.get("resolution"):
         review = review_status(task)
         if review == "unreviewed":
             notes.append("awaiting review")
@@ -866,7 +869,7 @@ def status_cell_without_subtasks(task: dict, by_id: dict[str, dict], config: Con
         )[0]
     ):
         return "blocked_dependency"
-    if task.get("resolution") and status in {"failed", "blocked_user"}:
+    if task.get("resolution") and status in {"failed", "blocked_user", "completed"}:
         return "resolved"
     if status == "completed":
         review = review_status(task)
@@ -1308,13 +1311,19 @@ def review_status(task: dict) -> str:
 
 
 def needs_review(task: dict) -> bool:
-    return task.get("status") == "completed" and review_status(task) in {"unreviewed", "rejected", "needs_followup"}
+    return (
+        task.get("status") == "completed"
+        and not task.get("resolution")
+        and review_status(task) in {"unreviewed", "rejected", "needs_followup"}
+    )
 
 
 def visible_by_default(task: dict) -> bool:
     if task.get("status") == "archived":
         return False
     if task.get("status") == "completed":
+        if task.get("resolution"):
+            return False
         if accepted_worktree_not_applied(task):
             return True
         return needs_review(task)

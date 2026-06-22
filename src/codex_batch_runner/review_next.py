@@ -344,7 +344,7 @@ def no_selection_report(
 
 
 def is_review_needed(task: dict) -> bool:
-    return task.get("status") == "completed" and review_status(task) in REVIEW_NEEDED_STATUSES
+    return task.get("status") == "completed" and not task.get("resolution") and review_status(task) in REVIEW_NEEDED_STATUSES
 
 
 def apply_filters(tasks: list[dict], filters: Namespace | None) -> list[dict]:

@@ -14,6 +14,7 @@ RUNNABLE_STATUSES = {"runnable", "needs_resume"}
 DEFAULT_HIDDEN_LIST_STATUSES = {"completed", "archived"}
 REVIEW_STATUSES = {"unreviewed", "accepted", "rejected", "needs_followup"}
 RESOLUTIONS = {"wont_fix", "superseded", "manual", "smoke", "duplicate"}
+RESOLVABLE_COMPLETED_REVIEW_STATUSES = {"rejected", "needs_followup"}
 CHAIN_STATUSES = {
     "awaiting_review",
     "reviewing",
@@ -141,8 +142,10 @@ def set_resolution(config: Config, task_id: str, resolution: str, reason: str | 
     if resolution not in RESOLUTIONS:
         raise ValueError(f"invalid resolution: {resolution}")
     task = load_task(config, task_id)
-    if task.get("status") not in {"failed", "blocked_user"}:
-        raise ValueError("resolution can only be set on failed or blocked_user tasks")
+    if not is_resolvable_task(task):
+        raise ValueError(
+            "resolution can only be set on failed, blocked_user, or completed rejected/needs_followup tasks"
+        )
     task["resolution"] = resolution
     task["resolved_at"] = iso_now()
     task["resolution_reason"] = reason
@@ -156,6 +159,16 @@ def set_resolution(config: Config, task_id: str, resolution: str, reason: str | 
         payload=transition_payload(task, resolution=resolution, resolved_at=task.get("resolved_at")),
     )
     return task
+
+
+def is_resolvable_task(task: dict) -> bool:
+    status = task.get("status")
+    if status in {"failed", "blocked_user"}:
+        return True
+    if status != "completed":
+        return False
+    review = task.get("review_status") or "unreviewed"
+    return review in RESOLVABLE_COMPLETED_REVIEW_STATUSES
 
 
 def list_tasks(config: Config) -> list[dict]:

@@ -88,7 +88,7 @@ cbr doctor
 
 `doctor`는 Codex를 호출하지 않습니다. runtime path, command availability,
 global cooldown, lock state, task count, runnable count, review count, resolved
-failed/blocked count를 점검합니다.
+failed/blocked count, resolved completed-review count를 점검합니다.
 
 ## Review workflow
 
