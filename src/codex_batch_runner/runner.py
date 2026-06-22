@@ -45,7 +45,7 @@ def run_next(config: Config) -> RunOutcome:
         recover_stale_running_tasks(config)
         review_report: dict[str, Any] | None = None
         if config.auto_review_mechanical_accept or config.auto_review_codex_enabled:
-            review_report = build_review_next_apply_report_locked(config)
+            review_report = build_review_next_apply_report_locked(config, auto_mode=True)
             if review_report.get("mutated"):
                 mark_run(config, None)
                 outcome = RunOutcome(
@@ -228,6 +228,7 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult, *, git_s
         task["review_status"] = "unreviewed"
         task["reviewed_at"] = None
         task["review_reason"] = None
+        task.pop("reviewer_codex_backoff", None)
         if task.get("root_task_id") or task.get("chain_status"):
             task["chain_status"] = "awaiting_review"
         task["next_prompt"] = None

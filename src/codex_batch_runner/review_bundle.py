@@ -53,6 +53,9 @@ def build_review_bundle(
         "task_worktree": sanitize_value(task_worktree_report(task)),
         "review_follow_up": sanitize_value(task.get("review_follow_up")) if isinstance(task.get("review_follow_up"), dict) else None,
         "reviewer_codex": sanitize_value(task.get("reviewer_codex")) if isinstance(task.get("reviewer_codex"), dict) else None,
+        "reviewer_codex_backoff": sanitize_value(task.get("reviewer_codex_backoff"))
+        if isinstance(task.get("reviewer_codex_backoff"), dict)
+        else None,
         "chain": chain_summary(task),
         "changed_files": changed_files,
         "verification": result_list(last_result, "verification"),
@@ -95,6 +98,7 @@ def task_metadata(task: dict) -> dict[str, Any]:
         "fix_attempts",
         "chain_status",
         "last_review_decision",
+        "reviewer_codex_backoff",
         "auto_fix_allowed",
         "auto_fix_budget",
         "last_auto_fix_task_id",
@@ -108,6 +112,7 @@ def task_metadata(task: dict) -> dict[str, Any]:
         "fix_attempts",
         "chain_status",
         "last_review_decision",
+        "reviewer_codex_backoff",
         "auto_fix_allowed",
         "auto_fix_budget",
         "last_auto_fix_task_id",
@@ -350,7 +355,13 @@ def public_repo(repo: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def commit_information(task: dict, repo: dict[str, Any] | None) -> dict[str, Any]:
-    info: dict[str, Any] = {"reported": [], "inferred_commits": [], "status": "unavailable", "warnings": []}
+    info: dict[str, Any] = {
+        "reported": [],
+        "inferred_commits": [],
+        "status": "unavailable",
+        "ancestry": {"status": "unavailable", "ok": None, "detail": "git repository unavailable"},
+        "warnings": [],
+    }
     last_result = task.get("last_result") if isinstance(task.get("last_result"), dict) else {}
     reported = last_result.get("commits") if isinstance(last_result, dict) else []
     if isinstance(reported, list):
@@ -372,16 +383,62 @@ def commit_information(task: dict, repo: dict[str, Any] | None) -> dict[str, Any
     if len(unique) == 1:
         show = run_git(repo_root, ["show", "--no-patch", "--format=%H %s", unique[0]])
         info["status"] = "inferred"
+        info["ancestry"] = commit_ancestry(repo_root, unique[0])
         if show.returncode == 0:
             info["commit"] = sanitize(show.stdout.strip())
+        if info["ancestry"].get("ok") is False:
+            info["warnings"].append(str(info["ancestry"].get("detail") or "reported commit is not reachable from current HEAD"))
     elif len(unique) > 1:
         info["status"] = "ambiguous"
+        info["ancestry"] = {"status": "ambiguous", "ok": False, "detail": "multiple commit hashes were inferable"}
         info["warnings"].append("multiple commit hashes were inferable; diff omitted")
     else:
         info["status"] = "not_inferred"
+        info["ancestry"] = {
+            "status": "not_inferred",
+            "ok": None,
+            "detail": "no single reported or inferred commit is available for ancestry comparison",
+        }
         if info["reported"]:
             info["warnings"].append("reported commit metadata did not include an inferable commit hash")
     return info
+
+
+def commit_ancestry(repo_root: Path, commit: str) -> dict[str, Any]:
+    head = run_git(repo_root, ["rev-parse", "--verify", "HEAD^{commit}"])
+    if head.returncode != 0 or not head.stdout.strip():
+        return {
+            "status": "unknown",
+            "ok": None,
+            "reported_commit": sanitize(commit),
+            "current_head": None,
+            "detail": "current HEAD is unavailable",
+        }
+    current_head = head.stdout.strip()
+    if commit == current_head:
+        return {
+            "status": "equal",
+            "ok": True,
+            "reported_commit": sanitize(commit),
+            "current_head": sanitize(current_head),
+            "detail": "reported task commit equals current HEAD",
+        }
+    ancestor = run_git(repo_root, ["merge-base", "--is-ancestor", commit, current_head])
+    if ancestor.returncode == 0:
+        return {
+            "status": "ancestor",
+            "ok": True,
+            "reported_commit": sanitize(commit),
+            "current_head": sanitize(current_head),
+            "detail": "reported task commit is an ancestor of current HEAD; later commits on top are acceptable",
+        }
+    return {
+        "status": "not_reachable",
+        "ok": False,
+        "reported_commit": sanitize(commit),
+        "current_head": sanitize(current_head),
+        "detail": "reported task commit is not reachable from current HEAD",
+    }
 
 
 def build_git_diff(task: dict, repo: dict[str, Any] | None) -> dict[str, Any]:
@@ -484,6 +541,7 @@ def render_review_bundle(bundle: dict[str, Any]) -> str:
     append_object_section(lines, "task_worktree", bundle.get("task_worktree"))
     append_object_section(lines, "review_follow_up", bundle.get("review_follow_up"))
     append_object_section(lines, "reviewer_codex", bundle.get("reviewer_codex"))
+    append_object_section(lines, "reviewer_codex_backoff", bundle.get("reviewer_codex_backoff"))
     append_object_section(lines, "chain", bundle.get("chain"))
     append_object_section(lines, "changed_files", bundle.get("changed_files"))
     append_list_section(lines, "verification", bundle.get("verification"))

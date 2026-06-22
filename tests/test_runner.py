@@ -213,6 +213,68 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("implementation", outcome.task_id)
             self.assertEqual("unreviewed", load_task(config, "reviewable")["review_status"])
 
+    def test_run_next_auto_review_does_not_repeat_same_needs_human_reviewer_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(
+                make_config(tmp, "reviewer_needs_human"),
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+            )
+            create_clean_completed_task(config, repo, "reviewable")
+
+            first = run_next(config)
+            task = load_task(config, "reviewable")
+            reviewer_logs = list((config.log_dir / "reviewable").glob("reviewer-*.jsonl"))
+
+            create_task(config, "implementation", tmp, task_id="implementation")
+            success_config = replace(config, codex_command=[sys.executable, str(FIXTURE), "success"])
+            second = run_next(success_config)
+            reviewer_logs_after = list((config.log_dir / "reviewable").glob("reviewer-*.jsonl"))
+
+            self.assertEqual("review_needed", first.status)
+            self.assertEqual("reviewable", first.task_id)
+            self.assertTrue(first.review["auto_review"]["reviewer_codex_invoked"])
+            self.assertEqual("needs_human", task["reviewer_codex"]["decision"])
+            self.assertEqual("needs_human", task["reviewer_codex_backoff"]["decision"])
+            self.assertEqual("completed", second.status)
+            self.assertEqual("implementation", second.task_id)
+            self.assertEqual(reviewer_logs, reviewer_logs_after)
+
+    def test_run_next_auto_review_skips_backed_off_oldest_candidate_for_next_review_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(
+                make_config(tmp, "reviewer_needs_human"),
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+            )
+            old = create_clean_completed_task(config, repo, "old-review")
+            old["completed_at"] = "2026-01-01T00:00:00+00:00"
+            save_task(config, old)
+            new = create_clean_completed_task(config, repo, "new-review")
+            new["completed_at"] = "2026-01-02T00:00:00+00:00"
+            save_task(config, new)
+
+            first = run_next(config)
+            pass_config = replace(config, codex_command=[sys.executable, str(FIXTURE), "reviewer_pass"])
+            second = run_next(pass_config)
+
+            self.assertEqual("review_needed", first.status)
+            self.assertEqual("old-review", first.task_id)
+            self.assertEqual("review_accepted", second.status)
+            self.assertEqual("new-review", second.task_id)
+            self.assertEqual("unreviewed", load_task(config, "old-review")["review_status"])
+            self.assertEqual("accepted", load_task(config, "new-review")["review_status"])
+            self.assertEqual(
+                [{"task_id": "old-review", "decision": "needs_human", "reason": "synthetic reviewer needs human input", "recorded_at": load_task(config, "old-review")["reviewer_codex_backoff"]["recorded_at"]}],
+                second.review["skipped_review_candidates"],
+            )
+
     def test_run_next_auto_review_respects_runner_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"

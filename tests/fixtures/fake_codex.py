@@ -164,6 +164,37 @@ def main() -> int:
         )
         return 0
 
+    if mode == "reviewer_needs_human":
+        emit(
+            {
+                "type": "turn.completed",
+                "response": {
+                    "task_id": task_id,
+                    "decision": "needs_human",
+                    "confidence": "low",
+                    "reason": "synthetic reviewer needs human input",
+                    "findings": [
+                        {
+                            "severity": "warning",
+                            "summary": "manual check needed",
+                            "evidence": "synthetic evidence",
+                        }
+                    ],
+                    "required_human_checks": ["inspect manually"],
+                    "auto_fix_allowed": False,
+                    "auto_fix_risk": "high",
+                    "suggested_fix_prompt": "",
+                    "finding_fingerprints": ["manual-check"],
+                    "reviewer_limits": {
+                        "calls_used_this_run": 1,
+                        "fix_loops_used_for_task": 0,
+                        "cooldown_recommended_seconds": 0,
+                    },
+                },
+            }
+        )
+        return 0
+
     if mode == "reviewer_invalid":
         emit({"type": "turn.completed", "response": {"task_id": task_id, "decision": "pass"}})
         return 0

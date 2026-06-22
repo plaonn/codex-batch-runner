@@ -92,8 +92,9 @@ def build_review_next_apply_report_locked(
     *,
     mechanical_auto_accept: bool = False,
     reviewer_codex: bool = False,
+    auto_mode: bool = False,
 ) -> dict[str, Any]:
-    report = select_review_next_report(config, filters, mode="apply")
+    report = select_review_next_report(config, filters, mode="apply", skip_reviewer_backoff=auto_mode)
     expected = report.pop("_fingerprint", None)
     mechanical_enabled = mechanical_auto_accept or config.auto_review_mechanical_accept
     reviewer_enabled = reviewer_codex or config.auto_review_codex_enabled
@@ -170,12 +171,19 @@ def build_review_next_apply_report_locked(
     return report
 
 
-def select_review_next_report(config: Config, filters: Namespace | None = None, *, mode: str) -> dict[str, Any]:
+def select_review_next_report(
+    config: Config,
+    filters: Namespace | None = None,
+    *,
+    mode: str,
+    skip_reviewer_backoff: bool = False,
+) -> dict[str, Any]:
     tasks = list_tasks(config)
     by_id = {task.get("id"): task for task in tasks}
     candidates = [task for task in tasks if is_review_needed(task)]
     candidates = apply_filters(candidates, filters)
     candidates.sort(key=review_sort_key)
+    skipped: list[dict[str, Any]] = []
     if not candidates:
         return no_selection_report(
             mode=mode,
@@ -183,13 +191,59 @@ def select_review_next_report(config: Config, filters: Namespace | None = None, 
             filters=filter_summary(filters),
         )
 
-    task = candidates[0]
-    bundle = build_review_bundle(
-        task,
-        by_id=by_id,
-        require_accepted_review=config.dependency_requires_accepted_review,
+    for task in candidates:
+        bundle = build_review_bundle(
+            task,
+            by_id=by_id,
+            require_accepted_review=config.dependency_requires_accepted_review,
+        )
+        gates = mechanical_gates(task, bundle)
+        if skip_reviewer_backoff and reviewer_backoff_matches(config, task, bundle, gates):
+            marker = task.get("reviewer_codex_backoff") if isinstance(task.get("reviewer_codex_backoff"), dict) else {}
+            skipped.append(
+                {
+                    "task_id": sanitize(task.get("id")),
+                    "decision": sanitize(marker.get("decision")),
+                    "reason": sanitize(marker.get("reason")),
+                    "recorded_at": sanitize(marker.get("recorded_at")),
+                }
+            )
+            continue
+        return review_report_for_task(
+            config,
+            task,
+            bundle,
+            by_id,
+            candidates,
+            mode=mode,
+            filters=filters,
+            skipped_review_candidates=skipped,
+            gates=gates,
+        )
+
+    return no_selection_report(
+        mode=mode,
+        message="no completed task needs review outside reviewer backoff",
+        filters=filter_summary(filters),
+        status="backoff",
+        candidate_count=len(candidates),
+        skipped_review_candidates=skipped,
     )
-    gates = mechanical_gates(task, bundle)
+
+
+def review_report_for_task(
+    config: Config,
+    task: dict[str, Any],
+    bundle: dict[str, Any],
+    by_id: dict[str, dict],
+    candidates: list[dict],
+    *,
+    mode: str,
+    filters: Namespace | None,
+    skipped_review_candidates: list[dict[str, Any]],
+    gates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    gates = gates if gates is not None else mechanical_gates(task, bundle)
     deps_ready, blocked_by = dependency_status(
         task,
         by_id,
@@ -200,6 +254,7 @@ def select_review_next_report(config: Config, filters: Namespace | None = None, 
         "selected": True,
         "task_id": task.get("id"),
         "candidate_count": len(candidates),
+        "skipped_review_candidates": skipped_review_candidates,
         "message": "selected oldest completed task needing review",
         "filters": filter_summary(filters),
         "gates_ok": all(gate["ok"] for gate in gates),
@@ -227,13 +282,15 @@ def no_selection_report(
     message: str,
     filters: dict[str, Any],
     status: str = "empty",
+    candidate_count: int = 0,
+    skipped_review_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "mode": mode,
         "status": status,
         "selected": False,
         "task_id": None,
-        "candidate_count": 0,
+        "candidate_count": candidate_count,
         "message": message,
         "filters": filters,
         "gates_ok": False,
@@ -243,6 +300,7 @@ def no_selection_report(
         "chain": None,
         "bundle": None,
         "mutated": False,
+        "skipped_review_candidates": skipped_review_candidates or [],
     }
 
 
@@ -295,6 +353,7 @@ def mechanical_gates(task: dict, bundle: dict[str, Any]) -> list[dict[str, Any]]
     last_result = task.get("last_result") if isinstance(task.get("last_result"), dict) else {}
     git_status = task.get("git_status") if isinstance(task.get("git_status"), dict) else {}
     repo = review_gate_repository(bundle)
+    commit_info = bundle.get("commit_information") if isinstance(bundle.get("commit_information"), dict) else {}
     changed_files = last_result.get("changed_files") if isinstance(last_result, dict) else None
     verification = last_result.get("verification") if isinstance(last_result, dict) else None
     deps = bundle.get("dependencies") if isinstance(bundle.get("dependencies"), dict) else {}
@@ -328,6 +387,7 @@ def mechanical_gates(task: dict, bundle: dict[str, Any]) -> list[dict[str, Any]]
         gate("dependencies_ready", bool(deps.get("ready")), dependency_detail(deps)),
         gate("git_clean", repo.get("dirty") is False, git_clean_detail(repo)),
         gate("no_unpushed_commits", no_unpushed(repo, git_status), unpushed_detail(repo, git_status)),
+        gate("commit_ancestry_acceptable", commit_ancestry_ok(commit_info), commit_ancestry_detail(commit_info)),
         gate("safety_metadata_clean", not detectable_safety_violation(task, bundle), safety_detail(task, bundle)),
     ]
 
@@ -387,6 +447,37 @@ def unpushed_detail(repo: dict[str, Any], git_status: dict[str, Any]) -> str:
     )
 
 
+def commit_ancestry_ok(commit_info: dict[str, Any]) -> bool:
+    ancestry = commit_info.get("ancestry") if isinstance(commit_info.get("ancestry"), dict) else {}
+    status = ancestry.get("status")
+    if status in {"equal", "ancestor"}:
+        return True
+    if status in {"not_reachable", "ambiguous"}:
+        return False
+    return True
+
+
+def commit_ancestry_detail(commit_info: dict[str, Any]) -> str:
+    ancestry = commit_info.get("ancestry") if isinstance(commit_info.get("ancestry"), dict) else {}
+    status = ancestry.get("status") or "unavailable"
+    detail = ancestry.get("detail") or ""
+    reported = ancestry.get("reported_commit")
+    current = ancestry.get("current_head")
+    parts = [f"status={status}"]
+    if reported:
+        parts.append(f"reported={short_sha(reported)}")
+    if current:
+        parts.append(f"current_head={short_sha(current)}")
+    if detail:
+        parts.append(str(detail))
+    return "; ".join(parts)
+
+
+def short_sha(value: object) -> str:
+    text = str(value or "")
+    return text[:12] if len(text) >= 12 else text
+
+
 def concise_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
     git_diff = bundle.get("git_diff") if isinstance(bundle.get("git_diff"), dict) else {}
     return {
@@ -400,6 +491,7 @@ def concise_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
         "task_worktree": bundle.get("task_worktree"),
         "review_follow_up": bundle.get("review_follow_up"),
         "reviewer_codex": bundle.get("reviewer_codex"),
+        "reviewer_codex_backoff": bundle.get("reviewer_codex_backoff"),
         "chain": bundle.get("chain"),
         "changed_files": bundle.get("changed_files"),
         "verification": bundle.get("verification"),
@@ -465,8 +557,48 @@ def review_fingerprint(task: dict, bundle: dict[str, Any]) -> dict[str, Any]:
         "commit_information": {
             "status": commit_info.get("status"),
             "inferred_commits": commit_info.get("inferred_commits"),
+            "ancestry": commit_info.get("ancestry"),
         },
     }
+
+
+def reviewer_backoff_matches(
+    config: Config,
+    task: dict[str, Any],
+    bundle: dict[str, Any],
+    gates: list[dict[str, Any]],
+) -> bool:
+    marker = task.get("reviewer_codex_backoff") if isinstance(task.get("reviewer_codex_backoff"), dict) else {}
+    if not marker:
+        return False
+    if marker.get("fingerprint") != reviewer_backoff_fingerprint(task, bundle):
+        return False
+    decision = marker.get("decision")
+    if decision in {"needs_human", "failed_review"}:
+        return True
+    if decision == "needs_fix":
+        planner = build_auto_fix_planner_report(config, task, gates)
+        return not bool(planner and planner.get("allowed"))
+    return False
+
+
+def reviewer_backoff_marker(
+    task: dict[str, Any],
+    bundle: dict[str, Any],
+    reviewer_result: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "decision": sanitize(reviewer_result.get("decision")),
+        "reason": sanitize(reviewer_result.get("reason")),
+        "recorded_at": iso_now(),
+        "fingerprint": reviewer_backoff_fingerprint(task, bundle),
+    }
+
+
+def reviewer_backoff_fingerprint(task: dict[str, Any], bundle: dict[str, Any]) -> dict[str, Any]:
+    fingerprint = dict(review_fingerprint(task, bundle))
+    fingerprint.pop("updated_at", None)
+    return fingerprint
 
 
 def build_auto_fix_planner_report(config: Config, task: dict[str, Any], gates: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -653,6 +785,7 @@ def apply_mechanical_accept(config: Config, task_id: str, expected_fingerprint: 
     task["review_status"] = "accepted"
     task["reviewed_at"] = iso_now()
     task["review_reason"] = "auto-accepted by local mechanical review gates"
+    task.pop("reviewer_codex_backoff", None)
     if task.get("chain_status"):
         task["chain_status"] = "accepted"
     save_task(config, task)
@@ -709,7 +842,7 @@ def run_reviewer_phase(
     )
     limit_error = bundle_limit_error(config, bundle)
     if limit_error:
-        record_reviewer_summary(config, task_id, {"decision": "needs_human", "reason": limit_error})
+        record_reviewer_summary(config, task_id, {"decision": "needs_human", "reason": limit_error}, bundle=bundle)
         return reviewer_phase_report(
             decision="needs_human",
             reason=limit_error,
@@ -730,6 +863,7 @@ def run_reviewer_phase(
                 "rate_limit_markers": sorted(set(outcome.rate_limit_markers or [])),
                 "cooldown_until": cooldown_until,
             },
+            bundle=bundle,
         )
         return reviewer_phase_report(
             decision="failed_review",
@@ -768,7 +902,7 @@ def run_reviewer_phase(
             review_status=applied.get("review_status"),
         )
 
-    record_reviewer_summary(config, task_id, reviewer_result)
+    record_reviewer_summary(config, task_id, reviewer_result, bundle=bundle)
     return reviewer_phase_report(
         decision=str(reviewer_result.get("decision") or "failed_review"),
         reason=str(reviewer_result.get("reason") or outcome.reason),
@@ -800,6 +934,7 @@ def apply_reviewer_accept(
                 "decision": "needs_human",
                 "reason": "stale review state after reviewer Codex pass",
             },
+            bundle=bundle,
         )
         return {
             "mutated": False,
@@ -817,6 +952,7 @@ def apply_reviewer_accept(
                 "decision": "needs_human",
                 "reason": "mechanical gates no longer pass after reviewer Codex pass",
             },
+            bundle=bundle,
         )
         return {
             "mutated": False,
@@ -829,6 +965,7 @@ def apply_reviewer_accept(
     task["reviewed_at"] = iso_now()
     task["review_reason"] = "auto-accepted by reviewer Codex clear pass and local mechanical gates"
     task["reviewer_codex"] = compact_reviewer_result(reviewer_result)
+    task.pop("reviewer_codex_backoff", None)
     update_task_chain_from_reviewer(task, reviewer_result, accepted=True)
     save_task(config, task)
     emit_task_event(
@@ -852,10 +989,23 @@ def apply_reviewer_accept(
     }
 
 
-def record_reviewer_summary(config: Config, task_id: str, reviewer_result: dict[str, Any]) -> None:
+def record_reviewer_summary(
+    config: Config,
+    task_id: str,
+    reviewer_result: dict[str, Any],
+    *,
+    bundle: dict[str, Any] | None = None,
+) -> None:
     task = load_task(config, task_id)
     task["reviewer_codex"] = compact_reviewer_result(reviewer_result)
     update_task_chain_from_reviewer(task, reviewer_result, accepted=False)
+    if bundle is None:
+        bundle = build_review_bundle(
+            task,
+            by_id={item.get("id"): item for item in list_tasks(config)},
+            require_accepted_review=config.dependency_requires_accepted_review,
+        )
+    task["reviewer_codex_backoff"] = reviewer_backoff_marker(task, bundle, reviewer_result)
     save_task(config, task)
     emit_task_event(
         config,
@@ -989,6 +1139,9 @@ def render_review_next_report(report: dict[str, Any]) -> str:
     ]
     if not report["selected"]:
         lines.append(f"message: {report['message']}")
+        skipped = report.get("skipped_review_candidates") if isinstance(report.get("skipped_review_candidates"), list) else []
+        if skipped:
+            lines.append(f"skipped_review_candidates: {len(skipped)}")
         return "\n".join(lines) + "\n"
 
     bundle = report.get("bundle") or {}
@@ -1016,6 +1169,9 @@ def render_review_next_report(report: dict[str, Any]) -> str:
                 f"- reviewer_codex_invoked: {str(bool(auto_review.get('reviewer_codex_invoked'))).lower()}",
             ]
         )
+    skipped = report.get("skipped_review_candidates") if isinstance(report.get("skipped_review_candidates"), list) else []
+    if skipped:
+        lines.append(f"skipped_review_candidates: {len(skipped)}")
     chain = report.get("chain") if isinstance(report.get("chain"), dict) else {}
     if chain:
         parts = [
@@ -1078,6 +1234,9 @@ def append_result_summary(lines: list[str], bundle: dict[str, Any]) -> None:
     if commit_info:
         reported_count = len(commit_info.get("reported") or [])
         lines.append(f"commit_information: status={commit_info.get('status')} reported={reported_count}")
+        ancestry = commit_info.get("ancestry") if isinstance(commit_info.get("ancestry"), dict) else {}
+        if ancestry:
+            lines.append("commit_ancestry: " + commit_ancestry_detail(commit_info))
     diff = bundle.get("git_diff_summary") if isinstance(bundle.get("git_diff_summary"), dict) else {}
     if diff:
         lines.append(f"git_diff: kind={diff.get('kind')} ref={diff.get('ref') or '-'}")

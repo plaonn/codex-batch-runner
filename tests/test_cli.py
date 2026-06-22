@@ -2774,6 +2774,81 @@ class CliTests(unittest.TestCase):
             self.assertEqual("accepted", apply_report["auto_review"]["decision"])
             self.assertEqual("accepted", load_task(config, "stale-snapshot")["review_status"])
 
+    def test_review_bundle_reports_ancestor_commit_as_acceptable_ancestry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            create_pushed_repo(repo)
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+
+            (repo / "file.txt").write_text("base\ntask change\n", encoding="utf-8")
+            git(repo, "commit", "-am", "task change")
+            task_commit = git(repo, "rev-parse", "HEAD")
+            (repo / "file.txt").write_text("base\ntask change\nlater change\n", encoding="utf-8")
+            git(repo, "commit", "-am", "later change")
+            git(repo, "push")
+
+            task = create_clean_completed_task(config, repo, "ancestor-commit")
+            task["last_result"]["commits"] = [task_commit]
+            save_task(config, task)
+
+            bundle_code, bundle_output = run_cli(["--config", str(config_path), "review-bundle", "ancestor-commit", "--json"])
+            bundle = json.loads(bundle_output)
+            review_code, review_output = run_cli(["--config", str(config_path), "review-next", "--dry-run", "--json"])
+            report = json.loads(review_output)
+            gate_details = {gate["name"]: gate for gate in report["gates"]}
+
+            self.assertEqual(0, bundle_code)
+            self.assertEqual("ancestor", bundle["commit_information"]["ancestry"]["status"])
+            self.assertTrue(bundle["commit_information"]["ancestry"]["ok"])
+            self.assertEqual(0, review_code)
+            self.assertTrue(gate_details["commit_ancestry_acceptable"]["ok"])
+            self.assertTrue(report["gates_ok"])
+
+            equal_task = create_clean_completed_task(config, repo, "equal-commit")
+            equal_task["last_result"]["commits"] = [git(repo, "rev-parse", "HEAD")]
+            save_task(config, equal_task)
+            equal_code, equal_output = run_cli(["--config", str(config_path), "review-bundle", "equal-commit", "--json"])
+            equal_bundle = json.loads(equal_output)
+
+            self.assertEqual(0, equal_code)
+            self.assertEqual("equal", equal_bundle["commit_information"]["ancestry"]["status"])
+            self.assertTrue(equal_bundle["commit_information"]["ancestry"]["ok"])
+
+    def test_review_bundle_reports_unreachable_commit_as_human_check_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            create_pushed_repo(repo)
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+
+            git(repo, "checkout", "-b", "side")
+            (repo / "file.txt").write_text("base\nside change\n", encoding="utf-8")
+            git(repo, "commit", "-am", "side change")
+            side_commit = git(repo, "rev-parse", "HEAD")
+            git(repo, "checkout", "main")
+            (repo / "file.txt").write_text("base\nmain change\n", encoding="utf-8")
+            git(repo, "commit", "-am", "main change")
+            git(repo, "push")
+
+            task = create_clean_completed_task(config, repo, "unreachable-commit")
+            task["last_result"]["commits"] = [side_commit]
+            save_task(config, task)
+
+            bundle_code, bundle_output = run_cli(["--config", str(config_path), "review-bundle", "unreachable-commit", "--json"])
+            bundle = json.loads(bundle_output)
+            review_code, review_output = run_cli(["--config", str(config_path), "review-next", "--dry-run", "--json"])
+            report = json.loads(review_output)
+            gate_details = {gate["name"]: gate for gate in report["gates"]}
+
+            self.assertEqual(0, bundle_code)
+            self.assertEqual("not_reachable", bundle["commit_information"]["ancestry"]["status"])
+            self.assertFalse(bundle["commit_information"]["ancestry"]["ok"])
+            self.assertIn("not reachable", " ".join(bundle["commit_information"]["warnings"]))
+            self.assertEqual(0, review_code)
+            self.assertFalse(gate_details["commit_ancestry_acceptable"]["ok"])
+            self.assertFalse(report["gates_ok"])
+
     def test_review_next_safety_gate_ignores_private_operational_paths(self) -> None:
         task = {
             "cwd": "/Users/example/private-repo",
