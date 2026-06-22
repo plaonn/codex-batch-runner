@@ -236,9 +236,16 @@ def state_summary(config: Config) -> dict[str, Any]:
     state = load_state(config)
     cooldown_until = state.get("global_cooldown_until")
     parsed = parse_time(cooldown_until)
+    runner_pause = state.get("runner_pause") if isinstance(state.get("runner_pause"), dict) else {}
     return {
         "global_cooldown_until": cooldown_until,
         "global_cooldown_active": bool(parsed and parsed > utc_now()),
+        "runner_pause": {
+            "active": bool(runner_pause.get("active")),
+            "reason": runner_pause.get("reason"),
+            "paused_at": runner_pause.get("paused_at"),
+            "paused_by": runner_pause.get("paused_by"),
+        },
     }
 
 
@@ -522,6 +529,10 @@ def render_doctor_report(report: dict[str, Any]) -> str:
             "state:",
             f"  global_cooldown_until: {state.get('global_cooldown_until')}",
             f"  global_cooldown_active: {str(state.get('global_cooldown_active')).lower()}",
+            f"  runner_pause_active: {str(bool((state.get('runner_pause') or {}).get('active'))).lower()}",
+            f"  runner_pause_reason: {(state.get('runner_pause') or {}).get('reason')}",
+            f"  runner_pause_paused_at: {(state.get('runner_pause') or {}).get('paused_at')}",
+            f"  runner_pause_paused_by: {(state.get('runner_pause') or {}).get('paused_by')}",
         ]
     )
     lock = report["lock"]

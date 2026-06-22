@@ -430,6 +430,29 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("accepted", load_task(config, "reviewable")["review_status"])
             self.assertFalse(marker.exists())
 
+    def test_run_next_auto_review_does_not_trigger_when_runner_pause_becomes_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('x\\n', encoding='utf-8')",
+                str(marker),
+            ]
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(make_config(tmp, "success", trigger), auto_review_mechanical_accept=True)
+            create_clean_completed_task(config, repo, "reviewable")
+            create_task(config, "implementation", tmp, task_id="implementation")
+
+            with patch("codex_batch_runner.runner.is_runner_paused", side_effect=[False, True]):
+                outcome = run_next(config)
+
+            self.assertEqual("review_accepted", outcome.status)
+            self.assertEqual("accepted", load_task(config, "reviewable")["review_status"])
+            self.assertFalse(marker.exists())
+
     def test_run_next_does_not_trigger_without_eligible_follow_up(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "trigger.log"
@@ -496,6 +519,59 @@ class RunnerTests(unittest.TestCase):
             outcome = run_next(config)
 
             self.assertEqual("cooldown", outcome.status)
+            self.assertFalse(marker.exists())
+
+    def test_run_next_returns_paused_after_stale_recovery_without_invoking_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            stale = create_task(config, "stale", tmp, task_id="stale-task")
+            stale["status"] = "running"
+            stale["started_at"] = None
+            save_task(config, stale)
+            create_task(config, "ready", tmp, task_id="ready-task")
+            config.state_file.write_text(
+                json.dumps(
+                    {
+                        "runner_pause": {
+                            "active": True,
+                            "reason": "operator drain window",
+                            "paused_at": "2026-06-22T00:00:00+00:00",
+                            "paused_by": "ops",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")):
+                outcome = run_next(config)
+
+            self.assertEqual("paused", outcome.status)
+            self.assertIn("operator drain window", outcome.message)
+            recovered = load_task(config, "stale-task")
+            self.assertEqual("runnable", recovered["status"])
+            self.assertEqual("recovered stale running task", recovered["last_error"])
+            self.assertEqual("runnable", load_task(config, "ready-task")["status"])
+            self.assertIsNone(load_state(config)["last_task_id"])
+
+    def test_run_next_does_not_trigger_when_runner_pause_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('x\\n', encoding='utf-8')",
+                str(marker),
+            ]
+            config = make_config(tmp, "success", trigger)
+            create_task(config, "first", tmp, task_id="task-1")
+            create_task(config, "second", tmp, task_id="task-2")
+
+            with patch("codex_batch_runner.runner.is_runner_paused", side_effect=[False, True]):
+                outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("task-1", outcome.task_id)
             self.assertFalse(marker.exists())
 
     def test_post_run_trigger_failure_is_non_fatal(self) -> None:

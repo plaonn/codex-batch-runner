@@ -16,7 +16,7 @@ from .lock import FileLock
 from .prompts import build_prompt
 from .queue import is_in_cooldown, recover_stale_running_tasks, save_task, select_next_task
 from .review_next import build_review_next_apply_report_locked, has_actionable_auto_review_candidate
-from .state import in_global_cooldown, mark_rate_limit, mark_run, mark_success
+from .state import get_runner_pause, in_global_cooldown, is_runner_paused, mark_rate_limit, mark_run, mark_success
 from .timeutil import add_seconds, iso_now, parse_time
 from .triggers import run_post_run_trigger
 from .worktree import prepare_task_worktree_for_run_locked
@@ -44,6 +44,11 @@ def run_next(config: Config) -> RunOutcome:
     outcome: RunOutcome | None = None
     try:
         recover_stale_running_tasks(config)
+        if is_runner_paused(config):
+            pause = get_runner_pause(config)
+            mark_run(config, None)
+            outcome = RunOutcome(status="paused", message=runner_pause_message(pause))
+            return outcome
         review_report: dict[str, Any] | None = None
         if config.auto_review_mechanical_accept or config.auto_review_codex_enabled:
             review_report = build_review_next_apply_report_locked(config, auto_mode=True)
@@ -177,6 +182,14 @@ def review_report_consumed_work(report: dict[str, Any]) -> bool:
     return bool(auto_review.get("reviewer_codex_invoked"))
 
 
+def runner_pause_message(pause: dict[str, Any]) -> str:
+    reason = str(pause.get("reason") or "no reason recorded")
+    paused_at = pause.get("paused_at")
+    if paused_at:
+        return f"runner pause is active: {reason} (paused_at={paused_at})"
+    return f"runner pause is active: {reason}"
+
+
 def validate_execution_profile(config: Config, task: dict[str, Any]) -> tuple[ExecutionSettings | None, str | None]:
     try:
         settings = resolve_execution_settings(config, task)
@@ -206,6 +219,8 @@ def should_trigger_post_run_wake(config: Config, processed_task: dict[str, Any] 
         return False
     if in_global_cooldown(config):
         return False
+    if is_runner_paused(config):
+        return False
     if is_in_cooldown(processed_task):
         return False
     return select_next_task(config) is not None
@@ -213,6 +228,8 @@ def should_trigger_post_run_wake(config: Config, processed_task: dict[str, Any] 
 
 def should_trigger_post_review_wake(config: Config) -> bool:
     if in_global_cooldown(config):
+        return False
+    if is_runner_paused(config):
         return False
     return select_next_task(config) is not None or has_actionable_auto_review_candidate(config)
 

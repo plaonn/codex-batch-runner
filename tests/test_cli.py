@@ -501,6 +501,115 @@ class CliTests(unittest.TestCase):
             self.assertIn("active: true", active_output)
             self.assertIn("remaining: 1h 1m", active_output)
 
+    def test_pause_set_stores_sanitized_state_and_writes_event_without_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).open('a', encoding='utf-8').write('x\\n')",
+                str(marker),
+            ]
+            config_path = write_config(tmp, trigger)
+
+            with patch.dict(os.environ, {"USER": "ops-user"}, clear=False):
+                code, output = run_cli(
+                    ["--config", str(config_path), "pause", "set", "--reason", "ops\nmaintenance window"]
+                )
+
+            self.assertEqual(0, code)
+            self.assertEqual(
+                "runner pause set\nreason: ops maintenance window\npaused_at: "
+                + load_state(Config.load(str(config_path)))["runner_pause"]["paused_at"]
+                + "\npaused_by: ops-user\n",
+                output,
+            )
+            state = json.loads((Path(tmp) / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                {
+                    "active": True,
+                    "reason": "ops maintenance window",
+                    "paused_at": state["runner_pause"]["paused_at"],
+                    "paused_by": "ops-user",
+                },
+                state["runner_pause"],
+            )
+            self.assertFalse(marker.exists())
+            events = list_events(Config.load(str(config_path)), limit=5)
+            pause_events = [event for event in events if event["event_type"] == "runner_pause_updated"]
+            self.assertEqual(1, len(pause_events))
+            self.assertEqual("set", pause_events[0]["payload"]["action"])
+            self.assertEqual("ops maintenance window", pause_events[0]["payload"]["runner_pause"]["reason"])
+
+    def test_pause_clear_resets_state_runs_trigger_and_writes_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).open('a', encoding='utf-8').write('x\\n')",
+                str(marker),
+            ]
+            config_path = write_config(tmp, trigger)
+            (Path(tmp) / "state.json").write_text(
+                json.dumps(
+                    {
+                        "runner_pause": {
+                            "active": True,
+                            "reason": "operator drain",
+                            "paused_at": "2026-06-22T07:07:00+09:00",
+                            "paused_by": "ops-user",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(["--config", str(config_path), "pause", "clear"])
+
+            self.assertEqual(0, code)
+            self.assertEqual("runner pause cleared\n", output)
+            state = json.loads((Path(tmp) / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                {"active": False, "reason": None, "paused_at": None, "paused_by": None},
+                state["runner_pause"],
+            )
+            self.assertEqual(["x"], marker.read_text(encoding="utf-8").splitlines())
+            events = list_events(Config.load(str(config_path)), limit=5)
+            pause_events = [event for event in events if event["event_type"] == "runner_pause_updated"]
+            self.assertEqual(1, len(pause_events))
+            self.assertEqual("clear", pause_events[0]["payload"]["action"])
+            self.assertEqual("operator drain", pause_events[0]["payload"]["previous_runner_pause"]["reason"])
+
+    def test_pause_show_and_state_output_include_runner_pause(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            (Path(tmp) / "state.json").write_text(
+                json.dumps(
+                    {
+                        "runner_pause": {
+                            "active": True,
+                            "reason": "operator drain",
+                            "paused_at": "2026-06-22T07:07:00+09:00",
+                            "paused_by": "ops-user",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            show_code, show_output = run_cli(["--config", str(config_path), "pause", "show"])
+            state_code, state_output = run_cli(["--config", str(config_path), "state"])
+            state = json.loads(state_output)
+
+            self.assertEqual(0, show_code)
+            self.assertIn("active: true", show_output)
+            self.assertIn("reason: operator drain", show_output)
+            self.assertIn("paused_by: ops-user", show_output)
+            self.assertEqual(0, state_code)
+            self.assertTrue(state["runner_pause"]["active"])
+            self.assertEqual("operator drain", state["runner_pause"]["reason"])
+
     def test_post_mutation_trigger_runs_after_enqueue_and_review_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "trigger.log"
