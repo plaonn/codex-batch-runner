@@ -784,6 +784,81 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertIn("last error: first line second line", output)
 
+    def test_list_human_shows_dependency_blocked_runnable_as_effective_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "dep", tmp, task_id="dep")
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"], project_id="project-a")
+
+            code, output = run_cli(["--config", str(config_path), "list", "--color=never"])
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertEqual("blocked_dependency", rows["child"]["STATUS"])
+            self.assertEqual("dep", rows["child"]["DEPS"])
+            self.assertIn("blocked by dep", rows["child"]["NOTE"])
+            self.assertNotIn("\033[", output)
+
+    def test_list_human_distinguishes_not_completed_and_not_accepted_dependency_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, dependency_requires_accepted_review=True)
+            config = Config.load(str(config_path))
+            not_completed = create_task(config, "not completed", tmp, task_id="not-completed")
+            save_task(config, not_completed)
+            not_accepted = create_task(config, "not accepted", tmp, task_id="not-accepted")
+            not_accepted["status"] = "completed"
+            not_accepted["review_status"] = "unreviewed"
+            save_task(config, not_accepted)
+            create_task(
+                config,
+                "child",
+                tmp,
+                task_id="child",
+                depends_on=["not-completed", "not-accepted"],
+                project_id="project-a",
+            )
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a"])
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertEqual("blocked_dependency", rows["child"]["STATUS"])
+            self.assertIn("blocked by not-completed,not-accepted:not_accepted", rows["child"]["NOTE"])
+            self.assertEqual("not-completed\nnot-accepted", rows["child"]["DEPS"])
+
+    def test_list_json_preserves_raw_status_for_dependency_blocked_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "dep", tmp, task_id="dep")
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"], project_id="project-a")
+
+            code, output = run_cli(["--config", str(config_path), "list", "--json"])
+
+            self.assertEqual(0, code)
+            rows = {task["id"]: task for task in json.loads(output)}
+            self.assertEqual("runnable", rows["child"]["status"])
+            self.assertNotIn("blocked_dependency", output)
+
+    def test_list_default_filtering_keeps_dependency_blocked_runnable_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "dep", tmp, task_id="dep")
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+            archived = create_task(config, "archived", tmp, task_id="archived")
+            archived["status"] = "archived"
+            save_task(config, archived)
+
+            code, output = run_cli(["--config", str(config_path), "list"])
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertIn("child", rows)
+            self.assertEqual("blocked_dependency", rows["child"]["STATUS"])
+            self.assertNotIn("archived", rows)
+
     def test_list_default_uses_project_first_id_layout_and_prefix_free_title_detail_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -1777,10 +1852,23 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual(
-                ["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE", "LAST_RESULT", "LAST_RUN", "LAST_ERROR"],
+                [
+                    "ID",
+                    "TITLE",
+                    "STATUS",
+                    "PROJECT",
+                    "ATTEMPTS",
+                    "DEPS",
+                    "NOTE",
+                    "RAW_STATUS",
+                    "LAST_RESULT",
+                    "LAST_RUN",
+                    "LAST_ERROR",
+                ],
                 lines[0].split(),
             )
             self.assertEqual("failed", rows["verbose"]["STATUS"])
+            self.assertEqual("failed", rows["verbose"]["RAW_STATUS"])
             self.assertEqual("last error: error line one line two", rows["verbose"]["NOTE"])
             self.assertEqual("status=failed summary=first line second line", rows["verbose"]["LAST_RESULT"])
             self.assertEqual("command=exec returncode=1 duration=2.5s", rows["verbose"]["LAST_RUN"])
@@ -1812,6 +1900,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual("awaiting_review", rows["push-meta"]["STATUS"])
+            self.assertEqual("completed", rows["push-meta"]["RAW_STATUS"])
             self.assertEqual("awaiting review", rows["push-meta"]["NOTE"])
             self.assertEqual(
                 "status=completed summary=done commits=1 push_status=ahead=1 behind=0 "
@@ -1833,9 +1922,25 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual("-", rows["plain"]["DEPS"])
             self.assertEqual("-", rows["plain"]["NOTE"])
+            self.assertEqual("runnable", rows["plain"]["RAW_STATUS"])
             self.assertEqual("-", rows["plain"]["LAST_RESULT"])
             self.assertEqual("-", rows["plain"]["LAST_RUN"])
             self.assertEqual("-", rows["plain"]["LAST_ERROR"])
+
+    def test_list_verbose_distinguishes_effective_and_raw_status_for_dependency_blocked_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "dep", tmp, task_id="dep")
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"], project_id="project-a")
+
+            code, output = run_cli(["--config", str(config_path), "list", "--verbose"])
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertEqual("blocked_dependency", rows["child"]["STATUS"])
+            self.assertEqual("runnable", rows["child"]["RAW_STATUS"])
+            self.assertIn("blocked by dep", rows["child"]["NOTE"])
 
     def test_list_verbose_does_not_change_json_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

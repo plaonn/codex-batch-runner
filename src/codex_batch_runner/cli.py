@@ -18,6 +18,7 @@ from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
 from .queue import (
     DEFAULT_HIDDEN_LIST_STATUSES,
     RESOLUTIONS,
+    RUNNABLE_STATUSES,
     archive_task,
     create_task,
     dependency_blockers,
@@ -320,7 +321,7 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
         print(render_compact_list(tasks, by_id, config, color))
         return 0
     header = ["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"]
-    header.extend(["LAST_RESULT", "LAST_RUN", "LAST_ERROR"])
+    header.extend(["RAW_STATUS", "LAST_RESULT", "LAST_RUN", "LAST_ERROR"])
     rows = []
     for task in tasks:
         row = list_table_row(task, by_id, config)
@@ -366,7 +367,7 @@ def compact_task_rows(task: dict, by_id: dict[str, dict], config: Config, color:
         [
             color.project(scalar_cell(task_project_id(task))),
             color.task_id(scalar_cell(task.get("id"))),
-            color.status(status_cell(task)),
+            color.status(status_cell(task, by_id, config)),
             scalar_cell(task.get("attempts", 0)),
             dep_ids[0] if dep_ids else "-",
             note_segments[0] if note_segments else "-",
@@ -403,7 +404,7 @@ def list_table_row(task: dict, by_id: dict[str, dict], config: Config) -> list[s
     return [
         scalar_cell(task.get("id")),
         scalar_cell(truncate_table_text(task_title(task), 72)),
-        scalar_cell(status_cell(task)),
+        scalar_cell(status_cell(task, by_id, config)),
         scalar_cell(task_project_id(task)),
         scalar_cell(task.get("attempts", 0)),
         deps_cell(task.get("depends_on"), by_id),
@@ -443,8 +444,19 @@ def dependency_satisfied(dep: dict | None, config: Config) -> bool:
     return not config.dependency_requires_accepted_review or dep.get("review_status") == "accepted"
 
 
-def status_cell(task: dict) -> str:
+def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config | None = None) -> str:
     status = str(task.get("status") or "-")
+    if (
+        by_id is not None
+        and config is not None
+        and status in RUNNABLE_STATUSES
+        and not dependency_status(
+            task,
+            by_id,
+            require_accepted_review=config.dependency_requires_accepted_review,
+        )[0]
+    ):
+        return "blocked_dependency"
     if task.get("resolution") and status in {"failed", "blocked_user"}:
         return "resolved"
     if status == "completed":
@@ -618,7 +630,7 @@ class ListColor:
         return self.apply(dep_id, self.DIM)
 
     def status(self, status: str) -> str:
-        if status in {"failed", "blocked_user", "review_failed", "needs_followup"}:
+        if status in {"failed", "blocked_user", "review_failed", "needs_followup", "blocked_dependency"}:
             return self.apply(status, self.BG_RED)
         if status in {"awaiting_review", "reviewing"}:
             return self.apply(status, self.BG_YELLOW)
@@ -663,6 +675,7 @@ def truncate_table_text(value: str, limit: int) -> str:
 
 def verbose_table_cells(task: dict) -> list[str]:
     return [
+        scalar_cell(task.get("status")),
         last_result_cell(task.get("last_result"), task.get("git_status")),
         last_run_cell(task.get("last_run")),
         excerpt_cell(task.get("last_error")),
