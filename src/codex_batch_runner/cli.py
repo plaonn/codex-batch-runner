@@ -37,7 +37,7 @@ from .queue import (
 from .review_bundle import build_review_bundle, render_review_bundle
 from .review_next import build_review_next_apply_report, build_review_next_report, render_review_next_report
 from .runner import run_next
-from .state import clear_global_cooldown, load_state, set_global_cooldown
+from .state import clear_global_cooldown, clear_reviewer_codex_cooldown, load_state, set_global_cooldown
 from .summary import render_task_summary
 from .timeutil import parse_time, utc_now
 from .transcript import render_task_transcript
@@ -203,6 +203,11 @@ def build_parser() -> argparse.ArgumentParser:
     cooldown_show = cooldown_sub.add_parser("show", help="show global cooldown status")
     cooldown_show.set_defaults(func=cmd_cooldown_show)
     cooldown_clear = cooldown_sub.add_parser("clear", help="clear global cooldown")
+    cooldown_clear.add_argument(
+        "--reviewer-codex",
+        action="store_true",
+        help="clear reviewer Codex cooldown instead of global cooldown",
+    )
     cooldown_clear.set_defaults(func=cmd_cooldown_clear)
     cooldown_set = cooldown_sub.add_parser("set", help="set global cooldown reset time")
     cooldown_set.add_argument("value", help="reset time such as 7:6, 6/21 7:06, 2026-06-21 07:06, +90m")
@@ -1031,6 +1036,19 @@ def cmd_cooldown_show(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_cooldown_clear(config: Config, args: argparse.Namespace) -> int:
+    if args.reviewer_codex:
+        previous = load_state(config).get("reviewer_codex_cooldown_until")
+        clear_reviewer_codex_cooldown(config)
+        write_event_nonfatal(
+            config,
+            "cooldown_updated",
+            summary="reviewer Codex cooldown cleared",
+            payload={"action": "clear_reviewer_codex", "previous_reviewer_codex_cooldown_until": previous},
+        )
+        run_post_mutation_trigger(config)
+        print("reviewer Codex cooldown cleared")
+        return 0
+
     previous = load_state(config).get("global_cooldown_until")
     clear_global_cooldown(config)
     write_event_nonfatal(

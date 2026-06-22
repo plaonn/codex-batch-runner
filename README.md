@@ -223,9 +223,10 @@ PYTHONPATH=src python3 -m codex_batch_runner cooldown set 7:6
 PYTHONPATH=src python3 -m codex_batch_runner cooldown set "6/22 7:06"
 PYTHONPATH=src python3 -m codex_batch_runner cooldown set +2h30m
 PYTHONPATH=src python3 -m codex_batch_runner cooldown clear
+PYTHONPATH=src python3 -m codex_batch_runner cooldown clear --reviewer-codex
 ```
 
-`cooldown show`는 현재 `global_cooldown_until`, 활성 여부, 남은 시간을 표시합니다. `cooldown set VALUE`는 운영자가 알고 있는 usage/rate-limit reset 시각을 local timezone 기준으로 해석하고, 해석된 reset 시각에 60초 safety offset을 더한 값을 `global_cooldown_until`에 저장합니다. 지원 형식은 local time-only `H:M`/`HH:MM`, month/day date-time `M/D H:M` 또는 `M-D H:M`, year date-time `YYYY-MM-DD H:M`, timezone이 포함된 ISO datetime, 그리고 `+90m`, `+2h30m`, `+1d3h` 같은 상대 duration입니다. Time-only 입력은 오늘 해당 시각이 미래이면 오늘, 이미 지났으면 내일로 해석합니다. Date-time 입력이 과거이거나 reset 시각이 7일보다 멀면 오류로 종료합니다. `cooldown set`은 optional one-shot wake 설정 상태를 함께 출력하며, `cooldown clear`는 global cooldown을 지우고 즉시 실행 가능한 작업이 있을 수 있으므로 기존 configured post-mutation trigger를 계속 실행합니다.
+`cooldown show`는 현재 `global_cooldown_until`, 활성 여부, 남은 시간을 표시합니다. `cooldown set VALUE`는 운영자가 알고 있는 usage/rate-limit reset 시각을 local timezone 기준으로 해석하고, 해석된 reset 시각에 60초 safety offset을 더한 값을 `global_cooldown_until`에 저장합니다. 지원 형식은 local time-only `H:M`/`HH:MM`, month/day date-time `M/D H:M` 또는 `M-D H:M`, year date-time `YYYY-MM-DD H:M`, timezone이 포함된 ISO datetime, 그리고 `+90m`, `+2h30m`, `+1d3h` 같은 상대 duration입니다. Time-only 입력은 오늘 해당 시각이 미래이면 오늘, 이미 지났으면 내일로 해석합니다. Date-time 입력이 과거이거나 reset 시각이 7일보다 멀면 오류로 종료합니다. `cooldown set`은 optional one-shot wake 설정 상태를 함께 출력하며, `cooldown clear`는 global cooldown을 지우고 즉시 실행 가능한 작업이 있을 수 있으므로 기존 configured post-mutation trigger를 계속 실행합니다. Reviewer Codex 사용량을 수동으로 reset한 경우에는 `cooldown clear --reviewer-codex`로 `reviewer_codex_cooldown_until`만 지웁니다. `last_reviewer_codex_rate_limit_at`은 최근 rate-limit 진단 이력으로 보존합니다.
 
 beta health check:
 

@@ -82,3 +82,10 @@ def clear_global_cooldown(config: Config) -> dict:
     state["global_cooldown_until"] = None
     save_state(config, state)
     return state
+
+
+def clear_reviewer_codex_cooldown(config: Config) -> dict:
+    state = load_state(config)
+    state["reviewer_codex_cooldown_until"] = None
+    save_state(config, state)
+    return state

@@ -394,6 +394,50 @@ class CliTests(unittest.TestCase):
             self.assertIsNone(state["global_cooldown_until"])
             self.assertEqual(["x"], marker.read_text(encoding="utf-8").splitlines())
 
+    def test_cooldown_clear_reviewer_codex_removes_reviewer_cooldown_preserves_rate_limit_marker_and_runs_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).open('a', encoding='utf-8').write('x\\n')",
+                str(marker),
+            ]
+            config_path = write_config(tmp, trigger)
+            (Path(tmp) / "state.json").write_text(
+                json.dumps(
+                    {
+                        "global_cooldown_until": "2026-06-22T07:07:00+09:00",
+                        "reviewer_codex_cooldown_until": "2026-06-22T08:08:00+09:00",
+                        "last_reviewer_codex_rate_limit_at": "2026-06-22T06:00:00+09:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(["--config", str(config_path), "cooldown", "clear", "--reviewer-codex"])
+
+            self.assertEqual(0, code)
+            self.assertEqual("reviewer Codex cooldown cleared\n", output)
+            state = json.loads((Path(tmp) / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual("2026-06-22T07:07:00+09:00", state["global_cooldown_until"])
+            self.assertIsNone(state["reviewer_codex_cooldown_until"])
+            self.assertEqual("2026-06-22T06:00:00+09:00", state["last_reviewer_codex_rate_limit_at"])
+            self.assertEqual(["x"], marker.read_text(encoding="utf-8").splitlines())
+
+            events = list_events(Config.load(str(config_path)), limit=5)
+            reviewer_events = [
+                event
+                for event in events
+                if event["event_type"] == "cooldown_updated"
+                and event["payload"].get("action") == "clear_reviewer_codex"
+            ]
+            self.assertEqual(1, len(reviewer_events))
+            self.assertEqual(
+                "2026-06-22T08:08:00+09:00",
+                reviewer_events[0]["payload"]["previous_reviewer_codex_cooldown_until"],
+            )
+
     def test_cooldown_show_reports_inactive_and_active_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
