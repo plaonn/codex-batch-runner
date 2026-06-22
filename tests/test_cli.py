@@ -2186,7 +2186,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
-            create_task(config, "done", tmp, task_id="done")
+            create_task(config, "done task", tmp, task_id="done")
             create_task(config, "follow", tmp, task_id="follow")
             set_status(config, "done", "completed")
             set_status(config, "follow", "completed")
@@ -2195,7 +2195,8 @@ class CliTests(unittest.TestCase):
             accepted = load_task(config, "done")
 
             self.assertEqual(0, code)
-            self.assertEqual("done\taccepted\n", output)
+            self.assertEqual("done task (done)\taccepted\n", output)
+            self.assertNotEqual("done\taccepted\n", output)
             self.assertEqual("accepted", accepted["review_status"])
             self.assertEqual("verified", accepted["review_reason"])
 

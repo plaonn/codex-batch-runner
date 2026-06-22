@@ -96,6 +96,52 @@ class QueueTests(unittest.TestCase):
 
             self.assertEqual("child", selected["id"])
 
+    def test_dependency_status_blocks_accepted_unapplied_worktree_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            dep = create_task(config, "dep", tmp, task_id="dep")
+            dep["status"] = "completed"
+            dep["review_status"] = "accepted"
+            dep["execution_mode"] = "git_worktree"
+            save_task(config, dep)
+            child = create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+
+            ready, blocked_by = dependency_status(child, {"dep": dep})
+
+            self.assertFalse(ready)
+            self.assertEqual(["dep"], blocked_by)
+
+    def test_select_skips_child_with_accepted_unapplied_worktree_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            dep = create_task(config, "dep", tmp, task_id="dep")
+            dep["status"] = "completed"
+            dep["review_status"] = "accepted"
+            dep["execution_mode"] = "git_worktree"
+            save_task(config, dep)
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+            create_task(config, "ready", tmp, task_id="ready")
+
+            selected = select_next_task(config)
+
+            self.assertEqual("ready", selected["id"])
+
+    def test_dependency_status_allows_applied_worktree_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            dep = create_task(config, "dep", tmp, task_id="dep")
+            dep["status"] = "completed"
+            dep["review_status"] = "accepted"
+            dep["execution_mode"] = "git_worktree"
+            dep["execution_apply_status"] = "applied"
+            save_task(config, dep)
+            child = create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+
+            ready, blocked_by = dependency_status(child, {"dep": dep})
+
+            self.assertTrue(ready)
+            self.assertEqual([], blocked_by)
+
     def test_recover_stale_running_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))

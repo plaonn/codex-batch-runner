@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .queue import dependency_blockers, dependency_status, is_in_cooldown, task_labels, task_project_id, task_project_root
+from .queue import dependency_blockers, dependency_status, is_in_cooldown, task_labels, task_project_id, task_project_root, task_title
 from .transcript import sanitize
 from .worktree import task_worktree_metadata
 
@@ -64,7 +64,7 @@ def render_task_summary(
         if blocked_by:
             lines.append(f"blocked_by: {', '.join(blocked_by)}")
             lines.append("dependency_blockers:")
-            lines.extend(f"- {blocker['id']}: {blocker['reason']}" for blocker in blockers)
+            lines.extend(f"- {dependency_blocker_label(blocker, by_id)}: {blocker['reason']}" for blocker in blockers)
 
     append_multiline_section(lines, "last_result", render_last_result(task.get("last_result")))
     append_multiline_section(lines, "reviewer_codex", render_reviewer_codex(task.get("reviewer_codex")))
@@ -127,6 +127,7 @@ def append_chain_summary(lines: list[str], task: dict) -> None:
         "last_review_decision",
         "auto_fix_allowed",
         "last_auto_fix_task_id",
+        "last_conflict_fix_task_id",
     ):
         value = task.get(key)
         if meaningful_chain_value(key, value):
@@ -241,12 +242,16 @@ def render_worktree_metadata(task: dict) -> str:
         "applied_at",
         "applied_head",
         "apply_target",
+        "apply_via_task_id",
         "rebase_status",
         "rebased_at",
         "rebased_onto",
         "rebased_head",
         "rebase_blocker",
         "rebase_blocked_at",
+        "conflict_fix_status",
+        "conflict_fix_task_id",
+        "conflict_fix_queued_at",
         "worktree_status",
         "worktree_path",
         "worktree_root",
@@ -256,6 +261,15 @@ def render_worktree_metadata(task: dict) -> str:
         if key in metadata:
             lines.append(f"{key}: {display_value(metadata.get(key))}")
     return "\n".join(lines)
+
+
+def dependency_blocker_label(blocker: dict[str, str], by_id: dict[str, dict]) -> str:
+    dep_id = blocker["id"]
+    dep = by_id.get(dep_id)
+    if not dep:
+        return dep_id
+    label = task_title(dep)
+    return f"{label} ({dep_id})" if label != dep_id else dep_id
 
 
 def render_structured_value(value: object) -> str:

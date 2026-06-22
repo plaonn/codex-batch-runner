@@ -20,6 +20,7 @@ from .execution_profiles import config_overrides_value
 from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
 from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
+from .post_accept import accept_task_and_integrate
 from .queue import (
     DEFAULT_HIDDEN_LIST_STATUSES,
     RESOLUTIONS,
@@ -682,6 +683,11 @@ def dependency_display_state(dep: dict | None, config: Config) -> str:
     if dep.get("status") == "completed":
         if config.dependency_requires_accepted_review and dep.get("review_status") != "accepted":
             return "not_accepted"
+        if dep.get("execution_mode") == "git_worktree":
+            if dep.get("review_status") != "accepted":
+                return "not_accepted"
+            if dep.get("execution_apply_status") != "applied":
+                return "not_applied"
         return "done"
     return "blocked"
 
@@ -715,6 +721,8 @@ def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config
             return "needs_followup"
         if review == "reviewing":
             return "reviewing"
+        if review == "accepted" and accepted_worktree_not_applied(task):
+            return "accepted_unapplied"
     return status
 
 
@@ -768,6 +776,8 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
 def worktree_apply_note(task: dict) -> str:
     if task.get("execution_mode") != "git_worktree":
         return ""
+    if task.get("execution_conflict_fix_status") == "queued" and task.get("execution_conflict_fix_task_id"):
+        return "conflict-fix subtask queued"
     if task.get("execution_rebase_status") == "blocked":
         return "worktree rebase blocked"
     if task.get("execution_rebase_status") == "rebased" and review_status(task) != "accepted":
@@ -803,11 +813,14 @@ def chain_note_cell(task: dict) -> str:
     return ""
 
 
-def subtask_note_cell(task: dict) -> str:
+def subtask_note_cell(task: dict, by_id: dict[str, dict] | None = None) -> str:
     subtask_type = task.get("subtask_type")
     subtask_for = task.get("subtask_for")
+    subtask_for_label = str(subtask_for or "")
+    if subtask_for and by_id and by_id.get(str(subtask_for)):
+        subtask_for_label = f"{dependency_label(str(subtask_for), by_id)} ({subtask_for})"
     if subtask_type and subtask_for:
-        return f"subtask {subtask_type} for {subtask_for}"
+        return f"subtask {subtask_type} for {subtask_for_label}"
     if subtask_type:
         return f"subtask {subtask_type}"
     return ""
@@ -897,6 +910,32 @@ def startup_stall_note(task: dict) -> str:
     return "startup stall history"
 
 
+def dependency_blocker_labels(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
+    return [
+        dependency_blocker_label(blocker, by_id)
+        for blocker in dependency_blockers(
+            task,
+            by_id,
+            require_accepted_review=config.dependency_requires_accepted_review,
+        )
+    ]
+
+
+def dependency_blocker_label(blocker: dict[str, str], by_id: dict[str, dict]) -> str:
+    dep_id = blocker["id"]
+    label = dependency_label(dep_id, by_id)
+    base = f"{label} ({dep_id})" if label != dep_id else dep_id
+    return base if blocker["reason"] == "not_completed" else f"{base}:{blocker['reason']}"
+
+
+def dependency_label(dep_id: str, by_id: dict[str, dict]) -> str:
+    dep = by_id.get(dep_id)
+    if not dep:
+        return dep_id
+    label = task_title(dep)
+    return truncate_table_text(label, 48)
+
+
 def running_notes(task: dict, config: Config) -> list[str]:
     started = parse_time(task.get("started_at"))
     if not started:
@@ -974,6 +1013,9 @@ class ListColor:
         if state == "missing":
             label = f"{dep_id}:missing" if self.enabled else f"{dep_id} (missing)"
             return self.apply(label, self.BG_RED)
+        if state == "not_applied":
+            label = f"{dep_id}:not_applied" if self.enabled else f"{dep_id} (not_applied)"
+            return self.apply(label, self.BG_YELLOW)
         if state == "blocked":
             label = dep_id if self.enabled else f"{dep_id} (blocked)"
             return self.apply(label, self.BG_RED)
@@ -1273,10 +1315,20 @@ def visible_by_default(task: dict) -> bool:
     if task.get("status") == "archived":
         return False
     if task.get("status") == "completed":
+        if accepted_worktree_not_applied(task):
+            return True
         return needs_review(task)
     if task.get("status") in {"failed", "blocked_user"} and task.get("resolution"):
         return False
     return task.get("status") not in DEFAULT_HIDDEN_LIST_STATUSES
+
+
+def accepted_worktree_not_applied(task: dict) -> bool:
+    return (
+        task.get("execution_mode") == "git_worktree"
+        and review_status(task) == "accepted"
+        and task.get("execution_apply_status") != "applied"
+    )
 
 
 def cmd_run_next(config: Config, args: argparse.Namespace) -> int:
@@ -1417,12 +1469,21 @@ def cmd_follow(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_accept(config: Config, args: argparse.Namespace) -> int:
-    task = set_review_status(config, args.task_id, "accepted", args.reason, require_completed=True)
-    run_post_mutation_trigger(config)
+    result = accept_task_and_integrate(config, args.task_id, args.reason, source="review")
+    if result.get("task") is None:
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            print("accept\tlocked")
+        return 1
+    task = result["task"]
+    post_accept = result.get("post_accept") if isinstance(result.get("post_accept"), dict) else {}
+    if post_accept.get("should_wake"):
+        run_post_mutation_trigger(config)
     if args.json:
-        print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps({"task": task, "post_accept": post_accept}, ensure_ascii=False, indent=2, sort_keys=True))
     else:
-        print(render_review_mutation(task, "accepted"), end="")
+        print(render_review_mutation(task, "accepted", post_accept=post_accept), end="")
     return 0
 
 
@@ -1437,8 +1498,14 @@ def cmd_reject(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-def render_review_mutation(task: dict, status: str) -> str:
-    lines = [f"{task.get('id')}\t{status}"]
+def render_review_mutation(task: dict, status: str, post_accept: dict | None = None) -> str:
+    task_id = task.get("id")
+    if status == "accepted":
+        title = task_title(task)
+        label = f"{title} ({task_id})"
+    else:
+        label = str(task_id)
+    lines = [f"{label}\t{status}"]
     metadata = task_worktree_metadata(task)
     if metadata != {"execution_mode": "main_worktree"}:
         parts = [
@@ -1461,7 +1528,28 @@ def render_review_mutation(task: dict, status: str) -> str:
                 ]
             )
         )
+    if post_accept and post_accept.get("status") not in {"not_worktree"}:
+        lines.append("post_accept\t" + render_post_accept_status(post_accept))
     return "\n".join(lines) + "\n"
+
+
+def render_post_accept_status(post_accept: dict) -> str:
+    status = post_accept.get("status") or "-"
+    if status == "applied":
+        return "worktree applied"
+    if status == "rebased_awaiting_re_review":
+        return "worktree rebased; awaiting re-review"
+    if status == "conflict_fix_subtask_queued":
+        title = post_accept.get("conflict_fix_task_title") or "conflict-fix subtask"
+        task_id = post_accept.get("conflict_fix_task_id") or "-"
+        return f"{title} ({task_id}) queued"
+    if status in {"not_worktree", "already_applied"}:
+        return str(status)
+    errors = []
+    report = post_accept.get("worktree_apply") if isinstance(post_accept.get("worktree_apply"), dict) else {}
+    if isinstance(report.get("errors"), list):
+        errors = [str(item) for item in report.get("errors")[:2]]
+    return f"{status}" + (": " + "; ".join(errors) if errors else "")
 
 
 def cmd_archive(config: Config, args: argparse.Namespace) -> int:

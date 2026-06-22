@@ -10,7 +10,7 @@ from typing import Any
 from .config import Config
 from .events import transition_payload, write_event_nonfatal
 from .lock import FileLock
-from .queue import load_task, save_task
+from .queue import create_task, load_task, save_task, task_labels, task_project_id, task_title, truncate_text
 from .timeutil import iso_now
 
 
@@ -47,8 +47,12 @@ def build_cleanup_report(config: Config, task_id: str, *, apply: bool = False) -
 
 def build_apply_report(config: Config, task_id: str, *, apply: bool = False) -> dict[str, Any]:
     if apply:
-        return _with_lock(config, task_id, lambda: _build_apply_report_locked(config, task_id, apply=True))
-    return _build_apply_report_locked(config, task_id, apply=False)
+        return _with_lock(config, task_id, lambda: build_apply_report_locked(config, task_id, apply=True))
+    return build_apply_report_locked(config, task_id, apply=False)
+
+
+def build_apply_report_locked(config: Config, task_id: str, *, apply: bool = False) -> dict[str, Any]:
+    return _build_apply_report_locked(config, task_id, apply=apply)
 
 
 def prepare_task_worktree_for_run_locked(config: Config, task: dict[str, Any]) -> dict[str, Any]:
@@ -276,7 +280,7 @@ def _build_apply_report_locked(config: Config, task_id: str, *, apply: bool) -> 
     validate_apply_report(config, task, report)
     if report["errors"]:
         if apply and report.get("apply_strategy") == "stale_base_rebase" and report.get("rebase", {}).get("status") == "blocked":
-            record_rebase_blocked(config, task, report)
+            record_rebase_conflict_fix(config, task, report)
         return report
     if apply and report.get("apply_strategy") == "stale_base_rebase":
         return apply_stale_base_rebase(config, task, report)
@@ -310,6 +314,7 @@ def _build_apply_report_locked(config: Config, task_id: str, *, apply: bool) -> 
             execution_apply_target=report.get("apply_target"),
         ),
     )
+    mark_parent_applied_by_conflict_fix(config, task, applied_head, report)
     return report
 
 
@@ -327,14 +332,14 @@ def apply_stale_base_rebase(config: Config, task: dict[str, Any], report: dict[s
         if abort.returncode != 0:
             detail = sanitize_git_detail(f"{detail}; rebase --abort failed: {clean_git_result(abort)}")
             task["execution_worktree_status"] = "recovery_required"
-        report["errors"].append("stale-base rebase failed; human review required: " + detail)
+        report["errors"].append("stale-base rebase failed; conflict-fix subtask required: " + detail)
         report["rebase"] = {
             **report.get("rebase", {}),
             "status": "blocked",
             "reason": detail,
             "abort_status": "ok" if abort.returncode == 0 else "failed",
         }
-        record_rebase_blocked(config, task, report)
+        record_rebase_conflict_fix(config, task, report)
         return report
 
     new_branch_head = git(worktree_path, "rev-parse", "--verify", "HEAD^{commit}")
@@ -352,6 +357,8 @@ def apply_stale_base_rebase(config: Config, task: dict[str, Any], report: dict[s
     task["review_status"] = "unreviewed"
     task["reviewed_at"] = None
     task["review_reason"] = "stale-base rebase invalidated prior acceptance; re-review required"
+    if task.get("root_task_id") or task.get("parent_task_id") or task.get("chain_status"):
+        task["chain_status"] = "awaiting_review"
     for key in ("execution_rebase_blocker", "execution_rebase_blocked_at"):
         task.pop(key, None)
     save_task(config, task)
@@ -373,6 +380,7 @@ def apply_stale_base_rebase(config: Config, task: dict[str, Any], report: dict[s
         "from_head": old_branch_head,
         "head": new_branch_head,
         "review_status": "unreviewed",
+        "chain_status": task.get("chain_status"),
         "reason": "task branch rebased onto current main; re-review required before main apply",
     }
     write_event_nonfatal(
@@ -394,29 +402,176 @@ def apply_stale_base_rebase(config: Config, task: dict[str, Any], report: dict[s
     return report
 
 
-def record_rebase_blocked(config: Config, task: dict[str, Any], report: dict[str, Any]) -> None:
+def record_rebase_conflict_fix(config: Config, task: dict[str, Any], report: dict[str, Any]) -> None:
     reason = sanitize_git_detail(str(report.get("rebase", {}).get("reason") or "stale-base rebase is blocked"))
     task["execution_rebase_status"] = "blocked"
     task["execution_rebase_blocker"] = reason
     task["execution_rebase_blocked_at"] = iso_now()
-    task["review_status"] = "needs_followup"
-    task["reviewed_at"] = iso_now()
-    task["review_reason"] = "stale-base rebase blocked; human follow-up required"
+    task["execution_conflict_fix_status"] = "queued"
+    task["root_task_id"] = task.get("root_task_id") or task.get("id")
+    task["parent_task_id"] = task.get("parent_task_id") or None
+    task["chain_status"] = "fixing"
+    fix_task = enqueue_conflict_fix_subtask(config, task, report, reason)
+    task["last_conflict_fix_task_id"] = fix_task["id"]
+    task["execution_conflict_fix_task_id"] = fix_task["id"]
+    task["execution_conflict_fix_queued_at"] = iso_now()
+    task["fix_attempts"] = max(non_negative_int(task.get("fix_attempts")), 1)
+    existing = task.get("blocking_subtask_ids") if isinstance(task.get("blocking_subtask_ids"), list) else []
+    task["blocking_subtask_ids"] = [*dict.fromkeys([*[str(item) for item in existing if str(item)], fix_task["id"]])]
     save_task(config, task)
+    report["conflict_fix"] = {
+        "status": "queued",
+        "task_id": fix_task["id"],
+        "title": task_title(fix_task),
+        "reason": reason,
+    }
     write_event_nonfatal(
         config,
-        "task_worktree_rebase_blocked",
+        "task_worktree_conflict_fix_enqueued",
         task=task,
         source="worktree apply",
-        summary=f"blocked stale worktree rebase for task {task.get('id')}",
+        summary=f"queued conflict-fix task for {task_title(task)} ({task.get('id')})",
         payload=transition_payload(
             task,
             execution_branch=task.get("execution_branch"),
             execution_rebase_status="blocked",
             execution_rebase_blocker=reason,
-            review_status=task.get("review_status"),
+            conflict_fix_task_id=fix_task["id"],
+            conflict_fix_task_title=task_title(fix_task),
         ),
     )
+
+
+def enqueue_conflict_fix_subtask(
+    config: Config,
+    parent_task: dict[str, Any],
+    report: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    existing_id = str(parent_task.get("execution_conflict_fix_task_id") or parent_task.get("last_conflict_fix_task_id") or "")
+    if existing_id:
+        try:
+            return load_task(config, existing_id)
+        except FileNotFoundError:
+            pass
+
+    parent_task_id = str(parent_task.get("id") or "")
+    root_task_id = str(parent_task.get("root_task_id") or parent_task_id)
+    review_cycle = non_negative_int(parent_task.get("review_cycle")) + 1
+    title = truncate_text(f"Resolve stale-base conflict for {task_title(parent_task)}", 80)
+    prompt = build_conflict_fix_prompt(parent_task, report, root_task_id, review_cycle, reason)
+    fix_task = create_task(
+        config,
+        prompt,
+        str(parent_task.get("cwd") or config.root),
+        depends_on=[],
+        project_id=task_project_id(parent_task) or None,
+        category=parent_task.get("category"),
+        labels=[*task_labels(parent_task), "worktree-conflict-fix"],
+        created_by="worktree-conflict-fix",
+        title=title,
+        description=f"Bounded stale-base conflict fix for {parent_task_id}.",
+        execution_profile=parent_task.get("execution_profile"),
+        model=parent_task.get("model"),
+        codex_profile=parent_task.get("codex_profile"),
+        codex_config_overrides=parent_task.get("codex_config_overrides")
+        if isinstance(parent_task.get("codex_config_overrides"), dict)
+        else None,
+        token_budget_hint=parent_task.get("token_budget_hint"),
+        subtask_type="worktree_conflict_fix",
+        subtask_for=parent_task_id,
+        blocks_root_completion=True,
+    )
+    fix_task["root_task_id"] = root_task_id
+    fix_task["parent_task_id"] = parent_task_id
+    fix_task["review_cycle"] = review_cycle
+    fix_task["fix_attempts"] = non_negative_int(parent_task.get("fix_attempts")) + 1
+    fix_task["chain_status"] = "fixing"
+    fix_task["last_review_decision"] = "stale_base_conflict"
+    fix_task["auto_fix_allowed"] = False
+    fix_task["auto_fix_budget"] = {"max_conflict_fix_tasks": 1}
+    fix_task["execution_parent_task_id"] = parent_task_id
+    save_task(config, fix_task)
+    return fix_task
+
+
+def build_conflict_fix_prompt(
+    parent_task: dict[str, Any],
+    report: dict[str, Any],
+    root_task_id: str,
+    review_cycle: int,
+    reason: str,
+) -> str:
+    return "\n".join(
+        [
+            "Implement a bounded stale-base conflict-fix task.",
+            "",
+            "Scope constraints:",
+            f"- Root task: {root_task_id}",
+            f"- Parent task: {parent_task.get('id')}",
+            f"- Review cycle: {review_cycle}",
+            f"- Parent task branch: {parent_task.get('execution_branch') or '-'}",
+            f"- Parent execution base: {report.get('base_head') or parent_task.get('execution_base_head') or '-'}",
+            f"- Current main HEAD: {report.get('main_head') or '-'}",
+            "- Port the parent task branch changes onto current main in this task's own worktree.",
+            "- Resolve conflicts in this conflict-fix worktree only.",
+            "- Do not edit conflict markers inside `cbr worktree apply`.",
+            "- Do not apply worktree branches or push remotes.",
+            "- Do not create or enqueue new tasks.",
+            "- Preserve cbr final JSON schema requirements in the final response.",
+            "",
+            "Conflict reason:",
+            reason,
+            "",
+            "Expected verification:",
+            "Run focused tests or checks relevant to the ported changes and report the commands/results.",
+        ]
+    )
+
+
+def mark_parent_applied_by_conflict_fix(
+    config: Config,
+    task: dict[str, Any],
+    applied_head: str,
+    report: dict[str, Any],
+) -> None:
+    if task.get("subtask_type") != "worktree_conflict_fix" or not task.get("parent_task_id"):
+        return
+    try:
+        parent = load_task(config, str(task.get("parent_task_id")))
+    except FileNotFoundError:
+        return
+    if parent.get("execution_conflict_fix_task_id") != task.get("id") and parent.get("last_conflict_fix_task_id") != task.get("id"):
+        return
+    parent["execution_apply_status"] = "applied"
+    parent["execution_applied_at"] = iso_now()
+    parent["execution_applied_head"] = applied_head
+    parent["execution_apply_target"] = report.get("apply_target")
+    parent["execution_apply_via_task_id"] = task.get("id")
+    parent["execution_conflict_fix_status"] = "applied"
+    parent["chain_status"] = "accepted"
+    save_task(config, parent)
+    write_event_nonfatal(
+        config,
+        "task_worktree_applied_via_conflict_fix",
+        task=parent,
+        source="worktree apply",
+        summary=f"marked {task_title(parent)} ({parent.get('id')}) applied via conflict-fix task",
+        payload=transition_payload(
+            parent,
+            conflict_fix_task_id=task.get("id"),
+            execution_applied_head=applied_head,
+            execution_apply_target=report.get("apply_target"),
+        ),
+    )
+
+
+def non_negative_int(value: object) -> int:
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, number)
 
 
 def validate_apply_report(config: Config, task: dict[str, Any], report: dict[str, Any]) -> None:
@@ -602,7 +757,8 @@ def validate_apply_report(config: Config, task: dict[str, Any], report: dict[str
                 "stale_base_rebase_clean",
                 rebase_check.get("status") == "clean",
                 str(rebase_check.get("reason") or "stale-base rebase preflight completed"),
-                "stale-base rebase is not clean; human follow-up required: " + str(rebase_check.get("reason") or "unknown"),
+                "stale-base rebase is not clean; conflict-fix subtask required: "
+                + str(rebase_check.get("reason") or "unknown"),
             )
     else:
         report["apply_strategy"] = "fast_forward"
@@ -899,6 +1055,7 @@ def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
         ("execution_applied_at", "applied_at"),
         ("execution_applied_head", "applied_head"),
         ("execution_apply_target", "apply_target"),
+        ("execution_apply_via_task_id", "apply_via_task_id"),
         ("execution_rebase_status", "rebase_status"),
         ("execution_rebased_at", "rebased_at"),
         ("execution_rebased_from_base", "rebased_from_base"),
@@ -907,6 +1064,9 @@ def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
         ("execution_rebased_head", "rebased_head"),
         ("execution_rebase_blocker", "rebase_blocker"),
         ("execution_rebase_blocked_at", "rebase_blocked_at"),
+        ("execution_conflict_fix_status", "conflict_fix_status"),
+        ("execution_conflict_fix_task_id", "conflict_fix_task_id"),
+        ("execution_conflict_fix_queued_at", "conflict_fix_queued_at"),
         ("execution_cleaned_at", "cleaned_at"),
     ):
         value = task.get(source)
@@ -1032,6 +1192,10 @@ def render_worktree_report(report: dict[str, Any]) -> str:
     if isinstance(rebase, dict):
         detail = rebase.get("reason") or rebase.get("status")
         lines.append(f"rebase: {rebase.get('status')} ({detail})")
+    conflict_fix = report.get("conflict_fix")
+    if isinstance(conflict_fix, dict):
+        title = conflict_fix.get("title") or "conflict-fix subtask"
+        lines.append(f"conflict_fix: {conflict_fix.get('status')} {title} ({conflict_fix.get('task_id')})")
     commit_summary = report.get("commit_summary")
     if isinstance(commit_summary, dict):
         lines.append(

@@ -39,6 +39,7 @@ CHAIN_METADATA_FIELDS = (
     "auto_fix_allowed",
     "auto_fix_budget",
     "last_auto_fix_task_id",
+    "last_conflict_fix_task_id",
     "finding_fingerprints",
 )
 SCHEMA_VERSION = 1
@@ -228,6 +229,7 @@ def create_task(
         "auto_fix_allowed": False,
         "auto_fix_budget": None,
         "last_auto_fix_task_id": None,
+        "last_conflict_fix_task_id": None,
         "finding_fingerprints": [],
         "project_root": str(project_root),
         "project_id": resolved_project_id,
@@ -413,6 +415,24 @@ def dependency_blockers(
                 {
                     "id": str(dep_id),
                     "reason": "not_accepted",
+                    "status": dep_status,
+                    "review_status": dep_review_status,
+                }
+            )
+        elif dep.get("execution_mode") == "git_worktree" and dep.get("review_status") != "accepted":
+            blockers.append(
+                {
+                    "id": str(dep_id),
+                    "reason": "not_accepted",
+                    "status": dep_status,
+                    "review_status": dep_review_status,
+                }
+            )
+        elif dep.get("execution_mode") == "git_worktree" and dep.get("execution_apply_status") != "applied":
+            blockers.append(
+                {
+                    "id": str(dep_id),
+                    "reason": "not_applied",
                     "status": dep_status,
                     "review_status": dep_review_status,
                 }
