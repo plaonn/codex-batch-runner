@@ -6,6 +6,7 @@ from typing import Any
 from .config import Config
 from .queue import list_tasks, task_labels, task_project_id, task_project_root
 from .timeutil import iso_now
+from .transcript import sanitize
 
 DEFAULT_ROUTING_REPORT_LIMIT = 50
 
@@ -48,11 +49,15 @@ def build_routing_report(
         "total_available": total_available,
         "filtered_count": filtered_count,
         "task_count": len(rows),
+        "task_rows": rows,
         "groups": {
             "profile": summarize_groups(group_rows(rows, "profile")),
             "category": summarize_groups(group_rows(rows, "category")),
             "label": summarize_groups(group_rows_by_label(rows)),
             "profile_category": summarize_groups(group_rows(rows, "profile_category")),
+            "routing_experiment": summarize_groups(group_rows(rows, "routing_experiment")),
+            "routing_risk_factor": summarize_groups(group_rows_by_risk_factor(rows)),
+            "profile_experiment": summarize_groups(group_rows(rows, "profile_experiment")),
         },
     }
 
@@ -83,6 +88,7 @@ def filter_tasks(
 def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
     profile = str(task.get("execution_profile") or "default")
     category = str(task.get("category") or "uncategorized")
+    routing_experiment = str(task.get("routing_experiment") or "unspecified")
     reviewer = task.get("reviewer_codex") if isinstance(task.get("reviewer_codex"), dict) else {}
     last_run = task.get("last_run") if isinstance(task.get("last_run"), dict) else {}
     duration = number(last_run.get("duration_seconds"))
@@ -95,6 +101,10 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
         "category": category,
         "profile_category": f"{profile}/{category}",
         "labels": task_labels(task) or ["unlabeled"],
+        "routing_reason": sanitize(task.get("routing_reason")) if task.get("routing_reason") else "",
+        "routing_risk_factors": routing_risk_factors(task),
+        "routing_experiment": sanitize(routing_experiment),
+        "profile_experiment": f"{profile}/{sanitize(routing_experiment)}",
         "status": str(task.get("status") or ""),
         "review_status": review_status,
         "reviewer_decision": reviewer_decision,
@@ -137,6 +147,23 @@ def group_rows_by_label(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, 
         for label in labels or ["unlabeled"]:
             groups[str(label)].append(row)
     return groups
+
+
+def group_rows_by_risk_factor(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        factors = row.get("routing_risk_factors") if isinstance(row.get("routing_risk_factors"), list) else ["none"]
+        for factor in factors or ["none"]:
+            groups[str(factor)].append(row)
+    return groups
+
+
+def routing_risk_factors(task: dict[str, Any]) -> list[str]:
+    factors = task.get("routing_risk_factors")
+    if not isinstance(factors, list):
+        return ["none"]
+    cleaned = [sanitize(item) for item in factors if str(item).strip()]
+    return cleaned or ["none"]
 
 
 def summarize_groups(groups: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -219,7 +246,7 @@ def render_routing_report(report: dict[str, Any]) -> str:
     if active_filters:
         lines.append("filters: " + " ".join(active_filters))
     groups = report.get("groups") if isinstance(report.get("groups"), dict) else {}
-    for group_name in ("profile", "category", "label", "profile_category"):
+    for group_name in ("profile", "category", "label", "profile_category", "routing_experiment", "routing_risk_factor", "profile_experiment"):
         entries = groups.get(group_name) if isinstance(groups.get(group_name), list) else []
         lines.append("")
         lines.append(f"## by_{group_name}")

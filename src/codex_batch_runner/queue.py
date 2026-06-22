@@ -184,6 +184,9 @@ def create_task(
     codex_profile: str | None = None,
     codex_config_overrides: dict[str, str] | None = None,
     token_budget_hint: str | None = None,
+    routing_reason: str | None = None,
+    routing_risk_factors: list[str] | None = None,
+    routing_experiment: str | None = None,
     subtask_type: str | None = None,
     subtask_for: str | None = None,
     blocks_root_completion: bool = False,
@@ -231,6 +234,9 @@ def create_task(
         "category": category,
         "labels": labels or [],
         "created_by": created_by,
+        "routing_reason": clean_optional_text(routing_reason),
+        "routing_risk_factors": clean_text_list(routing_risk_factors),
+        "routing_experiment": clean_optional_text(routing_experiment),
         "prompt": prompt,
         "next_prompt": None,
         "cwd": str(cwd_path),
@@ -272,6 +278,9 @@ def create_task(
             created_by=task.get("created_by"),
             title=task.get("title"),
             has_description=bool(task.get("description")),
+            has_routing_reason=bool(task.get("routing_reason")),
+            routing_risk_factor_count=len(task.get("routing_risk_factors") or []),
+            routing_experiment=task.get("routing_experiment"),
             subtask_type=task.get("subtask_type"),
             subtask_for=task.get("subtask_for"),
             blocks_root_completion=task.get("blocks_root_completion"),
@@ -285,6 +294,17 @@ def clean_optional_text(value: object | None) -> str | None:
         return None
     cleaned = " ".join(str(value).split())
     return cleaned or None
+
+
+def clean_text_list(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    cleaned = []
+    for value in values:
+        item = clean_optional_text(value)
+        if item:
+            cleaned.append(item)
+    return cleaned
 
 
 def chain_metadata(task: dict) -> dict:

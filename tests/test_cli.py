@@ -707,6 +707,41 @@ class CliTests(unittest.TestCase):
             self.assertEqual({"model_reasoning_effort": "medium"}, task["codex_config_overrides"])
             self.assertEqual("under 20k tokens", task["token_budget_hint"])
 
+    def test_enqueue_records_routing_decision_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "enqueue",
+                    "--cwd",
+                    tmp,
+                    "--id",
+                    "routed",
+                    "--profile",
+                    "small",
+                    "--routing-reason",
+                    "docs-only bounded change",
+                    "--routing-risk-factor",
+                    "public-docs",
+                    "--routing-risk-factor",
+                    "low-blast-radius",
+                    "--routing-experiment",
+                    "downshift_probe",
+                    "--prompt",
+                    "work",
+                ]
+            )
+            task = load_task(Config.load(str(config_path)), "routed")
+
+            self.assertEqual(0, code)
+            self.assertEqual("routed\n", output)
+            self.assertEqual("docs-only bounded change", task["routing_reason"])
+            self.assertEqual(["public-docs", "low-blast-radius"], task["routing_risk_factors"])
+            self.assertEqual("downshift_probe", task["routing_experiment"])
+
     def test_enqueue_rejects_unallowlisted_config_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -828,6 +863,42 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, labels["docs"]["tasks"])
             self.assertEqual(2, labels["runner"]["tasks"])
             self.assertEqual(1, load_task(config, "accepted-small")["attempts"])
+
+    def test_routing_report_exposes_routing_decision_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="downshift",
+                project_id="project-a",
+                category="docs",
+                labels=["docs"],
+                execution_profile="small",
+                routing_reason="docs-only bounded change",
+                routing_risk_factors=["public-docs", "low-blast-radius"],
+                routing_experiment="downshift_probe",
+            )
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            task["attempts"] = 1
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
+            report = json.loads(output)
+            experiments = {entry["key"]: entry for entry in report["groups"]["routing_experiment"]}
+            risks = {entry["key"]: entry for entry in report["groups"]["routing_risk_factor"]}
+            profile_experiments = {entry["key"]: entry for entry in report["groups"]["profile_experiment"]}
+
+            self.assertEqual(0, code)
+            self.assertEqual("docs-only bounded change", report["task_rows"][0]["routing_reason"])
+            self.assertEqual(["public-docs", "low-blast-radius"], report["task_rows"][0]["routing_risk_factors"])
+            self.assertEqual(1, experiments["downshift_probe"]["tasks"])
+            self.assertEqual(1, risks["public-docs"]["tasks"])
+            self.assertEqual(1, risks["low-blast-radius"]["tasks"])
+            self.assertEqual(1, profile_experiments["small/downshift_probe"]["first_pass_accepted"])
 
     def test_routing_report_human_output_and_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2445,6 +2516,9 @@ class CliTests(unittest.TestCase):
                 category="implementation",
                 labels=["queue"],
                 created_by="test",
+                routing_reason="runner-state risk",
+                routing_risk_factors=["queue-mutation"],
+                routing_experiment="upshift_guard",
             )
             task["status"] = "completed"
             task["review_status"] = "unreviewed"
@@ -2479,6 +2553,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("project_id: project-a", output)
             self.assertIn("category: implementation", output)
             self.assertIn("labels: queue", output)
+            self.assertIn("routing: routing_experiment=upshift_guard, routing_reason=runner-state risk, routing_risk_factors=queue-mutation", output)
             self.assertIn("summary:", output)
             self.assertIn("Implemented token [REDACTED] handling.", output)
             self.assertIn("commits:", output)
@@ -2625,7 +2700,16 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
-            task = create_task(config, "work", tmp, task_id="bundle-json", project_id="project-a")
+            task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="bundle-json",
+                project_id="project-a",
+                routing_reason="baseline route",
+                routing_risk_factors=["normal-risk"],
+                routing_experiment="baseline",
+            )
             task["status"] = "completed"
             task["review_status"] = "unreviewed"
             task["last_result"] = {
@@ -2642,6 +2726,9 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual("bundle-json", bundle["task"]["id"])
+            self.assertEqual("baseline route", bundle["task"]["routing_reason"])
+            self.assertEqual(["normal-risk"], bundle["task"]["routing_risk_factors"])
+            self.assertEqual("baseline", bundle["task"]["routing_experiment"])
             self.assertEqual("completed", bundle["status"])
             self.assertEqual(["unit tests"], bundle["verification"])
             self.assertFalse(bundle["transcript_contents_included"])

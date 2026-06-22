@@ -87,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="allowlisted Codex -c config override, repeatable",
     )
     enqueue.add_argument("--token-budget-hint", help="non-enforced token or budget hint")
+    enqueue.add_argument("--routing-reason", help="public-safe reason for the profile/provider routing decision")
+    enqueue.add_argument("--routing-risk-factor", action="append", default=[], help="public-safe routing risk factor, repeatable")
+    enqueue.add_argument("--routing-experiment", help="routing experiment label such as baseline, downshift_probe, upshift_guard, or manual")
     enqueue.set_defaults(func=cmd_enqueue)
 
     list_cmd = sub.add_parser("list", help="list tasks")
@@ -319,6 +322,9 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         codex_profile=args.codex_profile,
         codex_config_overrides=parse_config_overrides(args.config_override),
         token_budget_hint=args.token_budget_hint,
+        routing_reason=args.routing_reason,
+        routing_risk_factors=args.routing_risk_factor,
+        routing_experiment=args.routing_experiment,
     )
     run_post_mutation_trigger(config)
     print(task["id"])

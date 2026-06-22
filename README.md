@@ -320,7 +320,22 @@ Config may set `root` to make relative runtime paths independent of the process 
 
 Optional execution profiles are disabled by default. `default_execution_profile` applies to implementation tasks that do not specify `execution_profile`; `review_execution_profile` applies to reviewer Codex calls. A task-level `execution_profile` selects a named profile, and task-level `model`, `codex_profile`, or `codex_config_overrides` override values from that profile. If `default_execution_profile` is set and a task category or label is one of `runner`, `runner-state`, `lock`, `resume`, `reviewer-codex`, `reviewer-safety`, `queue-mutation`, `worktree-critical`, `worktree-apply`, `worktree-recovery`, `stale-base`, or `rebase`, cbr uses a configured `deep` profile by fallback when it exists. General routing labels such as `worktree` or `docs` do not trigger `deep` by themselves. Each Codex execution records the resolved profile and fallback reason in `last_run`.
 
-`routing-report` is a read-only profile routing report for tuning profile selection over time. It groups recent tasks by profile, category, label, and profile/category pair, then reports accepted counts, first-pass accepted counts, needs-fix/rejected rates, auto-fix task frequency, attempts, duration, and a simple cost proxy based on attempts/runs/duration. It supports the same project/category/label narrowing style as list:
+Enqueue can also record public-safe routing decision metadata without changing execution policy:
+
+```bash
+PYTHONPATH=src python3 -m codex_batch_runner enqueue \
+  --cwd /path/to/repo \
+  --profile small \
+  --routing-reason "docs-only bounded change" \
+  --routing-risk-factor public-docs \
+  --routing-risk-factor low-blast-radius \
+  --routing-experiment downshift_probe \
+  --prompt-file task.md
+```
+
+`routing_experiment` is an audit label, not an enforced policy. Common labels are `baseline`, `downshift_probe`, `upshift_guard`, and `manual`.
+
+`routing-report` is a read-only profile routing report for tuning profile selection over time. It groups recent tasks by profile, category, label, profile/category pair, routing experiment, routing risk factor, and profile/experiment pair, then reports accepted counts, first-pass accepted counts, needs-fix/rejected rates, auto-fix task frequency, attempts, duration, and a simple cost proxy based on attempts/runs/duration. It supports the same project/category/label narrowing style as list:
 
 ```bash
 PYTHONPATH=src python3 -m codex_batch_runner routing-report --project codex-batch-runner

@@ -29,6 +29,7 @@ def render_task_summary(
     if task.get("cwd"):
         lines.append(f"cwd: {task.get('cwd')}")
     append_execution_profile_summary(lines, task)
+    append_routing_summary(lines, task)
     append_counters(lines, task)
     append_chain_summary(lines, task)
     if task.get("cooldown_until") or is_in_cooldown(task):
@@ -145,6 +146,19 @@ def append_execution_profile_summary(lines: list[str], task: dict) -> None:
         fields.append("codex_config_overrides=" + ",".join(sorted(str(key) for key in overrides)))
     if fields:
         lines.append("execution: " + ", ".join(fields))
+
+
+def append_routing_summary(lines: list[str], task: dict) -> None:
+    fields = []
+    for key in ("routing_experiment", "routing_reason"):
+        value = task.get(key)
+        if value not in (None, "", [], {}):
+            fields.append(f"{key}={sanitize(value)}")
+    risk_factors = task.get("routing_risk_factors")
+    if isinstance(risk_factors, list) and risk_factors:
+        fields.append("routing_risk_factors=" + ",".join(sanitize(item) for item in risk_factors))
+    if fields:
+        lines.append("routing: " + ", ".join(fields))
 
 
 def meaningful_chain_value(key: str, value: object) -> bool:
