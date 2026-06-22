@@ -132,6 +132,9 @@ def compact_list_rows(output: str) -> list[dict[str, str]]:
     rows = []
     current: dict[str, str] | None = None
     for line in lines[1:]:
+        if line.startswith("[") and line.endswith("]"):
+            current = None
+            continue
         if current is not None and line.startswith("  ") and line.strip():
             title_segment = line[: starts[4]].strip() if len(starts) > 4 else line.strip()
             deps_segment = line[starts[4] : starts[5]].strip() if len(starts) > 5 else ""
@@ -1474,9 +1477,10 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual(["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"], lines[0].split())
-            self.assertTrue(lines[1].startswith("project-a"))
-            self.assertIn("child-task", lines[1])
-            self.assertTrue(lines[2].startswith("  Child task title"))
+            self.assertEqual("[project-a]", lines[1])
+            self.assertTrue(lines[2].startswith("project-a"))
+            self.assertIn("child-task", lines[2])
+            self.assertTrue(lines[3].startswith("  Child task title"))
             self.assertNotIn("title:", output)
             self.assertNotIn("(child-task)", output)
             self.assertEqual("parent-task (done)\nsecond-parent (done)", rows["child-task"]["DEPS"])
@@ -1675,6 +1679,30 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual(["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
             self.assertTrue(any(line.startswith("  Table title") for line in output.splitlines()))
+
+    def test_list_compact_groups_by_project_and_renders_subtask_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "Parent work", tmp, task_id="parent", project_id="project-a")
+            child = create_task(config, "Child work", tmp, task_id="child", project_id="project-a")
+            child["parent_task_id"] = "parent"
+            save_task(config, child)
+            followup = create_task(config, "Follow-up work", tmp, task_id="followup", project_id="project-a")
+            followup["subtask_for"] = "parent"
+            save_task(config, followup)
+            create_task(config, "Other project", tmp, task_id="other", project_id="project-b")
+
+            code, output = run_cli(["--config", str(config_path), "list", "--all", "--color=never"])
+            lines = list_lines(output)
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertLess(lines.index("[project-a]"), lines.index("[project-b]"))
+            self.assertEqual("Parent work", rows["parent"]["TITLE"])
+            self.assertEqual("|-- Child work", rows["child"]["TITLE"])
+            self.assertEqual("`-- Follow-up work", rows["followup"]["TITLE"])
+            self.assertEqual("Other project", rows["other"]["TITLE"])
 
     def test_list_blocking_subtasks_affect_parent_effective_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

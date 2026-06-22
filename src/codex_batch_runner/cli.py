@@ -592,17 +592,114 @@ def render_compact_list(
     terminal_width: int | None = None,
 ) -> str:
     header = ["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"]
-    row_groups = [compact_task_group(task, by_id, config, color) for task in tasks]
+    project_groups = compact_project_groups(tasks, by_id, config, color)
+    row_groups = [group for _, groups in project_groups for group in groups]
     if terminal_width is not None and terminal_width < 80:
-        return render_compact_block_list(row_groups, terminal_width)
+        return render_compact_block_list(project_groups, terminal_width)
     widths = compact_widths(header, row_groups, terminal_width)
     lines = [render_compact_row(header, widths)]
-    for group in row_groups:
-        lines.extend(render_compact_group(group, widths, terminal_width))
+    for project, groups in project_groups:
+        lines.append(project_section_header(project, terminal_width))
+        for group in groups:
+            lines.extend(render_compact_group(group, widths, terminal_width))
     return "\n".join(lines)
 
 
-def compact_task_group(task: dict, by_id: dict[str, dict], config: Config, color: "ListColor") -> dict[str, object]:
+def compact_project_groups(
+    tasks: list[dict],
+    by_id: dict[str, dict],
+    config: Config,
+    color: "ListColor",
+) -> list[tuple[str, list[dict[str, object]]]]:
+    grouped: dict[str, list[dict]] = {}
+    project_order: list[str] = []
+    for task in tasks:
+        project = task_project_id(task)
+        if project not in grouped:
+            grouped[project] = []
+            project_order.append(project)
+        grouped[project].append(task)
+    return [
+        (
+            project,
+            [
+                compact_task_group(item["task"], by_id, config, color, tree_prefix=item["prefix"])
+                for item in compact_tree_items(grouped[project], by_id)
+            ],
+        )
+        for project in project_order
+    ]
+
+
+def compact_tree_items(tasks: list[dict], by_id: dict[str, dict]) -> list[dict[str, object]]:
+    visible_ids = {str(task.get("id")) for task in tasks if task.get("id")}
+    children: dict[str, list[dict]] = {task_id: [] for task_id in visible_ids}
+    roots: list[dict] = []
+    for task in tasks:
+        task_id = str(task.get("id") or "")
+        parent_id = compact_parent_task_id(task, visible_ids, by_id)
+        if parent_id and parent_id != task_id:
+            children.setdefault(parent_id, []).append(task)
+        else:
+            roots.append(task)
+
+    def sort_key(task: dict) -> tuple[str, str]:
+        return list_sort_key(task)
+
+    for task_id in children:
+        children[task_id].sort(key=sort_key)
+    roots.sort(key=sort_key)
+
+    items: list[dict[str, object]] = []
+
+    def visit(task: dict, ancestors: list[bool], seen: set[str]) -> None:
+        task_id = str(task.get("id") or "")
+        prefix = tree_prefix(ancestors) if ancestors else ""
+        items.append({"task": task, "prefix": prefix})
+        if not task_id or task_id in seen:
+            return
+        child_tasks = children.get(task_id, [])
+        for index, child in enumerate(child_tasks):
+            visit(child, [*ancestors, index == len(child_tasks) - 1], {*seen, task_id})
+
+    for root in roots:
+        visit(root, [], set())
+    attached = {str(item["task"].get("id") or "") for item in items if isinstance(item.get("task"), dict)}
+    for task in sorted(tasks, key=sort_key):
+        task_id = str(task.get("id") or "")
+        if task_id not in attached:
+            visit(task, [], set())
+    return items
+
+
+def compact_parent_task_id(task: dict, visible_ids: set[str], by_id: dict[str, dict]) -> str:
+    for key in ("parent_task_id", "subtask_for", "root_task_id"):
+        value = task.get(key)
+        if value is not None and str(value) in visible_ids:
+            return str(value)
+    task_id = str(task.get("id") or "")
+    for parent_id in visible_ids:
+        parent = by_id.get(parent_id)
+        if parent and task_id in blocking_subtask_ids(parent):
+            return parent_id
+    return ""
+
+
+def tree_prefix(ancestors: list[bool]) -> str:
+    parts = []
+    for is_last in ancestors[:-1]:
+        parts.append("    " if is_last else "|   ")
+    parts.append("`-- " if ancestors[-1] else "|-- ")
+    return "".join(parts)
+
+
+def compact_task_group(
+    task: dict,
+    by_id: dict[str, dict],
+    config: Config,
+    color: "ListColor",
+    tree_prefix: str = "",
+) -> dict[str, object]:
     dep_ids = dependency_id_cells(task.get("depends_on"), by_id, config, color)
     note_segments = note_cells(task, by_id, config)
     return {
@@ -614,8 +711,15 @@ def compact_task_group(task: dict, by_id: dict[str, dict], config: Config, color
         ],
         "deps": dep_ids or ["-"],
         "notes": note_segments or ["-"],
-        "title": color.title(compact_title(task)),
+        "title": color.title(tree_prefix + compact_title(task)),
     }
+
+
+def project_section_header(project: str, terminal_width: int | None) -> str:
+    label = f"[{project}]"
+    if terminal_width is None:
+        return label
+    return fit_visible(label, max(1, terminal_width))
 
 
 def compact_widths(header: list[str], row_groups: list[dict[str, object]], terminal_width: int | None) -> list[int]:
@@ -687,23 +791,27 @@ def render_compact_group(group: dict[str, object], widths: list[int], terminal_w
     return lines
 
 
-def render_compact_block_list(row_groups: list[dict[str, object]], terminal_width: int) -> str:
+def render_compact_block_list(project_groups: list[tuple[str, list[dict[str, object]]]], terminal_width: int) -> str:
     lines = []
-    for index, group in enumerate(row_groups):
-        if index:
+    for project, row_groups in project_groups:
+        if lines:
             lines.append("")
-        summary = group["summary"] if isinstance(group["summary"], list) else ["-", "-", "-", "-"]
-        block_rows = [
-            ("STATUS", str(summary[2])),
-            ("ID", str(summary[1])),
-            ("PROJECT", str(summary[0])),
-            ("TITLE", str(group.get("title") or "-")),
-        ]
-        deps = group["deps"] if isinstance(group["deps"], list) else ["-"]
-        notes = group["notes"] if isinstance(group["notes"], list) else ["-"]
-        block_rows.extend(("DEPS", str(dep)) for dep in deps)
-        block_rows.extend(("NOTE", str(note)) for note in notes)
-        lines.extend(render_block_rows(block_rows, terminal_width))
+        lines.append(f"[{fit_visible(project, max(1, terminal_width - 2))}]")
+        for index, group in enumerate(row_groups):
+            if index:
+                lines.append("")
+            summary = group["summary"] if isinstance(group["summary"], list) else ["-", "-", "-", "-"]
+            block_rows = [
+                ("STATUS", str(summary[2])),
+                ("ID", str(summary[1])),
+                ("PROJECT", str(summary[0])),
+                ("TITLE", str(group.get("title") or "-")),
+            ]
+            deps = group["deps"] if isinstance(group["deps"], list) else ["-"]
+            notes = group["notes"] if isinstance(group["notes"], list) else ["-"]
+            block_rows.extend(("DEPS", str(dep)) for dep in deps)
+            block_rows.extend(("NOTE", str(note)) for note in notes)
+            lines.extend(render_block_rows(block_rows, terminal_width))
     return "\n".join(lines)
 
 
