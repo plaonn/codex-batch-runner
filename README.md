@@ -358,6 +358,22 @@ PYTHONPATH=src python3 -m codex_batch_runner routing-report --project codex-batc
 
 Profile options are inserted into both `codex_command` and `codex_resume_command` after `codex exec`, preserving `resume {session_id}` ordering. If no execution profile or task override is configured, command construction is unchanged.
 
+Capacity config names are reserved for future multi-worker operation while preserving the current single-runner default. The default contract is equivalent to:
+
+```json
+{
+  "max_total_running": 1,
+  "max_running_per_project": 1,
+  "capacity_pools": {
+    "codex": {
+      "max_running": 1
+    }
+  }
+}
+```
+
+`max_total_running` limits all concurrent implementation task executions, `max_running_per_project` limits executions for the same project, and `capacity_pools` names scarce execution resources such as `codex`. These fields form the planning contract for future parallel admission; the current runner still starts one implementation task per `run-next` invocation under the runner lock. Detailed semantics are maintained in [docs/spec.md](docs/spec.md).
+
 Optional `post_mutation_trigger_command` can run a generic scheduler wake-up hook after successful queue mutations and after `run-next` finishes one task when another task is eligible to run. The value is an argv list, not a shell string, so it is not shell-expanded. It is disabled by default.
 
 ```json
