@@ -42,6 +42,32 @@ def build_cleanup_report(config: Config, task_id: str, *, apply: bool = False) -
     return _build_cleanup_report_locked(config, task_id, apply=False)
 
 
+def prepare_task_worktree_for_run_locked(config: Config, task: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(task.get("id") or "")
+    if task.get("status") == "needs_resume":
+        validation_error = validate_resume_worktree(task)
+        if validation_error:
+            report = base_report("prepare", task, apply=True)
+            report["errors"].append(validation_error)
+            return {"task": task, "worktree_path": None, "report": report}
+
+    report = _build_prepare_report_locked(config, task_id, apply=True)
+    if report.get("errors") or not report.get("applied"):
+        return {"task": task, "worktree_path": None, "report": report}
+    prepared = load_task(config, task_id)
+    return {"task": prepared, "worktree_path": Path(str(report.get("worktree_path"))), "report": report}
+
+
+def validate_resume_worktree(task: dict[str, Any]) -> str | None:
+    if task.get("execution_mode") != "git_worktree":
+        return "needs_resume task requires an existing retained git worktree"
+    if str(task.get("execution_worktree_status") or "") not in WORKTREE_RETAINED_STATUSES:
+        return "needs_resume task worktree is not retained for recovery"
+    if not task.get("execution_branch") or not task.get("execution_worktree_path"):
+        return "needs_resume task has incomplete retained worktree metadata"
+    return None
+
+
 def _with_lock(config: Config, task_id: str, callback) -> dict[str, Any]:
     lock = FileLock(config.lock_file, config.stale_lock_seconds)
     if not lock.acquire(task_id=task_id):

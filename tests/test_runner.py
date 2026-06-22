@@ -22,6 +22,7 @@ from codex_batch_runner.queue import create_task, load_task, save_task
 from codex_batch_runner.runner import apply_codex_result, run_next
 from codex_batch_runner.state import load_state
 from codex_batch_runner.timeutil import iso_now
+from codex_batch_runner.worktree import build_prepare_report
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_codex.py"
@@ -339,6 +340,177 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(0, task["last_run"]["returncode"])
             self.assertIsNone(task["last_run"]["resume_id_used"])
             self.assertIsNotNone(task["last_run"]["duration_seconds"])
+
+    def test_run_next_worktree_disabled_uses_original_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(config, "do it", tmp, task_id="task-disabled-worktree")
+            seen_cwds = []
+
+            def fake_run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
+                seen_cwds.append(task["cwd"])
+                return CodexResult(
+                    returncode=0,
+                    log_path=Path(tmp) / "attempt.jsonl",
+                    command_kind="exec",
+                    resume_id_used=None,
+                    stderr="",
+                    events=[],
+                    final_response={
+                        "task_id": "task-disabled-worktree",
+                        "status": "completed",
+                        "summary": "done",
+                        "next_prompt": "",
+                        "changed_files": [],
+                        "verification": [],
+                    },
+                    session_id=None,
+                    thread_id=None,
+                    rate_limited=False,
+                    rate_limit_markers=[],
+                )
+
+            with patch.object(runner_module, "run_codex", fake_run_codex):
+                outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual([tmp], seen_cwds)
+            self.assertNotIn("execution_worktree_status", load_task(config, "task-disabled-worktree"))
+
+    def test_run_next_worktree_task_runs_codex_in_prepared_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(make_config(tmp, "success"), worktree_mode="task", worktree_root=root / "worktrees")
+            create_task(config, "do it", str(repo), task_id="task-worktree")
+            seen_cwds = []
+
+            def fake_run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
+                seen_cwds.append(Path(task["cwd"]))
+                return CodexResult(
+                    returncode=0,
+                    log_path=root / "attempt.jsonl",
+                    command_kind="exec",
+                    resume_id_used=None,
+                    stderr="",
+                    events=[],
+                    final_response={
+                        "task_id": "task-worktree",
+                        "status": "completed",
+                        "summary": "done",
+                        "next_prompt": "",
+                        "changed_files": ["file.txt"],
+                        "verification": ["unit tests"],
+                    },
+                    session_id=None,
+                    thread_id=None,
+                    rate_limited=False,
+                    rate_limit_markers=[],
+                )
+
+            with patch.object(runner_module, "run_codex", fake_run_codex):
+                outcome = run_next(config)
+
+            task = load_task(config, "task-worktree")
+            worktree_path = Path(task["execution_worktree_path"])
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual(str(repo), task["cwd"])
+            self.assertEqual([worktree_path], seen_cwds)
+            self.assertEqual("git_worktree", task["execution_mode"])
+            self.assertEqual("retained", task["execution_worktree_status"])
+            self.assertTrue(worktree_path.is_dir())
+            self.assertEqual(str(worktree_path), task["git_status"]["root"])
+
+    def test_run_next_worktree_prepare_failure_does_not_call_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            git(repo, "branch", "cbr/task-conflict")
+            config = replace(make_config(tmp, "success"), worktree_mode="task", worktree_root=root / "worktrees")
+            create_task(config, "do it", str(repo), task_id="task-conflict")
+
+            with patch.object(runner_module, "run_codex", side_effect=AssertionError("unexpected Codex call")):
+                outcome = run_next(config)
+
+            task = load_task(config, "task-conflict")
+            self.assertEqual("failed", outcome.status)
+            self.assertEqual("failed", task["status"])
+            self.assertEqual(0, task["attempts"])
+            self.assertEqual(1, task["failure_count"])
+            self.assertEqual("recovery_required", task["execution_worktree_status"])
+            self.assertIn("existing branch", task["last_error"])
+
+    def test_run_next_worktree_resume_requires_retained_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(make_config(tmp, "success"), worktree_mode="task", worktree_root=Path(tmp) / "worktrees")
+            task = create_task(config, "original", tmp, task_id="task-resume-no-worktree")
+            task["status"] = "needs_resume"
+            task["next_prompt"] = "continue"
+            task["thread_id"] = "thread-1"
+            save_task(config, task)
+
+            with patch.object(runner_module, "run_codex", side_effect=AssertionError("unexpected Codex call")):
+                outcome = run_next(config)
+
+            task = load_task(config, "task-resume-no-worktree")
+            self.assertEqual("failed", outcome.status)
+            self.assertEqual("failed", task["status"])
+            self.assertEqual(0, task["attempts"])
+            self.assertIn("requires an existing retained git worktree", task["last_error"])
+
+    def test_run_next_worktree_resume_uses_existing_retained_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(make_config(tmp, "success"), worktree_mode="task", worktree_root=root / "worktrees")
+            task = create_task(config, "original", str(repo), task_id="task-resume-worktree")
+            self.assertTrue(build_prepare_report(config, "task-resume-worktree", apply=True)["applied"])
+            task = load_task(config, "task-resume-worktree")
+            worktree_path = Path(task["execution_worktree_path"])
+            task["status"] = "needs_resume"
+            task["next_prompt"] = "continue"
+            task["thread_id"] = "thread-1"
+            task["execution_worktree_status"] = "retained"
+            save_task(config, task)
+            seen_cwds = []
+
+            def fake_run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
+                seen_cwds.append(Path(task["cwd"]))
+                return CodexResult(
+                    returncode=0,
+                    log_path=root / "attempt.jsonl",
+                    command_kind="resume",
+                    resume_id_used="thread-1",
+                    stderr="",
+                    events=[],
+                    final_response={
+                        "task_id": "task-resume-worktree",
+                        "status": "completed",
+                        "summary": "done",
+                        "next_prompt": "",
+                        "changed_files": [],
+                        "verification": [],
+                    },
+                    session_id="thread-1",
+                    thread_id="thread-1",
+                    rate_limited=False,
+                    rate_limit_markers=[],
+                )
+
+            with patch.object(runner_module, "run_codex", fake_run_codex):
+                outcome = run_next(config)
+
+            task = load_task(config, "task-resume-worktree")
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual([worktree_path], seen_cwds)
+            self.assertEqual("retained", task["execution_worktree_status"])
+            self.assertEqual(1, task["resume_count"])
 
     def test_run_next_stores_needs_resume_next_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

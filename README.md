@@ -245,7 +245,7 @@ PYTHONPATH=src python3 -m codex_batch_runner apply-plan queue-plan.json --apply
 
 실제 queue 변경은 `--apply`를 명시한 경우에만 수행됩니다. Apply mode는 runner와 같은 queue lock을 잡은 뒤 같은 validation을 다시 실행하고, 검증이 통과한 경우에만 제한된 field(`title`, `description`, `category`, `labels`, `depends_on`, `status`)를 atomic JSON write로 갱신합니다. `running` task 대상 mutation과 `status=running` 전환은 거부합니다. 적용된 변경은 sanitized `task_mutated` event로 기록하고, 변경이 있었을 때 configured `post_mutation_trigger_command`를 실행합니다.
 
-task별 git worktree 준비와 정리는 명시적 명령으로만 수행됩니다. 이 단계는 `run-next`와 연결되어 있지 않으므로 Codex를 호출하지 않고, 기존 실행 동작도 바꾸지 않습니다.
+task별 git worktree 준비와 정리는 명시적 명령으로도 수행할 수 있습니다. `worktree_mode=task`에서는 `run-next`가 실행 가능한 task를 처리하기 직전에 같은 prepare/recovery guard를 적용하고, 통과한 경우 task worktree를 Codex 실행 `cwd`로 사용합니다. `worktree_mode=disabled`는 기존처럼 task의 원래 `cwd`에서 실행합니다.
 
 ```bash
 PYTHONPATH=src python3 -m codex_batch_runner worktree prepare task-a --dry-run
@@ -254,7 +254,7 @@ PYTHONPATH=src python3 -m codex_batch_runner worktree cleanup task-a --dry-run
 PYTHONPATH=src python3 -m codex_batch_runner worktree cleanup task-a --apply
 ```
 
-`worktree prepare --apply`는 `worktree_mode=task`일 때만 task branch와 worktree를 만들거나 기존 연결 상태를 재확인하고, runner와 같은 queue lock 아래에서 task metadata를 갱신합니다. 기본 branch 이름은 `cbr/<task-id>`를 Git ref 규칙에 맞게 sanitize한 값입니다. `worktree cleanup --apply`는 `completed + accepted` 또는 `archived` task만 대상으로 하며, configured `worktree_root` 아래에 있고 Git worktree registry와 task metadata가 일치하는 worktree만 제거합니다. Local branch는 삭제하지 않습니다. Existing branch/worktree가 다른 task와 연결된 것으로 보이거나 path가 registry와 맞지 않으면 `recovery_required`로 보고하고 자동 정리하지 않습니다.
+`worktree prepare --apply`는 `worktree_mode=task`일 때만 task branch와 worktree를 만들거나 기존 연결 상태를 재확인하고, runner와 같은 queue lock 아래에서 task metadata를 갱신합니다. 기본 branch 이름은 `cbr/<task-id>`를 Git ref 규칙에 맞게 sanitize한 값입니다. `run-next`도 같은 규칙으로 worktree를 만들거나 재사용하며, prepare/recovery check가 실패하면 Codex를 호출하지 않고 task를 `failed`로 표시해 운영자 점검을 요구합니다. `needs_resume` task는 기존 retained worktree metadata가 유효할 때만 같은 worktree에서 resume하며, metadata가 없거나 stale이면 새 worktree를 조용히 만들지 않습니다. `worktree cleanup --apply`는 `completed + accepted` 또는 `archived` task만 대상으로 하며, configured `worktree_root` 아래에 있고 Git worktree registry와 task metadata가 일치하는 worktree만 제거합니다. Local branch는 삭제하지 않습니다. Existing branch/worktree가 다른 task와 연결된 것으로 보이거나 path가 registry와 맞지 않으면 `recovery_required`로 보고하고 자동 정리하지 않습니다.
 
 ## 설정
 
@@ -281,7 +281,7 @@ Optional `notifier_cursor_state_paths` can point to local notifier cursor state 
 
 `last_processed_event_file` may be used instead of `current_event_file` when a notifier records only whole-file progress. Cursor event file paths may be absolute or relative to `event_dir`, but they must resolve inside configured `event_dir`. If a configured cursor state file is missing, malformed, unreadable, or references an event file outside `event_dir`, `prune` reports a warning and skips old event JSONL deletion rather than failing the whole command.
 
-Optional git worktree mode is disabled by default. Enabling it only allows explicit `worktree prepare`/`cleanup` commands in the current phase; `run-next` still executes tasks in their original `cwd`. 이 roadmap의 목적은 completed-but-unreviewed 결과와 독립적인 후속 작업이 main worktree를 더럽히거나 서로 다른 task state를 섞지 않고 공존할 수 있게 하는 것입니다. 기본 dependency readiness가 throughput을 우선하는 동안, worktree 격리는 검토 대기 결과와 새 작업을 분리해 운영 위험을 줄이는 보완 장치로 설계합니다.
+Optional git worktree mode is disabled by default. When enabled with `worktree_mode=task`, `run-next` prepares or reuses a task-specific worktree and runs Codex with that worktree as the process `cwd`; task metadata still preserves the original task `cwd` separately from `execution_worktree_path`. 이 목적은 completed-but-unreviewed 결과와 독립적인 후속 작업이 main worktree를 더럽히거나 서로 다른 task state를 섞지 않고 공존할 수 있게 하는 것입니다. 기본 dependency readiness가 throughput을 우선하는 동안, worktree 격리는 검토 대기 결과와 새 작업을 분리해 운영 위험을 줄이는 보완 장치로 설계합니다.
 
 ```json
 {
@@ -390,7 +390,7 @@ Codex를 호출하지 않는 조건:
 
 task와 state 파일은 같은 디렉터리에 임시 파일을 쓴 뒤 `os.replace`로 교체합니다. Codex JSONL 로그는 attempt별 파일로 저장합니다.
 
-Core state-changing commands also append sanitized audit events. Initial event types include `task_created`, `task_started`, `task_completed`, `task_failed`, `task_needs_resume`, `task_blocked_user`, `task_reviewed`, `task_resolved`, `task_archived`, `task_startup_stalled`, `task_worktree_prepared`, `task_worktree_cleaned`, `cooldown_updated`, and `rate_limit_detected`. Event payloads are intentionally small and redact prompt text, raw transcripts, session/thread ids, secrets, credentials, and token-like fields. Event write failures are warnings; queue operations continue to rely on canonical task JSON files.
+Core state-changing commands also append sanitized audit events. Initial event types include `task_created`, `task_started`, `task_completed`, `task_failed`, `task_needs_resume`, `task_blocked_user`, `task_reviewed`, `task_resolved`, `task_archived`, `task_startup_stalled`, `task_worktree_prepared`, `task_worktree_cleaned`, `cooldown_updated`, and `rate_limit_detected`. Event payloads are intentionally small and redact prompt text, raw transcripts, session/thread ids, secrets, credentials, and token-like fields. Event write failures are warnings; queue operations continue to rely on canonical task JSON files. In `worktree_mode=task`, `task_started`/terminal task events may include sanitized worktree execution metadata.
 
 `prune`은 삭제 동작이 있는 명령이므로 기본값이 비파괴 dry-run입니다. `--apply`가 없으면 파일을 삭제하지 않습니다. `--apply`가 있어도 resolved path가 configured `queue_dir`, `log_dir`, 또는 `event_dir` 밖에 있는 파일은 삭제하지 않으며, report에 blocked 항목으로 남깁니다. Event pruning only considers `*.jsonl` files under `event_dir`; notifier cursor/state files and other non-JSONL files are skipped. When notifier cursor state is configured, old event files that may not be fully consumed are reported with a skipped reason instead of being deleted.
 

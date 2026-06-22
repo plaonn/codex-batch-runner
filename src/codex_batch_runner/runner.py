@@ -18,6 +18,7 @@ from .review_next import build_review_next_apply_report_locked
 from .state import in_global_cooldown, mark_rate_limit, mark_run, mark_success
 from .timeutil import add_seconds, iso_now, parse_time
 from .triggers import run_post_run_trigger
+from .worktree import prepare_task_worktree_for_run_locked
 
 
 @dataclass
@@ -70,6 +71,17 @@ def run_next(config: Config) -> RunOutcome:
 
         started_at = iso_now()
         resume_requested = task.get("status") == "needs_resume"
+        execution_cwd: Path | None = None
+        if config.worktree_mode == "task":
+            worktree_result = prepare_task_worktree_for_run_locked(config, task)
+            task = worktree_result["task"]
+            if worktree_result["report"].get("errors"):
+                mark_worktree_prepare_failure(config, task, worktree_result["report"])
+                mark_run(config, task["id"])
+                outcome = RunOutcome(status=task["status"], message="worktree preparation failed", task_id=task["id"])
+                return outcome
+            execution_cwd = worktree_result["worktree_path"]
+
         resume_unavailable = bool(resume_requested and task.get("next_prompt") and not resume_id(task))
         prompt = build_prompt(task, resume_unavailable=resume_unavailable)
         task["status"] = "running"
@@ -81,6 +93,9 @@ def run_next(config: Config) -> RunOutcome:
             task["resume_unavailable_attempts"] = int(task.get("resume_unavailable_attempts", 0)) + 1
         task["attempts"] = int(task.get("attempts", 0)) + 1
         task["run_count"] = int(task.get("run_count", 0)) + 1
+        if execution_cwd:
+            task["execution_worktree_status"] = "running"
+            task["execution_started_at"] = started_at
         save_task(config, task)
         emit_task_event(
             config,
@@ -97,8 +112,14 @@ def run_next(config: Config) -> RunOutcome:
         )
         mark_run(config, task["id"])
 
-        result = run_codex(config, task, prompt, task["attempts"])
-        apply_codex_result(config, task, result)
+        codex_task = dict(task)
+        if execution_cwd:
+            codex_task["cwd"] = str(execution_cwd)
+        result = run_codex(config, codex_task, prompt, task["attempts"])
+        if execution_cwd:
+            task["execution_worktree_status"] = "retained"
+            task["execution_retained_at"] = iso_now()
+        apply_codex_result(config, task, result, git_status_cwd=execution_cwd)
         outcome = RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
         return outcome
     finally:
@@ -125,7 +146,7 @@ def should_trigger_post_review_wake(config: Config) -> bool:
     return select_next_task(config) is not None
 
 
-def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
+def apply_codex_result(config: Config, task: dict, result: CodexResult, *, git_status_cwd: Path | None = None) -> None:
     task.setdefault("log_paths", []).append(str(result.log_path))
     record_last_run(task, result)
     if result.command_kind == "resume":
@@ -178,7 +199,7 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
         return
 
     task["last_result"] = final_response
-    git_status = inspect_task_git_status(task.get("cwd"))
+    git_status = inspect_task_git_status(str(git_status_cwd) if git_status_cwd else task.get("cwd"))
     if git_status:
         task["git_status"] = git_status
     else:
@@ -251,6 +272,37 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult) -> None:
         task,
         source="run-next",
         summary=payload.get("summary_excerpt") or str(task.get("last_error") or f"failed task {task.get('id')}"),
+        payload=payload,
+    )
+
+
+def mark_worktree_prepare_failure(config: Config, task: dict, report: dict[str, Any]) -> None:
+    errors = [str(error) for error in report.get("errors") or []]
+    reason = "; ".join(errors) if errors else "worktree preparation failed"
+    task["status"] = "failed"
+    task["last_error"] = reason
+    task["failure_count"] = int(task.get("failure_count", 0)) + 1
+    classification = report.get("classification")
+    if task.get("execution_mode") == "git_worktree" or isinstance(classification, dict):
+        task["execution_worktree_status"] = "recovery_required"
+        task["execution_recovery_required_at"] = iso_now()
+    save_task(config, task)
+    payload = transition_payload(
+        task,
+        failure_count=task.get("failure_count"),
+        reason=reason,
+        worktree_prepare_report={
+            "classification": classification,
+            "errors": errors,
+            "warnings": report.get("warnings") or [],
+        },
+    )
+    emit_task_event(
+        config,
+        "task_failed",
+        task,
+        source="run-next",
+        summary=reason,
         payload=payload,
     )
 
