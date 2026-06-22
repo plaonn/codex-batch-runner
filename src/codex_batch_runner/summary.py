@@ -28,6 +28,7 @@ def render_task_summary(
         lines.append(f"created_by: {task.get('created_by')}")
     if task.get("cwd"):
         lines.append(f"cwd: {task.get('cwd')}")
+    append_execution_profile_summary(lines, task)
     append_counters(lines, task)
     append_chain_summary(lines, task)
     if task.get("cooldown_until") or is_in_cooldown(task):
@@ -127,6 +128,19 @@ def append_chain_summary(lines: list[str], task: dict) -> None:
             fields.append(f"{key}={sanitize(value)}")
     if fields:
         lines.append("chain: " + ", ".join(fields))
+
+
+def append_execution_profile_summary(lines: list[str], task: dict) -> None:
+    fields = []
+    for key in ("execution_profile", "model", "codex_profile", "token_budget_hint"):
+        value = task.get(key)
+        if value not in (None, "", [], {}):
+            fields.append(f"{key}={sanitize(value)}")
+    overrides = task.get("codex_config_overrides")
+    if isinstance(overrides, dict) and overrides:
+        fields.append("codex_config_overrides=" + ",".join(sorted(str(key) for key in overrides)))
+    if fields:
+        lines.append("execution: " + ", ".join(fields))
 
 
 def meaningful_chain_value(key: str, value: object) -> bool:

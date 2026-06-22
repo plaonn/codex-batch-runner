@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .execution_profiles import execution_profiles_value, optional_profile_name
 from .fs import read_json
 
 
@@ -42,6 +43,9 @@ class Config:
     codex_total_runtime_timeout_seconds: int | None = None
     codex_watchdog_grace_seconds: int = 5
     codex_startup_stall_cooldown_seconds: int = 60
+    default_execution_profile: str | None = None
+    review_execution_profile: str | None = None
+    execution_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, config_path: str | None = None, root: Path | None = None) -> "Config":
@@ -59,6 +63,7 @@ class Config:
         log_dir = path_value("log_dir", ".codex-batch-runner/logs")
         event_dir = path_value("event_dir", str(log_dir.parent / "events"))
         notifier_cursor_state_paths = path_list_value("notifier_cursor_state_paths", data, base)
+        execution_profiles = execution_profiles_value(data.get("execution_profiles", {}))
 
         return cls(
             root=base,
@@ -133,6 +138,17 @@ class Config:
             codex_total_runtime_timeout_seconds=optional_int_value(data.get("codex_total_runtime_timeout_seconds")),
             codex_watchdog_grace_seconds=int(data.get("codex_watchdog_grace_seconds", 5)),
             codex_startup_stall_cooldown_seconds=int(data.get("codex_startup_stall_cooldown_seconds", 60)),
+            default_execution_profile=optional_profile_name(
+                "default_execution_profile",
+                data.get("default_execution_profile"),
+                execution_profiles,
+            ),
+            review_execution_profile=optional_profile_name(
+                "review_execution_profile",
+                data.get("review_execution_profile"),
+                execution_profiles,
+            ),
+            execution_profiles=execution_profiles,
         )
 
 

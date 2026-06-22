@@ -131,6 +131,22 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(0, second["attempts"])
             self.assertEqual("unlocked\n", marker.read_text(encoding="utf-8"))
 
+    def test_invalid_task_execution_profile_fails_before_codex_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            task = create_task(config, "work", tmp, task_id="bad-profile")
+            task["execution_profile"] = "missing"
+            save_task(config, task)
+
+            with patch("codex_batch_runner.codex.subprocess.Popen", side_effect=AssertionError("unexpected Codex call")):
+                outcome = run_next(config)
+
+            loaded = load_task(config, "bad-profile")
+            self.assertEqual("failed", outcome.status)
+            self.assertEqual("failed", loaded["status"])
+            self.assertEqual(0, loaded["attempts"])
+            self.assertIn("invalid execution profile", loaded["last_error"])
+
     def test_run_next_does_not_auto_review_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"

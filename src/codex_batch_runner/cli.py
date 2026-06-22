@@ -12,6 +12,7 @@ from .config import Config
 from .cooldown import MANUAL_COOLDOWN_SAFETY_OFFSET_SECONDS, cooldown_status, format_duration, parse_manual_cooldown
 from .doctor import build_doctor_report, render_doctor_report
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write_event_nonfatal
+from .execution_profiles import config_overrides_value
 from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
 from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
@@ -74,6 +75,17 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument("--created-by", help="task creator")
     enqueue.add_argument("--title", help="human-readable task title")
     enqueue.add_argument("--description", help="optional human-readable task description")
+    enqueue.add_argument("--profile", dest="execution_profile", help="cbr execution profile name")
+    enqueue.add_argument("--model", help="Codex model override")
+    enqueue.add_argument("--codex-profile", help="Codex CONFIG_PROFILE_V2 override")
+    enqueue.add_argument(
+        "--config-override",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="allowlisted Codex -c config override, repeatable",
+    )
+    enqueue.add_argument("--token-budget-hint", help="non-enforced token or budget hint")
     enqueue.set_defaults(func=cmd_enqueue)
 
     list_cmd = sub.add_parser("list", help="list tasks")
@@ -273,10 +285,25 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         created_by=args.created_by,
         title=args.title,
         description=args.description,
+        execution_profile=args.execution_profile,
+        model=args.model,
+        codex_profile=args.codex_profile,
+        codex_config_overrides=parse_config_overrides(args.config_override),
+        token_budget_hint=args.token_budget_hint,
     )
     run_post_mutation_trigger(config)
     print(task["id"])
     return 0
+
+
+def parse_config_overrides(items: list[str]) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError("--config-override must use KEY=VALUE")
+        key, value = item.split("=", 1)
+        overrides[key] = value
+    return config_overrides_value("codex_config_overrides", overrides)
 
 
 def cmd_list(config: Config, args: argparse.Namespace) -> int:
@@ -494,6 +521,9 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
         notes.append("last error: " + one_line(task.get("last_error")))
     if task.get("status") == "running":
         notes.extend(running_notes(task, config))
+    profile_note = execution_profile_note(task)
+    if profile_note:
+        notes.append(profile_note)
     if task.get("resolution"):
         notes.append("resolution: " + str(task.get("resolution")))
     if task.get("status") == "completed":
@@ -512,6 +542,17 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
         if config.auto_review_mechanical_accept and needs_review(task):
             notes.append("mechanical auto-review enabled")
     return notes or ["-"]
+
+
+def execution_profile_note(task: dict) -> str:
+    parts = []
+    if task.get("execution_profile"):
+        parts.append("profile=" + one_line(task.get("execution_profile")))
+    if task.get("model"):
+        parts.append("model=" + one_line(task.get("model")))
+    if task.get("codex_profile"):
+        parts.append("codex_profile=" + one_line(task.get("codex_profile")))
+    return " ".join(parts)
 
 
 def chain_note_cell(task: dict) -> str:

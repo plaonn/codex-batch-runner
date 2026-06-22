@@ -66,6 +66,20 @@ prompt 파일로 등록:
 PYTHONPATH=src python3 -m codex_batch_runner enqueue --cwd /path/to/repo --prompt-file task.md
 ```
 
+실행 비용 힌트를 함께 지정할 수 있습니다. `--profile`은 config의 `execution_profiles`에 정의된 cbr 실행 profile 이름이고, `--model`과 `--codex-profile`은 해당 task에만 적용되는 Codex CLI override입니다.
+
+```bash
+PYTHONPATH=src python3 -m codex_batch_runner enqueue \
+  --cwd /path/to/repo \
+  --profile small \
+  --model gpt-5-small \
+  --codex-profile batch-small \
+  --config-override model_reasoning_effort=low \
+  --prompt-file task.md
+```
+
+Profile은 비용 힌트이며 correctness를 낮추기 위한 장치가 아닙니다. `--config-override`는 allowlisted Codex config key만 허용하며, 임의의 `-c key=value` 주입은 허용하지 않습니다. 현재 allowlist는 `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`입니다.
+
 의존성 있는 작업 등록:
 
 ```bash
@@ -87,7 +101,7 @@ PYTHONPATH=src python3 -m codex_batch_runner list --verbose
 PYTHONPATH=src python3 -m codex_batch_runner list --color=always
 ```
 
-기본 `list` 출력은 운영자가 봐야 할 남은 작업 중심의 compact human list입니다. `completed + accepted`, `archived`, resolution이 기록된 `failed`/`blocked_user` task는 기본 출력에서 숨기고, 전체 이력이 필요하면 `--all`을 사용합니다. 첫 줄은 `PROJECT`, `ID`, `STATUS`, `ATT`, `DEPS`, `NOTE`를 표시합니다. 각 task는 최소 두 줄로 표시하며 첫 줄에는 project id, task id, status, attempts, 첫 dependency, 첫 note segment를 표시하고, 둘째 줄은 왼쪽에서 바로 사람이 읽는 title을 prefix 없이 표시합니다. `DEPS`는 dependency title이 아니라 task id를 표시하며, dependency가 여러 개이면 한 줄에 하나씩 이어지는 continuation row에 세로로 표시합니다. 완료되어 현재 정책상 만족된 dependency도 숨기지 않으며, 색이 꺼진 출력에서는 `dep-id (done)`처럼 최소 텍스트 표시를 붙입니다. Dependency가 없으면 첫 줄에 `-`를 표시합니다. `NOTE`는 cooldown, dependency blocked 상태, review 상태, bounded review/fix chain 상태, resolution, failed error, startup stall evidence, running runtime/progress 같은 운영 정보를 사람이 읽는 segment로 표시하고, segment가 여러 개이면 continuation row의 `NOTE` 열에 이어서 표시합니다. 정보가 없으면 `-`를 표시합니다. 스크립트에서는 사람이 읽는 list 대신 `--json` 출력을 사용해야 합니다.
+기본 `list` 출력은 운영자가 봐야 할 남은 작업 중심의 compact human list입니다. `completed + accepted`, `archived`, resolution이 기록된 `failed`/`blocked_user` task는 기본 출력에서 숨기고, 전체 이력이 필요하면 `--all`을 사용합니다. 첫 줄은 `PROJECT`, `ID`, `STATUS`, `ATT`, `DEPS`, `NOTE`를 표시합니다. 각 task는 최소 두 줄로 표시하며 첫 줄에는 project id, task id, status, attempts, 첫 dependency, 첫 note segment를 표시하고, 둘째 줄은 왼쪽에서 바로 사람이 읽는 title을 prefix 없이 표시합니다. `DEPS`는 dependency title이 아니라 task id를 표시하며, dependency가 여러 개이면 한 줄에 하나씩 이어지는 continuation row에 세로로 표시합니다. 완료되어 현재 정책상 만족된 dependency도 숨기지 않으며, 색이 꺼진 출력에서는 `dep-id (done)`처럼 최소 텍스트 표시를 붙입니다. Dependency가 없으면 첫 줄에 `-`를 표시합니다. `NOTE`는 cooldown, dependency blocked 상태, review 상태, bounded review/fix chain 상태, resolution, failed error, startup stall evidence, running runtime/progress, explicit execution profile metadata 같은 운영 정보를 사람이 읽는 segment로 표시하고, segment가 여러 개이면 continuation row의 `NOTE` 열에 이어서 표시합니다. 정보가 없으면 `-`를 표시합니다. 스크립트에서는 사람이 읽는 list 대신 `--json` 출력을 사용해야 합니다.
 
 `STATUS`는 운영자가 현재 실행 가능 여부를 판단할 수 있는 effective status입니다. 내부 실행 상태를 기본으로 하되, raw status가 `runnable` 또는 `needs_resume`이어도 dependency readiness 정책상 아직 선택될 수 없는 task는 `blocked_dependency`로 표시합니다. `NOTE`와 `DEPS`는 어떤 dependency가 막고 있는지 계속 표시하며, `dependency_requires_accepted_review=true`일 때 completed-but-unaccepted dependency는 `dep:not_accepted`처럼 구분합니다. 그 밖에 `completed + unreviewed`는 `awaiting_review`, `completed + rejected`는 `review_failed`, `completed + needs_followup`은 `needs_followup`, resolution이 기록된 failed/blocked task는 `resolved`로 표시합니다. Raw task status는 task JSON과 `list --json`에서 그대로 유지됩니다. Startup stall evidence는 현재 재시도 대상이면 retry evidence로, 이미 완료되었거나 해결된 task이면 history로 `NOTE`에 표시해 과거 이력이 현재 장애처럼 보이지 않게 합니다. `running` task는 `NOTE`에 `running for 12m` 또는 `running for 1h 04m`처럼 시작 후 경과 시간을 표시하고, progress metadata가 있으면 `last event 35s ago` 또는 `no progress 9m` 같은 최근 활동 상태도 함께 표시합니다.
 
@@ -220,7 +234,7 @@ PYTHONPATH=src python3 -m codex_batch_runner doctor
 PYTHONPATH=src python3 -m codex_batch_runner doctor --json
 ```
 
-`doctor`는 config/runtime path, event directory, configured Codex executable path, resolved executable path, executable availability, bounded `codex --version` output, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts, 자동 검토 enable 상태와 reviewable completed task 수, startup/no-progress stall evidence를 점검합니다. Lock metadata에 현재 host의 pid가 있으면 pid와 liveness도 표시합니다. Version 확인은 configured executable에 `--version`만 붙여 짧은 timeout으로 실행하며, `codex exec`를 호출하거나 network operation을 수행한다고 가정하지 않습니다. Version command가 실패하거나 timeout되면 warning으로 보고하지만 doctor 실패로 취급하지 않습니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation을 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
+`doctor`는 config/runtime path, event directory, configured Codex executable path, resolved executable path, executable availability, bounded `codex --version` output, execution profile 이름과 allowlisted override key, global cooldown, active lock, task status counts, review/resolution/cooldown/runnable counts, 자동 검토 enable 상태와 reviewable completed task 수, startup/no-progress stall evidence를 점검합니다. Lock metadata에 현재 host의 pid가 있으면 pid와 liveness도 표시합니다. Version 확인은 configured executable에 `--version`만 붙여 짧은 timeout으로 실행하며, `codex exec`를 호출하거나 network operation을 수행한다고 가정하지 않습니다. Version command가 실패하거나 timeout되면 warning으로 보고하지만 doctor 실패로 취급하지 않습니다. configured/current project root가 git repository 안에 있으면 branch, dirty status, upstream 또는 local `origin/main` 대비 ahead/behind count도 표시합니다. git metadata는 local repository state만 읽고 network operation을 실행하지 않습니다. 다른 프로젝트에서 상세 transcript를 열기 전에 queue 상태를 낮은 비용으로 확인하는 용도입니다. error check가 있으면 non-zero로 종료하고, warning은 종료 코드를 실패로 만들지 않습니다.
 
 오래된 완료/보관 task 정리 후보 확인:
 
@@ -291,6 +305,39 @@ Optional git worktree mode is disabled by default. When enabled with `worktree_m
 ```
 
 `worktree_root` may be relative to the active runner root. Public docs and examples should keep this path generic and local-only.
+
+Optional execution profiles are disabled by default. `default_execution_profile` applies to implementation tasks that do not specify `execution_profile`; `review_execution_profile` applies to reviewer Codex calls. A task-level `execution_profile` selects a named profile, and task-level `model`, `codex_profile`, or `codex_config_overrides` override values from that profile. If `default_execution_profile` is set and a task category or label is one of `runner`, `lock`, `resume`, `worktree`, `reviewer-codex`, `queue-mutation`, or `document`, cbr uses a configured `deep` profile by default when it exists.
+
+```json
+{
+  "default_execution_profile": "normal",
+  "review_execution_profile": "review",
+  "execution_profiles": {
+    "small": {
+      "model": "gpt-5-small",
+      "codex_profile": "batch-small",
+      "config_overrides": {
+        "model_reasoning_effort": "low"
+      },
+      "token_budget_hint": "small documentation or test-only task"
+    },
+    "normal": {
+      "model": "gpt-5",
+      "codex_profile": "batch-normal"
+    },
+    "deep": {
+      "model": "gpt-5",
+      "codex_profile": "batch-deep"
+    },
+    "review": {
+      "model": "gpt-5",
+      "codex_profile": "batch-review"
+    }
+  }
+}
+```
+
+Profile options are inserted into both `codex_command` and `codex_resume_command` after `codex exec`, preserving `resume {session_id}` ordering. If no execution profile or task override is configured, command construction is unchanged.
 
 Optional `post_mutation_trigger_command` can run a generic scheduler wake-up hook after successful queue mutations and after `run-next` finishes one task when another task is eligible to run. The value is an argv list, not a shell string, so it is not shell-expanded. It is disabled by default.
 

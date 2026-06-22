@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
+from codex_batch_runner.config import Config
 from codex_batch_runner.codex import (
     extract_final_response,
     first_recursive_value,
     format_command,
+    format_command_with_profile,
     is_meaningful_event,
     should_use_resume,
 )
@@ -64,6 +68,110 @@ class CodexParserTests(unittest.TestCase):
         command = format_command(["codex", "resume", "{session_id}"], {"thread_id": "thread-123"}, "continue")
 
         self.assertEqual(["codex", "resume", "thread-123", "continue"], command)
+
+    def test_format_command_with_profile_is_noop_without_profile_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+
+            command = format_command_with_profile(["codex", "exec", "--json"], {"id": "task-1"}, "prompt", config)
+
+            self.assertEqual(["codex", "exec", "--json", "prompt"], command)
+
+    def test_format_command_injects_profile_options_after_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            config = Config(
+                **{
+                    **config.__dict__,
+                    "default_execution_profile": "normal",
+                    "execution_profiles": {
+                        "normal": {
+                            "model": "gpt-5-small",
+                            "codex_profile": "batch-small",
+                            "config_overrides": {"model_reasoning_effort": "low"},
+                        }
+                    },
+                }
+            )
+
+            command = format_command_with_profile(
+                ["codex", "exec", "--sandbox", "workspace-write", "--json"],
+                {"id": "task-1"},
+                "prompt",
+                config,
+            )
+
+            self.assertEqual(
+                [
+                    "codex",
+                    "exec",
+                    "--model",
+                    "gpt-5-small",
+                    "--profile",
+                    "batch-small",
+                    "-c",
+                    "model_reasoning_effort=low",
+                    "--sandbox",
+                    "workspace-write",
+                    "--json",
+                    "prompt",
+                ],
+                command,
+            )
+
+    def test_resume_command_preserves_resume_session_order_with_profile_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            config = Config(
+                **{
+                    **config.__dict__,
+                    "default_execution_profile": "normal",
+                    "execution_profiles": {"normal": {"model": "gpt-5-small"}},
+                }
+            )
+
+            command = format_command_with_profile(
+                ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"],
+                {"id": "task-1", "session_id": "session-123"},
+                "continue",
+                config,
+            )
+
+            self.assertEqual(
+                [
+                    "codex",
+                    "exec",
+                    "--model",
+                    "gpt-5-small",
+                    "--sandbox",
+                    "workspace-write",
+                    "resume",
+                    "session-123",
+                    "--json",
+                    "continue",
+                ],
+                command,
+            )
+
+    def test_task_model_and_profile_override_config_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            config = Config(
+                **{
+                    **config.__dict__,
+                    "default_execution_profile": "normal",
+                    "execution_profiles": {"normal": {"model": "gpt-5-small", "codex_profile": "batch-small"}},
+                }
+            )
+
+            command = format_command_with_profile(
+                ["codex", "exec"],
+                {"id": "task-1", "model": "gpt-5", "codex_profile": "batch-deep"},
+                "prompt",
+                config,
+            )
+
+            self.assertEqual(["codex", "exec", "--model", "gpt-5", "--profile", "batch-deep", "prompt"], command)
 
     def test_should_use_resume_after_task_is_marked_running(self) -> None:
         task = {"status": "running", "resume_requested": True, "thread_id": "thread-123"}

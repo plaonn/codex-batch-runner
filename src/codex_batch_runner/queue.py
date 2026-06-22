@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .config import Config
 from .events import emit_task_event, transition_payload
+from .execution_profiles import task_execution_metadata
 from .fs import ensure_dir, read_json, write_json_atomic
 from .timeutil import iso_now, parse_time, utc_now
 
@@ -174,6 +175,11 @@ def create_task(
     created_by: str | None = None,
     title: str | None = None,
     description: str | None = None,
+    execution_profile: str | None = None,
+    model: str | None = None,
+    codex_profile: str | None = None,
+    codex_config_overrides: dict[str, str] | None = None,
+    token_budget_hint: str | None = None,
 ) -> dict:
     ensure_dir(config.queue_dir)
     now = iso_now()
@@ -183,6 +189,8 @@ def create_task(
     if not task_id:
         stamp = now.replace(":", "").replace("+", "Z").replace(".", "-")
         task_id = slugify(f"task-{stamp}")
+    if execution_profile and execution_profile not in config.execution_profiles:
+        raise ValueError(f"unknown execution profile: {execution_profile}")
     path = task_path(config, task_id)
     if path.exists():
         raise FileExistsError(f"task already exists: {task_id}")
@@ -228,6 +236,15 @@ def create_task(
         "completed_at": None,
         "log_paths": [],
     }
+    task.update(
+        task_execution_metadata(
+            execution_profile=execution_profile,
+            model=model,
+            codex_profile=codex_profile,
+            config_overrides=codex_config_overrides,
+            token_budget_hint=token_budget_hint,
+        )
+    )
     write_json_atomic(path, task)
     emit_task_event(
         config,

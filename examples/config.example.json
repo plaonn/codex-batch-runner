@@ -6,6 +6,30 @@
   "state_file": ".codex-batch-runner/state.json",
   "codex_command": ["codex", "exec", "--sandbox", "workspace-write", "--json"],
   "codex_resume_command": ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"],
+  "default_execution_profile": "normal",
+  "review_execution_profile": "review",
+  "execution_profiles": {
+    "small": {
+      "model": "gpt-5-small",
+      "codex_profile": "batch-small",
+      "config_overrides": {
+        "model_reasoning_effort": "low"
+      },
+      "token_budget_hint": "small documentation or test-only task"
+    },
+    "normal": {
+      "model": "gpt-5",
+      "codex_profile": "batch-normal"
+    },
+    "deep": {
+      "model": "gpt-5",
+      "codex_profile": "batch-deep"
+    },
+    "review": {
+      "model": "gpt-5",
+      "codex_profile": "batch-review"
+    }
+  },
   "manual_cooldown_wake_scheduler": "disabled",
   "manual_cooldown_wake_command": [],
   "auto_review_mechanical_accept": false,

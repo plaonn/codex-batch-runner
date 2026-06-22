@@ -41,6 +41,7 @@ def write_config(
     auto_review_codex_max_calls_per_run: int = 0,
     auto_review_codex_max_fix_loops_per_task: int = 0,
     codex_command: list[str] | None = None,
+    extra: dict | None = None,
 ) -> Path:
     root = Path(tmp)
     data = {
@@ -57,6 +58,8 @@ def write_config(
     }
     if codex_command is not None:
         data["codex_command"] = codex_command
+    if extra:
+        data.update(extra)
     if trigger_command is not None:
         data["post_mutation_trigger_command"] = trigger_command
     if manual_cooldown_wake_scheduler is not None:
@@ -579,6 +582,75 @@ class CliTests(unittest.TestCase):
             self.assertEqual("metadata\n", output)
             self.assertEqual("Improve list output", task["title"])
             self.assertEqual("Make central queue triage easier.", task["description"])
+
+    def test_enqueue_records_execution_profile_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                extra={
+                    "execution_profiles": {
+                        "small": {
+                            "model": "gpt-5-small",
+                            "config_overrides": {"model_reasoning_effort": "low"},
+                        }
+                    }
+                },
+            )
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "enqueue",
+                    "--cwd",
+                    tmp,
+                    "--id",
+                    "profiled",
+                    "--profile",
+                    "small",
+                    "--model",
+                    "gpt-5",
+                    "--codex-profile",
+                    "batch-normal",
+                    "--config-override",
+                    "model_reasoning_effort=medium",
+                    "--token-budget-hint",
+                    "under 20k tokens",
+                    "--prompt",
+                    "work",
+                ]
+            )
+            task = load_task(Config.load(str(config_path)), "profiled")
+
+            self.assertEqual(0, code)
+            self.assertEqual("profiled\n", output)
+            self.assertEqual("small", task["execution_profile"])
+            self.assertEqual("gpt-5", task["model"])
+            self.assertEqual("batch-normal", task["codex_profile"])
+            self.assertEqual({"model_reasoning_effort": "medium"}, task["codex_config_overrides"])
+            self.assertEqual("under 20k tokens", task["token_budget_hint"])
+
+    def test_enqueue_rejects_unallowlisted_config_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output, stderr = run_cli_with_stderr(
+                [
+                    "--config",
+                    str(config_path),
+                    "enqueue",
+                    "--cwd",
+                    tmp,
+                    "--config-override",
+                    "danger=true",
+                    "--prompt",
+                    "work",
+                ]
+            )
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("is not allowlisted", stderr)
 
     def test_list_filters_by_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2178,6 +2250,32 @@ class CliTests(unittest.TestCase):
             self.assertIn("- python3 -m unittest", output)
             self.assertIn("## logs", output)
             self.assertNotIn("private-value", output)
+
+    def test_list_and_summary_show_execution_profile_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
+            config = Config.load(str(config_path))
+            create_task(
+                config,
+                "work",
+                tmp,
+                task_id="profiled",
+                project_id="project-a",
+                execution_profile="small",
+                model="gpt-5-small",
+                codex_profile="batch-small",
+            )
+
+            list_code, list_output = run_cli(["--config", str(config_path), "list", "--color", "never"])
+            summary_code, summary_output = run_cli(["--config", str(config_path), "summary", "profiled"])
+
+            self.assertEqual(0, list_code)
+            self.assertIn("profile=small model=gpt-5-small codex_profile=batch-small", list_output)
+            self.assertEqual(0, summary_code)
+            self.assertIn(
+                "execution: execution_profile=small, model=gpt-5-small, codex_profile=batch-small",
+                summary_output,
+            )
 
     def test_summary_and_list_show_startup_stall_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

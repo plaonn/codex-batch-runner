@@ -178,6 +178,56 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(2, config.codex_watchdog_grace_seconds)
             self.assertEqual(120, config.codex_startup_stall_cooldown_seconds)
 
+    def test_execution_profiles_default_to_disabled_and_can_be_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            default_config = Config.load(root=Path(tmp) / "default")
+            self.assertIsNone(default_config.default_execution_profile)
+            self.assertIsNone(default_config.review_execution_profile)
+            self.assertEqual({}, default_config.execution_profiles)
+
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "default_execution_profile": "normal",
+                        "review_execution_profile": "review",
+                        "execution_profiles": {
+                            "normal": {
+                                "model": "gpt-5-small",
+                                "codex_profile": "batch-small",
+                                "config_overrides": {"model_reasoning_effort": "low"},
+                                "token_budget_hint": "small",
+                            },
+                            "review": {"model": "gpt-5"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertEqual("normal", config.default_execution_profile)
+            self.assertEqual("review", config.review_execution_profile)
+            self.assertEqual("gpt-5-small", config.execution_profiles["normal"]["model"])
+            self.assertEqual({"model_reasoning_effort": "low"}, config.execution_profiles["normal"]["config_overrides"])
+
+    def test_execution_profile_config_rejects_unknown_defaults_and_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"default_execution_profile": "missing"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "default_execution_profile references unknown execution profile"):
+                Config.load(str(config_path), root=Path(tmp))
+
+            config_path.write_text(
+                json.dumps({"execution_profiles": {"small": {"config_overrides": {"danger": "true"}}}}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "is not allowlisted"):
+                Config.load(str(config_path), root=Path(tmp))
+
     def test_dependency_requires_accepted_review_must_be_boolean(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"

@@ -23,25 +23,24 @@ def write_config(
     codex_command: list[str],
     auto_review_mechanical_accept: bool = False,
     worktree_mode: str = "disabled",
+    extra: dict | None = None,
 ) -> Path:
     root = Path(tmp)
     config_path = root / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "queue_dir": str(root / "tasks"),
-                "log_dir": str(root / "logs"),
-                "event_dir": str(root / "events"),
-                "lock_file": str(root / "runner.lock"),
-                "state_file": str(root / "state.json"),
-                "codex_command": codex_command,
-                "auto_review_mechanical_accept": auto_review_mechanical_accept,
-                "worktree_mode": worktree_mode,
-                "worktree_root": str(root / "worktrees"),
-            }
-        ),
-        encoding="utf-8",
-    )
+    data = {
+        "queue_dir": str(root / "tasks"),
+        "log_dir": str(root / "logs"),
+        "event_dir": str(root / "events"),
+        "lock_file": str(root / "runner.lock"),
+        "state_file": str(root / "state.json"),
+        "codex_command": codex_command,
+        "auto_review_mechanical_accept": auto_review_mechanical_accept,
+        "worktree_mode": worktree_mode,
+        "worktree_root": str(root / "worktrees"),
+    }
+    if extra:
+        data.update(extra)
+    config_path.write_text(json.dumps(data), encoding="utf-8")
     return config_path
 
 
@@ -101,6 +100,42 @@ class DoctorTests(unittest.TestCase):
             self.assertIn(f"resolved_executable: {executable.resolve()}", output)
             self.assertIn("available: true", output)
             self.assertIn("version_output: codex-cli 2.0.0", output)
+
+    def test_doctor_reports_execution_profiles_without_private_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(
+                tmp,
+                [str(executable), "exec", "--json"],
+                extra={
+                    "default_execution_profile": "small",
+                    "review_execution_profile": "review",
+                    "execution_profiles": {
+                        "small": {
+                            "model": "gpt-5-small",
+                            "codex_profile": "batch-small",
+                            "config_overrides": {"model_reasoning_effort": "low"},
+                        },
+                        "review": {"model": "gpt-5"},
+                    },
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            self.assertEqual("small", report["execution_profiles"]["default_execution_profile"])
+            self.assertEqual("review", report["execution_profiles"]["review_execution_profile"])
+            self.assertEqual(["review", "small"], report["execution_profiles"]["configured"])
+            self.assertEqual(["model_reasoning_effort"], report["execution_profiles"]["profiles"]["small"]["config_override_keys"])
+            self.assertNotIn('"model_reasoning_effort": "low"', json.dumps(report["execution_profiles"], sort_keys=True))
+            self.assertEqual(0, human_code)
+            self.assertIn("execution_profiles:", human_output)
+            self.assertIn("small: model=true codex_profile=true config_overrides=model_reasoning_effort", human_output)
 
     def test_doctor_warns_when_codex_version_fails_without_failing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

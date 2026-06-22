@@ -9,6 +9,7 @@ from typing import Any
 from .codex import FIRST_MEANINGFUL_STALL_REASON, STARTUP_STALL_REASON, CodexResult, run_codex
 from .config import Config
 from .events import emit_task_event, result_summary_payload, transition_payload
+from .execution_profiles import command_options, resolve_execution_settings
 from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
 from .lock import FileLock
@@ -95,6 +96,12 @@ def run_next(config: Config) -> RunOutcome:
 
         resume_unavailable = bool(resume_requested and task.get("next_prompt") and not resume_id(task))
         prompt = build_prompt(task, resume_unavailable=resume_unavailable)
+        profile_error = validate_execution_profile(config, task)
+        if profile_error:
+            mark_profile_failure(config, task, profile_error)
+            mark_run(config, task["id"])
+            outcome = RunOutcome(status=task["status"], message=profile_error, task_id=task["id"])
+            return outcome
         task["status"] = "running"
         task["started_at"] = started_at
         task["resume_requested"] = resume_requested
@@ -144,6 +151,29 @@ def run_next(config: Config) -> RunOutcome:
 def review_report_consumed_work(report: dict[str, Any]) -> bool:
     auto_review = report.get("auto_review") if isinstance(report.get("auto_review"), dict) else {}
     return bool(auto_review.get("reviewer_codex_invoked"))
+
+
+def validate_execution_profile(config: Config, task: dict[str, Any]) -> str | None:
+    try:
+        command_options(resolve_execution_settings(config, task))
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def mark_profile_failure(config: Config, task: dict[str, Any], error_message: str) -> None:
+    task["status"] = "failed"
+    task["last_error"] = f"invalid execution profile: {error_message}"
+    task["failure_count"] = int(task.get("failure_count", 0)) + 1
+    save_task(config, task)
+    emit_task_event(
+        config,
+        "task_failed",
+        task,
+        source="run-next",
+        summary=task["last_error"],
+        payload=transition_payload(task, failure_count=task.get("failure_count")),
+    )
 
 
 def should_trigger_post_run_wake(config: Config, processed_task: dict[str, Any] | None) -> bool:

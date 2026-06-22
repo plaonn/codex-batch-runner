@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .codex import format_command, parse_json_line
+from .codex import format_command_with_profile, parse_json_line
 from .config import Config
 from .fs import ensure_dir
 from .limits import matched_rate_limit_markers
@@ -91,7 +91,17 @@ def run_reviewer_codex(
     )
     log_dir = ensure_dir(config.log_dir / task_id)
     log_path = log_dir / f"reviewer-{calls_used_this_run}.jsonl"
-    command = format_command(config.codex_command, {"id": task_id}, prompt)
+    try:
+        command = format_command_with_profile(config.codex_command, {"id": task_id}, prompt, config, reviewer=True)
+    except ValueError as exc:
+        log_path.write_text("", encoding="utf-8")
+        return ReviewerCodexOutcome(
+            invoked=False,
+            decision="failed_review",
+            reason=sanitize(f"invalid reviewer execution profile: {exc}"),
+            result=None,
+            log_path=log_path,
+        )
     events: list[dict[str, Any]] = []
     stderr = ""
 
