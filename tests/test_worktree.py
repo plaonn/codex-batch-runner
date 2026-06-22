@@ -435,6 +435,173 @@ class WorktreeTests(unittest.TestCase):
             self.assertIn("worktree_path", report["worktree_report"]["stale_metadata"])
             self.assertTrue(report["gates_ok"])
 
+    def test_apply_dry_run_reports_fast_forward_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="apply-dry")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "apply-dry", "--apply", "--json"])[0])
+            task = load_task(config, "apply-dry")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\ndry-run change\n", encoding="utf-8")
+            git(worktree, "commit", "-am", "dry-run change")
+            branch_head = git(worktree, "rev-parse", "HEAD")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
+            main_head = git(repo, "rev-parse", "HEAD")
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "apply", "apply-dry", "--dry-run", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["applied"])
+            self.assertTrue(report["gates_ok"])
+            self.assertEqual("cbr/apply-dry", report["branch"])
+            self.assertEqual(task["execution_base_head"], report["base_head"])
+            self.assertEqual(branch_head, report["branch_head"])
+            self.assertEqual(main_head, report["main_head"])
+            self.assertEqual(1, report["commit_summary"]["count"])
+            self.assertEqual(main_head, git(repo, "rev-parse", "HEAD"))
+            self.assertNotIn("execution_apply_status", load_task(config, "apply-dry"))
+
+    def test_apply_fast_forwards_accepted_worktree_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="apply-ok")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "apply-ok", "--apply", "--json"])[0])
+            task = load_task(config, "apply-ok")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\napplied change\n", encoding="utf-8")
+            git(worktree, "commit", "-am", "applied change")
+            branch_head = git(worktree, "rev-parse", "HEAD")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "apply", "apply-ok", "--apply", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["applied"])
+            self.assertEqual(branch_head, git(repo, "rev-parse", "HEAD"))
+            self.assertEqual("base\napplied change\n", (repo / "file.txt").read_text(encoding="utf-8"))
+            loaded = load_task(config, "apply-ok")
+            self.assertEqual("applied", loaded["execution_apply_status"])
+            self.assertEqual(branch_head, loaded["execution_applied_head"])
+            self.assertEqual("main", loaded["execution_apply_target"])
+            events = list_events(config, task_id="apply-ok", limit=0)
+            self.assertTrue(any(event["event_type"] == "task_worktree_applied" for event in events))
+            self.assertNotIn("prompt", json.dumps(events))
+
+    def test_apply_refuses_unaccepted_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="apply-unaccepted")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "apply-unaccepted", "--apply", "--json"])[0])
+            task = load_task(config, "apply-unaccepted")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\nchange\n", encoding="utf-8")
+            git(worktree, "commit", "-am", "change")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            save_task(config, task)
+            main_head = git(repo, "rev-parse", "HEAD")
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "apply", "apply-unaccepted", "--apply", "--json"])
+
+            self.assertEqual(1, code)
+            self.assertIn("status=completed and review_status=accepted", " ".join(report["errors"]))
+            self.assertEqual(main_head, git(repo, "rev-parse", "HEAD"))
+
+    def test_apply_refuses_dirty_main_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="apply-dirty-main")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "apply-dirty-main", "--apply", "--json"])[0])
+            task = load_task(config, "apply-dirty-main")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\nbranch change\n", encoding="utf-8")
+            git(worktree, "commit", "-am", "branch change")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
+            (repo / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "apply", "apply-dirty-main", "--apply", "--json"])
+
+            self.assertEqual(1, code)
+            self.assertIn("main worktree must be clean", " ".join(report["errors"]))
+            self.assertNotIn("execution_apply_status", load_task(config, "apply-dirty-main"))
+
+    def test_apply_refuses_when_main_head_moved_from_execution_base(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="apply-stale-main")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "apply-stale-main", "--apply", "--json"])[0])
+            task = load_task(config, "apply-stale-main")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\nbranch change\n", encoding="utf-8")
+            git(worktree, "commit", "-am", "branch change")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
+            (repo / "main.txt").write_text("main moved\n", encoding="utf-8")
+            git(repo, "add", "main.txt")
+            git(repo, "commit", "-m", "main moved")
+            moved_head = git(repo, "rev-parse", "HEAD")
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "apply", "apply-stale-main", "--apply", "--json"])
+
+            self.assertEqual(1, code)
+            self.assertIn("main HEAD must equal execution_base_head", " ".join(report["errors"]))
+            self.assertEqual(moved_head, git(repo, "rev-parse", "HEAD"))
+
+    def test_apply_refuses_branch_with_no_commits_after_base(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="apply-empty")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "apply-empty", "--apply", "--json"])[0])
+            task = load_task(config, "apply-empty")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
+            main_head = git(repo, "rev-parse", "HEAD")
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "apply", "apply-empty", "--dry-run", "--json"])
+
+            self.assertEqual(1, code)
+            self.assertIn("no commits after execution_base_head", " ".join(report["errors"]))
+            self.assertEqual(0, report["commit_summary"]["count"])
+            self.assertEqual(main_head, git(repo, "rev-parse", "HEAD"))
+
 
 if __name__ == "__main__":
     unittest.main()

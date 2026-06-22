@@ -43,7 +43,7 @@ from .timeutil import parse_time, utc_now
 from .transcript import render_task_transcript
 from .triggers import run_post_mutation_trigger
 from .wake import schedule_manual_cooldown_wake
-from .worktree import build_cleanup_report, build_prepare_report, render_worktree_report, task_worktree_metadata
+from .worktree import build_apply_report, build_cleanup_report, build_prepare_report, render_worktree_report, task_worktree_metadata
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -271,6 +271,14 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_mode.add_argument("--apply", action="store_true", help="remove the worktree and store task metadata under the queue lock")
     worktree_cleanup.add_argument("--json", action="store_true", help="print JSON")
     worktree_cleanup.set_defaults(func=cmd_worktree_cleanup)
+
+    worktree_apply = worktree_sub.add_parser("apply", help="fast-forward an accepted task worktree branch into the main worktree")
+    worktree_apply.add_argument("task_id")
+    apply_mode = worktree_apply.add_mutually_exclusive_group(required=True)
+    apply_mode.add_argument("--dry-run", action="store_true", help="report planned fast-forward apply without changing git or task state")
+    apply_mode.add_argument("--apply", action="store_true", help="fast-forward merge the accepted task branch under the queue lock")
+    worktree_apply.add_argument("--json", action="store_true", help="print JSON")
+    worktree_apply.set_defaults(func=cmd_worktree_apply)
     return parser
 
 
@@ -1162,6 +1170,15 @@ def cmd_worktree_prepare(config: Config, args: argparse.Namespace) -> int:
 
 def cmd_worktree_cleanup(config: Config, args: argparse.Namespace) -> int:
     report = build_cleanup_report(config, args.task_id, apply=args.apply)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_worktree_report(report), end="")
+    return 1 if report.get("errors") else 0
+
+
+def cmd_worktree_apply(config: Config, args: argparse.Namespace) -> int:
+    report = build_apply_report(config, args.task_id, apply=args.apply)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:

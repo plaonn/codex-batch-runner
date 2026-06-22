@@ -15,6 +15,7 @@ from .timeutil import iso_now
 PREPARE_OK_STATUSES = {"runnable", "needs_resume"}
 CLEANUP_OK_STATUSES = {"archived"}
 WORKTREE_RETAINED_STATUSES = {"prepared", "running", "retained", "cleanup_candidate"}
+APPLY_OK_WORKTREE_STATUSES = {"prepared", "retained", "cleanup_candidate"}
 
 
 def sanitize_branch_name(task_id: str) -> str:
@@ -40,6 +41,12 @@ def build_cleanup_report(config: Config, task_id: str, *, apply: bool = False) -
     if apply:
         return _with_lock(config, task_id, lambda: _build_cleanup_report_locked(config, task_id, apply=True))
     return _build_cleanup_report_locked(config, task_id, apply=False)
+
+
+def build_apply_report(config: Config, task_id: str, *, apply: bool = False) -> dict[str, Any]:
+    if apply:
+        return _with_lock(config, task_id, lambda: _build_apply_report_locked(config, task_id, apply=True))
+    return _build_apply_report_locked(config, task_id, apply=False)
 
 
 def prepare_task_worktree_for_run_locked(config: Config, task: dict[str, Any]) -> dict[str, Any]:
@@ -225,6 +232,183 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
     return report
 
 
+def _build_apply_report_locked(config: Config, task_id: str, *, apply: bool) -> dict[str, Any]:
+    task = load_task(config, task_id)
+    report = base_report("apply", task, apply)
+    report["planned_action"] = "git merge --ff-only <execution_branch>"
+    validate_apply_report(config, task, report)
+    if report["errors"] or not apply:
+        return report
+
+    repo_root = Path(str(report["repo_root"]))
+    branch = str(report["branch"])
+    git(repo_root, "merge", "--ff-only", branch)
+    applied_head = git(repo_root, "rev-parse", "--verify", "HEAD^{commit}")
+    task["execution_apply_status"] = "applied"
+    task["execution_applied_at"] = iso_now()
+    task["execution_applied_head"] = applied_head
+    task["execution_apply_target"] = report.get("apply_target")
+    save_task(config, task)
+    report["applied"] = True
+    report["main_head"] = applied_head
+    report["execution_applied_head"] = applied_head
+    write_event_nonfatal(
+        config,
+        "task_worktree_applied",
+        task=task,
+        source="worktree apply",
+        summary=f"applied worktree branch for task {task_id}",
+        payload=transition_payload(
+            task,
+            execution_branch=branch,
+            execution_base_head=report.get("base_head"),
+            execution_branch_head=report.get("branch_head"),
+            execution_applied_head=applied_head,
+            execution_apply_target=report.get("apply_target"),
+        ),
+    )
+    return report
+
+
+def validate_apply_report(config: Config, task: dict[str, Any], report: dict[str, Any]) -> None:
+    gates: list[dict[str, Any]] = []
+    report["gates"] = gates
+
+    def gate(name: str, ok: bool, detail: str, error_detail: str | None = None) -> None:
+        gates.append({"name": name, "ok": ok, "detail": detail})
+        if not ok:
+            report["errors"].append(error_detail or detail)
+
+    gate(
+        "task_completed_accepted",
+        task.get("status") == "completed" and task.get("review_status") == "accepted",
+        f"status={task.get('status') or '-'} review_status={task.get('review_status') or '-'}",
+        "worktree apply requires task status=completed and review_status=accepted",
+    )
+    gate(
+        "execution_mode_git_worktree",
+        task.get("execution_mode") == "git_worktree",
+        f"execution_mode={task.get('execution_mode') or '-'}",
+        "worktree apply requires execution_mode=git_worktree",
+    )
+
+    branch = str(task.get("execution_branch") or "").strip()
+    base = str(task.get("execution_base_head") or "").strip()
+    worktree_raw = task.get("execution_worktree_path")
+    repo_raw = task.get("execution_repo_root")
+    worktree_status = str(task.get("execution_worktree_status") or "")
+    missing = [
+        name
+        for name, value in (
+            ("execution_branch", branch),
+            ("execution_base_head", base),
+            ("execution_repo_root", repo_raw),
+            ("execution_worktree_path", worktree_raw),
+            ("execution_worktree_status", worktree_status),
+        )
+        if not value
+    ]
+    gate(
+        "required_worktree_metadata",
+        not missing,
+        "required worktree metadata present" if not missing else "missing: " + ", ".join(missing),
+        "worktree apply requires retained worktree metadata; missing: " + ", ".join(missing),
+    )
+    gate(
+        "worktree_status_retained",
+        bool(worktree_status) and worktree_status in APPLY_OK_WORKTREE_STATUSES,
+        f"execution_worktree_status={worktree_status or '-'}",
+        f"worktree apply requires retained worktree metadata, found execution_worktree_status={worktree_status or '-'}",
+    )
+    if missing or not branch or not base or not repo_raw or not worktree_raw:
+        report["gates_ok"] = False
+        return
+
+    try:
+        validate_branch_name(branch)
+        repo_root = Path(str(repo_raw)).expanduser().resolve()
+        worktree_path = guarded_existing_worktree_path(config, Path(str(worktree_raw)))
+        registry = worktree_registry(repo_root)
+        classification = classify_apply_state(task, branch, worktree_path, registry)
+        report.update(
+            {
+                "repo_root": str(repo_root),
+                "branch": branch,
+                "worktree_path": str(worktree_path),
+                "worktree_status": worktree_status,
+                "classification": classification,
+            }
+        )
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        gate("worktree_metadata_recoverable", False, str(exc))
+        report["gates_ok"] = False
+        return
+
+    gate(
+        "worktree_metadata_recoverable",
+        classification["status"] == "retained",
+        classification["reason"],
+    )
+
+    try:
+        repo_top = git(repo_root, "rev-parse", "--show-toplevel")
+        main_branch = git_optional(repo_root, "symbolic-ref", "--quiet", "--short", "HEAD") or "HEAD"
+        main_head = git(repo_root, "rev-parse", "--verify", "HEAD^{commit}")
+        base_head = git(repo_root, "rev-parse", "--verify", f"{base}^{{commit}}")
+        branch_head = git(repo_root, "rev-parse", "--verify", f"{branch}^{{commit}}")
+        status = git(repo_root, "status", "--porcelain=v1", "--untracked-files=all")
+        commits = rev_list(repo_root, f"{base_head}..{branch_head}")
+        commit_lines = git_optional(repo_root, "log", "--reverse", "--format=%H %s", f"{base_head}..{branch_head}")
+        task_status = git_optional(worktree_path, "status", "--porcelain=v1", "--untracked-files=all") or ""
+    except subprocess.CalledProcessError as exc:
+        gate("git_state_available", False, clean_git_exception(exc))
+        report["gates_ok"] = False
+        return
+
+    report.update(
+        {
+            "repo_root": repo_top,
+            "apply_target": main_branch,
+            "base_head": base_head,
+            "branch_head": branch_head,
+            "main_head": main_head,
+            "commit_summary": {
+                "range": f"{base_head}..{branch_head}",
+                "count": len(commits),
+                "commits": commit_lines.splitlines() if commit_lines else commits,
+            },
+        }
+    )
+    gate("git_state_available", True, "git state is available")
+    gate(
+        "main_worktree_clean",
+        not status.strip(),
+        "main worktree is clean" if not status.strip() else "main worktree has uncommitted changes",
+        "main worktree must be clean before applying",
+    )
+    gate(
+        "branch_based_on_execution_base",
+        is_ancestor(repo_root, base_head, branch_head),
+        "execution_base_head is an ancestor of the task branch",
+        "task branch must be based on execution_base_head",
+    )
+    gate(
+        "main_head_matches_execution_base",
+        main_head == base_head,
+        "main HEAD equals execution_base_head" if main_head == base_head else "main HEAD differs from execution_base_head",
+        "main HEAD must equal execution_base_head before fast-forward apply",
+    )
+    gate(
+        "branch_has_commits",
+        bool(commits),
+        f"commits_after_base={len(commits)}",
+        "task branch has no commits after execution_base_head; nothing to apply",
+    )
+    if task_status.strip():
+        report["warnings"].append("task worktree has uncommitted changes; apply only merges committed branch changes")
+    report["gates_ok"] = not report["errors"]
+
+
 def base_report(action: str, task: dict[str, Any], apply: bool) -> dict[str, Any]:
     return {
         "task_id": task.get("id"),
@@ -316,6 +500,24 @@ def classify_cleanup_state(
     return {"status": "cleanup_candidate", "reason": "worktree can be removed; branch will be retained"}
 
 
+def classify_apply_state(
+    task: dict[str, Any],
+    branch: str,
+    worktree_path: Path,
+    registry: list[dict[str, str]],
+) -> dict[str, str]:
+    registered = registry_entry_for_path(registry, worktree_path)
+    if not worktree_path.exists() and not registered:
+        return {"status": "missing", "reason": "worktree path and registry entry are absent"}
+    if worktree_path.exists() and not registered:
+        return {"status": "recovery_required", "reason": "worktree path exists but is not registered by git"}
+    if registered and not worktree_path.exists():
+        return {"status": "recovery_required", "reason": "git worktree registry points to a missing path"}
+    if registered and registered.get("branch") != f"refs/heads/{branch}":
+        return {"status": "recovery_required", "reason": "registered worktree branch does not match task branch"}
+    return {"status": "retained", "reason": "retained worktree metadata is valid"}
+
+
 def local_branch_state(repo_root: Path, branch: str) -> dict[str, Any]:
     result = subprocess.run(
         ["git", "-C", str(repo_root), "show-ref", "--verify", f"refs/heads/{branch}"],
@@ -388,6 +590,40 @@ def git(cwd: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def git_optional(cwd: Path, *args: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", ancestor, descendant],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def rev_list(repo_root: Path, ref_range: str) -> list[str]:
+    output = git(repo_root, "rev-list", "--reverse", ref_range)
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def clean_git_exception(exc: subprocess.CalledProcessError) -> str:
+    stderr = " ".join(str(exc.stderr or "").split())
+    stdout = " ".join(str(exc.stdout or "").split())
+    detail = stderr or stdout or str(exc)
+    return detail
+
+
 def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
     metadata: dict[str, Any] = {"execution_mode": task.get("execution_mode") or "main_worktree"}
     for source, target in (
@@ -401,6 +637,10 @@ def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
         ("execution_original_cwd", "original_cwd"),
         ("execution_parent_task_id", "parent_task_id"),
         ("execution_merge_target", "merge_target"),
+        ("execution_apply_status", "apply_status"),
+        ("execution_applied_at", "applied_at"),
+        ("execution_applied_head", "applied_head"),
+        ("execution_apply_target", "apply_target"),
     ):
         value = task.get(source)
         if value not in (None, ""):
@@ -518,6 +758,19 @@ def render_worktree_report(report: dict[str, Any]) -> str:
     for key in ("branch", "worktree_path", "base_ref", "base_head"):
         if report.get(key):
             lines.append(f"{key}: {report.get(key)}")
+    for key in ("branch_head", "main_head", "apply_target", "planned_action"):
+        if report.get(key):
+            lines.append(f"{key}: {report.get(key)}")
+    commit_summary = report.get("commit_summary")
+    if isinstance(commit_summary, dict):
+        lines.append(
+            f"commit_summary: count={commit_summary.get('count')} range={commit_summary.get('range')}"
+        )
+    if report.get("gates"):
+        for gate in report.get("gates") or []:
+            if isinstance(gate, dict):
+                status = "ok" if gate.get("ok") else "blocked"
+                lines.append(f"gate: {gate.get('name')} {status} ({gate.get('detail')})")
     classification = report.get("classification")
     if isinstance(classification, dict):
         lines.append(f"classification: {classification.get('status')} ({classification.get('reason')})")
