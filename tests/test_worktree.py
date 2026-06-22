@@ -318,6 +318,8 @@ class WorktreeTests(unittest.TestCase):
             self.assertIn("file.txt", bundle["git_diff"]["stat"])
             self.assertIn("+task change", bundle["git_diff"]["diff"])
             self.assertEqual(0, review_code)
+            self.assertTrue(gate_details["no_unpushed_commits"]["ok"])
+            self.assertIn("worktree_branch review unit", gate_details["no_unpushed_commits"]["detail"])
             self.assertTrue(gate_details["commit_ancestry_acceptable"]["ok"])
             self.assertEqual("commit", review["bundle"]["git_diff_summary"]["kind"])
 

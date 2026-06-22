@@ -616,6 +616,58 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(worktree_path.is_dir())
             self.assertEqual(str(worktree_path), task["git_status"]["root"])
 
+    def test_run_next_worktree_completed_task_commits_reported_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(make_config(tmp, "success"), worktree_mode="task", worktree_root=root / "worktrees")
+            create_task(config, "do it", str(repo), task_id="task-worktree-commit")
+
+            def fake_run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
+                Path(task["cwd"], "file.txt").write_text("changed\n", encoding="utf-8")
+                Path(task["cwd"], "new.txt").write_text("new\n", encoding="utf-8")
+                return CodexResult(
+                    returncode=0,
+                    log_path=root / "attempt.jsonl",
+                    command_kind="exec",
+                    resume_id_used=None,
+                    stderr="",
+                    events=[],
+                    final_response={
+                        "task_id": "task-worktree-commit",
+                        "status": "completed",
+                        "summary": "done",
+                        "next_prompt": "",
+                        "changed_files": ["file.txt", "new.txt"],
+                        "verification": ["unit tests"],
+                    },
+                    session_id=None,
+                    thread_id=None,
+                    rate_limited=False,
+                    rate_limit_markers=[],
+                )
+
+            with patch.object(runner_module, "run_codex", fake_run_codex):
+                outcome = run_next(config)
+
+            task = load_task(config, "task-worktree-commit")
+            worktree_path = Path(task["execution_worktree_path"])
+            base = task["execution_base_head"]
+            rev_list = git(worktree_path, "rev-list", "--count", f"{base}..HEAD").stdout.strip()
+            status = git(worktree_path, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip()
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("completed", task["status"])
+            self.assertEqual("retained", task["execution_worktree_status"])
+            self.assertEqual("1", rev_list)
+            self.assertEqual("", status)
+            self.assertFalse(task["git_status"]["dirty"])
+            self.assertTrue(task["last_result"]["commits"])
+            self.assertEqual("not_pushed", task["last_result"]["push_status"]["status"])
+            self.assertEqual("base\n", (repo / "file.txt").read_text(encoding="utf-8"))
+
     def test_run_next_worktree_prepare_failure_does_not_call_codex(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

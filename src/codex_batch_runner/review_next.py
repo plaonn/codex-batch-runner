@@ -417,7 +417,11 @@ def mechanical_gates(task: dict, bundle: dict[str, Any]) -> list[dict[str, Any]]
         ),
         gate("dependencies_ready", bool(deps.get("ready")), dependency_detail(deps)),
         gate("git_clean", repo.get("dirty") is False, git_clean_detail(repo)),
-        gate("no_unpushed_commits", no_unpushed(repo, git_status), unpushed_detail(repo, git_status)),
+        gate(
+            "no_unpushed_commits",
+            no_unpushed(repo, git_status, commit_info),
+            unpushed_detail(repo, git_status, commit_info),
+        ),
         gate("commit_ancestry_acceptable", commit_ancestry_ok(commit_info), commit_ancestry_detail(commit_info)),
         gate("safety_metadata_clean", not detectable_safety_violation(task, bundle), safety_detail(task, bundle)),
     ]
@@ -456,7 +460,9 @@ def git_clean_detail(repo: dict[str, Any]) -> str:
     return f"dirty={repo.get('dirty')}"
 
 
-def no_unpushed(repo: dict[str, Any], git_status: dict[str, Any]) -> bool:
+def no_unpushed(repo: dict[str, Any], git_status: dict[str, Any], commit_info: dict[str, Any]) -> bool:
+    if is_worktree_branch_review_unit(commit_info):
+        return True
     if repo and repo.get("has_unpushed") is not None:
         return repo.get("has_unpushed") is False
     if not git_status:
@@ -467,7 +473,9 @@ def no_unpushed(repo: dict[str, Any], git_status: dict[str, Any]) -> bool:
     return isinstance(ahead, int) and ahead == 0
 
 
-def unpushed_detail(repo: dict[str, Any], git_status: dict[str, Any]) -> str:
+def unpushed_detail(repo: dict[str, Any], git_status: dict[str, Any], commit_info: dict[str, Any]) -> str:
+    if is_worktree_branch_review_unit(commit_info):
+        return "worktree_branch review unit; local task branch commits are allowed before explicit apply/push"
     if not repo and not git_status:
         return "current_git_repository and task_git_status_snapshot unavailable"
     return (
@@ -476,6 +484,10 @@ def unpushed_detail(repo: dict[str, Any], git_status: dict[str, Any]) -> str:
         f"snapshot_has_unpushed={git_status.get('has_unpushed') if git_status else None}; "
         f"snapshot_ahead={git_status.get('ahead') if git_status else None}"
     )
+
+
+def is_worktree_branch_review_unit(commit_info: dict[str, Any]) -> bool:
+    return commit_info.get("source") == "worktree_branch"
 
 
 def commit_ancestry_ok(commit_info: dict[str, Any]) -> bool:

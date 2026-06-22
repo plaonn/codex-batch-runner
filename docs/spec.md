@@ -667,8 +667,8 @@ Branch naming and base policy:
 
 Review, reject, follow-up, accept model:
 
-- `run-next`는 task JSON의 canonical `cwd`를 원래 task cwd로 보존하고, Codex 호출에 전달하는 실행 cwd만 task worktree로 바꿉니다. 정상 final JSON 후 저장하는 `git_status` snapshot은 실제 Codex 실행 cwd인 task worktree에서 수집합니다.
-- `review-bundle`은 main repository state와 task worktree state를 분리해 표시합니다. Completion-time snapshot, review-time current main state, review-time task worktree state, branch, base ref, inferred commits, retained worktree path 존재 여부를 각각 기록합니다. Compatibility field인 `current_git_repository`와 `git_repository`는 review gate가 검사하는 task execution repository를 가리키며, worktree-backed task에서는 task worktree state입니다.
+- `run-next`는 task JSON의 canonical `cwd`를 원래 task cwd로 보존하고, Codex 호출에 전달하는 실행 cwd만 task worktree로 바꿉니다. 정상 final JSON이 `completed`이고 task worktree에 변경이 남아 있으면 runner는 final JSON의 `changed_files`에 보고된 안전한 상대 경로만 stage하여 task branch에 local commit을 만듭니다. 이 commit은 review unit을 고정하기 위한 것이며 remote push 또는 main 반영은 수행하지 않습니다. 저장하는 `git_status` snapshot은 자동 commit 이후 실제 Codex 실행 cwd인 task worktree에서 수집합니다.
+- `review-bundle`은 main repository state와 task worktree state를 분리해 표시합니다. Completion-time snapshot, review-time current main state, review-time task worktree state, branch, base ref, inferred commits, retained worktree path 존재 여부를 각각 기록합니다. Worktree-backed task에서 `execution_base_head..execution_branch` commit 또는 commit range를 추론할 수 있으면 이를 원자적인 review unit으로 취급합니다. Compatibility field인 `current_git_repository`와 `git_repository`는 review gate가 검사하는 task execution repository를 가리키며, worktree-backed task에서는 task worktree state입니다.
 - `summary`, `review-bundle`, `review-next`, `doctor`는 worktree 준비/정리 단계가 저장한 task metadata를 read-only로 표시합니다. 표시 대상은 `execution_mode`, branch, base ref/head, worktree status, sanitized worktree path/root이며, 실제 개인 절대 경로는 공개 보고에 그대로 노출하지 않습니다.
 - `review-next`는 missing/stale/recovery_required worktree metadata를 별도 report field와 warning으로 표시합니다. 이 warning은 operator review를 돕기 위한 정보이며, 기존 review gate가 명시적으로 요구하지 않는 한 단독으로 fatal gate가 되지 않습니다.
 - `doctor`는 configured `worktree_mode`, `worktree_root`, retained/recovery_required/missing metadata task count를 가볍게 요약합니다. 이 점검은 worktree 실행을 시작하거나 정리 작업을 수행하지 않습니다.
@@ -689,7 +689,7 @@ Stale worktree recovery and failure handling:
 
 - Worktree path가 존재하지만 Git registry에 없거나, registry에는 있으나 path가 없으면 `recovery_required`로 표시하고 raw execution을 중단합니다.
 - Branch HEAD가 task metadata의 expected head와 다르거나, worktree에 unexpected dirty changes가 있으면 자동 재사용하지 않습니다.
-- Codex process 실패, startup stall, final JSON schema failure, runner crash가 발생하면 worktree metadata와 branch ref를 task에 남겨 retry 또는 수동 점검이 가능하게 합니다. Codex 실행이 끝난 뒤 task worktree는 기본적으로 `retained`로 남깁니다.
+- Codex process 실패, startup stall, final JSON schema failure, runner crash가 발생하면 worktree metadata와 branch ref를 task에 남겨 retry 또는 수동 점검이 가능하게 합니다. Codex 실행이 끝난 뒤 task worktree는 기본적으로 `retained`로 남깁니다. 자동 commit이 실패하거나 `changed_files`가 안전한 상대 경로가 아니어서 stage할 수 없으면 task는 dirty retained worktree로 남고 review gate가 human check를 요구합니다.
 - Resume은 기존 session/thread id 정책을 따르되, resume cwd가 같은 retained worktree인지 확인합니다. Retained worktree metadata가 없거나, path/branch/registry check가 recovery-required 상태이면 새 worktree를 만들지 않고 Codex를 호출하지 않습니다. 이 경우 task를 `failed`로 표시하고 `last_error`와 sanitized event에 worktree prepare/recovery failure를 남겨 operator review를 요구합니다.
 - Worktree prepare가 실패하면 Codex를 호출하지 않고 task를 `failed` 또는 retryable `runnable`로 돌릴지 phase별로 정합니다. 초기 prepare/cleanup command는 mutation 실패를 task execution 실패와 분리해 report-only로 시작합니다.
 
@@ -706,7 +706,7 @@ Concrete implementation phases:
 2. Prepare/cleanup primitives: `git worktree` wrapper, branch sanitizer, path guard, base ref stale check, existing branch/worktree recovery classifier를 구현합니다. 우선 직접 실행 명령 또는 internal helper 테스트로 검증하고 `run-next`에는 연결하지 않습니다.
 3. Read-only reporting integration: `doctor`, `summary`, `review-bundle`, `review-next`가 task worktree metadata를 표시합니다. Main state와 worktree state를 분리하고, stale/missing/recovery_required 상태를 mechanical gate warning으로 노출합니다.
 4. Explicit prepare/cleanup commands: `cbr worktree prepare TASK_ID --dry-run|--apply`와 `cbr worktree cleanup TASK_ID --dry-run|--apply`를 추가합니다. Queue lock 아래에서 metadata를 갱신하고 event를 남기되 Codex를 호출하지 않습니다.
-5. `run-next` worktree adapter: 완료. `worktree_mode=task`이고 task가 runnable/needs_resume 및 dependency/cooldown 정책을 통과하면 prepare된 worktree cwd에서 Codex를 실행합니다. Prepared worktree가 없으면 prepare를 수행하고, 실패하면 Codex를 호출하지 않습니다. Main-worktree mode는 기존 behavior를 유지합니다.
+5. `run-next` worktree adapter: 완료. `worktree_mode=task`이고 task가 runnable/needs_resume 및 dependency/cooldown 정책을 통과하면 prepare된 worktree cwd에서 Codex를 실행합니다. Prepared worktree가 없으면 prepare를 수행하고, 실패하면 Codex를 호출하지 않습니다. Completed worktree task는 보고된 `changed_files`를 task branch local commit으로 고정합니다. Main-worktree mode는 기존 behavior를 유지합니다.
 6. Review and follow-up branch workflow: `review-bundle`, `reject`, `reject --follow-up`, `accept`가 task branch/worktree linkage를 보존합니다. `review-bundle`은 main repository state와 task execution repository state를 분리하고, `reject --follow-up`은 새 task 생성 없이 원 branch/worktree를 가리키는 minimal linkage를 기록합니다. Follow-up fix task 생성, same-branch/replacement-branch 정책, stale checks는 별도 phase에서 구현합니다.
 7. Explicit merge/apply phase: accepted task branch를 main baseline에 반영하는 command를 별도 추가합니다. Fast-forward를 우선하고, dirty main, stale base, dependency mismatch, safety gate 실패 시 중단합니다.
 8. Remote push helper: 필요하면 task branch push만 explicit opt-in으로 추가합니다. 기본 runner, doctor, review paths는 계속 local-only입니다.

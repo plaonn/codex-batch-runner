@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 from .codex import FIRST_MEANINGFUL_STALL_REASON, STARTUP_STALL_REASON, CodexResult, run_codex
@@ -137,6 +137,7 @@ def run_next(config: Config) -> RunOutcome:
         if execution_cwd:
             task["execution_worktree_status"] = "retained"
             task["execution_retained_at"] = iso_now()
+            auto_commit_worktree_result(config, task, result, execution_cwd)
         apply_codex_result(config, task, result, git_status_cwd=execution_cwd)
         outcome = RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
         return outcome
@@ -354,6 +355,101 @@ def mark_worktree_prepare_failure(config: Config, task: dict, report: dict[str, 
         summary=reason,
         payload=payload,
     )
+
+
+def auto_commit_worktree_result(config: Config, task: dict[str, Any], result: CodexResult, worktree_path: Path) -> None:
+    final_response = result.final_response if isinstance(result.final_response, dict) else None
+    if not final_response or final_response.get("status") != "completed":
+        return
+    if task.get("execution_mode") != "git_worktree":
+        return
+    if not worktree_has_changes(worktree_path):
+        return
+
+    paths, skipped = safe_changed_file_paths(final_response.get("changed_files"))
+    if not paths:
+        task["execution_commit_warning"] = "worktree dirty but no safe changed_files paths were reported"
+        return
+
+    add_result = run_git(worktree_path, ["add", "--", *paths])
+    if add_result.returncode != 0:
+        task["execution_commit_warning"] = "cannot stage reported changed_files: " + clean_git_error(add_result)
+        return
+    if not worktree_has_staged_changes(worktree_path):
+        task["execution_commit_warning"] = "worktree dirty but reported changed_files produced no staged changes"
+        return
+
+    subject = f"Complete cbr task {task.get('id')}"
+    body = "Created automatically by codex-batch-runner from reported changed_files in the task worktree."
+    commit_result = run_git(worktree_path, ["commit", "-m", subject, "-m", body])
+    if commit_result.returncode != 0:
+        task["execution_commit_warning"] = "cannot commit task worktree changes: " + clean_git_error(commit_result)
+        return
+
+    head = run_git(worktree_path, ["rev-parse", "--verify", "HEAD^{commit}"])
+    if head.returncode != 0 or not head.stdout.strip():
+        task["execution_commit_warning"] = "committed task worktree changes but could not read HEAD"
+        return
+
+    commit = head.stdout.strip()
+    task["execution_commit"] = commit
+    task["execution_committed_at"] = iso_now()
+    if skipped:
+        task["execution_commit_warning"] = "skipped unsafe changed_files paths: " + ", ".join(skipped)
+    else:
+        task.pop("execution_commit_warning", None)
+
+    final_response["commits"] = append_commit(final_response.get("commits"), commit)
+    final_response["push_status"] = {
+        "status": "not_pushed",
+        "branch": task.get("execution_branch"),
+        "reason": "runner created a local task worktree commit; push/apply remains explicit",
+    }
+    emit_task_event(
+        config,
+        "task_worktree_committed",
+        task,
+        source="run-next",
+        summary=f"committed worktree changes for task {task.get('id')}",
+        payload=transition_payload(
+            task,
+            execution_branch=task.get("execution_branch"),
+            execution_commit=commit,
+            changed_files=paths,
+        ),
+    )
+
+
+def worktree_has_changes(worktree_path: Path) -> bool:
+    status = run_git(worktree_path, ["status", "--porcelain=v1", "--untracked-files=all"])
+    return status.returncode == 0 and bool(status.stdout.strip())
+
+
+def worktree_has_staged_changes(worktree_path: Path) -> bool:
+    diff = run_git(worktree_path, ["diff", "--cached", "--quiet", "--exit-code"])
+    return diff.returncode == 1
+
+
+def safe_changed_file_paths(changed_files: object) -> tuple[list[str], list[str]]:
+    if not isinstance(changed_files, list):
+        return [], []
+    paths: list[str] = []
+    skipped: list[str] = []
+    for value in changed_files:
+        text = str(value).strip()
+        pure = PurePath(text)
+        if not text or pure.is_absolute() or ".." in pure.parts or ".git" in pure.parts:
+            skipped.append(text or "<empty>")
+            continue
+        paths.append(text)
+    return paths, skipped
+
+
+def append_commit(existing: object, commit: str) -> list[str]:
+    values = [str(item) for item in existing] if isinstance(existing, list) else []
+    if commit not in values:
+        values.append(commit)
+    return values
 
 
 def mark_non_rate_failure(config: Config, task: dict, result: CodexResult, reason: str) -> None:
