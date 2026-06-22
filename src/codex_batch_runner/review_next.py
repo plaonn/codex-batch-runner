@@ -27,6 +27,29 @@ from .timeutil import add_seconds, iso_now
 from .transcript import sanitize
 
 REVIEW_NEEDED_STATUSES = {"unreviewed", "rejected", "needs_followup"}
+AUTO_FIX_ALLOWED_CONFIDENCE = {"medium", "high"}
+HIGH_RISK_TERMS = (
+    "credential",
+    "token",
+    "secret",
+    "auth",
+    "permission",
+    "encryption",
+    "signing",
+    "migration",
+    "schema migration",
+    "dependency",
+    "upgrade",
+    "lockfile",
+    "reset",
+    "prune",
+    "cleanup",
+    "delete",
+    "remove",
+    "history rewrite",
+    "public api",
+    "breaking",
+)
 
 
 def build_review_next_report(config: Config, filters: Namespace | None = None) -> dict[str, Any]:
@@ -118,7 +141,9 @@ def build_review_next_apply_report_locked(
         report["mutated"] = reviewer_report["mutated"]
         report["review_status"] = reviewer_report.get("review_status", report.get("review_status"))
         report["auto_review"] = reviewer_report["auto_review"]
-        report["chain"] = chain_metadata(load_task(config, task_id))
+        task = load_task(config, task_id)
+        report["chain"] = chain_metadata(task)
+        report["auto_fix_planner"] = build_auto_fix_planner_report(config, task, report.get("gates", []))
         return report
 
     if not mechanical_enabled:
@@ -133,7 +158,9 @@ def build_review_next_apply_report_locked(
     applied = apply_mechanical_accept(config, task_id, expected)
     report["mutated"] = applied["mutated"]
     report["review_status"] = applied.get("review_status", report.get("review_status"))
-    report["chain"] = chain_metadata(load_task(config, task_id))
+    task = load_task(config, task_id)
+    report["chain"] = chain_metadata(task)
+    report["auto_fix_planner"] = build_auto_fix_planner_report(config, task, report.get("gates", []))
     report["auto_review"] = auto_review_summary(
         decision=applied["decision"],
         reason=applied["reason"],
@@ -187,6 +214,7 @@ def select_review_next_report(config: Config, filters: Namespace | None = None, 
         "worktree_report": bundle.get("task_worktree"),
         "review_status": review_status(task),
         "chain": chain_metadata(task),
+        "auto_fix_planner": build_auto_fix_planner_report(config, task, gates),
         "bundle": concise_bundle(bundle),
         "_fingerprint": review_fingerprint(task, bundle),
         "mutated": False,
@@ -439,6 +467,164 @@ def review_fingerprint(task: dict, bundle: dict[str, Any]) -> dict[str, Any]:
             "inferred_commits": commit_info.get("inferred_commits"),
         },
     }
+
+
+def build_auto_fix_planner_report(config: Config, task: dict[str, Any], gates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    reviewer = task.get("reviewer_codex") if isinstance(task.get("reviewer_codex"), dict) else {}
+    if reviewer.get("decision") != "needs_fix":
+        return None
+    parent_task_id = str(task.get("id") or "")
+    root_task_id = str(task.get("root_task_id") or parent_task_id)
+    review_cycle = non_negative_int(task.get("review_cycle"))
+    fix_attempts = non_negative_int(task.get("fix_attempts"))
+    max_fix_attempts = config.auto_review_codex_max_fix_loops_per_task
+    skip_reasons: list[dict[str, str]] = []
+
+    if max_fix_attempts < 1:
+        skip_reasons.append(skip_reason("disabled_config", "auto_review_codex_max_fix_loops_per_task is zero"))
+    if not bool(reviewer.get("auto_fix_allowed", False)):
+        skip_reasons.append(skip_reason("disabled_config", "reviewer did not set auto_fix_allowed=true"))
+
+    confidence = str(reviewer.get("confidence") or "")
+    risk = str(reviewer.get("auto_fix_risk") or "")
+    if confidence not in AUTO_FIX_ALLOWED_CONFIDENCE or risk != "low":
+        skip_reasons.append(skip_reason("confidence_risk_mismatch", f"confidence={confidence or 'missing'} risk={risk or 'missing'}"))
+
+    suggested_fix_prompt = sanitize(reviewer.get("suggested_fix_prompt", ""))
+    if not suggested_fix_prompt.strip():
+        skip_reasons.append(skip_reason("missing_suggested_fix_prompt", "reviewer did not provide a bounded fix prompt"))
+
+    if repeated_finding(task, reviewer):
+        skip_reasons.append(skip_reason("repeated_finding", "finding fingerprint already appeared in this chain"))
+
+    skip_reasons.extend(cooldown_limit_stale_skip_reasons(config, task, gates, fix_attempts, max_fix_attempts))
+
+    high_risk = high_risk_blocker(reviewer)
+    if high_risk:
+        skip_reasons.append(skip_reason("high_risk_blocker", high_risk))
+
+    report: dict[str, Any] = {
+        "allowed": not skip_reasons,
+        "skip_reasons": skip_reasons,
+        "config": {
+            "auto_review_codex_max_fix_loops_per_task": max_fix_attempts,
+        },
+        "chain": {
+            "root_task_id": root_task_id,
+            "parent_task_id": parent_task_id,
+            "review_cycle": review_cycle,
+            "fix_attempts": fix_attempts,
+        },
+        "fix_task_draft": None,
+    }
+    if not skip_reasons:
+        report["fix_task_draft"] = build_fix_task_draft(task, reviewer, root_task_id, parent_task_id, review_cycle)
+    return report
+
+
+def skip_reason(code: str, detail: str) -> dict[str, str]:
+    return {"code": code, "detail": sanitize(detail)}
+
+
+def repeated_finding(task: dict[str, Any], reviewer: dict[str, Any]) -> bool:
+    current = normalized_fingerprints(reviewer.get("finding_fingerprints"))
+    if not current or non_negative_int(task.get("fix_attempts")) < 1:
+        return False
+    previous = normalized_fingerprints(task.get("finding_fingerprints"))
+    return bool(current.intersection(previous))
+
+
+def normalized_fingerprints(value: object) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {sanitize(item).strip().lower() for item in value if sanitize(item).strip()}
+
+
+def cooldown_limit_stale_skip_reasons(
+    config: Config,
+    task: dict[str, Any],
+    gates: list[dict[str, Any]],
+    fix_attempts: int,
+    max_fix_attempts: int,
+) -> list[dict[str, str]]:
+    reasons: list[dict[str, str]] = []
+    if in_global_cooldown(config):
+        reasons.append(skip_reason("cooldown_limit_stale_gate", "global cooldown is active"))
+    if in_reviewer_codex_cooldown(config):
+        reasons.append(skip_reason("cooldown_limit_stale_gate", "reviewer Codex cooldown is active"))
+    if max_fix_attempts >= 0 and fix_attempts >= max_fix_attempts:
+        reasons.append(skip_reason("cooldown_limit_stale_gate", "fix loop limit is exhausted"))
+    if task.get("last_auto_fix_task_id"):
+        reasons.append(skip_reason("cooldown_limit_stale_gate", "last auto-fix task is already recorded"))
+    failed_gates = [str(gate.get("name")) for gate in gates if isinstance(gate, dict) and not gate.get("ok")]
+    if failed_gates:
+        reasons.append(skip_reason("cooldown_limit_stale_gate", "mechanical gates failed: " + ",".join(failed_gates)))
+    return reasons
+
+
+def high_risk_blocker(reviewer: dict[str, Any]) -> str | None:
+    if str(reviewer.get("auto_fix_risk") or "") == "high":
+        return "reviewer marked auto_fix_risk=high"
+    required = reviewer.get("required_human_checks") if isinstance(reviewer.get("required_human_checks"), list) else []
+    if required:
+        return "reviewer required human checks"
+    findings = reviewer.get("findings") if isinstance(reviewer.get("findings"), list) else []
+    for finding in findings:
+        if isinstance(finding, dict) and finding.get("severity") == "error":
+            return "reviewer finding severity=error"
+    text = " ".join(
+        [
+            sanitize(reviewer.get("reason", "")),
+            sanitize(reviewer.get("suggested_fix_prompt", "")),
+            json.dumps(sanitize_value(findings), ensure_ascii=False, sort_keys=True),
+        ]
+    ).lower()
+    for term in HIGH_RISK_TERMS:
+        if term in text:
+            return f"reviewer result mentions high-risk term: {term}"
+    return None
+
+
+def build_fix_task_draft(
+    task: dict[str, Any],
+    reviewer: dict[str, Any],
+    root_task_id: str,
+    parent_task_id: str,
+    review_cycle: int,
+) -> dict[str, Any]:
+    return {
+        "root_task_id": root_task_id,
+        "parent_task_id": parent_task_id,
+        "review_cycle": review_cycle + 1,
+        "bounded_prompt_summary": bounded_prompt_summary(reviewer),
+        "project_id": sanitize(task_project_id(task)),
+        "category": sanitize(task.get("category")),
+        "labels": [sanitize(label) for label in task_labels(task)],
+        "cwd": sanitize(task.get("cwd")),
+        "depends_on": [parent_task_id],
+        "required_verification_summary": required_verification_summary(task),
+    }
+
+
+def bounded_prompt_summary(reviewer: dict[str, Any]) -> str:
+    prompt = sanitize(reviewer.get("suggested_fix_prompt", ""))
+    findings = reviewer.get("findings") if isinstance(reviewer.get("findings"), list) else []
+    finding_summaries = []
+    for finding in findings[:3]:
+        if isinstance(finding, dict) and finding.get("summary"):
+            finding_summaries.append(sanitize(finding.get("summary")))
+    prefix = "Fix reviewer needs_fix finding"
+    if finding_summaries:
+        prefix += ": " + "; ".join(finding_summaries)
+    return one_line(f"{prefix}. Bounded fix prompt: {prompt}", 500)
+
+
+def required_verification_summary(task: dict[str, Any]) -> str:
+    last_result = task.get("last_result") if isinstance(task.get("last_result"), dict) else {}
+    verification = last_result.get("verification") if isinstance(last_result.get("verification"), list) else []
+    if verification:
+        return one_line("; ".join(sanitize(item) for item in verification[:5]), 500)
+    return "Run focused verification covering the reviewer-requested fix and report commands/results."
 
 
 def apply_mechanical_accept(config: Config, task_id: str, expected_fingerprint: dict[str, Any]) -> dict[str, Any]:
@@ -840,6 +1026,22 @@ def render_review_next_report(report: dict[str, Any]) -> str:
             f"fix_attempts={chain.get('fix_attempts', '-')}",
         ]
         lines.append("chain: " + " ".join(parts))
+    auto_fix_planner = report.get("auto_fix_planner") if isinstance(report.get("auto_fix_planner"), dict) else {}
+    if auto_fix_planner:
+        lines.append(f"auto_fix_planner: allowed={str(bool(auto_fix_planner.get('allowed'))).lower()}")
+        skip_reasons = auto_fix_planner.get("skip_reasons") if isinstance(auto_fix_planner.get("skip_reasons"), list) else []
+        for reason in skip_reasons[:5]:
+            if isinstance(reason, dict):
+                lines.append(f"- skip: {reason.get('code')} ({reason.get('detail')})")
+        draft = auto_fix_planner.get("fix_task_draft") if isinstance(auto_fix_planner.get("fix_task_draft"), dict) else {}
+        if draft:
+            lines.append(
+                "fix_task_draft: "
+                f"root={draft.get('root_task_id')} "
+                f"parent={draft.get('parent_task_id')} "
+                f"cycle={draft.get('review_cycle')} "
+                f"depends_on={','.join(draft.get('depends_on') or [])}"
+            )
     deps = report.get("dependencies") or {}
     blockers = deps.get("blockers") or []
     if blockers:

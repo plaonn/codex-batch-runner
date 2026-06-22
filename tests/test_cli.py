@@ -39,6 +39,7 @@ def write_config(
     auto_review_mechanical_accept: bool = False,
     auto_review_codex_enabled: bool = False,
     auto_review_codex_max_calls_per_run: int = 0,
+    auto_review_codex_max_fix_loops_per_task: int = 0,
     codex_command: list[str] | None = None,
 ) -> Path:
     root = Path(tmp)
@@ -52,6 +53,7 @@ def write_config(
         "auto_review_mechanical_accept": auto_review_mechanical_accept,
         "auto_review_codex_enabled": auto_review_codex_enabled,
         "auto_review_codex_max_calls_per_run": auto_review_codex_max_calls_per_run,
+        "auto_review_codex_max_fix_loops_per_task": auto_review_codex_max_fix_loops_per_task,
     }
     if codex_command is not None:
         data["codex_command"] = codex_command
@@ -2359,6 +2361,100 @@ class CliTests(unittest.TestCase):
             self.assertIn("gates", report)
             self.assertIn("bundle", report)
             self.assertEqual("json-review", report["bundle"]["task"]["id"])
+
+    def test_review_next_dry_run_reports_allowed_auto_fix_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(tmp, auto_review_codex_max_fix_loops_per_task=1)
+            config = Config.load(str(config_path))
+            task = create_clean_completed_task(config, repo, "planner-allowed")
+            task["category"] = "docs"
+            task["labels"] = ["review"]
+            task["reviewer_codex"] = {
+                "decision": "needs_fix",
+                "confidence": "medium",
+                "reason": "documentation update is incomplete",
+                "findings": [{"severity": "warning", "summary": "missing docs", "evidence": "spec mismatch"}],
+                "required_human_checks": [],
+                "auto_fix_allowed": True,
+                "auto_fix_risk": "low",
+                "suggested_fix_prompt": "Update docs/spec.md to match the README behavior.",
+                "finding_fingerprints": ["missing-docs:docs-spec"],
+            }
+            save_task(config, task)
+            before = load_task(config, "planner-allowed")
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--dry-run", "--json"])
+            report = json.loads(output)
+            after = load_task(config, "planner-allowed")
+
+            self.assertEqual(0, code)
+            self.assertEqual(before, after)
+            planner = report["auto_fix_planner"]
+            self.assertTrue(planner["allowed"])
+            self.assertEqual([], planner["skip_reasons"])
+            draft = planner["fix_task_draft"]
+            self.assertEqual("planner-allowed", draft["root_task_id"])
+            self.assertEqual("planner-allowed", draft["parent_task_id"])
+            self.assertEqual(1, draft["review_cycle"])
+            self.assertEqual("repo", draft["project_id"])
+            self.assertEqual("docs", draft["category"])
+            self.assertEqual(["review"], draft["labels"])
+            self.assertEqual(str(repo), draft["cwd"])
+            self.assertEqual(["planner-allowed"], draft["depends_on"])
+            self.assertIn("unit tests", draft["required_verification_summary"])
+            self.assertIn("Update docs/spec.md", draft["bounded_prompt_summary"])
+
+            human_code, human_output = run_cli(["--config", str(config_path), "review-next", "--dry-run"])
+            self.assertEqual(0, human_code)
+            self.assertIn("auto_fix_planner: allowed=true", human_output)
+            self.assertIn("fix_task_draft: root=planner-allowed", human_output)
+
+    def test_review_next_dry_run_reports_auto_fix_skip_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_clean_completed_task(config, repo, "planner-skipped")
+            task["fix_attempts"] = 1
+            task["finding_fingerprints"] = ["same-finding"]
+            task["reviewer_codex"] = {
+                "decision": "needs_fix",
+                "confidence": "low",
+                "reason": "auth behavior is ambiguous",
+                "findings": [{"severity": "error", "summary": "same issue", "evidence": "same evidence"}],
+                "required_human_checks": ["confirm policy"],
+                "auto_fix_allowed": True,
+                "auto_fix_risk": "high",
+                "suggested_fix_prompt": "",
+                "finding_fingerprints": ["same-finding"],
+            }
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--dry-run", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            planner = report["auto_fix_planner"]
+            self.assertFalse(planner["allowed"])
+            self.assertIsNone(planner["fix_task_draft"])
+            codes = {item["code"] for item in planner["skip_reasons"]}
+            self.assertIn("disabled_config", codes)
+            self.assertIn("confidence_risk_mismatch", codes)
+            self.assertIn("missing_suggested_fix_prompt", codes)
+            self.assertIn("repeated_finding", codes)
+            self.assertIn("cooldown_limit_stale_gate", codes)
+            self.assertIn("high_risk_blocker", codes)
 
     def test_review_next_dry_run_does_not_mutate_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
