@@ -729,6 +729,147 @@ class CliTests(unittest.TestCase):
             self.assertEqual("", output)
             self.assertIn("is not allowlisted", stderr)
 
+    def test_routing_report_groups_profile_category_and_label_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                extra={
+                    "execution_profiles": {
+                        "small": {"model": "gpt-5-small"},
+                        "normal": {"model": "gpt-5"},
+                    }
+                },
+            )
+            config = Config.load(str(config_path))
+            accepted = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="accepted-small",
+                project_id="project-a",
+                category="implementation",
+                labels=["docs", "safe"],
+                execution_profile="small",
+            )
+            accepted["status"] = "completed"
+            accepted["review_status"] = "accepted"
+            accepted["attempts"] = 1
+            accepted["run_count"] = 1
+            accepted["last_run"] = {"duration_seconds": 30}
+            accepted["reviewer_codex"] = {"decision": "pass", "confidence": "high"}
+            save_task(config, accepted)
+
+            needs_fix = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="needs-fix-normal",
+                project_id="project-a",
+                category="implementation",
+                labels=["runner"],
+                execution_profile="normal",
+            )
+            needs_fix["status"] = "completed"
+            needs_fix["review_status"] = "needs_followup"
+            needs_fix["attempts"] = 2
+            needs_fix["run_count"] = 2
+            needs_fix["fix_attempts"] = 1
+            needs_fix["last_auto_fix_task_id"] = "fix-normal"
+            needs_fix["last_run"] = {"duration_seconds": 90}
+            needs_fix["reviewer_codex"] = {"decision": "needs_fix", "confidence": "high"}
+            save_task(config, needs_fix)
+
+            fix_task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="fix-normal",
+                project_id="project-a",
+                category="implementation",
+                labels=["runner"],
+                execution_profile="normal",
+            )
+            fix_task["status"] = "completed"
+            fix_task["review_status"] = "accepted"
+            fix_task["attempts"] = 1
+            fix_task["subtask_type"] = "auto_review_fix"
+            save_task(config, fix_task)
+
+            other = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="other-project",
+                project_id="project-b",
+                category="docs",
+                labels=["docs"],
+                execution_profile="small",
+            )
+            other["status"] = "completed"
+            other["review_status"] = "accepted"
+            save_task(config, other)
+
+            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
+            report = json.loads(output)
+            profiles = {entry["key"]: entry for entry in report["groups"]["profile"]}
+            labels = {entry["key"]: entry for entry in report["groups"]["label"]}
+            categories = {entry["key"]: entry for entry in report["groups"]["category"]}
+
+            self.assertEqual(0, code)
+            self.assertEqual(3, report["task_count"])
+            self.assertEqual(1, profiles["small"]["tasks"])
+            self.assertEqual(1, profiles["small"]["first_pass_accepted"])
+            self.assertEqual(1.0, profiles["small"]["first_pass_accept_rate"])
+            self.assertEqual(2, profiles["normal"]["tasks"])
+            self.assertEqual(1, profiles["normal"]["needs_fix_or_rejected"])
+            self.assertEqual(1, profiles["normal"]["auto_fix_tasks"])
+            self.assertEqual(1, profiles["normal"]["roots_with_auto_fix"])
+            self.assertEqual(3, categories["implementation"]["tasks"])
+            self.assertEqual(1, labels["docs"]["tasks"])
+            self.assertEqual(2, labels["runner"]["tasks"])
+            self.assertEqual(1, load_task(config, "accepted-small")["attempts"])
+
+    def test_routing_report_human_output_and_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}},
+            )
+            config = Config.load(str(config_path))
+            for index in range(3):
+                task = create_task(
+                    config,
+                    "work",
+                    tmp,
+                    task_id=f"task-{index}",
+                    project_id="project-a",
+                    category="docs",
+                    labels=["docs"],
+                    execution_profile="small",
+                )
+                task["status"] = "completed"
+                task["review_status"] = "accepted"
+                task["attempts"] = 1
+                save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--limit", "2"])
+
+            self.assertEqual(0, code)
+            self.assertIn("# routing report", output)
+            self.assertIn("tasks: 2 of 3 filtered", output)
+            self.assertIn("## by_profile", output)
+            self.assertIn("small", output)
+
+    def test_routing_report_rejects_negative_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output, stderr = run_cli_with_stderr(["--config", str(config_path), "routing-report", "--limit", "-1"])
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("--limit must be non-negative", stderr)
+
     def test_list_filters_by_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
