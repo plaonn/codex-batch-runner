@@ -1956,6 +1956,43 @@ class CliTests(unittest.TestCase):
             self.assertIn("op[0]\tdependency_changes\ttasks=task-b\twould_change=yes", output)
             self.assertEqual("runnable", load_task(config, "task-b")["status"])
 
+    def test_apply_plan_dry_run_accepts_execution_profile_and_routing_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
+            config = Config.load(str(config_path))
+            create_task(config, "synthetic work", tmp, task_id="task-a")
+            original = load_task(config, "task-a")
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "actor": {"type": "operator", "id": "test"},
+                    "reason": "retarget safe routing metadata",
+                    "operations": [
+                        {
+                            "op": "retarget_metadata",
+                            "task_id": "task-a",
+                            "expected": {"updated_at": original["updated_at"]},
+                            "fields": {
+                                "execution_profile": "small",
+                                "routing_reason": "docs-only bounded change",
+                                "routing_risk_factors": ["public-docs", "low-blast-radius"],
+                            },
+                        }
+                    ],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--dry-run"])
+
+            self.assertEqual(0, code)
+            self.assertIn("mode: dry-run", output)
+            self.assertIn("valid: true", output)
+            task = load_task(config, "task-a")
+            self.assertNotIn("execution_profile", task)
+            self.assertIsNone(task["routing_reason"])
+            self.assertEqual([], task["routing_risk_factors"])
+
     def test_apply_plan_dry_run_rejects_missing_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -1995,6 +2032,32 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(1, code)
             self.assertIn("operation targets running task: running-task", output)
+
+    def test_apply_plan_dry_run_rejects_unknown_execution_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
+            config = Config.load(str(config_path))
+            create_task(config, "synthetic work", tmp, task_id="task-a")
+            plan_path = write_plan(
+                tmp,
+                {
+                    "schema_version": 1,
+                    "actor": "operator",
+                    "reason": "unsafe profile name",
+                    "operations": [
+                        {
+                            "op": "retarget_metadata",
+                            "task_id": "task-a",
+                            "fields": {"execution_profile": "missing"},
+                        }
+                    ],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--dry-run"])
+
+            self.assertEqual(1, code)
+            self.assertIn("execution_profile references unknown execution profile: missing", output)
 
     def test_apply_plan_dry_run_rejects_dependency_cycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2051,7 +2114,7 @@ class CliTests(unittest.TestCase):
                 "from pathlib import Path; import sys; Path(sys.argv[1]).open('a', encoding='utf-8').write('x\\n')",
                 str(marker),
             ]
-            config_path = write_config(tmp, trigger)
+            config_path = write_config(tmp, trigger, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
             config = Config.load(str(config_path))
             create_task(config, "synthetic work", tmp, task_id="task-a")
             create_task(config, "synthetic work", tmp, task_id="task-b")
@@ -2075,6 +2138,9 @@ class CliTests(unittest.TestCase):
                                 "labels": ["safe", "mutation"],
                                 "depends_on": ["task-a"],
                                 "status": "paused",
+                                "execution_profile": "small",
+                                "routing_reason": "docs-only bounded change",
+                                "routing_risk_factors": ["public-docs", "low-blast-radius"],
                             },
                         }
                     ],
@@ -2096,9 +2162,28 @@ class CliTests(unittest.TestCase):
             self.assertEqual(["safe", "mutation"], task["labels"])
             self.assertEqual(["task-a"], task["depends_on"])
             self.assertEqual("paused", task["status"])
+            self.assertEqual("small", task["execution_profile"])
+            self.assertEqual("docs-only bounded change", task["routing_reason"])
+            self.assertEqual(["public-docs", "low-blast-radius"], task["routing_risk_factors"])
             self.assertEqual(["x"], marker.read_text(encoding="utf-8").splitlines())
             self.assertEqual("task_mutated", events[0]["event_type"])
-            self.assertEqual(["category", "depends_on", "description", "labels", "status", "title"], events[0]["payload"]["changed_fields"])
+            self.assertEqual(
+                [
+                    "category",
+                    "depends_on",
+                    "description",
+                    "execution_profile",
+                    "labels",
+                    "routing_reason",
+                    "routing_risk_factors",
+                    "status",
+                    "title",
+                ],
+                events[0]["payload"]["changed_fields"],
+            )
+            self.assertEqual("small", events[0]["payload"]["after"]["execution_profile"])
+            self.assertEqual("docs-only bounded change", events[0]["payload"]["after"]["routing_reason"])
+            self.assertEqual(["public-docs", "low-blast-radius"], events[0]["payload"]["after"]["routing_risk_factors"])
 
     def test_apply_plan_apply_rejects_stale_expected_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

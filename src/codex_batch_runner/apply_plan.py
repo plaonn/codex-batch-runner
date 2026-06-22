@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .execution_profiles import optional_profile_name
 from .events import emit_task_event
 from .fs import read_json
 from .lock import FileLock
@@ -62,6 +63,9 @@ APPLY_MUTATION_FIELDS = {
     "labels",
     "depends_on",
     "status",
+    "execution_profile",
+    "routing_reason",
+    "routing_risk_factors",
 }
 SAFE_STATUS_VALUES = {
     "runnable",
@@ -117,7 +121,7 @@ def build_apply_plan_report(config: Config, plan_path: str | Path) -> dict:
     created_ids: set[str] = set()
 
     for index, raw_operation in enumerate(operations):
-        op_report = validate_operation(index, raw_operation, plan, by_id, graph, created_ids, report)
+        op_report = validate_operation(config, index, raw_operation, plan, by_id, graph, created_ids, report)
         report["operations"].append(op_report)
 
     cycle = find_cycle(graph)
@@ -128,6 +132,7 @@ def build_apply_plan_report(config: Config, plan_path: str | Path) -> dict:
 
 
 def validate_operation(
+    config: Config,
     index: int,
     raw_operation: object,
     plan: dict,
@@ -175,7 +180,7 @@ def validate_operation(
             add_op_error(report, op_report, f"operation targets running task: {task_id}")
             continue
         validate_expected_state(raw_operation, task, op_report, report)
-        validate_safe_field_updates(raw_operation, task_id, op_report, report)
+        validate_safe_field_updates(config, raw_operation, task_id, op_report, report)
 
     validate_dependency_references(raw_operation, by_id, created_ids, op_report, report)
     apply_dependency_simulation(raw_operation, by_id, graph, created_ids, op_report, report)
@@ -293,6 +298,10 @@ def normalized_field_updates(fields: dict[str, Any]) -> dict[str, Any]:
             updates[field] = [str(item) for item in value] if isinstance(value, list) else []
         elif field == "status":
             updates[field] = str(value)
+        elif field in {"execution_profile", "routing_reason"}:
+            updates[field] = None if value is None else str(value)
+        elif field == "routing_risk_factors":
+            updates[field] = [str(item) for item in value] if isinstance(value, list) else []
     return updates
 
 
@@ -315,6 +324,9 @@ def mutation_summary(task: dict[str, Any]) -> dict[str, Any]:
             "category": task.get("category"),
             "labels": task.get("labels"),
             "depends_on": task.get("depends_on"),
+            "execution_profile": task.get("execution_profile"),
+            "routing_reason": task.get("routing_reason"),
+            "routing_risk_factors": task.get("routing_risk_factors"),
         }
     )
 
@@ -358,7 +370,7 @@ def validate_expected_state(operation: dict, task: dict, op_report: dict, report
             )
 
 
-def validate_safe_field_updates(operation: dict, task_id: str, op_report: dict, report: dict) -> None:
+def validate_safe_field_updates(config: Config, operation: dict, task_id: str, op_report: dict, report: dict) -> None:
     fields = operation.get("fields")
     if not isinstance(fields, dict):
         return
@@ -366,6 +378,11 @@ def validate_safe_field_updates(operation: dict, task_id: str, op_report: dict, 
         add_op_error(report, op_report, f"status mutation cannot set running task: {task_id}")
     elif "status" in fields and str(fields.get("status")) not in SAFE_STATUS_VALUES:
         add_op_error(report, op_report, f"unsupported status mutation for {task_id}: {fields.get('status')}")
+    if "execution_profile" in fields:
+        try:
+            optional_profile_name("execution_profile", fields.get("execution_profile"), config.execution_profiles)
+        except ValueError as exc:
+            add_op_error(report, op_report, f"{task_id}: {exc}")
 
 
 def validate_apply_supported_operations(plan: object) -> list[str]:
