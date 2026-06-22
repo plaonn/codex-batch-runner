@@ -6,10 +6,10 @@
 
 ## 현재 상태
 
-초기 구현 단계입니다. 실제 Codex CLI JSONL schema는 버전별 차이가 있을 수 있으므로 runner는 원본 JSONL 로그를 보존하고, 최종 응답과 session/thread id는 best-effort로 파싱합니다.
+현재는 로컬 beta 운영을 목표로 core flow를 구현하고 있습니다. 파일 기반 queue, lock, cooldown, Codex JSONL parsing, 자동 검토, bounded auto-fix, worktree 격리 실행, worktree apply 흐름을 포함합니다. 실제 Codex CLI JSONL schema는 버전별 차이가 있을 수 있으므로 runner는 원본 JSONL 로그를 보존하고, 최종 응답과 session/thread id는 best-effort로 파싱합니다.
 
 구현 기준은 [docs/spec.md](docs/spec.md)에 있습니다. 로컬 beta 설치와 macOS 운영자 설정은 [docs/operator-installation.md](docs/operator-installation.md)를 참고하십시오. 여러 프로젝트에서 beta로 운영하는 실무 흐름은 [docs/beta-operations.md](docs/beta-operations.md)를 참고하십시오.
-향후 notification, Telegram adapter, dashboard, optional SQLite index, task별 git worktree 실행 격리 계획도 [docs/spec.md](docs/spec.md)에 정리되어 있습니다.
+향후 notification, Telegram adapter, dashboard, optional SQLite index 계획도 [docs/spec.md](docs/spec.md)에 정리되어 있습니다. 개인 운영 환경에서 별도 roadmap 또는 task dashboard가 필요하면 [examples/ROADMAP.local.example.md](examples/ROADMAP.local.example.md)와 [examples/TASKS.local.example.md](examples/TASKS.local.example.md)를 복사해 gitignore되는 로컬 문서로 관리할 수 있습니다.
 
 ## 설치
 

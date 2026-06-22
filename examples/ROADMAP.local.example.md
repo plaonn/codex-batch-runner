@@ -1,19 +1,17 @@
 # 로컬 Roadmap 템플릿
 
-이 파일은 개인 작업 메모용 템플릿임. 실제 메모는 `ROADMAP.local.md`로 복사해서 사용함.
+이 파일은 개인 운영 환경에서 사용할 roadmap 템플릿입니다. 실제 메모는 저장소 루트의 `ROADMAP.local.md`로 복사해서 사용하십시오. `ROADMAP.local.md`는 gitignore 대상이어야 하며, 공개 저장소에 commit하지 않습니다.
 
-## 다음 작업
+`ROADMAP.local.md`에는 미래 방향, milestone, 큰 phase, parking lot만 기록합니다. 현재 작업 목록과 완료 로그는 별도 `TASKS.local.md`에 둡니다.
 
-- [ ] 실제 Codex CLI JSONL 샘플을 sanitized fixture로 정리
-- [ ] session/thread id 추출 규칙 보강
-- [ ] launchd local plist 작성 및 로컬 실행 확인
+## 방향
 
-## 관찰 로그
+-
 
-날짜:
+## Milestones
 
-내용:
+-
 
-## 스펙으로 승격할 결정
+## Parking Lot
 
 -
