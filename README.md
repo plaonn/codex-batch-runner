@@ -275,7 +275,7 @@ PYTHONPATH=src python3 -m codex_batch_runner worktree cleanup task-a --apply
 
 `worktree apply TASK_ID --dry-run`은 read-only report로, `completed + accepted` worktree task branch를 main worktree에 fast-forward로 반영할 수 있는지 확인합니다. Report에는 branch, `execution_base_head`, branch head, main head, 적용 대상, commit range summary, gate 결과, errors, warnings가 포함됩니다. `worktree apply TASK_ID --apply`는 runner와 같은 queue lock 아래에서 같은 validation을 다시 수행한 뒤, main worktree에서 `git merge --ff-only <execution_branch>`만 실행합니다. 초기 구현은 main HEAD가 정확히 `execution_base_head`와 같고 main worktree가 clean하며 task branch가 `execution_base_head` 위에 하나 이상의 commit을 가진 경우만 허용합니다. Rebase, merge commit, conflict resolution, cherry-pick, remote push는 수행하지 않습니다. 성공하면 task에 apply metadata를 기록하고 sanitized `task_worktree_applied` event를 남기며, worktree와 branch는 삭제하지 않습니다.
 
-`worktree cleanup --apply`는 `completed + accepted` 또는 `archived` task만 대상으로 하며, configured `worktree_root` 아래에 있고 Git worktree registry와 task metadata가 일치하는 worktree만 제거합니다. Local branch는 삭제하지 않습니다. Existing branch/worktree가 다른 task와 연결된 것으로 보이거나 path/registry 상태가 맞지 않으면 `recovery_required`로 보고하고 자동 정리하지 않습니다.
+`worktree cleanup --dry-run`은 기본 read-only report이며, `worktree cleanup --apply`는 `execution_apply_status=applied` metadata가 있는 `completed + accepted` 또는 `archived` worktree task만 대상으로 합니다. Cleanup은 configured `worktree_root` 아래에 있고 Git worktree registry와 task metadata가 일치하는 worktree만 제거합니다. Local branch, task JSON, runtime log, event log, private state는 삭제하지 않습니다. Missing/stale metadata, `recovery_required` metadata, 또는 path/registry 상태 불일치는 명확한 거부 사유로 보고하고 자동 정리하지 않습니다.
 
 ## 설정
 

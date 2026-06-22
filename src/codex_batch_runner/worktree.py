@@ -13,9 +13,9 @@ from .timeutil import iso_now
 
 
 PREPARE_OK_STATUSES = {"runnable", "needs_resume"}
-CLEANUP_OK_STATUSES = {"archived"}
 WORKTREE_RETAINED_STATUSES = {"prepared", "running", "retained", "cleanup_candidate"}
 APPLY_OK_WORKTREE_STATUSES = {"prepared", "retained", "cleanup_candidate"}
+CLEANUP_OK_WORKTREE_STATUSES = {"prepared", "retained", "cleanup_candidate"}
 
 
 def sanitize_branch_name(task_id: str) -> str:
@@ -177,14 +177,25 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
     report = base_report("cleanup", task, apply)
     branch = str(task.get("execution_branch") or "")
     worktree_raw = task.get("execution_worktree_path")
-    if not branch or not worktree_raw:
+    apply_status = str(task.get("execution_apply_status") or "")
+    report["apply_status"] = apply_status or "-"
+    missing = [
+        name
+        for name, value in (
+            ("execution_branch", branch),
+            ("execution_worktree_path", worktree_raw),
+            ("execution_worktree_status", task.get("execution_worktree_status")),
+            ("execution_repo_root", task.get("execution_repo_root")),
+        )
+        if not value
+    ]
+    if missing:
         report["classification"] = {"status": "missing", "reason": "task has no worktree metadata"}
-        report["warnings"].append("task has no worktree metadata")
+        report["errors"].append("worktree cleanup requires retained worktree metadata; missing: " + ", ".join(missing))
         return report
-    if task.get("status") not in CLEANUP_OK_STATUSES and not (
-        task.get("status") == "completed" and task.get("review_status") == "accepted"
-    ):
-        report["errors"].append("worktree cleanup is only allowed for archived or completed accepted tasks")
+    eligibility_error = cleanup_eligibility_error(task)
+    if eligibility_error:
+        report["errors"].append(eligibility_error)
         return report
     try:
         validate_branch_name(branch)
@@ -204,7 +215,7 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
         report["errors"].append(str(exc))
         return report
 
-    if classification["status"] == "recovery_required":
+    if classification["status"] in {"missing", "recovery_required"}:
         report["errors"].append(classification["reason"])
     if report["errors"] or not apply:
         return report
@@ -227,9 +238,33 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
             execution_mode=task.get("execution_mode"),
             execution_branch=branch,
             execution_worktree_status="cleaned",
+            execution_apply_status=task.get("execution_apply_status"),
+            execution_applied_head=task.get("execution_applied_head"),
         ),
     )
     return report
+
+
+def cleanup_eligibility_error(task: dict[str, Any]) -> str | None:
+    if task.get("execution_mode") != "git_worktree":
+        return "worktree cleanup requires execution_mode=git_worktree"
+    if not (
+        (task.get("status") == "completed" and task.get("review_status") == "accepted")
+        or task.get("status") == "archived"
+    ):
+        return "worktree cleanup is only allowed for archived or completed accepted tasks"
+    if not has_applied_worktree_metadata(task):
+        return (
+            "worktree cleanup requires execution_apply_status=applied before removing retained worktree; "
+            f"found execution_apply_status={task.get('execution_apply_status') or '-'}"
+        )
+    return None
+
+
+def has_applied_worktree_metadata(task: dict[str, Any]) -> bool:
+    if task.get("execution_apply_status") == "applied":
+        return True
+    return bool(task.get("execution_applied_at") and task.get("execution_applied_head"))
 
 
 def _build_apply_report_locked(config: Config, task_id: str, *, apply: bool) -> dict[str, Any]:
@@ -486,6 +521,14 @@ def classify_cleanup_state(
     worktree_path: Path,
     registry: list[dict[str, str]],
 ) -> dict[str, str]:
+    metadata_status = str(task.get("execution_worktree_status") or "")
+    if metadata_status == "recovery_required":
+        return {"status": "recovery_required", "reason": "task worktree metadata is marked recovery_required"}
+    if metadata_status not in CLEANUP_OK_WORKTREE_STATUSES:
+        return {
+            "status": "recovery_required",
+            "reason": f"execution_worktree_status={metadata_status or '-'} is not a retained cleanup candidate",
+        }
     registered = registry_entry_for_path(registry, worktree_path)
     if not worktree_path.exists() and not registered:
         return {"status": "missing", "reason": "worktree path and registry entry are already absent"}
@@ -641,6 +684,7 @@ def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
         ("execution_applied_at", "applied_at"),
         ("execution_applied_head", "applied_head"),
         ("execution_apply_target", "apply_target"),
+        ("execution_cleaned_at", "cleaned_at"),
     ):
         value = task.get(source)
         if value not in (None, ""):
@@ -755,7 +799,7 @@ def render_worktree_report(report: dict[str, Any]) -> str:
         f"task_id: {report.get('task_id')}",
         f"applied: {str(bool(report.get('applied'))).lower()}",
     ]
-    for key in ("branch", "worktree_path", "base_ref", "base_head"):
+    for key in ("branch", "worktree_path", "base_ref", "base_head", "apply_status"):
         if report.get(key):
             lines.append(f"{key}: {report.get(key)}")
     for key in ("branch_head", "main_head", "apply_target", "planned_action"):

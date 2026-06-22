@@ -555,9 +555,23 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
         chain_note = chain_note_cell(task)
         if chain_note:
             notes.append(chain_note)
+        worktree_note = worktree_apply_note(task)
+        if worktree_note:
+            notes.append(worktree_note)
         if config.auto_review_mechanical_accept and needs_review(task):
             notes.append("mechanical auto-review enabled")
     return notes or ["-"]
+
+
+def worktree_apply_note(task: dict) -> str:
+    if task.get("execution_mode") != "git_worktree":
+        return ""
+    if review_status(task) != "accepted":
+        return ""
+    if task.get("execution_apply_status") == "applied":
+        target = one_line(task.get("execution_apply_target") or "main")
+        return f"worktree applied to {target}"
+    return "worktree not applied"
 
 
 def execution_profile_note(task: dict) -> str:

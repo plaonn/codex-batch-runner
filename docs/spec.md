@@ -674,7 +674,7 @@ Review, reject, follow-up, accept model:
 
 - `run-next`는 task JSON의 canonical `cwd`를 원래 task cwd로 보존하고, Codex 호출에 전달하는 실행 cwd만 task worktree로 바꿉니다. 정상 final JSON이 `completed`이고 task worktree에 변경이 남아 있으면 runner는 final JSON의 `changed_files`에 보고된 안전한 상대 경로만 stage하여 task branch에 local commit을 만듭니다. 이 commit은 review unit을 고정하기 위한 것이며 remote push 또는 main 반영은 수행하지 않습니다. 저장하는 `git_status` snapshot은 자동 commit 이후 실제 Codex 실행 cwd인 task worktree에서 수집합니다.
 - `review-bundle`은 main repository state와 task worktree state를 분리해 표시합니다. Completion-time snapshot, review-time current main state, review-time task worktree state, branch, base ref, inferred commits, retained worktree path 존재 여부를 각각 기록합니다. Worktree-backed task에서 `execution_base_head..execution_branch` commit 또는 commit range를 추론할 수 있으면 이를 원자적인 review unit으로 취급합니다. Compatibility field인 `current_git_repository`와 `git_repository`는 review gate가 검사하는 task execution repository를 가리키며, worktree-backed task에서는 task worktree state입니다.
-- `summary`, `review-bundle`, `review-next`, `doctor`는 worktree 준비/정리 단계가 저장한 task metadata를 read-only로 표시합니다. 표시 대상은 `execution_mode`, branch, base ref/head, worktree status, sanitized worktree path/root이며, 실제 개인 절대 경로는 공개 보고에 그대로 노출하지 않습니다.
+- `summary`, `review-bundle`, `review-next`, `doctor`는 worktree 준비/정리 단계가 저장한 task metadata를 read-only로 표시합니다. 표시 대상은 `execution_mode`, branch, base ref/head, apply status/head/target, worktree status, sanitized worktree path/root이며, 실제 개인 절대 경로는 공개 보고에 그대로 노출하지 않습니다.
 - `review-next`는 missing/stale/recovery_required worktree metadata를 별도 report field와 warning으로 표시합니다. 이 warning은 operator review를 돕기 위한 정보이며, 기존 review gate가 명시적으로 요구하지 않는 한 단독으로 fatal gate가 되지 않습니다.
 - `doctor`는 configured `worktree_mode`, `worktree_root`, retained/recovery_required/missing metadata task count를 가볍게 요약합니다. 이 점검은 worktree 실행을 시작하거나 정리 작업을 수행하지 않습니다.
 - `reject`는 task branch/worktree를 보존하고 `review_status`만 갱신합니다. Reject 자체가 branch를 삭제하거나 main을 되돌리지 않습니다.
@@ -687,9 +687,9 @@ Review, reject, follow-up, accept model:
 Cleanup and retention:
 
 - 기본 retention은 보수적입니다. `failed`, `blocked_user`, `needs_resume`, `completed + unreviewed`, `completed + rejected`, `completed + needs_followup` task의 worktree는 review와 recovery를 위해 보존합니다.
-- `completed + accepted`이면서 merge/apply 완료 또는 operator가 branch retention을 명시적으로 해제한 task만 cleanup 후보가 됩니다.
-- `cbr prune`은 기본 dry-run에서 retained worktree, branch, task linkage를 보고합니다. `--apply`가 명시되고 cleanup guard가 통과한 경우에만 accepted/archived task의 worktree를 삭제합니다.
-- Cleanup guard는 target path가 configured `worktree_root` 아래인지, path가 비어 있지 않은지, Git worktree registry에 등록된 path인지, task metadata와 branch가 일치하는지 확인해야 합니다.
+- `execution_apply_status=applied` metadata가 있는 `completed + accepted` 또는 `archived` worktree task만 cleanup 후보가 됩니다. Accepted-but-not-applied task는 review는 끝났지만 main 반영이 끝나지 않은 상태이므로 retained worktree cleanup 대상이 아닙니다.
+- `cbr worktree cleanup`은 기본 dry-run이며, `--apply`가 명시되고 cleanup guard가 통과한 경우에만 retained task worktree를 삭제합니다. Local branch, task JSON, runtime log, event log, private state는 삭제하지 않습니다. Task/log/event 파일 삭제는 별도 `cbr prune` semantics를 통해서만 수행합니다.
+- Cleanup guard는 target path가 configured `worktree_root` 아래인지, path가 비어 있지 않은지, Git worktree registry에 등록된 path인지, task metadata와 branch가 일치하는지, worktree metadata가 missing/stale/recovery_required 상태가 아닌지 확인해야 합니다.
 - Branch deletion은 worktree 삭제와 별도 phase입니다. 기본은 local branch 보존이며, branch 삭제는 merged/applied 상태와 explicit option을 요구합니다.
 
 Stale worktree recovery and failure handling:
@@ -728,7 +728,7 @@ Next minimal implementation task:
 
 - `cbr worktree prepare TASK_ID --dry-run|--apply`: `worktree_mode=task`일 때만 task-specific branch와 worktree를 준비합니다. Apply mode는 queue lock 아래에서 task metadata를 갱신하고 `task_worktree_prepared` event를 기록합니다.
 - `cbr worktree apply TASK_ID --dry-run|--apply`: `completed + accepted` worktree task branch를 main worktree에 반영할 수 있는지 검증하고, `--apply`에서는 queue lock 아래에서 `git merge --ff-only`만 수행합니다. Main HEAD가 `execution_base_head`와 다르거나 main worktree가 dirty이거나 branch에 적용할 commit이 없으면 거부합니다. 성공해도 worktree와 branch는 보존합니다.
-- `cbr worktree cleanup TASK_ID --dry-run|--apply`: `completed + accepted` 또는 `archived` task의 retained worktree만 정리합니다. Cleanup은 configured `worktree_root` 아래의 Git registry에 등록된 path와 task metadata branch가 일치할 때만 수행하며, local branch는 보존합니다. Apply mode는 queue lock 아래에서 `execution_worktree_status=cleaned`를 기록하고 `task_worktree_cleaned` event를 남깁니다.
+- `cbr worktree cleanup TASK_ID --dry-run|--apply`: `execution_apply_status=applied` metadata가 있는 `completed + accepted` 또는 `archived` task의 retained worktree만 정리합니다. Cleanup은 configured `worktree_root` 아래의 Git registry에 등록된 path와 task metadata branch가 일치할 때만 수행하며, local branch, task JSON, runtime log, event log는 보존합니다. Apply mode는 queue lock 아래에서 `execution_worktree_status=cleaned`를 기록하고 `task_worktree_cleaned` event를 남깁니다.
 - 두 명령은 Codex를 호출하지 않습니다. `run-next`는 같은 prepare/recovery 규칙을 사용해 selected task worktree를 준비합니다. Existing branch/worktree가 metadata와 맞지 않거나 path/registry 상태가 불일치하면 `recovery_required`로 보고하고 자동 복구하지 않습니다.
 
 ## Project routing metadata

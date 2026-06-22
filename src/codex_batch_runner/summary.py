@@ -223,10 +223,15 @@ def render_worktree_metadata(task: dict) -> str:
         "branch",
         "base_ref",
         "base_head",
+        "apply_status",
+        "applied_at",
+        "applied_head",
+        "apply_target",
         "worktree_status",
         "worktree_path",
         "worktree_root",
         "repo_root",
+        "cleaned_at",
     ):
         if key in metadata:
             lines.append(f"{key}: {display_value(metadata.get(key))}")

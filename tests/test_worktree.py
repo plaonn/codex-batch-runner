@@ -13,7 +13,7 @@ from unittest.mock import patch
 from codex_batch_runner.cli import main
 from codex_batch_runner.config import Config
 from codex_batch_runner.events import list_events
-from codex_batch_runner.queue import create_task, load_task, save_task
+from codex_batch_runner.queue import create_task, load_task, save_task, task_path
 from codex_batch_runner.worktree import sanitize_branch_name
 
 
@@ -65,6 +65,20 @@ def write_config(root: Path, *, worktree_mode: str = "task", worktree_root: Path
     path = root / "config.json"
     path.write_text(json.dumps(data), encoding="utf-8")
     return path
+
+
+def create_applied_worktree_task(config_path: Path, config: Config, repo: Path, task_id: str) -> dict:
+    create_task(config, "work", str(repo), task_id=task_id)
+    assert run_cli(["--config", str(config_path), "worktree", "prepare", task_id, "--apply", "--json"])[0] == 0
+    task = load_task(config, task_id)
+    worktree = Path(task["execution_worktree_path"])
+    (worktree / "file.txt").write_text(f"base\n{task_id} change\n", encoding="utf-8")
+    git(worktree, "commit", "-am", f"{task_id} change")
+    task["status"] = "completed"
+    task["review_status"] = "accepted"
+    save_task(config, task)
+    assert run_cli(["--config", str(config_path), "worktree", "apply", task_id, "--apply", "--json"])[0] == 0
+    return load_task(config, task_id)
 
 
 class WorktreeTests(unittest.TestCase):
@@ -144,6 +158,12 @@ class WorktreeTests(unittest.TestCase):
             task["execution_worktree_path"] = str(root / "outside")
             task["execution_branch"] = "cbr/escape"
             task["execution_base_head"] = git(repo, "rev-parse", "HEAD")
+            task["execution_mode"] = "git_worktree"
+            task["execution_worktree_status"] = "retained"
+            task["execution_repo_root"] = str(repo)
+            task["execution_apply_status"] = "applied"
+            task["execution_applied_at"] = "2026-01-01T00:00:00+00:00"
+            task["execution_applied_head"] = git(repo, "rev-parse", "HEAD")
             task["status"] = "completed"
             task["review_status"] = "accepted"
             save_task(config, task)
@@ -170,7 +190,7 @@ class WorktreeTests(unittest.TestCase):
             self.assertEqual("existing_branch", report["classification"]["status"])
             self.assertIn("existing branch", report["errors"][0])
 
-    def test_cleanup_refuses_unaccepted_task_and_removes_accepted_worktree(self) -> None:
+    def test_cleanup_refuses_accepted_but_not_applied_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -193,11 +213,122 @@ class WorktreeTests(unittest.TestCase):
 
             code, report = run_cli(["--config", str(config_path), "worktree", "cleanup", "cleanup", "--apply", "--json"])
 
+            self.assertEqual(1, code)
+            self.assertFalse(report["applied"])
+            self.assertIn("execution_apply_status=applied", report["errors"][0])
+            self.assertTrue(worktree_path.exists())
+            self.assertNotIn("execution_cleaned_at", load_task(config, "cleanup"))
+
+    def test_cleanup_dry_run_reports_candidate_after_applied_worktree_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_applied_worktree_task(config_path, config, repo, "cleanup-dry")
+            worktree_path = Path(task["execution_worktree_path"])
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "cleanup", "cleanup-dry", "--dry-run", "--json"])
+            summary_code, summary = run_cli_text(["--config", str(config_path), "summary", "cleanup-dry"])
+            bundle_code, bundle_output = run_cli_text(["--config", str(config_path), "review-bundle", "cleanup-dry", "--json"])
+            bundle = json.loads(bundle_output)
+            list_code, list_output = run_cli_text(["--config", str(config_path), "list", "--all", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["applied"])
+            self.assertEqual("applied", report["apply_status"])
+            self.assertEqual("cleanup_candidate", report["classification"]["status"])
+            self.assertTrue(worktree_path.exists())
+            self.assertEqual(task["execution_worktree_status"], load_task(config, "cleanup-dry")["execution_worktree_status"])
+            self.assertNotIn("execution_cleaned_at", load_task(config, "cleanup-dry"))
+            self.assertEqual(0, summary_code)
+            self.assertIn("apply_status: applied", summary)
+            self.assertEqual(0, bundle_code)
+            self.assertEqual("applied", bundle["task_worktree"]["metadata"]["apply_status"])
+            self.assertEqual(0, list_code)
+            self.assertIn("worktree applied to main", list_output)
+
+    def test_cleanup_after_applied_task_preserves_branch_task_logs_and_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_applied_worktree_task(config_path, config, repo, "cleanup")
+            worktree_path = Path(task["execution_worktree_path"])
+            config.log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = config.log_dir / "cleanup.log"
+            log_path.write_text("sanitized log\n", encoding="utf-8")
+            task["log_paths"] = [str(log_path)]
+            save_task(config, task)
+            event_files_before = sorted(config.event_dir.rglob("*.jsonl"))
+            self.assertTrue(event_files_before)
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "cleanup", "cleanup", "--apply", "--json"])
+
             self.assertEqual(0, code)
             self.assertTrue(report["applied"])
+            self.assertEqual("applied", report["apply_status"])
             self.assertFalse(worktree_path.exists())
-            self.assertEqual("cleaned", load_task(config, "cleanup")["execution_worktree_status"])
+            loaded = load_task(config, "cleanup")
+            self.assertEqual("cleaned", loaded["execution_worktree_status"])
+            self.assertEqual("applied", loaded["execution_apply_status"])
+            self.assertTrue(task_path(config, "cleanup").exists())
+            self.assertTrue(log_path.exists())
+            self.assertTrue(all(path.exists() for path in event_files_before))
             self.assertIn("cbr/cleanup", git(repo, "branch", "--list", "cbr/cleanup"))
+            events = list_events(config, task_id="cleanup", limit=0)
+            self.assertTrue(any(event["event_type"] == "task_worktree_cleaned" for event in events))
+            self.assertNotIn("prompt", json.dumps(events))
+
+    def test_cleanup_refuses_missing_stale_and_recovery_required_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+
+            missing = create_task(config, "work", str(repo), task_id="cleanup-missing")
+            missing["status"] = "completed"
+            missing["review_status"] = "accepted"
+            missing["execution_mode"] = "git_worktree"
+            missing["execution_apply_status"] = "applied"
+            missing["execution_applied_at"] = "2026-01-01T00:00:00+00:00"
+            missing["execution_applied_head"] = git(repo, "rev-parse", "HEAD")
+            save_task(config, missing)
+
+            stale = create_applied_worktree_task(config_path, config, repo, "cleanup-stale")
+            stale_path = Path(stale["execution_worktree_path"])
+            git(repo, "worktree", "remove", str(stale_path))
+
+            recovery = create_applied_worktree_task(config_path, config, repo, "cleanup-recovery")
+            recovery["execution_worktree_status"] = "recovery_required"
+            save_task(config, recovery)
+
+            missing_code, missing_report = run_cli(
+                ["--config", str(config_path), "worktree", "cleanup", "cleanup-missing", "--dry-run", "--json"]
+            )
+            stale_code, stale_report = run_cli(
+                ["--config", str(config_path), "worktree", "cleanup", "cleanup-stale", "--dry-run", "--json"]
+            )
+            recovery_code, recovery_report = run_cli(
+                ["--config", str(config_path), "worktree", "cleanup", "cleanup-recovery", "--dry-run", "--json"]
+            )
+
+            self.assertEqual(1, missing_code)
+            self.assertIn("missing:", missing_report["errors"][0])
+            self.assertEqual(1, stale_code)
+            self.assertEqual("missing", stale_report["classification"]["status"])
+            self.assertIn("already absent", stale_report["errors"][0])
+            self.assertEqual(1, recovery_code)
+            self.assertEqual("recovery_required", recovery_report["classification"]["status"])
+            self.assertIn("marked recovery_required", recovery_report["errors"][0])
 
     def test_summary_and_review_bundle_include_sanitized_worktree_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
