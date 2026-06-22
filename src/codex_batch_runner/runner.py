@@ -223,7 +223,7 @@ def should_trigger_post_run_wake(config: Config, processed_task: dict[str, Any] 
         return False
     if is_in_cooldown(processed_task):
         return False
-    return select_next_task(config) is not None
+    return select_next_task(config) is not None or has_actionable_auto_review_candidate(config)
 
 
 def should_trigger_post_review_wake(config: Config) -> bool:

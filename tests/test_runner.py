@@ -472,6 +472,64 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("task-1", outcome.task_id)
             self.assertFalse(marker.exists())
 
+    def test_run_next_triggers_after_implementation_completion_when_auto_review_is_immediately_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            origin = Path(tmp) / "origin.git"
+            git(origin.parent, "init", "--bare", str(origin))
+            git(repo, "remote", "add", "origin", str(origin))
+            git(repo, "push", "-u", "origin", "main")
+            config = replace(make_config(tmp, "success"), auto_review_mechanical_accept=True)
+            create_task(config, "implementation", str(repo), task_id="implementation")
+
+            with patch.object(runner_module, "run_post_run_trigger") as trigger_mock:
+                outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("implementation", outcome.task_id)
+            self.assertEqual("completed", load_task(config, "implementation")["status"])
+            trigger_mock.assert_called_once_with(config)
+            self.assertFalse(config.lock_file.exists())
+
+    def test_run_next_does_not_trigger_after_implementation_completion_for_non_actionable_auto_review_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(make_config(tmp, "success"), auto_review_mechanical_accept=True)
+            create_task(config, "implementation", tmp, task_id="implementation")
+
+            def fake_run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
+                return CodexResult(
+                    returncode=0,
+                    log_path=Path(tmp) / "attempt.jsonl",
+                    command_kind="exec",
+                    resume_id_used=None,
+                    stderr="",
+                    events=[],
+                    final_response={
+                        "task_id": "implementation",
+                        "status": "completed",
+                        "summary": "done",
+                        "next_prompt": "",
+                        "changed_files": ["README.md"],
+                        "verification": [],
+                    },
+                    session_id=None,
+                    thread_id=None,
+                    rate_limited=False,
+                    rate_limit_markers=[],
+                )
+
+            with (
+                patch.object(runner_module, "run_codex", fake_run_codex),
+                patch.object(runner_module, "run_post_run_trigger") as trigger_mock,
+            ):
+                outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("implementation", outcome.task_id)
+            trigger_mock.assert_not_called()
+
     def test_run_next_skips_child_with_unaccepted_completed_dependency_when_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = replace(make_config(tmp, "success"), dependency_requires_accepted_review=True)
