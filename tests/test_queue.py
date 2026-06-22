@@ -151,6 +151,9 @@ class QueueTests(unittest.TestCase):
             self.assertIsNone(task["auto_fix_budget"])
             self.assertIsNone(task["last_auto_fix_task_id"])
             self.assertEqual([], task["finding_fingerprints"])
+            self.assertEqual("codex", task["execution_backend"])
+            self.assertIsNone(task["shell_command"])
+            self.assertIsNone(task["shell_timeout_seconds"])
 
     def test_create_task_accepts_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

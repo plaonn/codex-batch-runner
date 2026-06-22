@@ -534,6 +534,84 @@ class RunnerTests(unittest.TestCase):
             self.assertIsNone(task["last_run"]["resume_id_used"])
             self.assertIsNotNone(task["last_run"]["duration_seconds"])
 
+    def test_run_next_shell_task_success_captures_log_and_completes_without_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(
+                config,
+                "shell gate",
+                tmp,
+                task_id="shell-ok",
+                execution_backend="shell",
+                shell_command=[sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"],
+            )
+
+            with patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")):
+                outcome = run_next(config)
+            task = load_task(config, "shell-ok")
+            log_text = Path(task["log_paths"][0]).read_text(encoding="utf-8")
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("completed", task["status"])
+            self.assertEqual("unreviewed", task["review_status"])
+            self.assertEqual("shell", task["execution_backend"])
+            self.assertEqual("shell", task["last_run"]["command_kind"])
+            self.assertEqual("shell", task["last_run"]["execution_backend"])
+            self.assertEqual(0, task["last_run"]["returncode"])
+            self.assertEqual([sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"], task["last_run"]["command"])
+            self.assertEqual("completed", task["last_result"]["status"])
+            self.assertIn("out", log_text)
+            self.assertIn("err", log_text)
+
+    def test_run_next_shell_task_failure_blocks_dependent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(
+                config,
+                "shell gate",
+                tmp,
+                task_id="shell-fail",
+                execution_backend="shell",
+                shell_command=[sys.executable, "-c", "import sys; print('bad'); sys.exit(3)"],
+            )
+            create_task(config, "child", tmp, task_id="child", depends_on=["shell-fail"])
+
+            outcome = run_next(config)
+            failed = load_task(config, "shell-fail")
+            child = load_task(config, "child")
+            second = run_next(config)
+
+            self.assertEqual("failed", outcome.status)
+            self.assertEqual("failed", failed["status"])
+            self.assertEqual(3, failed["last_run"]["returncode"])
+            self.assertEqual("failed", failed["last_result"]["status"])
+            self.assertIn("exited with 3", failed["last_error"])
+            self.assertEqual("runnable", child["status"])
+            self.assertEqual("empty", second.status)
+
+    def test_run_next_shell_task_timeout_fails_without_large_output_in_task_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(make_config(tmp, "success"), shell_task_timeout_seconds=1)
+            create_task(
+                config,
+                "shell timeout",
+                tmp,
+                task_id="shell-timeout",
+                execution_backend="shell",
+                shell_command=[sys.executable, "-c", "import time; print('before'); time.sleep(5)"],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "shell-timeout")
+            task_json = json.dumps(task)
+
+            self.assertEqual("failed", outcome.status)
+            self.assertEqual("failed", task["status"])
+            self.assertTrue(task["last_run"]["timed_out"])
+            self.assertEqual(1, task["last_run"]["timeout_seconds"])
+            self.assertIn("timed out", task["last_error"])
+            self.assertNotIn("before" * 100, task_json)
+
     def test_run_next_records_resolved_execution_profile_in_last_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")

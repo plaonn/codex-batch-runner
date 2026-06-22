@@ -16,6 +16,7 @@ from .lock import FileLock
 from .prompts import build_prompt
 from .queue import is_in_cooldown, recover_stale_running_tasks, save_task, select_next_task
 from .review_next import build_review_next_apply_report_locked, has_actionable_auto_review_candidate
+from .shell import ShellResult, run_shell_task
 from .state import in_global_cooldown, mark_rate_limit, mark_run, mark_success
 from .timeutil import add_seconds, iso_now, parse_time
 from .triggers import run_post_run_trigger
@@ -101,7 +102,8 @@ def run_next(config: Config) -> RunOutcome:
             return outcome
 
         started_at = iso_now()
-        resume_requested = task.get("status") == "needs_resume"
+        execution_backend = task_execution_backend(task)
+        resume_requested = execution_backend == "codex" and task.get("status") == "needs_resume"
         execution_cwd: Path | None = None
         if config.worktree_mode == "task":
             worktree_result = prepare_task_worktree_for_run_locked(config, task)
@@ -113,20 +115,31 @@ def run_next(config: Config) -> RunOutcome:
                 return outcome
             execution_cwd = worktree_result["worktree_path"]
 
-        resume_unavailable = bool(resume_requested and task.get("next_prompt") and not resume_id(task))
-        prompt = build_prompt(
-            task,
-            resume_unavailable=resume_unavailable,
-            execution_cwd=str(execution_cwd) if execution_cwd else None,
-        )
-        profile_settings, profile_error = validate_execution_profile(config, task)
-        if profile_error:
-            mark_profile_failure(config, task, profile_error)
+        backend_error = validate_task_backend(task)
+        if backend_error:
+            mark_backend_failure(config, task, backend_error)
             mark_run(config, task["id"])
-            outcome = RunOutcome(status=task["status"], message=profile_error, task_id=task["id"])
+            outcome = RunOutcome(status=task["status"], message=backend_error, task_id=task["id"])
             return outcome
+        prompt = ""
+        profile_settings: ExecutionSettings | None = None
+        resume_unavailable = False
+        if execution_backend == "codex":
+            resume_unavailable = bool(resume_requested and task.get("next_prompt") and not resume_id(task))
+            prompt = build_prompt(
+                task,
+                resume_unavailable=resume_unavailable,
+                execution_cwd=str(execution_cwd) if execution_cwd else None,
+            )
+            profile_settings, profile_error = validate_execution_profile(config, task)
+            if profile_error:
+                mark_profile_failure(config, task, profile_error)
+                mark_run(config, task["id"])
+                outcome = RunOutcome(status=task["status"], message=profile_error, task_id=task["id"])
+                return outcome
         task["status"] = "running"
         task["started_at"] = started_at
+        task["execution_backend"] = execution_backend
         task["resume_requested"] = resume_requested
         task["resume_unavailable"] = resume_unavailable
         task["resume_unavailable_at"] = started_at if resume_unavailable else None
@@ -153,15 +166,22 @@ def run_next(config: Config) -> RunOutcome:
         )
         mark_run(config, task["id"])
 
-        codex_task = dict(task)
+        run_task = dict(task)
         if execution_cwd:
-            codex_task["cwd"] = str(execution_cwd)
-        result = run_codex(config, codex_task, prompt, task["attempts"])
-        if execution_cwd:
-            task["execution_worktree_status"] = "retained"
-            task["execution_retained_at"] = iso_now()
-            auto_commit_worktree_result(config, task, result, execution_cwd)
-        apply_codex_result(config, task, result, git_status_cwd=execution_cwd, execution_settings=profile_settings)
+            run_task["cwd"] = str(execution_cwd)
+        if execution_backend == "shell":
+            result = run_shell_task(config, run_task, task["attempts"])
+            if execution_cwd:
+                task["execution_worktree_status"] = "retained"
+                task["execution_retained_at"] = iso_now()
+            apply_shell_result(config, task, result, git_status_cwd=execution_cwd)
+        else:
+            result = run_codex(config, run_task, prompt, task["attempts"])
+            if execution_cwd:
+                task["execution_worktree_status"] = "retained"
+                task["execution_retained_at"] = iso_now()
+                auto_commit_worktree_result(config, task, result, execution_cwd)
+            apply_codex_result(config, task, result, git_status_cwd=execution_cwd, execution_settings=profile_settings)
         outcome = RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
         return outcome
     finally:
@@ -184,6 +204,45 @@ def validate_execution_profile(config: Config, task: dict[str, Any]) -> tuple[Ex
     except ValueError as exc:
         return None, str(exc)
     return settings, None
+
+
+def task_execution_backend(task: dict[str, Any]) -> str:
+    backend = task.get("execution_backend") or "codex"
+    return str(backend)
+
+
+def validate_task_backend(task: dict[str, Any]) -> str | None:
+    backend = task_execution_backend(task)
+    if backend == "codex":
+        return None
+    if backend != "shell":
+        return f"invalid execution backend: {backend}"
+    command = task.get("shell_command")
+    if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
+        return "shell task requires non-empty shell_command argv list"
+    timeout = task.get("shell_timeout_seconds")
+    if timeout is not None:
+        try:
+            if int(timeout) < 1:
+                return "shell_timeout_seconds must be a positive integer"
+        except (TypeError, ValueError):
+            return "shell_timeout_seconds must be a positive integer"
+    return None
+
+
+def mark_backend_failure(config: Config, task: dict, error_message: str) -> None:
+    task["status"] = "failed"
+    task["last_error"] = error_message
+    task["failure_count"] = int(task.get("failure_count", 0)) + 1
+    save_task(config, task)
+    emit_task_event(
+        config,
+        "task_failed",
+        task,
+        source="run-next",
+        summary=error_message,
+        payload=transition_payload(task, failure_count=task.get("failure_count")),
+    )
 
 
 def mark_profile_failure(config: Config, task: dict[str, Any], error_message: str) -> None:
@@ -355,6 +414,106 @@ def apply_codex_result(
         summary=payload.get("summary_excerpt") or str(task.get("last_error") or f"failed task {task.get('id')}"),
         payload=payload,
     )
+
+
+def apply_shell_result(
+    config: Config,
+    task: dict,
+    result: ShellResult,
+    *,
+    git_status_cwd: Path | None = None,
+) -> None:
+    task.setdefault("log_paths", []).append(str(result.log_path))
+    record_shell_last_run(task, result)
+    task["last_result"] = shell_last_result(task, result)
+    task["last_error"] = None if result.returncode == 0 and not result.timed_out else shell_error_summary(result)
+    task["cooldown_until"] = None
+    git_status = inspect_task_git_status(str(git_status_cwd) if git_status_cwd else task.get("cwd"))
+    if git_status:
+        task["git_status"] = git_status
+    else:
+        task.pop("git_status", None)
+
+    if result.returncode == 0 and not result.timed_out:
+        task["status"] = "completed"
+        task["review_status"] = "unreviewed"
+        task["reviewed_at"] = None
+        task["review_reason"] = None
+        task["next_prompt"] = None
+        task["completed_at"] = iso_now()
+        save_task(config, task)
+        mark_success(config, task["id"])
+        payload = transition_payload(task, completed_at=task.get("completed_at"))
+        payload.update(result_summary_payload(task))
+        emit_task_event(
+            config,
+            "task_completed",
+            task,
+            source="run-next",
+            summary=payload.get("summary_excerpt") or f"completed task {task.get('id')}",
+            payload=payload,
+        )
+        return
+
+    task["status"] = "failed"
+    task["failure_count"] = int(task.get("failure_count", 0)) + 1
+    save_task(config, task)
+    payload = transition_payload(
+        task,
+        failure_count=task.get("failure_count"),
+        timed_out=result.timed_out,
+        returncode=result.returncode,
+    )
+    payload.update(result_summary_payload(task))
+    emit_task_event(
+        config,
+        "task_failed",
+        task,
+        source="run-next",
+        summary=payload.get("summary_excerpt") or str(task.get("last_error") or f"failed task {task.get('id')}"),
+        payload=payload,
+    )
+
+
+def record_shell_last_run(task: dict, result: ShellResult) -> None:
+    task["last_run"] = {
+        "execution_backend": "shell",
+        "command_kind": "shell",
+        "command": result.command,
+        "returncode": result.returncode,
+        "started_at": task.get("started_at") or result.started_at,
+        "finished_at": result.finished_at,
+        "duration_seconds": result.duration_seconds,
+        "timeout_seconds": result.timeout_seconds,
+        "timed_out": result.timed_out,
+        "log_path": str(result.log_path),
+        "stdout_bytes": result.stdout_bytes,
+        "stderr_bytes": result.stderr_bytes,
+    }
+
+
+def shell_last_result(task: dict, result: ShellResult) -> dict[str, Any]:
+    status = "completed" if result.returncode == 0 and not result.timed_out else "failed"
+    summary = "shell command completed" if status == "completed" else shell_error_summary(result)
+    return {
+        "task_id": task.get("id"),
+        "status": status,
+        "summary": summary,
+        "changed_files": [],
+        "verification": [
+            f"shell command exited with {result.returncode}"
+            if result.returncode is not None
+            else f"shell command timed out after {result.timeout_seconds}s"
+        ],
+    }
+
+
+def shell_error_summary(result: ShellResult) -> str:
+    if result.timed_out:
+        return f"shell command timed out after {result.timeout_seconds}s"
+    if result.error:
+        return result.error
+    return f"shell command exited with {result.returncode}"
 
 
 def mark_worktree_prepare_failure(config: Config, task: dict, report: dict[str, Any]) -> None:

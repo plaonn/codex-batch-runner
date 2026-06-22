@@ -477,6 +477,25 @@ cron을 써야 하는 환경에서는 아래처럼 실행할 수 있습니다.
 
 `run-next`는 한 번 실행될 때 task 하나만 처리합니다.
 
+## Shell task backend
+
+Most tasks use the default `codex` backend and invoke Codex. Simple local checks can be enqueued with the `shell` backend to run an argv-list command without consuming Codex tokens:
+
+```bash
+cbr enqueue --cwd /path/to/repo --backend shell --command-json '["pytest", "tests/test_queue.py"]'
+cbr enqueue --cwd /path/to/repo --backend shell --shell-timeout 300 --command python -m pytest tests/test_queue.py
+```
+
+`--command` must be the final cbr option because every following token becomes command argv. cbr does not implicitly evaluate shell strings. To use shell features such as pipes, redirects, or `&&`, make that explicit in argv, for example `--command bash -lc 'pytest && cbr doctor'`.
+
+Shell tasks participate in the normal queue lifecycle: dependency ordering, runner lock, stale running recovery, attempts/run counters, task logs, terminal events, post-run wake triggers, and dependent unblocking all use the same task state model. Exit code `0` marks the task `completed` with `review_status=unreviewed`; nonzero exit, missing executable, or timeout marks it `failed`. A failed shell dependency remains a normal unmet dependency for downstream tasks.
+
+Full stdout and stderr are written to the task attempt log under `log_dir`. Task JSON and event payloads keep compact metadata only: command argv, return code, duration, timeout flag, output byte counts, log path, and a short result summary. Do not put secrets in shell argv; command metadata is stored in the task JSON.
+
+`shell_task_timeout_seconds` configures the default timeout for shell tasks and defaults to `900`. A task-specific `--shell-timeout` overrides it.
+
+Future maintenance workflows such as Codex CLI update checks can use shell tasks as ordered dependency gates. A future `exclusive` or `maintenance_pause` mode should pause new admissions before running a solo maintenance task, clear the pause on success, and keep the pause on failure. That solo mode is not implemented by the current shell backend.
+
 Codex를 호출하지 않는 조건:
 
 - queue가 비어 있습니다.

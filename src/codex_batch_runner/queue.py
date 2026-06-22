@@ -14,6 +14,7 @@ RUNNABLE_STATUSES = {"runnable", "needs_resume"}
 DEFAULT_HIDDEN_LIST_STATUSES = {"completed", "archived"}
 REVIEW_STATUSES = {"unreviewed", "accepted", "rejected", "needs_followup"}
 RESOLUTIONS = {"wont_fix", "superseded", "manual", "smoke", "duplicate"}
+EXECUTION_BACKENDS = {"codex", "shell"}
 CHAIN_STATUSES = {
     "awaiting_review",
     "reviewing",
@@ -187,6 +188,9 @@ def create_task(
     routing_reason: str | None = None,
     routing_risk_factors: list[str] | None = None,
     routing_experiment: str | None = None,
+    execution_backend: str = "codex",
+    shell_command: list[str] | None = None,
+    shell_timeout_seconds: int | None = None,
     subtask_type: str | None = None,
     subtask_for: str | None = None,
     blocks_root_completion: bool = False,
@@ -201,6 +205,11 @@ def create_task(
         task_id = slugify(f"task-{stamp}")
     if execution_profile and execution_profile not in config.execution_profiles:
         raise ValueError(f"unknown execution profile: {execution_profile}")
+    execution_backend = validate_execution_backend(execution_backend)
+    if execution_backend == "codex" and shell_command:
+        raise ValueError("shell_command requires execution_backend=shell")
+    shell_command = validate_shell_command(shell_command) if execution_backend == "shell" else None
+    shell_timeout_seconds = validate_shell_timeout(shell_timeout_seconds) if shell_timeout_seconds is not None else None
     path = task_path(config, task_id)
     if path.exists():
         raise FileExistsError(f"task already exists: {task_id}")
@@ -240,6 +249,9 @@ def create_task(
         "prompt": prompt,
         "next_prompt": None,
         "cwd": str(cwd_path),
+        "execution_backend": execution_backend,
+        "shell_command": shell_command,
+        "shell_timeout_seconds": shell_timeout_seconds,
         "session_id": None,
         "thread_id": None,
         "depends_on": depends_on or [],
@@ -294,6 +306,33 @@ def clean_optional_text(value: object | None) -> str | None:
         return None
     cleaned = " ".join(str(value).split())
     return cleaned or None
+
+
+def validate_execution_backend(value: object) -> str:
+    backend = str(value or "codex").strip()
+    if backend not in EXECUTION_BACKENDS:
+        raise ValueError(f"invalid execution backend: {backend}")
+    return backend
+
+
+def validate_shell_command(value: object) -> list[str]:
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+        raise ValueError("shell_command must be a non-empty list of strings")
+    if any(item == "" for item in value):
+        raise ValueError("shell_command entries must be non-empty strings")
+    return list(value)
+
+
+def validate_shell_timeout(value: object) -> int:
+    if isinstance(value, bool):
+        raise ValueError("shell_timeout_seconds must be a positive integer")
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("shell_timeout_seconds must be a positive integer") from exc
+    if seconds < 1:
+        raise ValueError("shell_timeout_seconds must be a positive integer")
+    return seconds
 
 
 def clean_text_list(values: list[str] | None) -> list[str]:
