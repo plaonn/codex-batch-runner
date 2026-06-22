@@ -1783,6 +1783,20 @@ class CliTests(unittest.TestCase):
             self.assertIn("keys: q quit, r refresh, +/- interval", output)
             self.assertIn("task", output)
 
+    def test_list_watch_ctrl_c_exits_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "task", tmp, task_id="task")
+
+            with patch("codex_batch_runner.cli.wait_for_watch_action", side_effect=KeyboardInterrupt):
+                code, output, stderr = run_cli_with_stderr(["--config", str(config_path), "list", "--watch"])
+
+            self.assertEqual(0, code)
+            self.assertIn("keys: q quit, r refresh, +/- interval", output)
+            self.assertIn("task", output)
+            self.assertEqual("", stderr)
+
     def test_list_color_uses_dependency_status_style_in_dependency_cells(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

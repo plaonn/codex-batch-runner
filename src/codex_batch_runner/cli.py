@@ -453,6 +453,10 @@ def cmd_list_watch(config: Config, args: argparse.Namespace) -> int:
             action, interval = wait_for_watch_action(interval)
             if action == "quit":
                 return 0
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return 0
     finally:
         if old_terminal is not None:
             try:
