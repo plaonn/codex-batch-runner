@@ -11,6 +11,7 @@ from .fs import ensure_dir
 from .lock import FileLock
 from .queue import (
     chain_metadata,
+    create_task,
     dependency_status,
     list_tasks,
     load_task,
@@ -18,6 +19,8 @@ from .queue import (
     task_labels,
     task_project_id,
     task_project_root,
+    task_title,
+    truncate_text,
 )
 from .review_bundle import build_review_bundle, sanitize_value
 from .reviewer_codex import reviewer_clear_pass, run_reviewer_codex
@@ -27,7 +30,7 @@ from .timeutil import add_seconds, iso_now
 from .transcript import sanitize
 
 REVIEW_NEEDED_STATUSES = {"unreviewed", "rejected", "needs_followup"}
-AUTO_FIX_ALLOWED_CONFIDENCE = {"medium", "high"}
+AUTO_FIX_ALLOWED_CONFIDENCE = {"high"}
 HIGH_RISK_TERMS = (
     "credential",
     "token",
@@ -779,7 +782,10 @@ def build_fix_task_draft(
         "category": sanitize(task.get("category")),
         "labels": [sanitize(label) for label in task_labels(task)],
         "cwd": sanitize(task.get("cwd")),
-        "depends_on": [parent_task_id],
+        "depends_on": [],
+        "subtask_type": "auto_review_fix",
+        "subtask_for": parent_task_id,
+        "blocks_root_completion": True,
         "required_verification_summary": required_verification_summary(task),
     }
 
@@ -948,6 +954,21 @@ def run_reviewer_phase(
             review_status=applied.get("review_status"),
         )
 
+    if reviewer_result.get("decision") == "needs_fix":
+        applied = record_and_maybe_enqueue_auto_fix(config, task_id, expected_fingerprint, reviewer_result)
+        return reviewer_phase_report(
+            decision=applied["decision"],
+            reason=applied["reason"],
+            mechanical_enabled=mechanical_enabled,
+            reviewer_codex_invoked=True,
+            reviewer_result=reviewer_result,
+            mutated=applied["mutated"],
+            review_status=applied.get("review_status"),
+            follow_up_enqueued=applied.get("follow_up_enqueued", False),
+            follow_up_task_id=applied.get("follow_up_task_id"),
+            auto_fix_skip_reasons=applied.get("auto_fix_skip_reasons"),
+        )
+
     record_reviewer_summary(config, task_id, reviewer_result, bundle=bundle)
     return reviewer_phase_report(
         decision=str(reviewer_result.get("decision") or "failed_review"),
@@ -956,6 +977,77 @@ def run_reviewer_phase(
         reviewer_codex_invoked=True,
         reviewer_result=reviewer_result,
     )
+
+
+def record_and_maybe_enqueue_auto_fix(
+    config: Config,
+    task_id: str,
+    expected_fingerprint: dict[str, Any],
+    reviewer_result: dict[str, Any],
+) -> dict[str, Any]:
+    task = load_task(config, task_id)
+    previous_fingerprints = task.get("finding_fingerprints") if isinstance(task.get("finding_fingerprints"), list) else []
+    bundle = build_review_bundle(
+        task,
+        by_id={item.get("id"): item for item in list_tasks(config)},
+        require_accepted_review=config.dependency_requires_accepted_review,
+    )
+    current = review_fingerprint(task, bundle)
+    if current != expected_fingerprint:
+        stale_result = {
+            **reviewer_result,
+            "decision": "needs_human",
+            "reason": "stale review state after reviewer Codex needs_fix",
+            "auto_fix_allowed": False,
+        }
+        record_reviewer_summary(config, task_id, stale_result, bundle=bundle)
+        emit_auto_fix_skipped_event(
+            config,
+            load_task(config, task_id),
+            [skip_reason("stale_task_state", "task or git metadata changed after gates were computed")],
+        )
+        return {
+            "mutated": True,
+            "decision": "needs_human",
+            "reason": "stale review state after reviewer Codex needs_fix",
+            "review_status": review_status(task),
+            "follow_up_enqueued": False,
+            "auto_fix_skip_reasons": [skip_reason("stale_task_state", "task or git metadata changed after gates were computed")],
+        }
+
+    record_reviewer_summary(config, task_id, reviewer_result, bundle=bundle)
+    task = load_task(config, task_id)
+    bundle = build_review_bundle(
+        task,
+        by_id={item.get("id"): item for item in list_tasks(config)},
+        require_accepted_review=config.dependency_requires_accepted_review,
+    )
+    gates = mechanical_gates(task, bundle)
+    planner_task = dict(task)
+    planner_task["finding_fingerprints"] = previous_fingerprints
+    planner = build_auto_fix_planner_report(config, planner_task, gates)
+    if not planner or not planner.get("allowed"):
+        skip_reasons = planner.get("skip_reasons") if isinstance(planner, dict) else []
+        emit_auto_fix_skipped_event(config, task, skip_reasons if isinstance(skip_reasons, list) else [])
+        return {
+            "mutated": True,
+            "decision": "needs_fix",
+            "reason": auto_fix_skip_summary(skip_reasons if isinstance(skip_reasons, list) else []),
+            "review_status": review_status(task),
+            "follow_up_enqueued": False,
+            "auto_fix_skip_reasons": skip_reasons if isinstance(skip_reasons, list) else [],
+        }
+
+    fix_task = enqueue_auto_fix_task(config, task, planner, reviewer_result)
+    return {
+        "mutated": True,
+        "decision": "needs_fix",
+        "reason": f"auto-fix task enqueued: {fix_task['id']}",
+        "review_status": review_status(task),
+        "follow_up_enqueued": True,
+        "follow_up_task_id": fix_task["id"],
+        "auto_fix_skip_reasons": [],
+    }
 
 
 def apply_reviewer_accept(
@@ -1063,6 +1155,208 @@ def record_reviewer_summary(
     )
 
 
+def enqueue_auto_fix_task(
+    config: Config,
+    parent_task: dict[str, Any],
+    planner: dict[str, Any],
+    reviewer_result: dict[str, Any],
+) -> dict[str, Any]:
+    draft = planner.get("fix_task_draft") if isinstance(planner.get("fix_task_draft"), dict) else {}
+    parent_task_id = str(parent_task.get("id") or "")
+    root_task_id = str(draft.get("root_task_id") or parent_task.get("root_task_id") or parent_task_id)
+    review_cycle = non_negative_int(draft.get("review_cycle"))
+    fix_attempts = non_negative_int(parent_task.get("fix_attempts")) + 1
+    prompt = build_auto_fix_prompt(parent_task, reviewer_result, root_task_id, review_cycle)
+    title = truncate_text(f"Auto-fix review findings for {task_title(parent_task)}", 80)
+    fix_task = create_task(
+        config,
+        prompt,
+        str(parent_task.get("cwd") or config.root),
+        depends_on=[],
+        project_id=task_project_id(parent_task) or None,
+        category=parent_task.get("category"),
+        labels=task_labels(parent_task),
+        created_by="auto-review-fix",
+        title=title,
+        description=f"Bounded auto-fix follow-up for reviewer findings on {parent_task_id}.",
+        execution_profile=parent_task.get("execution_profile"),
+        model=parent_task.get("model"),
+        codex_profile=parent_task.get("codex_profile"),
+        codex_config_overrides=parent_task.get("codex_config_overrides")
+        if isinstance(parent_task.get("codex_config_overrides"), dict)
+        else None,
+        token_budget_hint=parent_task.get("token_budget_hint"),
+        subtask_type="auto_review_fix",
+        subtask_for=parent_task_id,
+        blocks_root_completion=True,
+    )
+    reviewer = compact_reviewer_result(reviewer_result)
+    fix_task["blocks_root_completion"] = True
+    fix_task["root_task_id"] = root_task_id
+    fix_task["parent_task_id"] = parent_task_id
+    fix_task["review_cycle"] = review_cycle
+    fix_task["fix_attempts"] = fix_attempts
+    fix_task["chain_status"] = "fixing"
+    fix_task["last_review_decision"] = "needs_fix"
+    fix_task["review_findings"] = reviewer.get("findings", [])
+    fix_task["auto_fix_allowed"] = False
+    fix_task["auto_fix_budget"] = planner.get("config")
+    fix_task["finding_fingerprints"] = reviewer.get("finding_fingerprints", [])
+    save_task(config, fix_task)
+
+    link_blocking_auto_fix_subtask(config, parent_task, fix_task, fix_attempts, planner.get("config"))
+    save_task(config, parent_task)
+    emit_task_event(
+        config,
+        "task_auto_fix_enqueued",
+        parent_task,
+        source="review-next",
+        summary=f"auto-fix task enqueued for {parent_task_id}",
+        payload=transition_payload(
+            parent_task,
+            auto_fix_task_id=fix_task["id"],
+            root_task_id=root_task_id,
+            parent_task_id=parent_task_id,
+            review_cycle=review_cycle,
+            fix_attempts=fix_attempts,
+            reviewer_decision=reviewer.get("decision"),
+            reviewer_confidence=reviewer.get("confidence"),
+            auto_fix_risk=reviewer.get("auto_fix_risk"),
+            finding_fingerprints=reviewer.get("finding_fingerprints", []),
+            bounded_prompt_summary=draft.get("bounded_prompt_summary"),
+        ),
+    )
+    emit_task_event(
+        config,
+        "task_auto_fix_linked",
+        fix_task,
+        source="review-next",
+        summary=f"auto-fix task {fix_task['id']} linked to {parent_task_id}",
+        payload=transition_payload(
+            fix_task,
+            root_task_id=root_task_id,
+            parent_task_id=parent_task_id,
+            review_cycle=review_cycle,
+            fix_attempts=fix_attempts,
+        ),
+    )
+    return fix_task
+
+
+def link_blocking_auto_fix_subtask(
+    config: Config,
+    parent_task: dict[str, Any],
+    fix_task: dict[str, Any],
+    fix_attempts: int,
+    budget: object,
+) -> None:
+    apply_blocking_auto_fix_link(parent_task, fix_task["id"], fix_attempts, budget)
+    root_task_id = str(parent_task.get("root_task_id") or parent_task.get("id") or "")
+    parent_task_id = str(parent_task.get("id") or "")
+    if root_task_id and root_task_id != parent_task_id:
+        try:
+            root_task = load_task(config, root_task_id)
+        except FileNotFoundError:
+            return
+        apply_blocking_auto_fix_link(root_task, fix_task["id"], fix_attempts, budget)
+        save_task(config, root_task)
+
+
+def apply_blocking_auto_fix_link(task: dict[str, Any], fix_task_id: str, fix_attempts: int, budget: object) -> None:
+    task["chain_status"] = "fixing"
+    task["last_auto_fix_task_id"] = fix_task_id
+    task["fix_attempts"] = max(non_negative_int(task.get("fix_attempts")), fix_attempts)
+    task["auto_fix_budget"] = budget
+    existing = task.get("blocking_subtask_ids") if isinstance(task.get("blocking_subtask_ids"), list) else []
+    merged = [str(item) for item in existing if str(item)]
+    if fix_task_id not in merged:
+        merged.append(fix_task_id)
+    task["blocking_subtask_ids"] = merged
+
+
+def build_auto_fix_prompt(
+    parent_task: dict[str, Any],
+    reviewer_result: dict[str, Any],
+    root_task_id: str,
+    review_cycle: int,
+) -> str:
+    reviewer = compact_reviewer_result(reviewer_result)
+    findings = reviewer.get("findings") if isinstance(reviewer.get("findings"), list) else []
+    finding_lines = []
+    for index, finding in enumerate(findings[:5], start=1):
+        if not isinstance(finding, dict):
+            continue
+        finding_lines.append(
+            f"{index}. severity={finding.get('severity') or 'unknown'}; "
+            f"summary={one_line(finding.get('summary'), 240)}; "
+            f"evidence={one_line(finding.get('evidence'), 360)}"
+        )
+    if not finding_lines:
+        finding_lines.append("1. Reviewer did not provide structured findings; use only the bounded fix prompt below.")
+    verification_summary = required_verification_summary(parent_task)
+    return "\n".join(
+        [
+            "Implement a bounded reviewer-requested fix task.",
+            "",
+            "Scope constraints:",
+            f"- Root task: {root_task_id}",
+            f"- Reviewed parent task: {parent_task.get('id')}",
+            f"- Review cycle: {review_cycle}",
+            "- Do not revisit unrelated code, docs, or tests.",
+            "- Do not apply worktree branches or push remotes.",
+            "- Do not create or enqueue new tasks.",
+            "- Constrain edits to the reviewer findings and suggested fix prompt below.",
+            "- Preserve cbr final JSON schema requirements in the final response.",
+            "",
+            "Reviewer findings:",
+            *finding_lines,
+            "",
+            "Suggested fix prompt:",
+            one_line(reviewer.get("suggested_fix_prompt"), 2000),
+            "",
+            "Expected verification:",
+            verification_summary,
+        ]
+    )
+
+
+def emit_auto_fix_skipped_event(
+    config: Config,
+    task: dict[str, Any],
+    skip_reasons: list[Any],
+) -> None:
+    reviewer = task.get("reviewer_codex") if isinstance(task.get("reviewer_codex"), dict) else {}
+    sanitized_reasons = sanitize_value(skip_reasons)
+    emit_task_event(
+        config,
+        "task_auto_fix_skipped",
+        task,
+        source="review-next",
+        summary=f"auto-fix skipped for task {task.get('id')}",
+        payload=transition_payload(
+            task,
+            reviewer_decision=reviewer.get("decision"),
+            reviewer_confidence=reviewer.get("confidence"),
+            auto_fix_risk=reviewer.get("auto_fix_risk"),
+            skip_reasons=sanitized_reasons,
+            root_task_id=task.get("root_task_id"),
+            parent_task_id=task.get("parent_task_id"),
+            review_cycle=task.get("review_cycle"),
+            fix_attempts=task.get("fix_attempts"),
+        ),
+    )
+
+
+def auto_fix_skip_summary(skip_reasons: list[Any]) -> str:
+    codes = []
+    for reason in skip_reasons:
+        if isinstance(reason, dict) and reason.get("code"):
+            codes.append(str(reason.get("code")))
+    if not codes:
+        return "auto-fix skipped"
+    return "auto-fix skipped: " + ",".join(codes[:5])
+
+
 def compact_reviewer_result(result: dict[str, Any]) -> dict[str, Any]:
     findings = result.get("findings") if isinstance(result.get("findings"), list) else []
     fingerprints = result.get("finding_fingerprints") if isinstance(result.get("finding_fingerprints"), list) else []
@@ -1097,7 +1391,19 @@ def update_task_chain_from_reviewer(task: dict[str, Any], result: dict[str, Any]
         task["auto_fix_budget"] = sanitize_value(result.get("reviewer_limits"))
     fingerprints = result.get("finding_fingerprints") if isinstance(result.get("finding_fingerprints"), list) else []
     if fingerprints:
-        task["finding_fingerprints"] = [sanitize(item) for item in fingerprints[:100]]
+        existing = task.get("finding_fingerprints") if isinstance(task.get("finding_fingerprints"), list) else []
+        merged: list[str] = []
+        seen: set[str] = set()
+        for item in [*existing, *fingerprints]:
+            sanitized = sanitize(item)
+            key = sanitized.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(sanitized)
+            if len(merged) >= 100:
+                break
+        task["finding_fingerprints"] = merged
     elif "finding_fingerprints" not in task:
         task["finding_fingerprints"] = []
     if accepted:
@@ -1137,6 +1443,9 @@ def reviewer_phase_report(
     mutated: bool = False,
     review_status: str | None = None,
     rate_limited: bool = False,
+    follow_up_enqueued: bool = False,
+    follow_up_task_id: str | None = None,
+    auto_fix_skip_reasons: list[Any] | None = None,
 ) -> dict[str, Any]:
     summary = auto_review_summary(
         decision=decision if decision != "pass" else "needs_human",
@@ -1149,6 +1458,12 @@ def reviewer_phase_report(
         summary["reviewer_codex_result"] = compact_reviewer_result(reviewer_result)
     if rate_limited:
         summary["rate_limited"] = True
+    if follow_up_enqueued:
+        summary["follow_up_enqueued"] = True
+    if follow_up_task_id:
+        summary["follow_up_task_id"] = sanitize(follow_up_task_id)
+    if auto_fix_skip_reasons is not None:
+        summary["auto_fix_skip_reasons"] = sanitize_value(auto_fix_skip_reasons)
     return {
         "mutated": mutated,
         "review_status": review_status,
@@ -1242,7 +1557,8 @@ def render_review_next_report(report: dict[str, Any]) -> str:
                 f"root={draft.get('root_task_id')} "
                 f"parent={draft.get('parent_task_id')} "
                 f"cycle={draft.get('review_cycle')} "
-                f"depends_on={','.join(draft.get('depends_on') or [])}"
+                f"subtask_type={draft.get('subtask_type') or '-'} "
+                f"subtask_for={draft.get('subtask_for') or '-'}"
             )
     deps = report.get("dependencies") or {}
     blockers = deps.get("blockers") or []

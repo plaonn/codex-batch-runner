@@ -113,8 +113,12 @@ def render_last_result(last_result: object) -> str:
 def append_chain_summary(lines: list[str], task: dict) -> None:
     fields = []
     for key in (
+        "subtask_type",
+        "subtask_for",
+        "blocks_root_completion",
         "root_task_id",
         "parent_task_id",
+        "blocking_subtask_ids",
         "review_cycle",
         "review_attempts",
         "fix_attempts",
@@ -148,7 +152,7 @@ def meaningful_chain_value(key: str, value: object) -> bool:
         return False
     if key in {"review_cycle", "review_attempts", "fix_attempts"} and value == 0:
         return False
-    if key == "auto_fix_allowed" and value is False:
+    if key in {"auto_fix_allowed", "blocks_root_completion"} and value is False:
         return False
     return True
 

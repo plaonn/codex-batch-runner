@@ -534,6 +534,9 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
         notes.append("last error: " + one_line(task.get("last_error")))
     if task.get("status") == "running":
         notes.extend(running_notes(task, config))
+    subtask_note = subtask_note_cell(task)
+    if subtask_note:
+        notes.append(subtask_note)
     profile_note = execution_profile_note(task)
     if profile_note:
         notes.append(profile_note)
@@ -577,6 +580,16 @@ def chain_note_cell(task: dict) -> str:
         return f"chain {chain_status}"
     if decision:
         return f"reviewer {decision}"
+    return ""
+
+
+def subtask_note_cell(task: dict) -> str:
+    subtask_type = task.get("subtask_type")
+    subtask_for = task.get("subtask_for")
+    if subtask_type and subtask_for:
+        return f"subtask {subtask_type} for {subtask_for}"
+    if subtask_type:
+        return f"subtask {subtask_type}"
     return ""
 
 

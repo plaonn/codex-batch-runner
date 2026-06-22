@@ -24,8 +24,12 @@ CHAIN_STATUSES = {
     "loop_limit_reached",
 }
 CHAIN_METADATA_FIELDS = (
+    "subtask_type",
+    "subtask_for",
+    "blocks_root_completion",
     "root_task_id",
     "parent_task_id",
+    "blocking_subtask_ids",
     "review_cycle",
     "review_attempts",
     "fix_attempts",
@@ -180,6 +184,9 @@ def create_task(
     codex_profile: str | None = None,
     codex_config_overrides: dict[str, str] | None = None,
     token_budget_hint: str | None = None,
+    subtask_type: str | None = None,
+    subtask_for: str | None = None,
+    blocks_root_completion: bool = False,
 ) -> dict:
     ensure_dir(config.queue_dir)
     now = iso_now()
@@ -203,8 +210,12 @@ def create_task(
         "review_status": None,
         "reviewed_at": None,
         "review_reason": None,
+        "subtask_type": clean_optional_text(subtask_type),
+        "subtask_for": clean_optional_text(subtask_for),
+        "blocks_root_completion": bool(blocks_root_completion),
         "root_task_id": None,
         "parent_task_id": None,
+        "blocking_subtask_ids": [],
         "review_cycle": 0,
         "review_attempts": 0,
         "fix_attempts": 0,
@@ -261,6 +272,9 @@ def create_task(
             created_by=task.get("created_by"),
             title=task.get("title"),
             has_description=bool(task.get("description")),
+            subtask_type=task.get("subtask_type"),
+            subtask_for=task.get("subtask_for"),
+            blocks_root_completion=task.get("blocks_root_completion"),
         ),
     )
     return task
@@ -282,7 +296,7 @@ def meaningful_chain_value(key: str, value: object) -> bool:
         return False
     if key in {"review_cycle", "review_attempts", "fix_attempts"} and value == 0:
         return False
-    if key == "auto_fix_allowed" and value is False:
+    if key in {"auto_fix_allowed", "blocks_root_completion"} and value is False:
         return False
     return True
 

@@ -48,6 +48,25 @@ def run_next(config: Config) -> RunOutcome:
         if config.auto_review_mechanical_accept or config.auto_review_codex_enabled:
             review_report = build_review_next_apply_report_locked(config, auto_mode=True)
             if review_report.get("mutated"):
+                auto_review = review_report.get("auto_review") if isinstance(review_report.get("auto_review"), dict) else {}
+                if auto_review.get("follow_up_enqueued"):
+                    mark_run(config, None)
+                    outcome = RunOutcome(
+                        status="review_fix_enqueued",
+                        message="auto-review enqueued one follow-up fix task",
+                        task_id=str(review_report.get("task_id") or "") or None,
+                        review=review_report,
+                    )
+                    return outcome
+                if auto_review.get("decision") != "accepted":
+                    mark_run(config, None)
+                    outcome = RunOutcome(
+                        status="review_needed",
+                        message="completed task needs human review",
+                        task_id=str(review_report.get("task_id") or "") or None,
+                        review=review_report,
+                    )
+                    return outcome
                 mark_run(config, None)
                 outcome = RunOutcome(
                     status="review_accepted",
@@ -145,7 +164,7 @@ def run_next(config: Config) -> RunOutcome:
         lock.release()
         if outcome and outcome.task_id and should_trigger_post_run_wake(config, task):
             run_post_run_trigger(config)
-        elif outcome and outcome.status == "review_accepted" and should_trigger_post_review_wake(config):
+        elif outcome and outcome.status in {"review_accepted", "review_fix_enqueued"} and should_trigger_post_review_wake(config):
             run_post_run_trigger(config)
 
 

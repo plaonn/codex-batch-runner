@@ -21,9 +21,10 @@ from codex_batch_runner.config import Config
 from codex_batch_runner.evidence import rate_limit_dir
 from codex_batch_runner.events import list_events
 from codex_batch_runner.fs import write_json_atomic
-from codex_batch_runner.queue import create_task, load_task, save_task
+from codex_batch_runner.queue import create_task, dependency_status, list_tasks, load_task, save_task, select_next_task
 from codex_batch_runner.review_bundle import build_review_bundle
 from codex_batch_runner.review_next import apply_mechanical_accept, detectable_safety_violation, review_fingerprint
+from codex_batch_runner.reviewer_codex import ReviewerCodexOutcome
 from codex_batch_runner.state import load_state
 
 
@@ -202,6 +203,38 @@ def create_clean_completed_task(config: Config, repo: Path, task_id: str = "revi
     task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
     save_task(config, task)
     return task
+
+
+def reviewer_needs_fix_result(
+    *,
+    confidence: str = "high",
+    suggested_fix_prompt: str = "Update docs/spec.md to match the README behavior.",
+    fingerprint: str = "missing-docs:docs-spec",
+    auto_fix_allowed: bool = True,
+) -> dict:
+    return {
+        "task_id": "reviewable",
+        "decision": "needs_fix",
+        "confidence": confidence,
+        "reason": "documentation update is incomplete",
+        "findings": [
+            {
+                "severity": "warning",
+                "summary": "missing docs",
+                "evidence": "README change is not reflected in docs/spec.md",
+            }
+        ],
+        "required_human_checks": [],
+        "auto_fix_allowed": auto_fix_allowed,
+        "auto_fix_risk": "low",
+        "suggested_fix_prompt": suggested_fix_prompt,
+        "finding_fingerprints": [fingerprint] if fingerprint else [],
+        "reviewer_limits": {
+            "calls_used_this_run": 1,
+            "fix_loops_used_for_task": 0,
+            "cooldown_recommended_seconds": 0,
+        },
+    }
 
 
 def write_plan(tmp: str, data: dict) -> Path:
@@ -2640,14 +2673,17 @@ class CliTests(unittest.TestCase):
             (repo / "file.txt").write_text("base\n", encoding="utf-8")
             git(repo, "add", "file.txt")
             git(repo, "commit", "-m", "initial")
-            config_path = write_config(tmp, auto_review_codex_max_fix_loops_per_task=1)
+            config_path = write_config(
+                tmp,
+                auto_review_codex_max_fix_loops_per_task=1,
+            )
             config = Config.load(str(config_path))
             task = create_clean_completed_task(config, repo, "planner-allowed")
             task["category"] = "docs"
             task["labels"] = ["review"]
             task["reviewer_codex"] = {
                 "decision": "needs_fix",
-                "confidence": "medium",
+                "confidence": "high",
                 "reason": "documentation update is incomplete",
                 "findings": [{"severity": "warning", "summary": "missing docs", "evidence": "spec mismatch"}],
                 "required_human_checks": [],
@@ -2676,7 +2712,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual("docs", draft["category"])
             self.assertEqual(["review"], draft["labels"])
             self.assertEqual(str(repo), draft["cwd"])
-            self.assertEqual(["planner-allowed"], draft["depends_on"])
+            self.assertEqual([], draft["depends_on"])
+            self.assertEqual("auto_review_fix", draft["subtask_type"])
+            self.assertEqual("planner-allowed", draft["subtask_for"])
+            self.assertTrue(draft["blocks_root_completion"])
             self.assertIn("unit tests", draft["required_verification_summary"])
             self.assertIn("Update docs/spec.md", draft["bounded_prompt_summary"])
 
@@ -2684,6 +2723,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, human_code)
             self.assertIn("auto_fix_planner: allowed=true", human_output)
             self.assertIn("fix_task_draft: root=planner-allowed", human_output)
+            self.assertIn("subtask_type=auto_review_fix", human_output)
 
     def test_review_next_dry_run_reports_auto_fix_skip_reasons(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2876,7 +2916,7 @@ class CliTests(unittest.TestCase):
             task = load_task(config, "reviewer-fix")
 
             self.assertEqual(0, code)
-            self.assertFalse(report["mutated"])
+            self.assertTrue(report["mutated"])
             self.assertEqual("needs_fix", report["auto_review"]["decision"])
             self.assertTrue(report["auto_review"]["reviewer_codex_invoked"])
             self.assertEqual("unreviewed", task["review_status"])
@@ -2910,6 +2950,277 @@ class CliTests(unittest.TestCase):
             self.assertEqual("needs_fix", bundle["chain"]["chain_status"])
             self.assertEqual("needs_fix", bundle["reviewer_codex"]["decision"])
 
+    def test_review_next_reviewer_codex_needs_fix_enqueues_one_auto_fix_when_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                auto_review_codex_max_fix_loops_per_task=1,
+                codex_command=[sys.executable, str(FAKE_CODEX), "reviewer_needs_fix"],
+            )
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "reviewer-fix-enqueue")
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+            parent = load_task(config, "reviewer-fix-enqueue")
+            fix_task_id = report["auto_review"]["follow_up_task_id"]
+            fix_task = load_task(config, fix_task_id)
+            tasks = list_tasks(config)
+            events = list_events(config, limit=0)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["mutated"])
+            self.assertEqual("needs_fix", report["auto_review"]["decision"])
+            self.assertTrue(report["auto_review"]["follow_up_enqueued"])
+            self.assertEqual(2, len(tasks))
+            self.assertEqual(fix_task_id, parent["last_auto_fix_task_id"])
+            self.assertEqual("fixing", parent["chain_status"])
+            self.assertEqual(1, parent["fix_attempts"])
+            self.assertEqual([fix_task_id], parent["blocking_subtask_ids"])
+            self.assertEqual("runnable", fix_task["status"])
+            self.assertEqual("reviewer-fix-enqueue", fix_task["root_task_id"])
+            self.assertEqual("reviewer-fix-enqueue", fix_task["parent_task_id"])
+            self.assertEqual([], fix_task["depends_on"])
+            self.assertEqual("auto_review_fix", fix_task["subtask_type"])
+            self.assertEqual("reviewer-fix-enqueue", fix_task["subtask_for"])
+            self.assertTrue(fix_task["blocks_root_completion"])
+            self.assertEqual(1, fix_task["review_cycle"])
+            self.assertEqual(1, fix_task["fix_attempts"])
+            self.assertEqual("fixing", fix_task["chain_status"])
+            self.assertIn("Update docs/spec.md", fix_task["prompt"])
+            self.assertIn("Preserve cbr final JSON schema requirements", fix_task["prompt"])
+            self.assertFalse(any("synthetic-session" in json.dumps(event) for event in events))
+            self.assertTrue(any(event["event_type"] == "task_auto_fix_enqueued" for event in events))
+
+    def test_auto_fix_subtask_runs_with_strict_dependency_review_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                auto_review_codex_max_fix_loops_per_task=1,
+                codex_command=[sys.executable, str(FAKE_CODEX), "reviewer_needs_fix"],
+                extra={"dependency_requires_accepted_review": True},
+            )
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "strict-parent")
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+            fix_task_id = report["auto_review"]["follow_up_task_id"]
+            parent = load_task(config, "strict-parent")
+            fix_task = load_task(config, fix_task_id)
+            external_child = create_task(config, "external child", str(repo), task_id="external-child", depends_on=["strict-parent"])
+            by_id = {task.get("id"): task for task in list_tasks(config)}
+            external_ready, external_blockers = dependency_status(
+                external_child,
+                by_id,
+                require_accepted_review=config.dependency_requires_accepted_review,
+            )
+            selected = select_next_task(config)
+
+            self.assertEqual(0, code)
+            self.assertEqual("completed", parent["status"])
+            self.assertEqual("unreviewed", parent["review_status"])
+            self.assertEqual("fixing", parent["chain_status"])
+            self.assertEqual([fix_task_id], parent["blocking_subtask_ids"])
+            self.assertEqual([], fix_task["depends_on"])
+            self.assertEqual("auto_review_fix", fix_task["subtask_type"])
+            self.assertEqual("strict-parent", fix_task["subtask_for"])
+            self.assertTrue(fix_task["blocks_root_completion"])
+            self.assertFalse(external_ready)
+            self.assertEqual(["strict-parent"], external_blockers)
+            self.assertEqual(fix_task_id, selected["id"])
+            self.assertNotEqual(external_child["id"], selected["id"])
+
+    def test_review_next_auto_fix_disabled_config_refuses_enqueue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                codex_command=[sys.executable, str(FAKE_CODEX), "reviewer_needs_fix"],
+            )
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "reviewer-fix-disabled")
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+            events = list_events(config, limit=0)
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["auto_review"]["follow_up_enqueued"])
+            self.assertEqual(1, len(list_tasks(config)))
+            self.assertIn("disabled_config", {item["code"] for item in report["auto_review"]["auto_fix_skip_reasons"]})
+            self.assertTrue(any(event["event_type"] == "task_auto_fix_skipped" for event in events))
+
+    def test_review_next_auto_fix_exceeded_loop_limit_refuses_enqueue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                auto_review_codex_max_fix_loops_per_task=1,
+            )
+            config = Config.load(str(config_path))
+            task = create_clean_completed_task(config, repo, "reviewer-fix-limit")
+            task["fix_attempts"] = 1
+            save_task(config, task)
+
+            with patch(
+                "codex_batch_runner.review_next.run_reviewer_codex",
+                return_value=ReviewerCodexOutcome(
+                    invoked=True,
+                    decision="needs_fix",
+                    reason="needs fix",
+                    result=reviewer_needs_fix_result(),
+                ),
+            ):
+                code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["auto_review"]["follow_up_enqueued"])
+            self.assertEqual(1, len(list_tasks(config)))
+            self.assertIn("cooldown_limit_stale_gate", {item["code"] for item in report["auto_review"]["auto_fix_skip_reasons"]})
+
+    def test_review_next_auto_fix_repeated_finding_refuses_enqueue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                auto_review_codex_max_fix_loops_per_task=2,
+            )
+            config = Config.load(str(config_path))
+            task = create_clean_completed_task(config, repo, "reviewer-fix-repeat")
+            task["fix_attempts"] = 1
+            task["finding_fingerprints"] = ["missing-docs:docs-spec"]
+            save_task(config, task)
+
+            with patch(
+                "codex_batch_runner.review_next.run_reviewer_codex",
+                return_value=ReviewerCodexOutcome(
+                    invoked=True,
+                    decision="needs_fix",
+                    reason="needs fix",
+                    result=reviewer_needs_fix_result(),
+                ),
+            ):
+                code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["auto_review"]["follow_up_enqueued"])
+            self.assertEqual(1, len(list_tasks(config)))
+            self.assertIn("repeated_finding", {item["code"] for item in report["auto_review"]["auto_fix_skip_reasons"]})
+
+    def test_review_next_auto_fix_missing_suggested_prompt_refuses_enqueue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                auto_review_codex_max_fix_loops_per_task=1,
+            )
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "reviewer-fix-missing-prompt")
+
+            with patch(
+                "codex_batch_runner.review_next.run_reviewer_codex",
+                return_value=ReviewerCodexOutcome(
+                    invoked=True,
+                    decision="needs_fix",
+                    reason="needs fix",
+                    result=reviewer_needs_fix_result(suggested_fix_prompt=""),
+                ),
+            ):
+                code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["auto_review"]["follow_up_enqueued"])
+            self.assertEqual(1, len(list_tasks(config)))
+            self.assertIn("missing_suggested_fix_prompt", {item["code"] for item in report["auto_review"]["auto_fix_skip_reasons"]})
+
+    def test_review_next_auto_fix_stale_task_guard_refuses_enqueue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                auto_review_codex_max_fix_loops_per_task=1,
+            )
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "reviewer-fix-stale")
+
+            def stale_reviewer(*args: object, **kwargs: object) -> ReviewerCodexOutcome:
+                task = load_task(config, "reviewer-fix-stale")
+                task["last_result"]["summary"] = "changed while reviewer was running"
+                save_task(config, task)
+                return ReviewerCodexOutcome(
+                    invoked=True,
+                    decision="needs_fix",
+                    reason="needs fix",
+                    result=reviewer_needs_fix_result(),
+                )
+
+            with patch("codex_batch_runner.review_next.run_reviewer_codex", side_effect=stale_reviewer):
+                code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+            task = load_task(config, "reviewer-fix-stale")
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["auto_review"]["follow_up_enqueued"])
+            self.assertIn("stale_task_state", {item["code"] for item in report["auto_review"]["auto_fix_skip_reasons"]})
+            self.assertEqual(1, len(list_tasks(config)))
+            self.assertEqual("needs_human", task["chain_status"])
+            self.assertEqual("needs_human", task["reviewer_codex"]["decision"])
+
     def test_review_next_reviewer_codex_legacy_needs_fix_is_preserved_without_auto_enqueue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
@@ -2932,7 +3243,7 @@ class CliTests(unittest.TestCase):
             task = load_task(config, "reviewer-legacy-fix")
 
             self.assertEqual(0, code)
-            self.assertFalse(report["mutated"])
+            self.assertTrue(report["mutated"])
             self.assertEqual("needs_fix", report["auto_review"]["decision"])
             self.assertEqual("unreviewed", task["review_status"])
             self.assertEqual("needs_fix", task["reviewer_codex"]["decision"])

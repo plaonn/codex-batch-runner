@@ -118,7 +118,7 @@ def main() -> int:
                 "response": {
                     "task_id": task_id,
                     "decision": "needs_fix",
-                    "confidence": "medium",
+                    "confidence": "high",
                     "reason": "documentation update is incomplete",
                     "findings": [
                         {
