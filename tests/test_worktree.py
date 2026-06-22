@@ -274,6 +274,88 @@ class WorktreeTests(unittest.TestCase):
             self.assertFalse(review["bundle"]["current_task_worktree_repository"]["dirty"])
             self.assertTrue(review["bundle"]["current_main_repository"]["dirty"])
 
+    def test_review_bundle_infers_task_worktree_branch_commit_from_execution_base(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="branch-commit")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "branch-commit", "--apply", "--json"])[0])
+            task = load_task(config, "branch-commit")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\ntask change\n", encoding="utf-8")
+            git(worktree, "add", "file.txt")
+            git(worktree, "commit", "-m", "task change")
+            task_commit = git(worktree, "rev-parse", "HEAD")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["last_result"] = {
+                "task_id": "branch-commit",
+                "status": "completed",
+                "summary": "done",
+                "changed_files": ["file.txt"],
+                "verification": ["unit tests"],
+            }
+            task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
+            save_task(config, task)
+
+            bundle_code, bundle_output = run_cli_text(["--config", str(config_path), "review-bundle", "branch-commit", "--json"])
+            bundle = json.loads(bundle_output)
+            review_code, review_output = run_cli_text(["--config", str(config_path), "review-next", "--dry-run", "--json"])
+            review = json.loads(review_output)
+            gate_details = {gate["name"]: gate for gate in review["gates"]}
+
+            self.assertEqual(0, bundle_code)
+            self.assertEqual("worktree_branch", bundle["commit_information"]["source"])
+            self.assertEqual("inferred", bundle["commit_information"]["status"])
+            self.assertEqual([task_commit], bundle["commit_information"]["inferred_commits"])
+            self.assertEqual("ancestor", bundle["commit_information"]["ancestry"]["status"])
+            self.assertEqual("commit", bundle["git_diff"]["kind"])
+            self.assertEqual(task_commit, bundle["git_diff"]["ref"])
+            self.assertIn("file.txt", bundle["git_diff"]["stat"])
+            self.assertIn("+task change", bundle["git_diff"]["diff"])
+            self.assertEqual(0, review_code)
+            self.assertTrue(gate_details["commit_ancestry_acceptable"]["ok"])
+            self.assertEqual("commit", review["bundle"]["git_diff_summary"]["kind"])
+
+    def test_review_bundle_keeps_dirty_task_worktree_diff_when_branch_has_no_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="dirty-worktree")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "dirty-worktree", "--apply", "--json"])[0])
+            task = load_task(config, "dirty-worktree")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\ndirty change\n", encoding="utf-8")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["last_result"] = {
+                "task_id": "dirty-worktree",
+                "status": "completed",
+                "summary": "done",
+                "changed_files": ["file.txt"],
+                "verification": ["unit tests"],
+            }
+            task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": True}
+            save_task(config, task)
+
+            bundle_code, bundle_output = run_cli_text(["--config", str(config_path), "review-bundle", "dirty-worktree", "--json"])
+            bundle = json.loads(bundle_output)
+
+            self.assertEqual(0, bundle_code)
+            self.assertEqual("not_inferred", bundle["commit_information"]["status"])
+            self.assertEqual("working_tree", bundle["git_diff"]["kind"])
+            self.assertTrue(bundle["git_diff"]["dirty"])
+            self.assertIn("task worktree is dirty", " ".join(bundle["git_diff"]["warnings"]))
+            self.assertIn("+dirty change", bundle["git_diff"]["diff"])
+
     def test_accept_and_reject_follow_up_report_worktree_linkage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -371,9 +371,13 @@ def commit_information(task: dict, repo: dict[str, Any] | None) -> dict[str, Any
     if not repo or not repo.get("_root_path"):
         info["warnings"].append("git repository unavailable")
         return info
+    repo_root = Path(repo["_root_path"])
+    worktree_unit = infer_worktree_branch_review_unit(task, repo_root)
+    if worktree_unit:
+        info.update(worktree_unit)
+        return info
     candidates = infer_commit_hashes(task)
     existing = []
-    repo_root = Path(repo["_root_path"])
     for candidate in candidates:
         rev = run_git(repo_root, ["rev-parse", "--verify", f"{candidate}^{{commit}}"])
         if rev.returncode == 0 and rev.stdout.strip():
@@ -402,6 +406,78 @@ def commit_information(task: dict, repo: dict[str, Any] | None) -> dict[str, Any
         if info["reported"]:
             info["warnings"].append("reported commit metadata did not include an inferable commit hash")
     return info
+
+
+def infer_worktree_branch_review_unit(task: dict, repo_root: Path) -> dict[str, Any] | None:
+    if task.get("execution_mode") != "git_worktree":
+        return None
+    branch = str(task.get("execution_branch") or "").strip()
+    base = str(task.get("execution_base_head") or "").strip()
+    if not branch or not base:
+        return None
+
+    base_rev = run_git(repo_root, ["rev-parse", "--verify", f"{base}^{{commit}}"])
+    branch_rev = run_git(repo_root, ["rev-parse", "--verify", f"{branch}^{{commit}}"])
+    if base_rev.returncode != 0 or not base_rev.stdout.strip() or branch_rev.returncode != 0 or not branch_rev.stdout.strip():
+        return None
+
+    base_commit = base_rev.stdout.strip()
+    branch_head = branch_rev.stdout.strip()
+    range_ref = f"{base_commit}..{branch_head}"
+    rev_list = run_git(repo_root, ["rev-list", "--reverse", range_ref])
+    if rev_list.returncode != 0:
+        return None
+    commits = [line.strip() for line in rev_list.stdout.splitlines() if line.strip()]
+    if not commits:
+        return None
+
+    info: dict[str, Any] = {
+        "inferred_commits": sanitize_value(commits),
+        "status": "inferred",
+        "source": "worktree_branch",
+        "ancestry": worktree_branch_ancestry(repo_root, base_commit, branch_head),
+        "warnings": [],
+    }
+    if len(commits) == 1:
+        show = run_git(repo_root, ["show", "--no-patch", "--format=%H %s", commits[0]])
+        if show.returncode == 0:
+            info["commit"] = sanitize(show.stdout.strip())
+    else:
+        subjects = run_git(repo_root, ["log", "--reverse", "--format=%H %s", range_ref])
+        info["status"] = "range_inferred"
+        info["commit_range"] = {
+            "base": sanitize(base_commit),
+            "head": sanitize(branch_head),
+            "ref": sanitize(range_ref),
+            "count": len(commits),
+            "commits": sanitize_value([line for line in subjects.stdout.splitlines() if line.strip()])
+            if subjects.returncode == 0
+            else sanitize_value(commits),
+        }
+    if info["ancestry"].get("ok") is False:
+        info["warnings"].append(str(info["ancestry"].get("detail") or "execution branch is not based on execution_base_head"))
+    return info
+
+
+def worktree_branch_ancestry(repo_root: Path, base: str, branch_head: str) -> dict[str, Any]:
+    ancestor = run_git(repo_root, ["merge-base", "--is-ancestor", base, branch_head])
+    if ancestor.returncode == 0:
+        return {
+            "status": "ancestor",
+            "ok": True,
+            "reported_commit": sanitize(branch_head),
+            "current_head": sanitize(branch_head),
+            "base_head": sanitize(base),
+            "detail": "execution_base_head is an ancestor of the task worktree branch head",
+        }
+    return {
+        "status": "not_reachable",
+        "ok": False,
+        "reported_commit": sanitize(branch_head),
+        "current_head": sanitize(branch_head),
+        "base_head": sanitize(base),
+        "detail": "task worktree branch head is not reachable from execution_base_head",
+    }
 
 
 def commit_ancestry(repo_root: Path, commit: str) -> dict[str, Any]:
@@ -447,7 +523,20 @@ def build_git_diff(task: dict, repo: dict[str, Any] | None) -> dict[str, Any]:
         result["warnings"].append("git repository unavailable")
         return result
     repo_root = Path(repo["_root_path"])
-    commits = commit_information(task, repo).get("inferred_commits") or []
+    commit_info = commit_information(task, repo)
+    commits = commit_info.get("inferred_commits") or []
+    commit_range = commit_info.get("commit_range") if isinstance(commit_info.get("commit_range"), dict) else None
+    if commit_range:
+        ref = str(commit_range.get("ref") or "")
+        stat = run_git(repo_root, ["diff", "--stat", ref])
+        diff = run_git(repo_root, ["diff", "--find-renames", ref])
+        result["kind"] = "commit_range"
+        result["ref"] = sanitize(ref)
+        result["stat"] = sanitize_multiline(stat.stdout) if stat.returncode == 0 else ""
+        result["diff"] = sanitize_multiline(diff.stdout) if diff.returncode == 0 else ""
+        if stat.returncode != 0 or diff.returncode != 0:
+            result["warnings"].append("cannot read commit range diff/stat")
+        return result
     if len(commits) == 1:
         commit = commits[0]
         stat = run_git(repo_root, ["show", "--stat", "--format=", commit])
@@ -467,8 +556,11 @@ def build_git_diff(task: dict, repo: dict[str, Any] | None) -> dict[str, Any]:
         stat = run_git(repo_root, ["diff", "--stat"])
         diff = run_git(repo_root, ["diff", "--find-renames"])
         result["kind"] = "working_tree"
+        result["dirty"] = True
         result["stat"] = sanitize_multiline(stat.stdout) if stat.returncode == 0 else ""
         result["diff"] = sanitize_multiline(diff.stdout) if diff.returncode == 0 else ""
+        if task.get("execution_mode") == "git_worktree":
+            result["warnings"].append("task worktree is dirty and has no inferred branch commit after execution_base_head")
         if stat.returncode != 0 or diff.returncode != 0:
             result["warnings"].append("cannot read working tree diff/stat")
     else:

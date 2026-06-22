@@ -494,7 +494,10 @@ def commit_ancestry_detail(commit_info: dict[str, Any]) -> str:
     detail = ancestry.get("detail") or ""
     reported = ancestry.get("reported_commit")
     current = ancestry.get("current_head")
+    base = ancestry.get("base_head")
     parts = [f"status={status}"]
+    if base:
+        parts.append(f"execution_base_head={short_sha(base)}")
     if reported:
         parts.append(f"reported={short_sha(reported)}")
     if current:
