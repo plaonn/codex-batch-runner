@@ -73,6 +73,10 @@ def set_review_status(
     task["review_status"] = review_status
     task["reviewed_at"] = iso_now()
     task["review_reason"] = reason
+    if review_status == "needs_followup":
+        apply_follow_up_linkage(task)
+    elif review_status == "accepted" and task.get("chain_status"):
+        task["chain_status"] = "accepted"
     save_task(config, task)
     emit_task_event(
         config,
@@ -83,6 +87,25 @@ def set_review_status(
         payload=transition_payload(task, review_status=review_status, reviewed_at=task.get("reviewed_at")),
     )
     return task
+
+
+def apply_follow_up_linkage(task: dict) -> None:
+    task_id = str(task.get("id") or "")
+    task.setdefault("root_task_id", task_id)
+    task.setdefault("parent_task_id", None)
+    task.setdefault("review_cycle", 0)
+    task["chain_status"] = "needs_fix"
+    linkage = {
+        "source_task_id": task_id,
+        "source_execution_mode": task.get("execution_mode") or "main_worktree",
+        "source_branch": task.get("execution_branch"),
+        "source_worktree_path": task.get("execution_worktree_path"),
+        "source_worktree_status": task.get("execution_worktree_status"),
+        "source_repo_root": task.get("execution_repo_root") or task.get("project_root"),
+        "task_generation": "not_created",
+        "recorded_at": task.get("reviewed_at"),
+    }
+    task["review_follow_up"] = {key: value for key, value in linkage.items() if value not in (None, "")}
 
 
 def set_resolution(config: Config, task_id: str, resolution: str, reason: str | None = None) -> dict:

@@ -41,7 +41,7 @@ from .timeutil import parse_time, utc_now
 from .transcript import render_task_transcript
 from .triggers import run_post_mutation_trigger
 from .wake import schedule_manual_cooldown_wake
-from .worktree import build_cleanup_report, build_prepare_report, render_worktree_report
+from .worktree import build_cleanup_report, build_prepare_report, render_worktree_report, task_worktree_metadata
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -889,7 +889,7 @@ def cmd_accept(config: Config, args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
     else:
-        print(f"{task.get('id')}\taccepted")
+        print(render_review_mutation(task, "accepted"), end="")
     return 0
 
 
@@ -900,8 +900,35 @@ def cmd_reject(config: Config, args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
     else:
-        print(f"{task.get('id')}\t{status}")
+        print(render_review_mutation(task, status), end="")
     return 0
+
+
+def render_review_mutation(task: dict, status: str) -> str:
+    lines = [f"{task.get('id')}\t{status}"]
+    metadata = task_worktree_metadata(task)
+    if metadata != {"execution_mode": "main_worktree"}:
+        parts = [
+            f"mode={metadata.get('execution_mode')}",
+            f"branch={metadata.get('branch') or '-'}",
+            f"status={metadata.get('worktree_status') or '-'}",
+        ]
+        if metadata.get("worktree_path"):
+            parts.append(f"path={metadata.get('worktree_path')}")
+        lines.append("worktree\t" + " ".join(parts))
+    follow_up = task.get("review_follow_up") if isinstance(task.get("review_follow_up"), dict) else {}
+    if follow_up and (follow_up.get("source_branch") or follow_up.get("source_execution_mode") == "git_worktree"):
+        lines.append(
+            "follow_up\t"
+            + " ".join(
+                [
+                    f"source_task={follow_up.get('source_task_id') or '-'}",
+                    f"source_branch={follow_up.get('source_branch') or '-'}",
+                    f"task_generation={follow_up.get('task_generation') or '-'}",
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
 
 
 def cmd_archive(config: Config, args: argparse.Namespace) -> int:

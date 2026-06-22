@@ -235,6 +235,83 @@ class WorktreeTests(unittest.TestCase):
             self.assertTrue(bundle["task_worktree"]["path_exists"])
             self.assertNotIn("execution_worktree_path", bundle["task"])
 
+    def test_review_bundle_distinguishes_main_and_task_worktree_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="split-state")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "split-state", "--apply", "--json"])[0])
+            task = load_task(config, "split-state")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["last_result"] = {
+                "task_id": "split-state",
+                "status": "completed",
+                "summary": "done",
+                "changed_files": ["file.txt"],
+                "verification": ["unit tests"],
+            }
+            task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
+            save_task(config, task)
+            (repo / "file.txt").write_text("main dirty\n", encoding="utf-8")
+
+            bundle_code, bundle_output = run_cli_text(["--config", str(config_path), "review-bundle", "split-state", "--json"])
+            bundle = json.loads(bundle_output)
+            review_code, review_output = run_cli_text(["--config", str(config_path), "review-next", "--dry-run", "--json"])
+            review = json.loads(review_output)
+
+            self.assertEqual(0, bundle_code)
+            self.assertEqual("task_worktree", bundle["current_git_repository"]["inspection_scope"])
+            self.assertFalse(bundle["current_git_repository"]["dirty"])
+            self.assertTrue(bundle["current_main_repository"]["dirty"])
+            self.assertFalse(bundle["current_task_worktree_repository"]["dirty"])
+            self.assertEqual(0, review_code)
+            self.assertTrue(review["gates_ok"])
+            self.assertFalse(review["bundle"]["current_task_worktree_repository"]["dirty"])
+            self.assertTrue(review["bundle"]["current_main_repository"]["dirty"])
+
+    def test_accept_and_reject_follow_up_report_worktree_linkage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            for task_id in ("accept-link", "follow-link"):
+                create_task(config, "work", str(repo), task_id=task_id)
+                self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", task_id, "--apply", "--json"])[0])
+                task = load_task(config, task_id)
+                task["status"] = "completed"
+                task["review_status"] = "unreviewed"
+                save_task(config, task)
+
+            accept_code, accept_output = run_cli_text(["--config", str(config_path), "accept", "accept-link", "--reason", "verified"])
+            reject_code, reject_output = run_cli_text(
+                ["--config", str(config_path), "reject", "follow-link", "--follow-up", "--reason", "needs fix"]
+            )
+            follow = load_task(config, "follow-link")
+            bundle_code, bundle_output = run_cli_text(["--config", str(config_path), "review-bundle", "follow-link", "--json"])
+            bundle = json.loads(bundle_output)
+
+            self.assertEqual(0, accept_code)
+            self.assertIn("accept-link\taccepted", accept_output)
+            self.assertIn("worktree\tmode=git_worktree branch=cbr/accept-link status=prepared", accept_output)
+            self.assertEqual(0, reject_code)
+            self.assertIn("follow-link\tneeds_followup", reject_output)
+            self.assertIn("worktree\tmode=git_worktree branch=cbr/follow-link status=prepared", reject_output)
+            self.assertIn("follow_up\tsource_task=follow-link source_branch=cbr/follow-link task_generation=not_created", reject_output)
+            self.assertEqual("needs_fix", follow["chain_status"])
+            self.assertEqual("follow-link", follow["root_task_id"])
+            self.assertEqual("cbr/follow-link", follow["review_follow_up"]["source_branch"])
+            self.assertEqual("not_created", follow["review_follow_up"]["task_generation"])
+            self.assertEqual(0, bundle_code)
+            self.assertEqual("cbr/follow-link", bundle["review_follow_up"]["source_branch"])
+
     def test_review_next_reports_worktree_warnings_without_failing_gates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

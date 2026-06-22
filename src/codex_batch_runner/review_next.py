@@ -261,7 +261,7 @@ def review_sort_key(task: dict) -> tuple[str, str, str]:
 def mechanical_gates(task: dict, bundle: dict[str, Any]) -> list[dict[str, Any]]:
     last_result = task.get("last_result") if isinstance(task.get("last_result"), dict) else {}
     git_status = task.get("git_status") if isinstance(task.get("git_status"), dict) else {}
-    repo = bundle.get("current_git_repository") if isinstance(bundle.get("current_git_repository"), dict) else {}
+    repo = review_gate_repository(bundle)
     changed_files = last_result.get("changed_files") if isinstance(last_result, dict) else None
     verification = last_result.get("verification") if isinstance(last_result, dict) else None
     deps = bundle.get("dependencies") if isinstance(bundle.get("dependencies"), dict) else {}
@@ -301,6 +301,15 @@ def mechanical_gates(task: dict, bundle: dict[str, Any]) -> list[dict[str, Any]]
 
 def gate(name: str, ok: bool, detail: str) -> dict[str, Any]:
     return {"name": name, "ok": bool(ok), "detail": sanitize(detail)}
+
+
+def review_gate_repository(bundle: dict[str, Any]) -> dict[str, Any]:
+    repo = bundle.get("current_git_repository") if isinstance(bundle.get("current_git_repository"), dict) else {}
+    if repo.get("available") is False and repo.get("inspection_scope") == "task_worktree":
+        main_repo = bundle.get("current_main_repository") if isinstance(bundle.get("current_main_repository"), dict) else {}
+        if main_repo.get("available") is True:
+            return main_repo
+    return repo
 
 
 def dependency_detail(deps: dict[str, Any]) -> str:
@@ -356,11 +365,15 @@ def concise_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
         "last_result": bundle.get("last_result"),
         "last_run": bundle.get("last_run"),
         "task_worktree": bundle.get("task_worktree"),
+        "review_follow_up": bundle.get("review_follow_up"),
         "changed_files": bundle.get("changed_files"),
         "verification": bundle.get("verification"),
         "last_error": bundle.get("last_error"),
         "task_git_status_snapshot": bundle.get("task_git_status_snapshot"),
         "current_git_repository": bundle.get("current_git_repository"),
+        "current_task_repository": bundle.get("current_task_repository"),
+        "current_main_repository": bundle.get("current_main_repository"),
+        "current_task_worktree_repository": bundle.get("current_task_worktree_repository"),
         "git_status": bundle.get("git_status"),
         "git_repository": bundle.get("git_repository"),
         "commit_information": bundle.get("commit_information"),
@@ -396,7 +409,7 @@ def safety_detail(task: dict, bundle: dict[str, Any]) -> str:
 
 
 def review_fingerprint(task: dict, bundle: dict[str, Any]) -> dict[str, Any]:
-    repo = bundle.get("current_git_repository") if isinstance(bundle.get("current_git_repository"), dict) else {}
+    repo = review_gate_repository(bundle)
     commit_info = bundle.get("commit_information") if isinstance(bundle.get("commit_information"), dict) else {}
     return {
         "updated_at": task.get("updated_at"),

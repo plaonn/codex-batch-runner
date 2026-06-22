@@ -29,9 +29,10 @@ def build_review_bundle(
         require_accepted_review=require_accepted_review,
     )
     last_result = sanitize_value(task.get("last_result")) if isinstance(task.get("last_result"), dict) else None
-    repo = inspect_repo(task)
-    git_diff = build_git_diff(task, repo)
-    changed_files = changed_file_summary(task, repo)
+    repositories = inspect_repositories(task)
+    task_repo = repositories.get("task")
+    git_diff = build_git_diff(task, task_repo)
+    changed_files = changed_file_summary(task, task_repo)
 
     return {
         "task": task_metadata(task),
@@ -50,15 +51,19 @@ def build_review_bundle(
         "last_result": last_result,
         "last_run": sanitize_value(task.get("last_run")) if isinstance(task.get("last_run"), dict) else None,
         "task_worktree": sanitize_value(task_worktree_report(task)),
+        "review_follow_up": sanitize_value(task.get("review_follow_up")) if isinstance(task.get("review_follow_up"), dict) else None,
         "changed_files": changed_files,
         "verification": result_list(last_result, "verification"),
         "last_error": sanitize(task.get("last_error")) if task.get("last_error") else None,
         "relevant_log_paths": sanitize_value(task.get("log_paths") or []),
         "task_git_status_snapshot": sanitize_value(task.get("git_status")) if isinstance(task.get("git_status"), dict) else None,
-        "current_git_repository": public_repo(repo),
+        "current_git_repository": public_repo(task_repo),
+        "current_task_repository": public_repo(task_repo),
+        "current_main_repository": public_repo(repositories.get("main")),
+        "current_task_worktree_repository": public_repo(repositories.get("task_worktree")),
         "git_status": sanitize_value(task.get("git_status")) if isinstance(task.get("git_status"), dict) else None,
-        "git_repository": public_repo(repo),
-        "commit_information": commit_information(task, repo),
+        "git_repository": public_repo(task_repo),
+        "commit_information": commit_information(task, task_repo),
         "git_diff": git_diff,
         "safety_policy": safety_policy(),
         "transcript_contents_included": False,
@@ -81,6 +86,10 @@ def task_metadata(task: dict) -> dict[str, Any]:
         "completed_at",
         "reviewed_at",
         "resolved_at",
+        "root_task_id",
+        "parent_task_id",
+        "review_cycle",
+        "chain_status",
     )
     metadata = {key: sanitize_value(task.get(key)) for key in fields if task.get(key) is not None}
     labels = task_labels(task)
@@ -166,16 +175,43 @@ def changed_file_summary(task: dict, repo: dict[str, Any] | None) -> dict[str, A
     return summary
 
 
+def inspect_repositories(task: dict) -> dict[str, dict[str, Any] | None]:
+    task_repo = inspect_repo_at(task_execution_cwd(task), scope=task_execution_scope(task))
+    main_repo = inspect_repo_at(main_repository_cwd(task), scope="main_repository")
+    return {
+        "task": task_repo,
+        "main": main_repo,
+        "task_worktree": task_repo if task.get("execution_mode") == "git_worktree" else None,
+    }
+
+
+def task_execution_cwd(task: dict) -> str | None:
+    if task.get("execution_mode") == "git_worktree" and task.get("execution_worktree_path"):
+        return str(task.get("execution_worktree_path"))
+    return str(task.get("cwd") or task.get("project_root") or "") or None
+
+
+def task_execution_scope(task: dict) -> str:
+    return "task_worktree" if task.get("execution_mode") == "git_worktree" else "main_worktree"
+
+
+def main_repository_cwd(task: dict) -> str | None:
+    return str(task.get("execution_repo_root") or task.get("project_root") or task.get("cwd") or "") or None
+
+
 def inspect_repo(task: dict) -> dict[str, Any] | None:
+    return inspect_repo_at(task_execution_cwd(task), scope=task_execution_scope(task))
+
+
+def inspect_repo_at(cwd: str | None, *, scope: str) -> dict[str, Any] | None:
     if not shutil.which("git"):
-        return {"available": False, "reason": "git executable not found"}
-    cwd = task.get("cwd") or task.get("project_root")
+        return {"available": False, "reason": "git executable not found", "inspection_scope": scope}
     if not cwd:
-        return {"available": False, "reason": "task cwd unavailable"}
+        return {"available": False, "reason": "repository cwd unavailable", "inspection_scope": scope}
     workdir = Path(str(cwd)).expanduser()
     root = run_git(workdir, ["rev-parse", "--show-toplevel"])
     if root.returncode != 0 or not root.stdout.strip():
-        return {"available": False, "reason": "task cwd is not inside a git repository"}
+        return {"available": False, "reason": "repository cwd is not inside a git repository", "inspection_scope": scope}
     repo_root = Path(root.stdout.strip()).expanduser().resolve()
     status = run_git(repo_root, ["status", "--porcelain=v1", "--untracked-files=all"])
     branch = run_git(repo_root, ["symbolic-ref", "--quiet", "--short", "HEAD"])
@@ -183,6 +219,7 @@ def inspect_repo(task: dict) -> dict[str, Any] | None:
     name_status = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
     repo: dict[str, Any] = {
         "available": True,
+        "inspection_scope": scope,
         "root": sanitize(repo_root),
         "_root_path": str(repo_root),
         "branch": sanitize(branch.stdout.strip()) if branch.returncode == 0 and branch.stdout.strip() else "HEAD",
@@ -390,12 +427,16 @@ def render_review_bundle(bundle: dict[str, Any]) -> str:
     append_object_section(lines, "last_result", bundle.get("last_result"))
     append_object_section(lines, "last_run", bundle.get("last_run"))
     append_object_section(lines, "task_worktree", bundle.get("task_worktree"))
+    append_object_section(lines, "review_follow_up", bundle.get("review_follow_up"))
     append_object_section(lines, "changed_files", bundle.get("changed_files"))
     append_list_section(lines, "verification", bundle.get("verification"))
     append_text_section(lines, "last_error", bundle.get("last_error"))
     append_list_section(lines, "relevant_log_paths", bundle.get("relevant_log_paths"))
     append_object_section(lines, "task_git_status_snapshot", bundle.get("task_git_status_snapshot"))
     append_object_section(lines, "current_git_repository", bundle.get("current_git_repository"))
+    append_object_section(lines, "current_task_repository", bundle.get("current_task_repository"))
+    append_object_section(lines, "current_main_repository", bundle.get("current_main_repository"))
+    append_object_section(lines, "current_task_worktree_repository", bundle.get("current_task_worktree_repository"))
     append_object_section(lines, "commit_information", bundle.get("commit_information"))
     append_object_section(lines, "git_diff", bundle.get("git_diff"))
     append_list_section(lines, "safety_policy", bundle.get("safety_policy"))
