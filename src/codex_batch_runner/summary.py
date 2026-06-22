@@ -138,6 +138,13 @@ def append_chain_summary(lines: list[str], task: dict) -> None:
 
 def append_execution_profile_summary(lines: list[str], task: dict) -> None:
     fields = []
+    if task.get("execution_backend") and task.get("execution_backend") != "codex":
+        fields.append(f"execution_backend={sanitize(task.get('execution_backend'))}")
+    shell_command = task.get("shell_command")
+    if isinstance(shell_command, list) and shell_command:
+        fields.append("shell_command=" + sanitize(shell_command))
+    if task.get("shell_timeout_seconds"):
+        fields.append(f"shell_timeout_seconds={sanitize(task.get('shell_timeout_seconds'))}")
     for key in ("execution_profile", "model", "codex_profile", "token_budget_hint"):
         value = task.get(key)
         if value not in (None, "", [], {}):
@@ -294,11 +301,17 @@ def render_last_run(last_run: object) -> str:
         return ""
     lines = []
     for key in (
+        "execution_backend",
         "command_kind",
+        "command",
         "returncode",
         "started_at",
         "finished_at",
         "duration_seconds",
+        "timeout_seconds",
+        "timed_out",
+        "stdout_bytes",
+        "stderr_bytes",
         "resume_id_used",
         "log_path",
         "execution_profile",

@@ -46,6 +46,7 @@ class Config:
     codex_total_runtime_timeout_seconds: int | None = None
     codex_watchdog_grace_seconds: int = 5
     codex_startup_stall_cooldown_seconds: int = 60
+    shell_task_timeout_seconds: int = 900
     default_execution_profile: str | None = None
     review_execution_profile: str | None = None
     execution_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -148,6 +149,10 @@ class Config:
             codex_total_runtime_timeout_seconds=optional_int_value(data.get("codex_total_runtime_timeout_seconds")),
             codex_watchdog_grace_seconds=int(data.get("codex_watchdog_grace_seconds", 5)),
             codex_startup_stall_cooldown_seconds=int(data.get("codex_startup_stall_cooldown_seconds", 60)),
+            shell_task_timeout_seconds=positive_int_value(
+                "shell_task_timeout_seconds",
+                data.get("shell_task_timeout_seconds", 900),
+            ),
             default_execution_profile=optional_profile_name(
                 "default_execution_profile",
                 data.get("default_execution_profile"),

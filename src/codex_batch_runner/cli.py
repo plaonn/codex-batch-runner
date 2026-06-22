@@ -5,6 +5,7 @@ import json
 import os
 import select
 import shutil
+import shlex
 import sys
 import time
 import unicodedata
@@ -76,10 +77,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     enqueue = sub.add_parser("enqueue", help="enqueue a task")
-    enqueue.add_argument("--cwd", required=True, help="working directory for Codex")
-    prompt_group = enqueue.add_mutually_exclusive_group(required=True)
+    enqueue.add_argument("--cwd", required=True, help="working directory for task execution")
+    prompt_group = enqueue.add_mutually_exclusive_group()
     prompt_group.add_argument("--prompt", help="task prompt")
     prompt_group.add_argument("--prompt-file", help="file containing task prompt")
+    enqueue.add_argument("--backend", choices=("codex", "shell"), default="codex", help="execution backend (default: codex)")
+    command_group = enqueue.add_mutually_exclusive_group()
+    command_group.add_argument("--command-json", help="shell backend argv as a JSON string list")
+    command_group.add_argument("--command", nargs=argparse.REMAINDER, help="shell backend argv; must be the final cbr option")
+    enqueue.add_argument("--shell-timeout", type=int, dest="shell_timeout_seconds", help="shell backend timeout in seconds")
     enqueue.add_argument("--id", dest="task_id", help="explicit task id")
     enqueue.add_argument("--depends-on", action="append", default=[], help="dependency task id, repeatable")
     enqueue.add_argument("--project", dest="project_id", help="project identifier")
@@ -334,6 +340,13 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
     prompt = args.prompt
     if args.prompt_file:
         prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+    shell_command = parse_shell_command_args(args)
+    if args.backend == "codex" and prompt is None:
+        raise ValueError("Codex tasks require --prompt or --prompt-file")
+    if args.backend == "shell" and not shell_command:
+        raise ValueError("shell tasks require --command-json or --command")
+    if args.backend == "shell" and prompt is None:
+        prompt = "Shell task: " + shlex.join(shell_command or [])
     task = create_task(
         config=config,
         prompt=prompt or "",
@@ -354,10 +367,34 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         routing_reason=args.routing_reason,
         routing_risk_factors=args.routing_risk_factor,
         routing_experiment=args.routing_experiment,
+        execution_backend=args.backend,
+        shell_command=shell_command,
+        shell_timeout_seconds=args.shell_timeout_seconds,
     )
     run_post_mutation_trigger(config)
     print(task["id"])
     return 0
+
+
+def parse_shell_command_args(args: argparse.Namespace) -> list[str] | None:
+    if args.command_json:
+        try:
+            value = json.loads(args.command_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("--command-json must be a JSON list of strings") from exc
+        if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+            raise ValueError("--command-json must be a non-empty JSON list of strings")
+        if any(item == "" for item in value):
+            raise ValueError("--command-json entries must be non-empty strings")
+        return list(value)
+    if args.command is not None:
+        command = list(args.command)
+        if command and command[0] == "--":
+            command = command[1:]
+        if not command:
+            raise ValueError("--command requires at least one argv item")
+        return command
+    return None
 
 
 def parse_config_overrides(items: list[str]) -> dict[str, str]:
@@ -814,6 +851,8 @@ def worktree_apply_note(task: dict) -> str:
 
 def execution_profile_note(task: dict) -> str:
     parts = []
+    if task.get("execution_backend") and task.get("execution_backend") != "codex":
+        parts.append("backend=" + one_line(task.get("execution_backend")))
     if task.get("execution_profile"):
         parts.append("profile=" + one_line(task.get("execution_profile")))
     if task.get("model"):
@@ -1257,8 +1296,12 @@ def last_run_cell(last_run: object) -> str:
     command_kind = last_run.get("command_kind")
     if command_kind:
         parts.append("command=" + one_line(command_kind))
+    if last_run.get("execution_backend") and last_run.get("execution_backend") != "codex":
+        parts.append("backend=" + one_line(last_run.get("execution_backend")))
     if "returncode" in last_run and last_run.get("returncode") is not None:
         parts.append("returncode=" + one_line(last_run.get("returncode")))
+    if last_run.get("timed_out"):
+        parts.append("timed_out=true")
     if "duration_seconds" in last_run and last_run.get("duration_seconds") is not None:
         parts.append("duration=" + one_line(last_run.get("duration_seconds")) + "s")
     return " ".join(parts) if parts else "-"

@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -857,6 +858,76 @@ class CliTests(unittest.TestCase):
             self.assertEqual("docs-only bounded change", task["routing_reason"])
             self.assertEqual(["public-docs", "low-blast-radius"], task["routing_risk_factors"])
             self.assertEqual("downshift_probe", task["routing_experiment"])
+
+    def test_enqueue_records_shell_command_json_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "enqueue",
+                    "--cwd",
+                    tmp,
+                    "--id",
+                    "shell-json",
+                    "--backend",
+                    "shell",
+                    "--shell-timeout",
+                    "120",
+                    "--command-json",
+                    json.dumps([sys.executable, "-c", "print('ok')"]),
+                ]
+            )
+            task = load_task(Config.load(str(config_path)), "shell-json")
+
+            self.assertEqual(0, code)
+            self.assertEqual("shell-json\n", output)
+            self.assertEqual("shell", task["execution_backend"])
+            self.assertEqual([sys.executable, "-c", "print('ok')"], task["shell_command"])
+            self.assertEqual(120, task["shell_timeout_seconds"])
+            self.assertEqual("Shell task: " + shlex.join([sys.executable, "-c", "print('ok')"]), task["prompt"])
+
+    def test_enqueue_records_shell_command_argv_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "enqueue",
+                    "--cwd",
+                    tmp,
+                    "--id",
+                    "shell-argv",
+                    "--backend",
+                    "shell",
+                    "--command",
+                    sys.executable,
+                    "-c",
+                    "print('ok')",
+                ]
+            )
+            task = load_task(Config.load(str(config_path)), "shell-argv")
+
+            self.assertEqual(0, code)
+            self.assertEqual("shell-argv\n", output)
+            self.assertEqual("shell", task["execution_backend"])
+            self.assertEqual([sys.executable, "-c", "print('ok')"], task["shell_command"])
+
+    def test_enqueue_codex_default_still_requires_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output, stderr = run_cli_with_stderr(
+                ["--config", str(config_path), "enqueue", "--cwd", tmp, "--id", "missing-prompt"]
+            )
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("Codex tasks require --prompt or --prompt-file", stderr)
 
     def test_enqueue_rejects_unallowlisted_config_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
