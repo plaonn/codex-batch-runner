@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -272,6 +274,12 @@ def _build_apply_report_locked(config: Config, task_id: str, *, apply: bool) -> 
     report = base_report("apply", task, apply)
     report["planned_action"] = "git merge --ff-only <execution_branch>"
     validate_apply_report(config, task, report)
+    if report["errors"]:
+        if apply and report.get("apply_strategy") == "stale_base_rebase" and report.get("rebase", {}).get("status") == "blocked":
+            record_rebase_blocked(config, task, report)
+        return report
+    if apply and report.get("apply_strategy") == "stale_base_rebase":
+        return apply_stale_base_rebase(config, task, report)
     if report["errors"] or not apply:
         return report
 
@@ -305,6 +313,112 @@ def _build_apply_report_locked(config: Config, task_id: str, *, apply: bool) -> 
     return report
 
 
+def apply_stale_base_rebase(config: Config, task: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    repo_root = Path(str(report["repo_root"]))
+    worktree_path = Path(str(report["worktree_path"]))
+    branch = str(report["branch"])
+    old_base = str(report["base_head"])
+    old_branch_head = str(report["branch_head"])
+    new_base = str(report["main_head"])
+    result = run_git(worktree_path, "rebase", new_base)
+    if result.returncode != 0:
+        detail = sanitize_git_detail(clean_git_result(result))
+        abort = run_git(worktree_path, "rebase", "--abort")
+        if abort.returncode != 0:
+            detail = sanitize_git_detail(f"{detail}; rebase --abort failed: {clean_git_result(abort)}")
+            task["execution_worktree_status"] = "recovery_required"
+        report["errors"].append("stale-base rebase failed; human review required: " + detail)
+        report["rebase"] = {
+            **report.get("rebase", {}),
+            "status": "blocked",
+            "reason": detail,
+            "abort_status": "ok" if abort.returncode == 0 else "failed",
+        }
+        record_rebase_blocked(config, task, report)
+        return report
+
+    new_branch_head = git(worktree_path, "rev-parse", "--verify", "HEAD^{commit}")
+    commit_lines = git_optional(repo_root, "log", "--reverse", "--format=%H %s", f"{new_base}..{new_branch_head}")
+    commits = rev_list(repo_root, f"{new_base}..{new_branch_head}")
+    now = iso_now()
+    task["execution_base_ref"] = report.get("apply_target") or task.get("execution_base_ref")
+    task["execution_base_head"] = new_base
+    task["execution_rebase_status"] = "rebased"
+    task["execution_rebased_at"] = now
+    task["execution_rebased_from_base"] = old_base
+    task["execution_rebased_onto"] = new_base
+    task["execution_rebased_from_head"] = old_branch_head
+    task["execution_rebased_head"] = new_branch_head
+    task["review_status"] = "unreviewed"
+    task["reviewed_at"] = None
+    task["review_reason"] = "stale-base rebase invalidated prior acceptance; re-review required"
+    for key in ("execution_rebase_blocker", "execution_rebase_blocked_at"):
+        task.pop(key, None)
+    save_task(config, task)
+
+    report["rebased"] = True
+    report["applied"] = False
+    report["base_head"] = new_base
+    report["branch_head"] = new_branch_head
+    report["commit_summary"] = {
+        "range": f"{new_base}..{new_branch_head}",
+        "count": len(commits),
+        "commits": commit_lines.splitlines() if commit_lines else commits,
+    }
+    report["rebase"] = {
+        **report.get("rebase", {}),
+        "status": "rebased",
+        "from_base": old_base,
+        "onto": new_base,
+        "from_head": old_branch_head,
+        "head": new_branch_head,
+        "review_status": "unreviewed",
+        "reason": "task branch rebased onto current main; re-review required before main apply",
+    }
+    write_event_nonfatal(
+        config,
+        "task_worktree_rebased",
+        task=task,
+        source="worktree apply",
+        summary=f"rebased stale worktree branch for task {task.get('id')}",
+        payload=transition_payload(
+            task,
+            execution_branch=branch,
+            execution_base_head=new_base,
+            execution_branch_head=new_branch_head,
+            execution_rebased_from_base=old_base,
+            execution_rebased_onto=new_base,
+            review_status="unreviewed",
+        ),
+    )
+    return report
+
+
+def record_rebase_blocked(config: Config, task: dict[str, Any], report: dict[str, Any]) -> None:
+    reason = sanitize_git_detail(str(report.get("rebase", {}).get("reason") or "stale-base rebase is blocked"))
+    task["execution_rebase_status"] = "blocked"
+    task["execution_rebase_blocker"] = reason
+    task["execution_rebase_blocked_at"] = iso_now()
+    task["review_status"] = "needs_followup"
+    task["reviewed_at"] = iso_now()
+    task["review_reason"] = "stale-base rebase blocked; human follow-up required"
+    save_task(config, task)
+    write_event_nonfatal(
+        config,
+        "task_worktree_rebase_blocked",
+        task=task,
+        source="worktree apply",
+        summary=f"blocked stale worktree rebase for task {task.get('id')}",
+        payload=transition_payload(
+            task,
+            execution_branch=task.get("execution_branch"),
+            execution_rebase_status="blocked",
+            execution_rebase_blocker=reason,
+            review_status=task.get("review_status"),
+        ),
+    )
+
+
 def validate_apply_report(config: Config, task: dict[str, Any], report: dict[str, Any]) -> None:
     gates: list[dict[str, Any]] = []
     report["gates"] = gates
@@ -325,6 +439,12 @@ def validate_apply_report(config: Config, task: dict[str, Any], report: dict[str
         task.get("execution_mode") == "git_worktree",
         f"execution_mode={task.get('execution_mode') or '-'}",
         "worktree apply requires execution_mode=git_worktree",
+    )
+    gate(
+        "not_already_applied",
+        task.get("execution_apply_status") != "applied",
+        f"execution_apply_status={task.get('execution_apply_status') or '-'}",
+        "worktree apply requires execution_apply_status not already applied",
     )
 
     branch = str(task.get("execution_branch") or "").strip()
@@ -428,20 +548,94 @@ def validate_apply_report(config: Config, task: dict[str, Any], report: dict[str
         "task branch must be based on execution_base_head",
     )
     gate(
-        "main_head_matches_execution_base",
-        main_head == base_head,
-        "main HEAD equals execution_base_head" if main_head == base_head else "main HEAD differs from execution_base_head",
-        "main HEAD must equal execution_base_head before fast-forward apply",
-    )
-    gate(
         "branch_has_commits",
         bool(commits),
         f"commits_after_base={len(commits)}",
         "task branch has no commits after execution_base_head; nothing to apply",
     )
-    if task_status.strip():
+    stale_base = main_head != base_head
+    if stale_base:
+        report["apply_strategy"] = "stale_base_rebase"
+        report["planned_action"] = f"git -C <task_worktree> rebase {main_head}"
+        report["rebase"] = {
+            "status": "pending",
+            "from_base": base_head,
+            "onto": main_head,
+            "from_head": branch_head,
+            "review_status_after_clean_rebase": "unreviewed",
+        }
+        gate(
+            "main_contains_execution_base",
+            is_ancestor(repo_root, base_head, main_head),
+            "main HEAD contains execution_base_head",
+            "main HEAD must contain execution_base_head before stale-base rebase",
+        )
+        gate(
+            "task_worktree_clean_for_rebase",
+            not task_status.strip(),
+            "task worktree is clean" if not task_status.strip() else "task worktree has uncommitted changes",
+            "task worktree must be clean before stale-base rebase",
+        )
+        rebase_can_run = not any(
+            not gate_result.get("ok")
+            for gate_result in gates
+            if gate_result.get("name")
+            in {
+                "task_completed_accepted",
+                "execution_mode_git_worktree",
+                "not_already_applied",
+                "required_worktree_metadata",
+                "worktree_status_retained",
+                "worktree_metadata_recoverable",
+                "git_state_available",
+                "main_worktree_clean",
+                "branch_based_on_execution_base",
+                "branch_has_commits",
+                "main_contains_execution_base",
+                "task_worktree_clean_for_rebase",
+            }
+        )
+        if rebase_can_run:
+            rebase_check = check_clean_rebase(config, repo_root, branch_head, main_head)
+            report["rebase"].update(rebase_check)
+            gate(
+                "stale_base_rebase_clean",
+                rebase_check.get("status") == "clean",
+                str(rebase_check.get("reason") or "stale-base rebase preflight completed"),
+                "stale-base rebase is not clean; human follow-up required: " + str(rebase_check.get("reason") or "unknown"),
+            )
+    else:
+        report["apply_strategy"] = "fast_forward"
+        gate(
+            "main_head_matches_execution_base",
+            True,
+            "main HEAD equals execution_base_head",
+        )
+    if task_status.strip() and not stale_base:
         report["warnings"].append("task worktree has uncommitted changes; apply only merges committed branch changes")
     report["gates_ok"] = not report["errors"]
+
+
+def check_clean_rebase(config: Config, repo_root: Path, branch_head: str, main_head: str) -> dict[str, Any]:
+    try:
+        temp_path = Path(tempfile.mkdtemp(prefix="cbr-rebase-check-"))
+        shutil.rmtree(temp_path)
+    except OSError as exc:
+        return {"status": "blocked", "reason": f"cannot create temporary rebase worktree: {exc}"}
+
+    try:
+        add = run_git(repo_root, "worktree", "add", "--detach", str(temp_path), branch_head)
+        if add.returncode != 0:
+            return {"status": "blocked", "reason": sanitize_git_detail("cannot create temporary rebase worktree: " + clean_git_result(add))}
+        rebase = run_git(temp_path, "rebase", main_head)
+        if rebase.returncode == 0:
+            return {"status": "clean", "reason": "task branch can be cleanly rebased onto current main HEAD"}
+        return {"status": "blocked", "reason": sanitize_git_detail(clean_git_result(rebase) or "rebase reported a conflict")}
+    finally:
+        remove = run_git(repo_root, "worktree", "remove", "--force", str(temp_path))
+        if remove.returncode != 0:
+            run_git(repo_root, "worktree", "prune")
+        shutil.rmtree(temp_path, ignore_errors=True)
 
 
 def base_report(action: str, task: dict[str, Any], apply: bool) -> dict[str, Any]:
@@ -645,6 +839,19 @@ def git_optional(cwd: Path, *args: str) -> str | None:
     return result.stdout.strip()
 
 
+def run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(args=["git", *args], returncode=1, stdout="", stderr=str(exc))
+
+
 def is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
     result = subprocess.run(
         ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", ancestor, descendant],
@@ -667,6 +874,14 @@ def clean_git_exception(exc: subprocess.CalledProcessError) -> str:
     return detail
 
 
+def clean_git_result(result: subprocess.CompletedProcess[str]) -> str:
+    return " ".join(str(result.stderr or result.stdout or "").split())
+
+
+def sanitize_git_detail(value: object) -> str:
+    return str(sanitize_report_value(value))
+
+
 def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
     metadata: dict[str, Any] = {"execution_mode": task.get("execution_mode") or "main_worktree"}
     for source, target in (
@@ -684,6 +899,14 @@ def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
         ("execution_applied_at", "applied_at"),
         ("execution_applied_head", "applied_head"),
         ("execution_apply_target", "apply_target"),
+        ("execution_rebase_status", "rebase_status"),
+        ("execution_rebased_at", "rebased_at"),
+        ("execution_rebased_from_base", "rebased_from_base"),
+        ("execution_rebased_onto", "rebased_onto"),
+        ("execution_rebased_from_head", "rebased_from_head"),
+        ("execution_rebased_head", "rebased_head"),
+        ("execution_rebase_blocker", "rebase_blocker"),
+        ("execution_rebase_blocked_at", "rebase_blocked_at"),
         ("execution_cleaned_at", "cleaned_at"),
     ):
         value = task.get(source)
@@ -802,9 +1025,13 @@ def render_worktree_report(report: dict[str, Any]) -> str:
     for key in ("branch", "worktree_path", "base_ref", "base_head", "apply_status"):
         if report.get(key):
             lines.append(f"{key}: {report.get(key)}")
-    for key in ("branch_head", "main_head", "apply_target", "planned_action"):
+    for key in ("branch_head", "main_head", "apply_target", "apply_strategy", "planned_action"):
         if report.get(key):
             lines.append(f"{key}: {report.get(key)}")
+    rebase = report.get("rebase")
+    if isinstance(rebase, dict):
+        detail = rebase.get("reason") or rebase.get("status")
+        lines.append(f"rebase: {rebase.get('status')} ({detail})")
     commit_summary = report.get("commit_summary")
     if isinstance(commit_summary, dict):
         lines.append(

@@ -682,7 +682,7 @@ class WorktreeTests(unittest.TestCase):
             self.assertIn("main worktree must be clean", " ".join(report["errors"]))
             self.assertNotIn("execution_apply_status", load_task(config, "apply-dirty-main"))
 
-    def test_apply_refuses_when_main_head_moved_from_execution_base(self) -> None:
+    def test_apply_dry_run_reports_stale_base_rebase_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -703,12 +703,117 @@ class WorktreeTests(unittest.TestCase):
             git(repo, "add", "main.txt")
             git(repo, "commit", "-m", "main moved")
             moved_head = git(repo, "rev-parse", "HEAD")
+            branch_head = git(worktree, "rev-parse", "HEAD")
 
-            code, report = run_cli(["--config", str(config_path), "worktree", "apply", "apply-stale-main", "--apply", "--json"])
+            code, report = run_cli(["--config", str(config_path), "worktree", "apply", "apply-stale-main", "--dry-run", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["applied"])
+            self.assertTrue(report["gates_ok"])
+            self.assertEqual("stale_base_rebase", report["apply_strategy"])
+            self.assertEqual("clean", report["rebase"]["status"])
+            self.assertEqual("unreviewed", report["rebase"]["review_status_after_clean_rebase"])
+            self.assertEqual(moved_head, git(repo, "rev-parse", "HEAD"))
+            self.assertEqual(branch_head, git(worktree, "rev-parse", "HEAD"))
+            loaded = load_task(config, "apply-stale-main")
+            self.assertEqual("accepted", loaded["review_status"])
+            self.assertNotIn("execution_rebase_status", loaded)
+
+    def test_apply_rebases_stale_base_and_requires_re_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="apply-rebase")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "apply-rebase", "--apply", "--json"])[0])
+            task = load_task(config, "apply-rebase")
+            old_base = task["execution_base_head"]
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\nbranch change\n", encoding="utf-8")
+            git(worktree, "commit", "-am", "branch change")
+            old_branch_head = git(worktree, "rev-parse", "HEAD")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
+            (repo / "main.txt").write_text("main moved\n", encoding="utf-8")
+            git(repo, "add", "main.txt")
+            git(repo, "commit", "-m", "main moved")
+            moved_head = git(repo, "rev-parse", "HEAD")
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "apply", "apply-rebase", "--apply", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["applied"])
+            self.assertTrue(report["rebased"])
+            self.assertEqual("stale_base_rebase", report["apply_strategy"])
+            self.assertEqual("rebased", report["rebase"]["status"])
+            self.assertEqual(moved_head, git(repo, "rev-parse", "HEAD"))
+            loaded = load_task(config, "apply-rebase")
+            new_branch_head = git(worktree, "rev-parse", "HEAD")
+            self.assertEqual("unreviewed", loaded["review_status"])
+            self.assertEqual(moved_head, loaded["execution_base_head"])
+            self.assertEqual("rebased", loaded["execution_rebase_status"])
+            self.assertEqual(old_base, loaded["execution_rebased_from_base"])
+            self.assertEqual(moved_head, loaded["execution_rebased_onto"])
+            self.assertEqual(old_branch_head, loaded["execution_rebased_from_head"])
+            self.assertEqual(new_branch_head, loaded["execution_rebased_head"])
+            self.assertNotEqual(old_branch_head, new_branch_head)
+            self.assertNotIn("execution_apply_status", loaded)
+            self.assertIn("branch change", (worktree / "file.txt").read_text(encoding="utf-8"))
+            self.assertIn("main moved", (worktree / "main.txt").read_text(encoding="utf-8"))
+            events = list_events(config, task_id="apply-rebase", limit=0)
+            self.assertTrue(any(event["event_type"] == "task_worktree_rebased" for event in events))
+            self.assertNotIn("prompt", json.dumps(events))
+            summary_code, summary = run_cli_text(["--config", str(config_path), "summary", "apply-rebase"])
+            list_code, list_output = run_cli_text(["--config", str(config_path), "list", "--color=never"])
+            self.assertEqual(0, summary_code)
+            self.assertIn("rebase_status: rebased", summary)
+            self.assertEqual(0, list_code)
+            self.assertIn("worktree rebased; awaiting re-review", list_output)
+
+    def test_apply_refuses_stale_base_rebase_conflict_and_records_followup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="apply-rebase-conflict")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "apply-rebase-conflict", "--apply", "--json"])[0])
+            task = load_task(config, "apply-rebase-conflict")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\nbranch change\n", encoding="utf-8")
+            git(worktree, "commit", "-am", "branch change")
+            branch_head = git(worktree, "rev-parse", "HEAD")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
+            (repo / "file.txt").write_text("base\nmain change\n", encoding="utf-8")
+            git(repo, "commit", "-am", "main conflicting change")
+            moved_head = git(repo, "rev-parse", "HEAD")
+
+            code, report = run_cli(["--config", str(config_path), "worktree", "apply", "apply-rebase-conflict", "--apply", "--json"])
 
             self.assertEqual(1, code)
-            self.assertIn("main HEAD must equal execution_base_head", " ".join(report["errors"]))
+            self.assertFalse(report["applied"])
+            self.assertEqual("stale_base_rebase", report["apply_strategy"])
+            self.assertEqual("blocked", report["rebase"]["status"])
+            self.assertIn("human follow-up", " ".join(report["errors"]))
             self.assertEqual(moved_head, git(repo, "rev-parse", "HEAD"))
+            self.assertEqual(branch_head, git(worktree, "rev-parse", "HEAD"))
+            loaded = load_task(config, "apply-rebase-conflict")
+            self.assertEqual("needs_followup", loaded["review_status"])
+            self.assertEqual("blocked", loaded["execution_rebase_status"])
+            self.assertIn("could not apply", loaded["execution_rebase_blocker"])
+            events = list_events(config, task_id="apply-rebase-conflict", limit=0)
+            self.assertTrue(any(event["event_type"] == "task_worktree_rebase_blocked" for event in events))
+            list_code, list_output = run_cli_text(["--config", str(config_path), "list", "--color=never"])
+            self.assertEqual(0, list_code)
+            self.assertIn("worktree rebase blocked", list_output)
 
     def test_apply_refuses_branch_with_no_commits_after_base(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

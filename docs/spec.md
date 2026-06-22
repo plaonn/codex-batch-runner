@@ -668,6 +668,14 @@ Task metadata model:
 - `execution_applied_at`: apply 성공 시각
 - `execution_applied_head`: apply 후 main worktree `HEAD`
 - `execution_apply_target`: apply 대상 branch 또는 baseline 이름
+- `execution_rebase_status`: stale-base apply가 task branch를 재배치했거나 막힌 경우 `rebased` 또는 `blocked`
+- `execution_rebased_at`: stale-base rebase 성공 시각
+- `execution_rebased_from_base`: rebase 전 `execution_base_head`
+- `execution_rebased_onto`: rebase 대상이 된 current main `HEAD`
+- `execution_rebased_from_head`: rebase 전 task branch `HEAD`
+- `execution_rebased_head`: rebase 후 task branch `HEAD`
+- `execution_rebase_blocker`: stale-base rebase가 막힌 sanitized reason
+- `execution_rebase_blocked_at`: stale-base rebase blocked 기록 시각
 
 Branch naming and base policy:
 
@@ -687,9 +695,11 @@ Review, reject, follow-up, accept model:
 - `reject`는 task branch/worktree를 보존하고 `review_status`만 갱신합니다. Reject 자체가 branch를 삭제하거나 main을 되돌리지 않습니다.
 - `reject --follow-up`은 새 task를 자동 생성하지 않고 원 task에 `chain_status=needs_fix`와 `review_follow_up` linkage metadata를 기록합니다. Metadata는 원 task id, execution mode, source branch, source worktree status/path, source repo root, `task_generation=not_created`를 포함할 수 있습니다. Future follow-up fix는 같은 task branch를 재사용하거나 `cbr/<task-id>-fix-N` branch를 만들 수 있습니다. 어떤 방식을 쓰든 review bundle은 원 task와 fix branch linkage를 표시해야 합니다.
 - `accept`는 task 결과를 완료로 인정하지만 자동으로 main에 merge하지 않습니다. Accepted task는 explicit merge/apply 후보가 됩니다. Existing review/follow-up chain metadata가 있으면 chain status만 `accepted`로 닫고 branch/worktree linkage는 보존합니다.
-- `cbr worktree apply TASK_ID --dry-run`은 accepted worktree task branch의 명시적 main 반영 가능 여부를 read-only로 보고합니다. Report는 branch, base/head, main head, apply target, commit range summary, gate 결과, errors, warnings를 포함합니다.
-- `cbr worktree apply TASK_ID --apply`는 runner와 같은 queue lock 아래에서 dry-run과 같은 validation을 다시 수행한 직후 main worktree에서 `git merge --ff-only <execution_branch>`를 실행합니다. 이 초기 구현은 `status=completed`, `review_status=accepted`, `execution_mode=git_worktree`, branch/base/worktree metadata 존재, recovery-required가 아닌 retained worktree, clean main worktree, `execution_base_head` 위에 있는 task branch, main `HEAD == execution_base_head`, branch에 적용할 commit이 하나 이상 있는 상태만 허용합니다.
-- Apply command는 rebase, merge commit, conflict resolution, cherry-pick, remote push를 수행하지 않습니다. 성공 시 `execution_apply_status=applied`, `execution_applied_at`, `execution_applied_head`, `execution_apply_target`을 task metadata에 기록하고 sanitized `task_worktree_applied` event를 남깁니다. Worktree cleanup과 branch deletion은 별도 cleanup path에 맡깁니다.
+- `cbr worktree apply TASK_ID --dry-run`은 accepted worktree task branch의 명시적 main 반영 가능 여부를 보고합니다. Report는 branch, base/head, main head, apply target, apply strategy, commit range summary, gate 결과, errors, warnings를 포함합니다. Main `HEAD == execution_base_head`이면 planned action은 fast-forward apply입니다. Main `HEAD`가 `execution_base_head` 뒤에 clean linear commit으로 이동했고 나머지 guard가 모두 통과하면 planned action은 stale-base rebase입니다.
+- `cbr worktree apply TASK_ID --apply`는 runner와 같은 queue lock 아래에서 dry-run과 같은 validation을 다시 수행합니다. Main `HEAD == execution_base_head`인 경우에만 main worktree에서 `git merge --ff-only <execution_branch>`를 실행합니다. 이 fast-forward path는 `status=completed`, `review_status=accepted`, `execution_apply_status`가 아직 `applied`가 아님, `execution_mode=git_worktree`, branch/base/worktree metadata 존재, recovery-required가 아닌 retained worktree, clean main worktree, `execution_base_head` 위에 있는 task branch, branch에 적용할 commit이 하나 이상 있는 상태만 허용합니다.
+- Main `HEAD`가 `execution_base_head`와 다르지만 `execution_base_head`를 포함하는 forward-only 상태이고, main worktree와 task worktree가 모두 clean이며, task branch가 `execution_base_head` 위에 있고, detached temporary worktree preflight에서 clean rebase가 확인되면 `--apply`는 task branch/worktree에서만 `git rebase <current-main-head>`를 실행할 수 있습니다. 이 stale-base rebase는 merge commit, cherry-pick, remote push, conflict resolution을 수행하지 않습니다. 성공 시 task metadata의 `execution_base_head`/base ref/branch head rebase fields를 갱신하고, 이전 accepted review를 무효화하여 `review_status=unreviewed`로 되돌리며, sanitized `task_worktree_rebased` event를 남깁니다. 같은 command 안에서 main fast-forward apply를 이어서 수행하지 않습니다. 운영자는 re-review 후 다시 `accept`하고 `worktree apply`를 실행해야 합니다.
+- Stale-base rebase preflight 또는 actual rebase가 conflict를 보고하면 cbr는 자동 해결하지 않습니다. Actual rebase conflict는 `git rebase --abort`로 branch/worktree를 원래 상태로 복구하려고 시도하고, task에 `execution_rebase_status=blocked`, sanitized `execution_rebase_blocker`, `review_status=needs_followup`을 기록하며 `task_worktree_rebase_blocked` event를 남깁니다. Dirty main, missing metadata, non-linear main movement, dirty task worktree, already-applied task, empty commit range 같은 guard failure는 main과 task branch를 변경하지 않고 명확한 report error로 남깁니다.
+- Apply command는 merge commit, automatic conflict resolution, cherry-pick, remote push를 수행하지 않습니다. Fast-forward 성공 시 `execution_apply_status=applied`, `execution_applied_at`, `execution_applied_head`, `execution_apply_target`을 task metadata에 기록하고 sanitized `task_worktree_applied` event를 남깁니다. Worktree cleanup과 branch deletion은 별도 cleanup path에 맡깁니다.
 
 Cleanup and retention:
 
@@ -722,7 +732,7 @@ Concrete implementation phases:
 4. Explicit prepare/cleanup commands: `cbr worktree prepare TASK_ID --dry-run|--apply`와 `cbr worktree cleanup TASK_ID --dry-run|--apply`를 추가합니다. Queue lock 아래에서 metadata를 갱신하고 event를 남기되 Codex를 호출하지 않습니다.
 5. `run-next` worktree adapter: 완료. `worktree_mode=task`이고 task가 runnable/needs_resume 및 dependency/cooldown 정책을 통과하면 prepare된 worktree cwd에서 Codex를 실행합니다. Prepared worktree가 없으면 prepare를 수행하고, 실패하면 Codex를 호출하지 않습니다. Completed worktree task는 보고된 `changed_files`를 task branch local commit으로 고정합니다. Main-worktree mode는 기존 behavior를 유지합니다.
 6. Review and follow-up branch workflow: `review-bundle`, `reject`, `reject --follow-up`, `accept`가 task branch/worktree linkage를 보존합니다. `review-bundle`은 main repository state와 task execution repository state를 분리하고, `reject --follow-up`은 새 task 생성 없이 원 branch/worktree를 가리키는 minimal linkage를 기록합니다. Bounded auto-fix enqueue는 별도 일반 cbr task를 만들며, same-branch/replacement-branch 정책은 명시적 worktree apply 흐름과 분리해 관리합니다.
-7. Explicit merge/apply phase: 완료. `cbr worktree apply TASK_ID --dry-run|--apply`는 accepted worktree task branch만 main worktree에 fast-forward로 반영합니다. Dirty main, stale main/base mismatch, branch ancestry 불일치, 빈 commit range, missing/recovery-required metadata는 중단합니다.
+7. Explicit merge/apply phase: 완료. `cbr worktree apply TASK_ID --dry-run|--apply`는 accepted worktree task branch만 main worktree에 fast-forward로 반영합니다. Dirty main, branch ancestry 불일치, 빈 commit range, missing/recovery-required metadata는 중단합니다. Main `HEAD`가 `execution_base_head` 이후로 forward-only 이동한 stale-base 상태에서는 clean rebase preflight가 통과할 때 task branch를 current main 위로 재배치하고 review를 다시 `unreviewed`로 돌립니다. 이 stale-base rebase step은 같은 command 안에서 main apply를 수행하지 않습니다.
 8. Remote push helper: 필요하면 task branch push만 explicit opt-in으로 추가합니다. 기본 runner, doctor, review paths는 계속 local-only입니다.
 9. Concurrency discussion: 위 phase가 안정화된 뒤에만 여러 Codex 실행을 허용할지 별도 설계합니다. 기본 제품 원칙은 계속 single runner, one task per invocation입니다.
 
@@ -734,7 +744,7 @@ Next minimal implementation task:
 현재 구현된 prepare/cleanup command 범위:
 
 - `cbr worktree prepare TASK_ID --dry-run|--apply`: `worktree_mode=task`일 때만 task-specific branch와 worktree를 준비합니다. Apply mode는 queue lock 아래에서 task metadata를 갱신하고 `task_worktree_prepared` event를 기록합니다.
-- `cbr worktree apply TASK_ID --dry-run|--apply`: `completed + accepted` worktree task branch를 main worktree에 반영할 수 있는지 검증하고, `--apply`에서는 queue lock 아래에서 `git merge --ff-only`만 수행합니다. Main HEAD가 `execution_base_head`와 다르거나 main worktree가 dirty이거나 branch에 적용할 commit이 없으면 거부합니다. 성공해도 worktree와 branch는 보존합니다.
+- `cbr worktree apply TASK_ID --dry-run|--apply`: `completed + accepted` worktree task branch를 main worktree에 반영할 수 있는지 검증합니다. `--apply`는 main HEAD가 `execution_base_head`와 같으면 queue lock 아래에서 `git merge --ff-only`를 수행하고, main HEAD가 `execution_base_head` 이후로 forward-only 이동했으면 clean stale-base rebase만 task branch/worktree에 수행한 뒤 re-review로 돌립니다. Dirty main, non-linear main movement, conflict, branch에 적용할 commit이 없는 상태는 거부합니다. 성공해도 worktree와 branch는 보존합니다.
 - `cbr worktree cleanup TASK_ID --dry-run|--apply`: `execution_apply_status=applied` metadata가 있는 `completed + accepted` 또는 `archived` task의 retained worktree만 정리합니다. Cleanup은 configured `worktree_root` 아래의 Git registry에 등록된 path와 task metadata branch가 일치할 때만 수행하며, local branch, task JSON, runtime log, event log는 보존합니다. Apply mode는 queue lock 아래에서 `execution_worktree_status=cleaned`를 기록하고 `task_worktree_cleaned` event를 남깁니다.
 - 두 명령은 Codex를 호출하지 않습니다. `run-next`는 같은 prepare/recovery 규칙을 사용해 selected task worktree를 준비합니다. Existing branch/worktree가 metadata와 맞지 않거나 path/registry 상태가 불일치하면 `recovery_required`로 보고하고 자동 복구하지 않습니다.
 

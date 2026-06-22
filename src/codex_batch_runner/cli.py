@@ -566,6 +566,10 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
 def worktree_apply_note(task: dict) -> str:
     if task.get("execution_mode") != "git_worktree":
         return ""
+    if task.get("execution_rebase_status") == "blocked":
+        return "worktree rebase blocked"
+    if task.get("execution_rebase_status") == "rebased" and review_status(task) != "accepted":
+        return "worktree rebased; awaiting re-review"
     if review_status(task) != "accepted":
         return ""
     if task.get("execution_apply_status") == "applied":
