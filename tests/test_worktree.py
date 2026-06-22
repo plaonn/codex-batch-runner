@@ -218,6 +218,10 @@ class WorktreeTests(unittest.TestCase):
             self.assertIn("execution_apply_status=applied", report["errors"][0])
             self.assertTrue(worktree_path.exists())
             self.assertNotIn("execution_cleaned_at", load_task(config, "cleanup"))
+            list_code, list_output = run_cli_text(["--config", str(config_path), "list", "--color=never"])
+            self.assertEqual(0, list_code)
+            self.assertIn("accepted_unapplied", list_output)
+            self.assertIn("worktree not applied", list_output)
 
     def test_cleanup_dry_run_reports_candidate_after_applied_worktree_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -632,6 +636,121 @@ class WorktreeTests(unittest.TestCase):
             self.assertTrue(any(event["event_type"] == "task_worktree_applied" for event in events))
             self.assertNotIn("prompt", json.dumps(events))
 
+    def test_accept_fast_forwards_worktree_branch_after_review_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="accept-apply")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "accept-apply", "--apply", "--json"])[0])
+            task = load_task(config, "accept-apply")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\naccepted change\n", encoding="utf-8")
+            git(worktree, "commit", "-am", "accepted change")
+            branch_head = git(worktree, "rev-parse", "HEAD")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "accept", "accept-apply", "--reason", "verified", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertEqual("applied", output["post_accept"]["status"])
+            self.assertEqual(branch_head, git(repo, "rev-parse", "HEAD"))
+            loaded = load_task(config, "accept-apply")
+            self.assertEqual("accepted", loaded["review_status"])
+            self.assertEqual("applied", loaded["execution_apply_status"])
+            self.assertEqual(branch_head, loaded["execution_applied_head"])
+
+    def test_review_next_auto_accept_applies_fast_forward_worktree_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config_data = json.loads(config_path.read_text(encoding="utf-8"))
+            config_data["auto_review_mechanical_accept"] = True
+            config_path.write_text(json.dumps(config_data), encoding="utf-8")
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="auto-apply")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "auto-apply", "--apply", "--json"])[0])
+            task = load_task(config, "auto-apply")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\nauto change\n", encoding="utf-8")
+            git(worktree, "commit", "-am", "auto change")
+            branch_head = git(worktree, "rev-parse", "HEAD")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["completed_at"] = "2026-01-01T00:00:00+00:00"
+            task["last_result"] = {
+                "task_id": "auto-apply",
+                "status": "completed",
+                "summary": "done",
+                "changed_files": ["file.txt"],
+                "verification": ["unit tests"],
+            }
+            task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
+            save_task(config, task)
+
+            code, report = run_cli(["--config", str(config_path), "review-next", "--apply", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertEqual("accepted", report["auto_review"]["decision"])
+            self.assertEqual("applied", report["post_accept"]["status"])
+            self.assertEqual(branch_head, git(repo, "rev-parse", "HEAD"))
+            loaded = load_task(config, "auto-apply")
+            self.assertEqual("accepted", loaded["review_status"])
+            self.assertEqual("applied", loaded["execution_apply_status"])
+
+    def test_review_next_auto_accept_clean_stale_rebase_requires_re_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config_data = json.loads(config_path.read_text(encoding="utf-8"))
+            config_data["auto_review_mechanical_accept"] = True
+            config_path.write_text(json.dumps(config_data), encoding="utf-8")
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="auto-rebase")
+            self.assertEqual(0, run_cli(["--config", str(config_path), "worktree", "prepare", "auto-rebase", "--apply", "--json"])[0])
+            task = load_task(config, "auto-rebase")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\nauto branch change\n", encoding="utf-8")
+            git(worktree, "commit", "-am", "auto branch change")
+            (repo / "main.txt").write_text("main moved\n", encoding="utf-8")
+            git(repo, "add", "main.txt")
+            git(repo, "commit", "-m", "main moved")
+            moved_head = git(repo, "rev-parse", "HEAD")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["completed_at"] = "2026-01-01T00:00:00+00:00"
+            task["last_result"] = {
+                "task_id": "auto-rebase",
+                "status": "completed",
+                "summary": "done",
+                "changed_files": ["file.txt"],
+                "verification": ["unit tests"],
+            }
+            task["git_status"] = {"has_unpushed": False, "ahead": 0, "dirty": False}
+            save_task(config, task)
+
+            code, report = run_cli(["--config", str(config_path), "review-next", "--apply", "--json"])
+
+            self.assertEqual(0, code)
+            self.assertEqual("rebased_re_review", report["auto_review"]["decision"])
+            self.assertEqual("rebased_awaiting_re_review", report["post_accept"]["status"])
+            self.assertEqual(moved_head, git(repo, "rev-parse", "HEAD"))
+            loaded = load_task(config, "auto-rebase")
+            self.assertEqual("unreviewed", loaded["review_status"])
+            self.assertEqual("rebased", loaded["execution_rebase_status"])
+            self.assertNotIn("execution_apply_status", loaded)
+
     def test_apply_refuses_unaccepted_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -768,13 +887,13 @@ class WorktreeTests(unittest.TestCase):
             self.assertTrue(any(event["event_type"] == "task_worktree_rebased" for event in events))
             self.assertNotIn("prompt", json.dumps(events))
             summary_code, summary = run_cli_text(["--config", str(config_path), "summary", "apply-rebase"])
-            list_code, list_output = run_cli_text(["--config", str(config_path), "list", "--color=never"])
+            list_code, list_output = run_cli_text(["--config", str(config_path), "list", "--all", "--color=never"])
             self.assertEqual(0, summary_code)
             self.assertIn("rebase_status: rebased", summary)
             self.assertEqual(0, list_code)
             self.assertIn("worktree rebased; awaiting re-review", list_output)
 
-    def test_apply_refuses_stale_base_rebase_conflict_and_records_followup(self) -> None:
+    def test_apply_stale_base_rebase_conflict_queues_single_conflict_fix_subtask(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -802,18 +921,46 @@ class WorktreeTests(unittest.TestCase):
             self.assertFalse(report["applied"])
             self.assertEqual("stale_base_rebase", report["apply_strategy"])
             self.assertEqual("blocked", report["rebase"]["status"])
-            self.assertIn("human follow-up", " ".join(report["errors"]))
+            self.assertIn("conflict-fix subtask", " ".join(report["errors"]))
+            self.assertEqual("queued", report["conflict_fix"]["status"])
+            fix_task_id = report["conflict_fix"]["task_id"]
             self.assertEqual(moved_head, git(repo, "rev-parse", "HEAD"))
             self.assertEqual(branch_head, git(worktree, "rev-parse", "HEAD"))
             loaded = load_task(config, "apply-rebase-conflict")
-            self.assertEqual("needs_followup", loaded["review_status"])
+            self.assertEqual("accepted", loaded["review_status"])
             self.assertEqual("blocked", loaded["execution_rebase_status"])
+            self.assertEqual("queued", loaded["execution_conflict_fix_status"])
+            self.assertEqual(fix_task_id, loaded["execution_conflict_fix_task_id"])
+            self.assertEqual(fix_task_id, loaded["last_conflict_fix_task_id"])
+            self.assertIn(fix_task_id, loaded["blocking_subtask_ids"])
             self.assertIn("could not apply", loaded["execution_rebase_blocker"])
+            fix_task = load_task(config, fix_task_id)
+            self.assertEqual("runnable", fix_task["status"])
+            self.assertEqual([], fix_task["depends_on"])
+            self.assertEqual("worktree_conflict_fix", fix_task["subtask_type"])
+            self.assertEqual("apply-rebase-conflict", fix_task["subtask_for"])
+            self.assertEqual("apply-rebase-conflict", fix_task["root_task_id"])
+            self.assertEqual("apply-rebase-conflict", fix_task["parent_task_id"])
+            self.assertTrue(fix_task["blocks_root_completion"])
+            self.assertIn("Port the parent task branch changes onto current main", fix_task["prompt"])
+
+            second_code, second_report = run_cli(
+                ["--config", str(config_path), "worktree", "apply", "apply-rebase-conflict", "--apply", "--json"]
+            )
+
+            self.assertEqual(1, second_code)
+            self.assertEqual(fix_task_id, second_report["conflict_fix"]["task_id"])
+            queued_fix_tasks = [
+                item
+                for item in config.queue_dir.glob("*.json")
+                if load_task(config, item.stem).get("subtask_type") == "worktree_conflict_fix"
+            ]
+            self.assertEqual(1, len(queued_fix_tasks))
             events = list_events(config, task_id="apply-rebase-conflict", limit=0)
-            self.assertTrue(any(event["event_type"] == "task_worktree_rebase_blocked" for event in events))
-            list_code, list_output = run_cli_text(["--config", str(config_path), "list", "--color=never"])
+            self.assertTrue(any(event["event_type"] == "task_worktree_conflict_fix_enqueued" for event in events))
+            list_code, list_output = run_cli_text(["--config", str(config_path), "list", "--all", "--color=never"])
             self.assertEqual(0, list_code)
-            self.assertIn("worktree rebase blocked", list_output)
+            self.assertIn("conflict-fix subtask queued", list_output)
 
     def test_apply_refuses_branch_with_no_commits_after_base(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

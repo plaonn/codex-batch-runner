@@ -1185,7 +1185,10 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual("blocked_dependency", rows["child"]["STATUS"])
-            self.assertIn("blocked by not-completed,not-accepted:not_accepted", rows["child"]["NOTE"])
+            self.assertIn(
+                "blocked by not completed (not-completed),not accepted (not-accepted):not_accepted",
+                rows["child"]["NOTE"],
+            )
             self.assertEqual("not-completed\nnot-accepted", rows["child"]["DEPS"])
 
     def test_list_json_preserves_raw_status_for_dependency_blocked_task(self) -> None:

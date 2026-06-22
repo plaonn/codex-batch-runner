@@ -109,6 +109,7 @@ def task_metadata(task: dict) -> dict[str, Any]:
         "auto_fix_allowed",
         "auto_fix_budget",
         "last_auto_fix_task_id",
+        "last_conflict_fix_task_id",
         "finding_fingerprints",
     )
     chain_fields = {
@@ -127,6 +128,7 @@ def task_metadata(task: dict) -> dict[str, Any]:
         "auto_fix_allowed",
         "auto_fix_budget",
         "last_auto_fix_task_id",
+        "last_conflict_fix_task_id",
         "finding_fingerprints",
     }
     metadata = {
@@ -158,6 +160,7 @@ def chain_summary(task: dict) -> dict[str, Any] | None:
         "auto_fix_allowed",
         "auto_fix_budget",
         "last_auto_fix_task_id",
+        "last_conflict_fix_task_id",
         "finding_fingerprints",
         "review_findings",
     )

@@ -9,6 +9,7 @@ from .config import Config
 from .events import emit_task_event, transition_payload
 from .fs import ensure_dir
 from .lock import FileLock
+from .post_accept import integrate_accepted_worktree
 from .queue import (
     chain_metadata,
     create_task,
@@ -145,6 +146,7 @@ def build_review_next_apply_report_locked(
         report["mutated"] = reviewer_report["mutated"]
         report["review_status"] = reviewer_report.get("review_status", report.get("review_status"))
         report["auto_review"] = reviewer_report["auto_review"]
+        report["post_accept"] = reviewer_report.get("post_accept")
         task = load_task(config, task_id)
         report["chain"] = chain_metadata(task)
         report["auto_fix_planner"] = build_auto_fix_planner_report(config, task, report.get("gates", []))
@@ -162,6 +164,7 @@ def build_review_next_apply_report_locked(
     applied = apply_mechanical_accept(config, task_id, expected)
     report["mutated"] = applied["mutated"]
     report["review_status"] = applied.get("review_status", report.get("review_status"))
+    report["post_accept"] = applied.get("post_accept")
     task = load_task(config, task_id)
     report["chain"] = chain_metadata(task)
     report["auto_fix_planner"] = build_auto_fix_planner_report(config, task, report.get("gates", []))
@@ -170,6 +173,8 @@ def build_review_next_apply_report_locked(
         reason=applied["reason"],
         enabled=True,
         reviewer_codex_enabled=False,
+        follow_up_enqueued=applied.get("follow_up_enqueued", False),
+        follow_up_task_id=applied.get("follow_up_task_id"),
     )
     return report
 
@@ -849,12 +854,33 @@ def apply_mechanical_accept(config: Config, task_id: str, expected_fingerprint: 
         summary=f"mechanically auto-accepted task {task_id}",
         payload=transition_payload(task, review_status="accepted", reviewed_at=task.get("reviewed_at")),
     )
+    post_accept = integrate_accepted_worktree(config, task_id, locked=True)
+    decision, reason = post_accept_decision(
+        post_accept,
+        accepted_reason="all local mechanical gates passed",
+    )
     return {
         "mutated": True,
-        "decision": "accepted",
-        "reason": "all local mechanical gates passed",
-        "review_status": "accepted",
+        "decision": decision,
+        "reason": reason,
+        "review_status": review_status(load_task(config, task_id)),
+        "post_accept": post_accept,
+        "follow_up_enqueued": post_accept.get("status") == "conflict_fix_subtask_queued",
+        "follow_up_task_id": post_accept.get("conflict_fix_task_id"),
     }
+
+
+def post_accept_decision(post_accept: dict[str, Any], *, accepted_reason: str) -> tuple[str, str]:
+    status = post_accept.get("status")
+    if status in {"applied", "already_applied", "not_worktree"}:
+        return "accepted", accepted_reason
+    if status == "rebased_awaiting_re_review":
+        return "rebased_re_review", "accepted worktree branch was stale; clean rebase completed and re-review is required"
+    if status == "conflict_fix_subtask_queued":
+        title = post_accept.get("conflict_fix_task_title") or "conflict-fix subtask"
+        task_id = post_accept.get("conflict_fix_task_id") or "-"
+        return "conflict_fix_queued", f"stale-base conflict queued {title} ({task_id})"
+    return "needs_human", "accepted task could not be applied to integration target"
 
 
 def run_reviewer_phase(
@@ -952,6 +978,9 @@ def run_reviewer_phase(
             reviewer_result=reviewer_result,
             mutated=applied["mutated"],
             review_status=applied.get("review_status"),
+            follow_up_enqueued=applied.get("follow_up_enqueued", False),
+            follow_up_task_id=applied.get("follow_up_task_id"),
+            post_accept=applied.get("post_accept"),
         )
 
     if reviewer_result.get("decision") == "needs_fix":
@@ -1119,11 +1148,19 @@ def apply_reviewer_accept(
             reviewer_codex=compact_reviewer_result(reviewer_result),
         ),
     )
+    post_accept = integrate_accepted_worktree(config, task_id, locked=True)
+    decision, reason = post_accept_decision(
+        post_accept,
+        accepted_reason="reviewer Codex returned high-confidence pass and mechanical gates passed",
+    )
     return {
         "mutated": True,
-        "decision": "accepted",
-        "reason": "reviewer Codex returned high-confidence pass and mechanical gates passed",
-        "review_status": "accepted",
+        "decision": decision,
+        "reason": reason,
+        "review_status": review_status(load_task(config, task_id)),
+        "post_accept": post_accept,
+        "follow_up_enqueued": post_accept.get("status") == "conflict_fix_subtask_queued",
+        "follow_up_task_id": post_accept.get("conflict_fix_task_id"),
     }
 
 
@@ -1446,6 +1483,7 @@ def reviewer_phase_report(
     follow_up_enqueued: bool = False,
     follow_up_task_id: str | None = None,
     auto_fix_skip_reasons: list[Any] | None = None,
+    post_accept: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     summary = auto_review_summary(
         decision=decision if decision != "pass" else "needs_human",
@@ -1468,6 +1506,7 @@ def reviewer_phase_report(
         "mutated": mutated,
         "review_status": review_status,
         "auto_review": summary,
+        "post_accept": sanitize_value(post_accept) if post_accept is not None else None,
     }
 
 
@@ -1478,6 +1517,8 @@ def auto_review_summary(
     enabled: bool,
     reviewer_codex_enabled: bool,
     failing_gates: list[object] | None = None,
+    follow_up_enqueued: bool = False,
+    follow_up_task_id: str | None = None,
 ) -> dict[str, Any]:
     summary = {
         "decision": decision,
@@ -1485,8 +1526,10 @@ def auto_review_summary(
         "mechanical_auto_accept_enabled": bool(enabled),
         "reviewer_codex_enabled": bool(reviewer_codex_enabled),
         "reviewer_codex_invoked": False,
-        "follow_up_enqueued": False,
+        "follow_up_enqueued": bool(follow_up_enqueued),
     }
+    if follow_up_task_id:
+        summary["follow_up_task_id"] = sanitize(follow_up_task_id)
     if failing_gates:
         summary["failing_gates"] = [sanitize(item) for item in failing_gates]
     return summary
