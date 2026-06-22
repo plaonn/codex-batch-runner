@@ -58,6 +58,64 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(queue_dir.resolve(), config.queue_dir.resolve())
 
+    def test_config_root_makes_relative_runtime_paths_independent_of_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg_config_home = Path(tmp) / "xdg-config"
+            runtime_root = Path(tmp) / "runtime-root"
+            other_cwd = Path(tmp) / "other-cwd"
+            other_cwd.mkdir()
+            config_path = xdg_config_home / "codex-batch-runner" / "config.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "root": str(runtime_root),
+                        "queue_dir": ".cbr/tasks",
+                        "log_dir": ".cbr/logs",
+                        "lock_file": ".cbr/runner.lock",
+                        "state_file": ".cbr/state.json",
+                        "worktree_root": ".cbr/worktrees",
+                        "notifier_cursor_state_paths": [".cbr/notifier.json"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.dict("os.environ", {"XDG_CONFIG_HOME": str(xdg_config_home)}, clear=True),
+                patch("codex_batch_runner.config.Path.cwd", return_value=other_cwd),
+            ):
+                config = Config.load()
+
+            self.assertEqual(runtime_root.resolve(), config.root)
+            self.assertEqual(runtime_root.resolve() / ".cbr" / "tasks", config.queue_dir)
+            self.assertEqual(runtime_root.resolve() / ".cbr" / "logs", config.log_dir)
+            self.assertEqual(runtime_root.resolve() / ".cbr" / "events", config.event_dir)
+            self.assertEqual(runtime_root.resolve() / ".cbr" / "runner.lock", config.lock_file)
+            self.assertEqual(runtime_root.resolve() / ".cbr" / "state.json", config.state_file)
+            self.assertEqual(runtime_root.resolve() / ".cbr" / "worktrees", config.worktree_root)
+            self.assertEqual([runtime_root.resolve() / ".cbr" / "notifier.json"], config.notifier_cursor_state_paths)
+
+    def test_relative_config_root_resolves_from_config_file_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "config-dir"
+            config_path = config_dir / "config.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(json.dumps({"root": "../runtime", "queue_dir": "tasks"}), encoding="utf-8")
+
+            config = Config.load(str(config_path))
+
+            self.assertEqual((config_dir / "../runtime").resolve(), config.root)
+            self.assertEqual((config_dir / "../runtime/tasks").resolve(), config.queue_dir)
+
+    def test_root_config_must_be_path_string(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"root": 1}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "root must be a path string"):
+                Config.load(str(config_path))
+
     def test_missing_config_falls_back_to_cwd_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cwd = Path(tmp) / "cwd"

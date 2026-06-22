@@ -304,8 +304,11 @@ Optional `notifier_cursor_state_paths` can point to local notifier cursor state 
 
 Optional git worktree mode is disabled by default. When enabled with `worktree_mode=task`, `run-next` prepares or reuses a task-specific worktree and runs Codex with that worktree as the process `cwd`; task metadata still preserves the original task `cwd` separately from `execution_worktree_path`. 이 목적은 completed-but-unreviewed 결과와 독립적인 후속 작업이 main worktree를 더럽히거나 서로 다른 task state를 섞지 않고 공존할 수 있게 하는 것입니다. 기본 dependency readiness가 throughput을 우선하는 동안, worktree 격리는 검토 대기 결과와 새 작업을 분리해 운영 위험을 줄이는 보완 장치로 설계합니다. Completed worktree task의 보고된 변경은 task branch local commit으로 고정되어 review-bundle/review-next가 원자적인 branch diff를 검토할 수 있습니다.
 
+Config may set `root` to make relative runtime paths independent of the process current working directory. When `root` is set, relative `queue_dir`, `log_dir`, `event_dir`, `lock_file`, `state_file`, `worktree_root`, and notifier cursor state paths are resolved under that root. Without `root`, cbr keeps the built-in fallback behavior of resolving relative paths from the current working directory.
+
 ```json
 {
+  "root": "/path/to/codex-batch-runner",
   "worktree_mode": "task",
   "worktree_root": ".codex-batch-runner/worktrees"
 }

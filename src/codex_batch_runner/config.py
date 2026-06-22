@@ -50,10 +50,11 @@ class Config:
     @classmethod
     def load(cls, config_path: str | None = None, root: Path | None = None) -> "Config":
         resolved_config_path = resolve_config_path(config_path, include_user_config=root is None)
-        base = (root or Path.cwd()).resolve()
         data: dict[str, Any] = {}
         if resolved_config_path:
             data = read_json(resolved_config_path, {}) or {}
+        fallback_root = (root or Path.cwd()).resolve()
+        base = fallback_root if root is not None else root_value(data.get("root"), fallback_root, resolved_config_path)
 
         def path_value(key: str, default: str) -> Path:
             raw = Path(data.get(key, default)).expanduser()
@@ -171,6 +172,18 @@ def path_list_value(key: str, data: dict[str, Any], base: Path) -> list[Path]:
         path = Path(item).expanduser()
         paths.append(path if path.is_absolute() else base / path)
     return paths
+
+
+def root_value(value: object, fallback: Path, config_path: Path | None) -> Path:
+    if value is None:
+        return fallback
+    if not isinstance(value, str):
+        raise ValueError("root must be a path string")
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    base = config_path.parent if config_path else fallback
+    return (base / path).resolve()
 
 
 def bool_value(key: str, value: object) -> bool:

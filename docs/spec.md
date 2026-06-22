@@ -1014,6 +1014,7 @@ codex exec --sandbox workspace-write resume "<session_id>" --json "<wrapped prom
 
 ```json
 {
+  "root": "/path/to/codex-batch-runner",
   "codex_command": ["codex", "exec", "--sandbox", "workspace-write", "--json"],
   "codex_resume_command": ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"],
   "default_execution_profile": "normal",
@@ -1045,6 +1046,8 @@ codex exec --sandbox workspace-write resume "<session_id>" --json "<wrapped prom
 ```
 
 `workspace-write`를 기본으로 둠. non-interactive batch 작업은 일반적으로 파일 수정을 해야 하며, read-only sandbox에서는 수정 task가 실패함.
+`root`가 있으면 relative `queue_dir`, `log_dir`, `event_dir`, `lock_file`, `state_file`, `worktree_root`, notifier cursor path는 `root` 기준으로 해석함.
+`root`가 없으면 compatibility를 위해 process current working directory를 기준으로 해석함.
 
 기본 공개 예시 [examples/config.example.json](../examples/config.example.json)은 이 safe default를 유지함.
 완전 비대화형 운영이 필요하고 운영자가 full local access 위험을 수용한 경우에만
