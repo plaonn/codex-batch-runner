@@ -529,6 +529,7 @@ def render_list_output(config: Config, args: argparse.Namespace, terminal_width:
         output = render_compact_list(tasks, by_id, config, color, terminal_width=terminal_width)
         return "\n".join([*banners, output]) if banners else output
     header = ["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"]
+    header.append("PROFILE")
     header.extend(["RAW_STATUS", "LAST_RESULT", "LAST_RUN", "LAST_ERROR"])
     rows = []
     for task in tasks:
@@ -584,6 +585,8 @@ def render_compact_list(
 ) -> str:
     header = ["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"]
     row_groups = [compact_task_group(task, by_id, config, color) for task in tasks]
+    if terminal_width is not None and terminal_width < 80:
+        return render_compact_block_list(row_groups, terminal_width)
     widths = compact_widths(header, row_groups, terminal_width)
     lines = [render_compact_row(header, widths)]
     for group in row_groups:
@@ -603,7 +606,7 @@ def compact_task_group(task: dict, by_id: dict[str, dict], config: Config, color
         ],
         "deps": dep_ids or ["-"],
         "notes": note_segments or ["-"],
-        "title": color.title(task_title(task)),
+        "title": color.title(compact_title(task)),
     }
 
 
@@ -656,25 +659,55 @@ def render_compact_group(group: dict[str, object], widths: list[int], terminal_w
         dep_lines[0] if dep_lines else "-",
         note_lines[0] if note_lines else "-",
     ]
+    title_cell_width = sum(widths[:4]) + 6
+    title_width = max(10, title_cell_width - 2)
+    title_lines = ["  " + line for line in wrap_plain_text(str(group.get("title") or "-"), title_width)]
     lines = [render_compact_row(first, widths)]
-    title_width = max(10, (terminal_width or sum(widths) + 10) - 2)
-    for title_line in wrap_plain_text(str(group.get("title") or "-"), title_width):
-        lines.append("  " + title_line)
-    row_count = max(len(dep_lines), len(note_lines))
-    for index in range(1, row_count):
+    row_count = max(len(title_lines), len(dep_lines) - 1, len(note_lines) - 1)
+    detail_widths = [title_cell_width, widths[4], widths[5]]
+    for index in range(row_count):
         lines.append(
             render_compact_row(
                 [
-                    "",
-                    "",
-                    "",
-                    "",
-                    dep_lines[index] if index < len(dep_lines) else "",
-                    note_lines[index] if index < len(note_lines) else "",
+                    title_lines[index] if index < len(title_lines) else "",
+                    dep_lines[index + 1] if index + 1 < len(dep_lines) else "",
+                    note_lines[index + 1] if index + 1 < len(note_lines) else "",
                 ],
-                widths,
+                detail_widths,
             )
         )
+    return lines
+
+
+def render_compact_block_list(row_groups: list[dict[str, object]], terminal_width: int) -> str:
+    lines = []
+    for index, group in enumerate(row_groups):
+        if index:
+            lines.append("")
+        summary = group["summary"] if isinstance(group["summary"], list) else ["-", "-", "-", "-"]
+        block_rows = [
+            ("STATUS", str(summary[2])),
+            ("ID", str(summary[1])),
+            ("PROJECT", str(summary[0])),
+            ("TITLE", str(group.get("title") or "-")),
+        ]
+        deps = group["deps"] if isinstance(group["deps"], list) else ["-"]
+        notes = group["notes"] if isinstance(group["notes"], list) else ["-"]
+        block_rows.extend(("DEPS", str(dep)) for dep in deps)
+        block_rows.extend(("NOTE", str(note)) for note in notes)
+        lines.extend(render_block_rows(block_rows, terminal_width))
+    return "\n".join(lines)
+
+
+def render_block_rows(rows: list[tuple[str, str]], terminal_width: int) -> list[str]:
+    label_width = max(visible_len(label) for label, _ in rows)
+    value_width = max(8, terminal_width - label_width - 2)
+    lines = []
+    for label, value in rows:
+        wrapped = wrap_visible(value, value_width)
+        for index, line in enumerate(wrapped):
+            prefix = (label + ":").ljust(label_width + 1) + " " if index == 0 else " " * (label_width + 2)
+            lines.append(prefix + line)
     return lines
 
 
@@ -693,7 +726,7 @@ def render_compact_row(row: list[str], widths: list[int]) -> str:
 def list_table_row(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
     return [
         scalar_cell(task.get("id")),
-        scalar_cell(truncate_table_text(task_title(task), 72)),
+        scalar_cell(truncate_table_text(compact_title(task), 72)),
         scalar_cell(status_cell(task, by_id, config)),
         scalar_cell(task_project_id(task)),
         scalar_cell(task.get("attempts", 0)),
@@ -730,25 +763,25 @@ def dependency_id_cells(depends_on: object, by_id: dict[str, dict], config: Conf
 
 def dependency_id_cell(dep_id: str, by_id: dict[str, dict], config: Config, color: "ListColor") -> str:
     dep = by_id.get(dep_id)
-    state = dependency_display_state(dep, config)
+    state, style_status = dependency_display_state(dep, by_id, config)
     if state == "done":
         return color.satisfied_dependency(dep_id)
-    return color.dependency(dep_id, state)
+    return color.dependency(dep_id, state, style_status)
 
 
-def dependency_display_state(dep: dict | None, config: Config) -> str:
+def dependency_display_state(dep: dict | None, by_id: dict[str, dict], config: Config) -> tuple[str, str]:
     if not dep:
-        return "missing"
+        return ("missing", "missing")
     if dep.get("status") == "completed":
         if config.dependency_requires_accepted_review and dep.get("review_status") != "accepted":
-            return "not_accepted"
+            return ("not_accepted", "awaiting_review")
         if dep.get("execution_mode") == "git_worktree":
             if dep.get("review_status") != "accepted":
-                return "not_accepted"
+                return ("not_accepted", "awaiting_review")
             if dep.get("execution_apply_status") != "applied":
-                return "not_applied"
-        return "done"
-    return "blocked"
+                return ("not_applied", "awaiting_review")
+        return ("done", "completed")
+    return ("blocked", status_cell(dep, by_id, config))
 
 
 def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config | None = None) -> str:
@@ -806,9 +839,9 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
     subtask_note = subtask_note_cell(task)
     if subtask_note:
         notes.append(subtask_note)
-    profile_note = execution_profile_note(task)
-    if profile_note:
-        notes.append(profile_note)
+    backend_note = execution_backend_note(task)
+    if backend_note:
+        notes.append(backend_note)
     if task.get("resolution"):
         notes.append("resolution: " + str(task.get("resolution")))
     if task.get("status") == "completed" and not task.get("resolution"):
@@ -851,8 +884,6 @@ def worktree_apply_note(task: dict) -> str:
 
 def execution_profile_note(task: dict) -> str:
     parts = []
-    if task.get("execution_backend") and task.get("execution_backend") != "codex":
-        parts.append("backend=" + one_line(task.get("execution_backend")))
     if task.get("execution_profile"):
         parts.append("profile=" + one_line(task.get("execution_profile")))
     if task.get("model"):
@@ -860,6 +891,33 @@ def execution_profile_note(task: dict) -> str:
     if task.get("codex_profile"):
         parts.append("codex_profile=" + one_line(task.get("codex_profile")))
     return " ".join(parts)
+
+
+def execution_backend_note(task: dict) -> str:
+    if task.get("execution_backend") and task.get("execution_backend") != "codex":
+        return "backend=" + one_line(task.get("execution_backend"))
+    return ""
+
+
+def compact_title(task: dict) -> str:
+    marker = execution_profile_marker(task)
+    title = task_title(task)
+    return f"{marker} {title}" if marker else title
+
+
+def execution_profile_marker(task: dict) -> str:
+    profile = str(task.get("execution_profile") or "").strip().lower()
+    budget = str(task.get("token_budget_hint") or "").strip().lower()
+    model = str(task.get("model") or "").strip().lower()
+    codex_profile = str(task.get("codex_profile") or "").strip().lower()
+    values = " ".join(value for value in [profile, budget, model, codex_profile] if value)
+    if not values:
+        return ""
+    if any(term in values for term in ("small", "light", "low-cost", "low_cost", "lite")):
+        return "[S]"
+    if any(term in values for term in ("deep", "high-cost", "high_cost", "large", "max")):
+        return "[D]"
+    return ""
 
 
 def chain_note_cell(task: dict) -> str:
@@ -1040,7 +1098,38 @@ class ListColor:
     BG_CYAN = "\033[106;30m"
     BG_BLUE = "\033[104;30m"
     BG_DIM = "\033[100;37m"
+    BG_NEUTRAL_CYAN = "\033[100;96m"
+    BG_NEUTRAL_YELLOW = "\033[100;93m"
+    BG_NEUTRAL_GREEN = "\033[100;92m"
+    BG_NEUTRAL_WHITE = "\033[100;37m"
     ID_COLORS = ("\033[35m", "\033[36m", "\033[34m", "\033[32m", "\033[33m", "\033[91m")
+    ACTIVE_STATUS_STYLES = {
+        "running": BG_CYAN,
+        "awaiting_review": BG_YELLOW,
+        "reviewing": BG_YELLOW,
+        "needs_resume": BG_BLUE,
+        "waiting_subtasks": BG_YELLOW,
+        "cooldown": BG_DIM,
+        "usage_exhausted": BG_DIM,
+        "failed": BG_RED,
+        "review_failed": BG_RED,
+        "needs_followup": BG_RED,
+        "blocked_user": BG_RED,
+        "subtasks_blocked": BG_RED,
+    }
+    PASSIVE_STATUS_STYLES = {
+        "runnable": BG_NEUTRAL_CYAN,
+        "blocked_dependency": BG_NEUTRAL_YELLOW,
+        "completed": BG_NEUTRAL_GREEN,
+        "accepted": BG_NEUTRAL_GREEN,
+        "resolved": BG_NEUTRAL_WHITE,
+        "archived": BG_NEUTRAL_WHITE,
+    }
+    DEPENDENCY_STATE_STYLES = {
+        "missing": BG_RED,
+        "not_accepted": BG_YELLOW,
+        "not_applied": BG_YELLOW,
+    }
 
     def __init__(self, enabled: bool) -> None:
         self.enabled = enabled
@@ -1067,35 +1156,28 @@ class ListColor:
             return f"{dep_id} (done)"
         return self.apply(dep_id, self.DIM)
 
-    def dependency(self, dep_id: str, state: str) -> str:
+    def dependency(self, dep_id: str, state: str, style_status: str) -> str:
         if state == "not_accepted":
             label = f"{dep_id}:not_accepted" if self.enabled else f"{dep_id} (not_accepted)"
-            return self.apply(label, self.BG_YELLOW)
+            return self.apply(label, self.DEPENDENCY_STATE_STYLES[state])
         if state == "missing":
             label = f"{dep_id}:missing" if self.enabled else f"{dep_id} (missing)"
-            return self.apply(label, self.BG_RED)
+            return self.apply(label, self.DEPENDENCY_STATE_STYLES[state])
         if state == "not_applied":
             label = f"{dep_id}:not_applied" if self.enabled else f"{dep_id} (not_applied)"
-            return self.apply(label, self.BG_YELLOW)
+            return self.apply(label, self.DEPENDENCY_STATE_STYLES[state])
         if state == "blocked":
             label = dep_id if self.enabled else f"{dep_id} (blocked)"
-            return self.apply(label, self.BG_RED)
-        return self.task_id(dep_id)
+            return self.status_label(label, style_status)
+        label = dep_id if self.enabled else f"{dep_id} ({state})"
+        return self.status_label(label, state)
 
     def status(self, status: str) -> str:
-        if status in {"failed", "blocked_user", "review_failed", "needs_followup", "blocked_dependency", "subtasks_blocked"}:
-            return self.apply(status, self.BG_RED)
-        if status in {"awaiting_review", "reviewing", "waiting_subtasks"}:
-            return self.apply(status, self.BG_YELLOW)
-        if status == "running":
-            return self.apply(status, self.BG_CYAN)
-        if status in {"runnable", "needs_resume"}:
-            return self.apply(status, self.BG_BLUE)
-        if status in {"cooldown", "usage_exhausted"}:
-            return self.apply(status, self.BG_DIM)
-        if status in {"completed", "accepted"}:
-            return self.apply(status, self.BG_GREEN)
-        return status
+        return self.status_label(status, status)
+
+    def status_label(self, label: str, status: str) -> str:
+        style = self.ACTIVE_STATUS_STYLES.get(status) or self.PASSIVE_STATUS_STYLES.get(status)
+        return self.apply(label, style) if style else label
 
 
 def list_colorizer(mode: str) -> ListColor:
@@ -1263,6 +1345,7 @@ def truncate_table_text(value: str, limit: int) -> str:
 
 def verbose_table_cells(task: dict) -> list[str]:
     return [
+        execution_profile_note(task) or "-",
         scalar_cell(task.get("status")),
         last_result_cell(task.get("last_result"), task.get("git_status")),
         last_run_cell(task.get("last_run")),

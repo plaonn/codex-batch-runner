@@ -132,8 +132,22 @@ def compact_list_rows(output: str) -> list[dict[str, str]]:
     rows = []
     current: dict[str, str] | None = None
     for line in lines[1:]:
-        if current is not None and not current["TITLE"] and line.startswith("  ") and line.strip():
-            current["TITLE"] = line.strip()
+        if current is not None and line.startswith("  ") and line.strip():
+            title_segment = line[: starts[4]].strip() if len(starts) > 4 else line.strip()
+            deps_segment = line[starts[4] : starts[5]].strip() if len(starts) > 5 else ""
+            note_segment = line[starts[5] :].strip() if len(starts) > 5 else ""
+            if title_segment and not current["TITLE"]:
+                current["TITLE"] = title_segment
+            if deps_segment:
+                if current["DEPS"] in {"", "-"}:
+                    current["DEPS"] = deps_segment
+                else:
+                    current["DEPS"] += "\n" + deps_segment
+            if note_segment:
+                if current["NOTE"] in {"", "-"}:
+                    current["NOTE"] = note_segment
+                else:
+                    current["NOTE"] += "; " + note_segment
             continue
         parsed = {}
         for index, header in enumerate(headers):
@@ -141,8 +155,9 @@ def compact_list_rows(output: str) -> list[dict[str, str]]:
             end = starts[index + 1] if index + 1 < len(starts) else None
             parsed[header] = line[start:end].strip()
         if not parsed["ID"] and current is not None:
-            if parsed["PROJECT"] and not current["TITLE"]:
-                current["TITLE"] = parsed["PROJECT"]
+            title_segment = line[: starts[4]].strip() if len(starts) > 4 else parsed["PROJECT"]
+            if title_segment and not current["TITLE"]:
+                current["TITLE"] = title_segment
             if parsed["DEPS"]:
                 if current["DEPS"] in {"", "-"}:
                     current["DEPS"] = parsed["DEPS"]
@@ -1457,6 +1472,36 @@ class CliTests(unittest.TestCase):
             self.assertIn("mechanical auto-review enabled", rows["reviewable"]["NOTE"])
             self.assertRegex(output, r"Review task title\s+mechanical auto-review enabled")
 
+    def test_list_compact_renders_title_deps_and_note_continuations_in_parallel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, auto_review_mechanical_accept=True)
+            config = Config.load(str(config_path))
+            for dep_id in ("dep-one", "dep-two"):
+                dep = create_task(config, dep_id, tmp, task_id=dep_id)
+                dep["status"] = "completed"
+                dep["review_status"] = "accepted"
+                save_task(config, dep)
+            task = create_task(
+                config,
+                "Review task title",
+                tmp,
+                task_id="reviewable",
+                project_id="project-a",
+                depends_on=["dep-one", "dep-two"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
+
+            self.assertEqual(0, code)
+            lines = list_lines(output)
+            detail = next(line for line in lines if "Review task title" in line)
+            self.assertIn("dep-two (done)", detail)
+            self.assertIn("mechanical auto-review enabled", detail)
+            self.assertNotIn("\n\n", output)
+
     def test_list_color_modes_respect_auto_no_color_and_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -1495,11 +1540,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, json_code)
             self.assertNotIn("\033[", never_output)
             self.assertNotIn("\033[", auto_output)
-            self.assertIn("\033[104;30mrunnable\033[0m", always_output)
+            self.assertIn("\033[100;96mrunnable\033[0m", always_output)
             self.assertIn("\033[104;30mneeds_resume\033[0m", always_output)
             self.assertIn("\033[103;30mawaiting_review\033[0m", always_output)
             self.assertIn("\033[106;30mrunning\033[0m", always_output)
-            self.assertIn("\033[102;30mcompleted\033[0m", always_output)
+            self.assertIn("\033[100;92mcompleted\033[0m", always_output)
             self.assertIn("\033[101;30mfailed\033[0m", always_output)
             self.assertRegex(always_output, r"\033\[96m[^\n]*\033\[0m")
             self.assertIn("\033[101;30mfailed\033[0m", no_color_output)
@@ -1556,31 +1601,52 @@ class CliTests(unittest.TestCase):
             self.assertIn("not-accepted (not_accepted)", rows["child"]["DEPS"])
             self.assertIn("missing-dep (missing)", rows["child"]["DEPS"])
             self.assertNotIn("blocked by", rows["child"]["NOTE"])
-            self.assertIn("\033[101;30mblocked-dep\033[0m", always_output)
+            self.assertIn("\033[100;96mblocked-dep\033[0m", always_output)
             self.assertIn("\033[103;30mnot-accepted:not_accepted\033[0m", always_output)
             self.assertIn("\033[101;30mmissing-dep:missing\033[0m", always_output)
 
-    def test_list_terminal_width_wraps_compact_rows_and_indents_title(self) -> None:
+    def test_list_terminal_width_below_80_uses_block_layout_and_wraps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
+            dep = create_task(config, "done dependency", tmp, task_id="dependency-with-a-long-readable-id")
+            dep["status"] = "completed"
+            dep["review_status"] = "accepted"
+            save_task(config, dep)
             create_task(
                 config,
-                "Very long task title that should wrap under the summary row without starting at column zero",
+                "Very long task title that should wrap in block layout without exceeding a narrow terminal width",
                 tmp,
-                task_id="short",
+                task_id="task-with-a-long-readable-id",
                 project_id="project-a",
+                depends_on=["dependency-with-a-long-readable-id"],
             )
 
-            with (
-                patch("codex_batch_runner.cli.sys.stdout.isatty", return_value=True),
-                patch("codex_batch_runner.cli.shutil.get_terminal_size", return_value=os.terminal_size((72, 24))),
-            ):
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=79):
                 code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
 
             self.assertEqual(0, code)
-            self.assertTrue(all(width <= 72 for width in visible_line_widths(output)))
-            self.assertTrue(any(line.startswith("  Very long task title") for line in output.splitlines()))
+            self.assertNotEqual(["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+            self.assertIn("STATUS:", output)
+            self.assertIn("ID:", output)
+            self.assertIn("PROJECT:", output)
+            self.assertIn("TITLE:", output)
+            self.assertIn("DEPS:", output)
+            self.assertIn("NOTE:", output)
+            self.assertTrue(all(width <= 79 for width in visible_line_widths(output)))
+
+    def test_list_terminal_width_80_uses_table_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "Table title", tmp, task_id="task", project_id="project-a")
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=80):
+                code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertEqual(["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+            self.assertTrue(any(line.startswith("  Table title") for line in output.splitlines()))
 
     def test_list_blocking_subtasks_affect_parent_effective_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1661,7 +1727,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("keys: q quit, r refresh, +/- interval", output)
             self.assertIn("task", output)
 
-    def test_list_color_uses_stable_task_id_color_in_dependency_cells(self) -> None:
+    def test_list_color_uses_dependency_status_style_in_dependency_cells(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
@@ -1673,7 +1739,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertIsNotNone(dep_color)
-            self.assertIn("\033[101;30mdep-a\033[0m", output)
+            self.assertIn("\033[100;96mdep-a\033[0m", output)
 
     def test_list_running_task_shows_elapsed_and_progress_age(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2698,6 +2764,7 @@ class CliTests(unittest.TestCase):
                     "ATTEMPTS",
                     "DEPS",
                     "NOTE",
+                    "PROFILE",
                     "RAW_STATUS",
                     "LAST_RESULT",
                     "LAST_RUN",
@@ -2708,6 +2775,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual("failed", rows["verbose"]["STATUS"])
             self.assertEqual("failed", rows["verbose"]["RAW_STATUS"])
             self.assertEqual("last error: error line one line two", rows["verbose"]["NOTE"])
+            self.assertEqual("-", rows["verbose"]["PROFILE"])
             self.assertEqual("status=failed summary=first line second line", rows["verbose"]["LAST_RESULT"])
             self.assertEqual("command=exec returncode=1 duration=2.5s", rows["verbose"]["LAST_RUN"])
             self.assertEqual("error line one line two", rows["verbose"]["LAST_ERROR"])
@@ -3041,7 +3109,13 @@ class CliTests(unittest.TestCase):
             summary_code, summary_output = run_cli(["--config", str(config_path), "summary", "profiled"])
 
             self.assertEqual(0, list_code)
-            self.assertIn("profile=small model=gpt-5-small codex_profile=batch-small", list_output)
+            self.assertIn("[S] work", list_output)
+            self.assertNotIn("profile=small", list_output)
+            self.assertNotIn("model=gpt-5-small", list_output)
+            verbose_code, verbose_output = run_cli(["--config", str(config_path), "list", "--verbose"])
+            verbose_rows = {row["ID"]: row for row in fixed_table_rows(verbose_output)}
+            self.assertEqual(0, verbose_code)
+            self.assertEqual("profile=small model=gpt-5-small codex_profile=batch-small", verbose_rows["profiled"]["PROFILE"])
             self.assertEqual(0, summary_code)
             self.assertIn(
                 "execution: execution_profile=small, model=gpt-5-small, codex_profile=batch-small",
