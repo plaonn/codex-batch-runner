@@ -985,16 +985,31 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
+            create_task(config, "runnable", tmp, task_id="runnable")
+            create_task(config, "resume", tmp, task_id="resume")
+            set_status(config, "resume", "needs_resume")
+            create_task(config, "running", tmp, task_id="running")
+            set_status(config, "running", "running")
+            create_task(config, "review", tmp, task_id="review")
+            review = load_task(config, "review")
+            review["status"] = "completed"
+            review["review_status"] = "unreviewed"
+            save_task(config, review)
+            create_task(config, "completed", tmp, task_id="completed")
+            completed = load_task(config, "completed")
+            completed["status"] = "completed"
+            completed["review_status"] = "accepted"
+            save_task(config, completed)
             create_task(config, "failed", tmp, task_id="failed")
             set_status(config, "failed", "failed")
 
-            code, never_output = run_cli(["--config", str(config_path), "list", "--color=never"])
-            auto_code, auto_output = run_cli(["--config", str(config_path), "list", "--color=auto"])
+            code, never_output = run_cli(["--config", str(config_path), "list", "--color=never", "--all"])
+            auto_code, auto_output = run_cli(["--config", str(config_path), "list", "--color=auto", "--all"])
             with patch.dict(os.environ, {"NO_COLOR": "1"}):
-                no_color_code, no_color_output = run_cli(["--config", str(config_path), "list", "--color=always"])
-                auto_no_color_code, auto_no_color_output = run_cli(["--config", str(config_path), "list", "--color=auto"])
-            always_code, always_output = run_cli(["--config", str(config_path), "list", "--color=always"])
-            json_code, json_output = run_cli(["--config", str(config_path), "list", "--color=always", "--json"])
+                no_color_code, no_color_output = run_cli(["--config", str(config_path), "list", "--color=always", "--all"])
+                auto_no_color_code, auto_no_color_output = run_cli(["--config", str(config_path), "list", "--color=auto", "--all"])
+            always_code, always_output = run_cli(["--config", str(config_path), "list", "--color=always", "--all"])
+            json_code, json_output = run_cli(["--config", str(config_path), "list", "--color=always", "--all", "--json"])
 
             self.assertEqual(0, code)
             self.assertEqual(0, auto_code)
@@ -1004,12 +1019,20 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, json_code)
             self.assertNotIn("\033[", never_output)
             self.assertNotIn("\033[", auto_output)
+            self.assertIn("\033[104;30mrunnable\033[0m", always_output)
+            self.assertIn("\033[104;30mneeds_resume\033[0m", always_output)
+            self.assertIn("\033[43;30mawaiting_review\033[0m", always_output)
+            self.assertIn("\033[46;30mrunning\033[0m", always_output)
+            self.assertIn("\033[42;30mcompleted\033[0m", always_output)
             self.assertIn("\033[41;37mfailed\033[0m", always_output)
             self.assertRegex(always_output, r"\033\[96m[^\n]*\033\[0m")
             self.assertIn("\033[41;37mfailed\033[0m", no_color_output)
             self.assertNotIn("\033[", auto_no_color_output)
             self.assertNotIn("\033[", json_output)
-            self.assertEqual("failed", json.loads(json_output)[0]["id"])
+            self.assertEqual(
+                ["completed", "failed", "resume", "review", "runnable", "running"],
+                sorted(task["id"] for task in json.loads(json_output)),
+            )
 
     def test_list_satisfied_dependency_uses_dim_color_or_done_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
