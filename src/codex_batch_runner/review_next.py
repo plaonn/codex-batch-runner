@@ -24,7 +24,7 @@ from .queue import (
 )
 from .review_bundle import build_review_bundle, sanitize_value
 from .reviewer_codex import reviewer_clear_pass, run_reviewer_codex
-from .state import in_global_cooldown, in_reviewer_codex_cooldown, mark_reviewer_codex_rate_limit
+from .state import in_global_cooldown, in_reviewer_codex_cooldown, is_runner_paused, mark_reviewer_codex_rate_limit
 from .summary import review_status
 from .timeutil import add_seconds, iso_now
 from .transcript import sanitize
@@ -178,6 +178,8 @@ def has_actionable_auto_review_candidate(config: Config) -> bool:
     if not (config.auto_review_mechanical_accept or config.auto_review_codex_enabled):
         return False
     if in_global_cooldown(config):
+        return False
+    if is_runner_paused(config):
         return False
 
     report = select_review_next_report(config, mode="apply", skip_reviewer_backoff=True)

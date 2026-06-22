@@ -101,6 +101,40 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("available: true", output)
             self.assertIn("version_output: codex-cli 2.0.0", output)
 
+    def test_doctor_reports_runner_pause_state_in_json_and_human_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(tmp, [str(executable), "exec", "--json"])
+            (Path(tmp) / "state.json").write_text(
+                json.dumps(
+                    {
+                        "runner_pause": {
+                            "active": True,
+                            "reason": "operator drain",
+                            "paused_at": "2026-06-22T07:07:00+09:00",
+                            "paused_by": "ops-user",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["state"]["runner_pause"]["active"])
+            self.assertEqual("operator drain", report["state"]["runner_pause"]["reason"])
+            self.assertEqual("2026-06-22T07:07:00+09:00", report["state"]["runner_pause"]["paused_at"])
+            self.assertEqual("ops-user", report["state"]["runner_pause"]["paused_by"])
+            self.assertEqual(0, human_code)
+            self.assertIn("runner_pause_active: true", human_output)
+            self.assertIn("runner_pause_reason: operator drain", human_output)
+            self.assertIn("runner_pause_paused_by: ops-user", human_output)
+
     def test_doctor_reports_execution_profiles_without_private_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executable = Path(tmp) / "codex"

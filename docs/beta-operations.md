@@ -87,8 +87,22 @@ cbr doctor
 ```
 
 `doctor`는 Codex를 호출하지 않습니다. runtime path, command availability,
-global cooldown, lock state, task count, runnable count, review count, resolved
-failed/blocked count를 점검합니다.
+global cooldown, runner pause, lock state, task count, runnable count, review
+count, resolved failed/blocked count를 점검합니다.
+
+운영자가 queue 신규 admission만 잠시 멈추고 싶으면 scheduler를 내리기 전에
+runner pause를 사용할 수 있습니다.
+
+```bash
+cbr pause set --reason "operator maintenance window"
+cbr pause show
+cbr pause clear
+```
+
+Pause는 global cooldown과 별개입니다. 활성 중인 Codex 작업은 그대로 두고, 이후
+`run-next` 호출은 stale `running` recovery만 수행한 뒤 `paused`로 종료합니다.
+`pause set`은 wake hook을 실행하지 않고, `pause clear`는 다시 runnable work가
+있을 수 있으므로 configured post-mutation trigger를 실행합니다.
 
 ## Review workflow
 

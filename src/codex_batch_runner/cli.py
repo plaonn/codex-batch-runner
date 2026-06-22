@@ -38,7 +38,15 @@ from .review_bundle import build_review_bundle, render_review_bundle
 from .review_next import build_review_next_apply_report, build_review_next_report, render_review_next_report
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, build_routing_report, render_routing_report
 from .runner import run_next
-from .state import clear_global_cooldown, clear_reviewer_codex_cooldown, load_state, set_global_cooldown
+from .state import (
+    clear_global_cooldown,
+    clear_reviewer_codex_cooldown,
+    clear_runner_pause,
+    get_runner_pause,
+    load_state,
+    set_global_cooldown,
+    set_runner_pause,
+)
 from .summary import render_task_summary
 from .timeutil import parse_time, utc_now
 from .transcript import render_task_transcript
@@ -231,6 +239,17 @@ def build_parser() -> argparse.ArgumentParser:
     cooldown_set = cooldown_sub.add_parser("set", help="set global cooldown reset time")
     cooldown_set.add_argument("value", help="reset time such as 7:6, 6/21 7:06, 2026-06-21 07:06, +90m")
     cooldown_set.set_defaults(func=cmd_cooldown_set)
+
+    pause = sub.add_parser("pause", help="show, set, or clear global runner admission pause")
+    pause_sub = pause.add_subparsers(dest="pause_command", required=True)
+    pause_show = pause_sub.add_parser("show", help="show runner pause status")
+    pause_show.set_defaults(func=cmd_pause_show)
+    pause_set = pause_sub.add_parser("set", help="set runner pause without expiry")
+    pause_set.add_argument("--reason", required=True, help="public-safe reason for pausing new runner admissions")
+    pause_set.add_argument("--by", help="optional public-safe operator identifier")
+    pause_set.set_defaults(func=cmd_pause_set)
+    pause_clear = pause_sub.add_parser("clear", help="clear runner pause and wake configured scheduler hooks")
+    pause_clear.set_defaults(func=cmd_pause_clear)
 
     rate_limits = sub.add_parser("rate-limits", help="list sanitized rate-limit evidence")
     rate_limits.add_argument("--json", action="store_true", help="print JSON")
@@ -1168,12 +1187,59 @@ def cmd_cooldown_set(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pause_show(config: Config, args: argparse.Namespace) -> int:
+    print(render_pause_status(get_runner_pause(config)), end="")
+    return 0
+
+
+def cmd_pause_set(config: Config, args: argparse.Namespace) -> int:
+    previous = get_runner_pause(config)
+    paused_by = args.by or os.environ.get("USER") or os.environ.get("USERNAME")
+    current = set_runner_pause(config, args.reason, paused_by)
+    write_event_nonfatal(
+        config,
+        "runner_pause_updated",
+        summary="runner pause set",
+        payload={"action": "set", "runner_pause": current, "previous_runner_pause": previous},
+    )
+    print("runner pause set")
+    print(f"reason: {current.get('reason') or '-'}")
+    print(f"paused_at: {current.get('paused_at') or '-'}")
+    print(f"paused_by: {current.get('paused_by') or '-'}")
+    return 0
+
+
+def cmd_pause_clear(config: Config, args: argparse.Namespace) -> int:
+    previous = clear_runner_pause(config)
+    current = get_runner_pause(config)
+    write_event_nonfatal(
+        config,
+        "runner_pause_updated",
+        summary="runner pause cleared",
+        payload={"action": "clear", "runner_pause": current, "previous_runner_pause": previous},
+    )
+    run_post_mutation_trigger(config)
+    print("runner pause cleared")
+    return 0
+
+
 def render_cooldown_status(status: dict[str, object]) -> str:
     lines = [
         "global cooldown status",
         f"global_cooldown_until: {status.get('global_cooldown_until') or '-'}",
         f"active: {str(bool(status.get('active'))).lower()}",
         f"remaining: {status.get('remaining')}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_pause_status(pause: dict[str, object]) -> str:
+    lines = [
+        "runner pause status",
+        f"active: {str(bool(pause.get('active'))).lower()}",
+        f"reason: {pause.get('reason') or '-'}",
+        f"paused_at: {pause.get('paused_at') or '-'}",
+        f"paused_by: {pause.get('paused_by') or '-'}",
     ]
     return "\n".join(lines) + "\n"
 

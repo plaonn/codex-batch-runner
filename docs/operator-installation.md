@@ -130,14 +130,31 @@ PYTHONPATH=src python3 -m codex_batch_runner --config /path/to/cbr-config.json d
 ```
 
 `doctor`는 Codex를 호출하지 않습니다. Resolved runtime path, directory와 parent
-접근성, Codex command availability, global cooldown, lock state, task count,
-runnable count, review count, resolved failed/blocked count를 점검합니다.
+접근성, Codex command availability, global cooldown, runner pause, lock state,
+task count, runnable count, review count, resolved failed/blocked count를
+점검합니다.
 Unattended execution에 의존하기 전에 `error` check를 해결합니다. Warning은 exit
 code를 실패로 만들지 않지만 확인해야 합니다.
 
 Launch agent를 load했다면 첫 scheduler pass 이후 또는 manual `run-next` 이후에
 `doctor`를 다시 실행해 runtime path와 lock/state 파일이 예상 위치에 생기는지
 확인합니다.
+
+운영자가 scheduler는 그대로 둔 채 신규 runner admission만 잠시 막고 싶으면
+global cooldown 대신 runner pause를 사용합니다.
+
+```bash
+PYTHONPATH=src python3 -m codex_batch_runner --config /path/to/cbr-config.json \
+  pause set --reason "operator maintenance window"
+PYTHONPATH=src python3 -m codex_batch_runner --config /path/to/cbr-config.json pause show
+PYTHONPATH=src python3 -m codex_batch_runner --config /path/to/cbr-config.json pause clear
+```
+
+Pause는 rate-limit cooldown과 별개이며 expiry 없이 유지됩니다. 활성 중인 Codex
+child는 종료하지 않고, 이후 `run-next`는 queue lock 아래에서 stale `running`
+recovery만 수행한 뒤 `paused`로 종료합니다. `pause set`은 wake hook을 실행하지
+않고, `pause clear`는 runnable work가 다시 있을 수 있으므로 configured
+post-mutation trigger를 실행합니다.
 
 ## 수동 cooldown one-shot wake
 
