@@ -342,6 +342,8 @@ PYTHONPATH=src python3 -m codex_batch_runner routing-report --project codex-batc
 PYTHONPATH=src python3 -m codex_batch_runner routing-report --project codex-batch-runner --limit 100 --json
 ```
 
+Routing policy changes are operator decisions, not automatic report side effects. The conservative downshift/upshift criteria are maintained in [docs/spec.md](docs/spec.md).
+
 ```json
 {
   "default_execution_profile": "normal",
