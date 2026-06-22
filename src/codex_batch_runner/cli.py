@@ -63,6 +63,8 @@ from .triggers import run_post_mutation_trigger
 from .wake import schedule_manual_cooldown_wake
 from .worktree import build_apply_report, build_cleanup_report, build_prepare_report, render_worktree_report, task_worktree_metadata
 
+WATCH_RESTART_MESSAGE = "cbr source changed since this watch started; restart watch to use updated code"
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
@@ -431,6 +433,7 @@ def cmd_list_watch(config: Config, args: argparse.Namespace) -> int:
     interval = args.interval
     max_refreshes = args.max_refreshes
     refresh_count = 0
+    source_signature = watch_source_signature()
     old_terminal = None
     if sys.stdin.isatty():
         try:
@@ -444,7 +447,20 @@ def cmd_list_watch(config: Config, args: argparse.Namespace) -> int:
     try:
         while True:
             sys.stdout.write("\033[H\033[J")
-            sys.stdout.write(render_watch_output(config, args, interval))
+            try:
+                output = render_watch_output(
+                    config,
+                    args,
+                    interval,
+                    source_changed=watch_source_changed(source_signature),
+                )
+            except Exception as exc:
+                output = render_watch_error_output(
+                    interval,
+                    exc,
+                    source_changed=watch_source_changed(source_signature),
+                )
+            sys.stdout.write(output)
             sys.stdout.write("\n")
             sys.stdout.flush()
             refresh_count += 1
@@ -467,10 +483,52 @@ def cmd_list_watch(config: Config, args: argparse.Namespace) -> int:
                 pass
 
 
-def render_watch_output(config: Config, args: argparse.Namespace, interval: float) -> str:
+def render_watch_output(config: Config, args: argparse.Namespace, interval: float, *, source_changed: bool = False) -> str:
     header = f"updated: {utc_now().isoformat()}  interval={interval:g}s  keys: q quit, r refresh, +/- interval"
     body = render_list_output(config, args, terminal_width=compact_terminal_width())
-    return header + "\n" + body
+    return "\n".join([*watch_header_lines(header, source_changed), body])
+
+
+def render_watch_error_output(interval: float, exc: Exception, *, source_changed: bool = False) -> str:
+    header = f"updated: {utc_now().isoformat()}  interval={interval:g}s  keys: q quit, r refresh, +/- interval"
+    error = f"refresh error: {type(exc).__name__}: {exc}"
+    return "\n".join([*watch_header_lines(header, source_changed), error])
+
+
+def watch_header_lines(header: str, source_changed: bool) -> list[str]:
+    lines = [header]
+    if source_changed:
+        lines.append(WATCH_RESTART_MESSAGE)
+    return lines
+
+
+def watch_source_changed(initial_signature: tuple[int, int, int] | None) -> bool:
+    if initial_signature is None:
+        return False
+    try:
+        current_signature = watch_source_signature()
+    except Exception:
+        return False
+    return current_signature is not None and current_signature != initial_signature
+
+
+def watch_source_signature() -> tuple[int, int, int] | None:
+    try:
+        paths = list(Path(__file__).resolve().parent.rglob("*.py"))
+    except OSError:
+        return None
+    count = 0
+    latest_mtime_ns = 0
+    total_mtime_ns = 0
+    for path in paths:
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        count += 1
+        latest_mtime_ns = max(latest_mtime_ns, mtime_ns)
+        total_mtime_ns += mtime_ns
+    return count, latest_mtime_ns, total_mtime_ns
 
 
 def wait_for_watch_action(interval: float) -> tuple[str, float]:

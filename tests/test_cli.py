@@ -1797,6 +1797,33 @@ class CliTests(unittest.TestCase):
             self.assertIn("task", output)
             self.assertEqual("", stderr)
 
+    def test_list_watch_reports_refresh_errors_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            with patch("codex_batch_runner.cli.render_list_output", side_effect=RuntimeError("boom")):
+                code, output, stderr = run_cli_with_stderr(
+                    ["--config", str(config_path), "list", "--watch", "--max-refreshes", "1"]
+                )
+
+            self.assertEqual(0, code)
+            self.assertIn("keys: q quit, r refresh, +/- interval", output)
+            self.assertIn("refresh error: RuntimeError: boom", output)
+            self.assertEqual("", stderr)
+
+    def test_list_watch_reports_source_change_restart_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "task", tmp, task_id="task")
+
+            with patch("codex_batch_runner.cli.watch_source_signature", side_effect=[(1, 1, 1), (1, 2, 3)]):
+                code, output = run_cli(["--config", str(config_path), "list", "--watch", "--max-refreshes", "1"])
+
+            self.assertEqual(0, code)
+            self.assertIn("restart watch to use updated code", output)
+            self.assertIn("task", output)
+
     def test_list_color_uses_dependency_status_style_in_dependency_cells(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
