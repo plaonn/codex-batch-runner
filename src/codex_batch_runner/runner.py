@@ -15,7 +15,7 @@ from .fs import ensure_dir
 from .lock import FileLock
 from .prompts import build_prompt
 from .queue import is_in_cooldown, recover_stale_running_tasks, save_task, select_next_task
-from .review_next import build_review_next_apply_report_locked
+from .review_next import build_review_next_apply_report_locked, has_actionable_auto_review_candidate
 from .state import in_global_cooldown, mark_rate_limit, mark_run, mark_success
 from .timeutil import add_seconds, iso_now, parse_time
 from .triggers import run_post_run_trigger
@@ -189,7 +189,7 @@ def should_trigger_post_run_wake(config: Config, processed_task: dict[str, Any] 
 def should_trigger_post_review_wake(config: Config) -> bool:
     if in_global_cooldown(config):
         return False
-    return select_next_task(config) is not None
+    return select_next_task(config) is not None or has_actionable_auto_review_candidate(config)
 
 
 def apply_codex_result(config: Config, task: dict, result: CodexResult, *, git_status_cwd: Path | None = None) -> None:

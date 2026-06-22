@@ -171,6 +171,37 @@ def build_review_next_apply_report_locked(
     return report
 
 
+def has_actionable_auto_review_candidate(config: Config) -> bool:
+    if not (config.auto_review_mechanical_accept or config.auto_review_codex_enabled):
+        return False
+    if in_global_cooldown(config):
+        return False
+
+    report = select_review_next_report(config, mode="apply", skip_reviewer_backoff=True)
+    if not report.get("selected"):
+        return False
+    if not report.get("gates_ok"):
+        return False
+
+    if config.auto_review_codex_enabled:
+        if config.auto_review_codex_max_calls_per_run < 1:
+            return False
+        if in_reviewer_codex_cooldown(config):
+            return False
+        task_id = str(report.get("task_id") or "")
+        if not task_id:
+            return False
+        task = load_task(config, task_id)
+        bundle = build_review_bundle(
+            task,
+            by_id={item.get("id"): item for item in list_tasks(config)},
+            require_accepted_review=config.dependency_requires_accepted_review,
+        )
+        return bundle_limit_error(config, bundle) is None
+
+    return bool(config.auto_review_mechanical_accept)
+
+
 def select_review_next_report(
     config: Config,
     filters: Namespace | None = None,
