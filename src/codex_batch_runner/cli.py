@@ -3,7 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
+import shutil
 import sys
+import time
+import unicodedata
 import zlib
 from pathlib import Path
 
@@ -22,7 +26,6 @@ from .queue import (
     RUNNABLE_STATUSES,
     archive_task,
     create_task,
-    dependency_blockers,
     dependency_status,
     is_in_cooldown,
     list_tasks,
@@ -104,6 +107,9 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("--needs-review", action="store_true", help="show tasks that need operator review")
     list_cmd.add_argument("--verbose", action="store_true", help="include compact result and run summary columns")
     list_cmd.add_argument("--json", action="store_true", help="print JSON")
+    list_cmd.add_argument("--watch", action="store_true", help="refresh the human list until interrupted")
+    list_cmd.add_argument("--interval", type=float, default=2.0, help="seconds between --watch refreshes (default: 2.0)")
+    list_cmd.add_argument("--max-refreshes", type=int, help=argparse.SUPPRESS)
     list_cmd.add_argument(
         "--color",
         choices=("auto", "always", "never"),
@@ -342,6 +348,86 @@ def parse_config_overrides(items: list[str]) -> dict[str, str]:
 
 
 def cmd_list(config: Config, args: argparse.Namespace) -> int:
+    if args.watch:
+        return cmd_list_watch(config, args)
+    output = render_list_output(config, args, terminal_width=compact_terminal_width())
+    print(output)
+    return 0
+
+
+def cmd_list_watch(config: Config, args: argparse.Namespace) -> int:
+    if args.json:
+        raise ValueError("--watch cannot be used with --json")
+    if args.interval <= 0:
+        raise ValueError("--interval must be positive")
+    interval = args.interval
+    max_refreshes = args.max_refreshes
+    refresh_count = 0
+    old_terminal = None
+    if sys.stdin.isatty():
+        try:
+            import termios
+            import tty
+
+            old_terminal = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+        except Exception:
+            old_terminal = None
+    try:
+        while True:
+            sys.stdout.write("\033[H\033[J")
+            sys.stdout.write(render_watch_output(config, args, interval))
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            refresh_count += 1
+            if max_refreshes is not None and refresh_count >= max_refreshes:
+                return 0
+            action, interval = wait_for_watch_action(interval)
+            if action == "quit":
+                return 0
+    finally:
+        if old_terminal is not None:
+            try:
+                import termios
+
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_terminal)
+            except Exception:
+                pass
+
+
+def render_watch_output(config: Config, args: argparse.Namespace, interval: float) -> str:
+    header = f"updated: {utc_now().isoformat()}  interval={interval:g}s  keys: q quit, r refresh, +/- interval"
+    body = render_list_output(config, args, terminal_width=compact_terminal_width())
+    return header + "\n" + body
+
+
+def wait_for_watch_action(interval: float) -> tuple[str, float]:
+    if not sys.stdin.isatty():
+        time.sleep(interval)
+        return "refresh", interval
+    deadline = time.monotonic() + interval
+    current_interval = interval
+    while True:
+        timeout = max(0.0, deadline - time.monotonic())
+        if timeout == 0:
+            return "refresh", current_interval
+        readable, _, _ = select.select([sys.stdin], [], [], timeout)
+        if not readable:
+            return "refresh", current_interval
+        key = sys.stdin.read(1)
+        if key == "q":
+            return "quit", current_interval
+        if key == "r":
+            return "refresh", current_interval
+        if key in {"+", "="}:
+            current_interval = min(60.0, current_interval + 1.0)
+            deadline = time.monotonic() + current_interval
+        elif key == "-":
+            current_interval = max(0.5, current_interval - 1.0)
+            deadline = time.monotonic() + current_interval
+
+
+def render_list_output(config: Config, args: argparse.Namespace, terminal_width: int | None = None) -> str:
     tasks = list_tasks(config)
     by_id = {task.get("id"): task for task in tasks}
     explicit_filter = bool(
@@ -376,12 +462,12 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
         tasks = [task for task in tasks if visible_by_default(task)]
     tasks.sort(key=list_sort_key)
     if args.json:
-        print(json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0
+        return json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True)
     color = list_colorizer(args.color)
+    banners = list_cooldown_banners(config)
     if not args.verbose:
-        print(render_compact_list(tasks, by_id, config, color))
-        return 0
+        output = render_compact_list(tasks, by_id, config, color, terminal_width=terminal_width)
+        return "\n".join([*banners, output]) if banners else output
     header = ["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"]
     header.extend(["RAW_STATUS", "LAST_RESULT", "LAST_RUN", "LAST_ERROR"])
     rows = []
@@ -389,8 +475,27 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
         row = list_table_row(task, by_id, config)
         row.extend(verbose_table_cells(task))
         rows.append(row)
-    print(render_table(header, rows))
-    return 0
+    output = render_table(header, rows)
+    return "\n".join([*banners, output]) if banners else output
+
+
+def compact_terminal_width() -> int | None:
+    if not sys.stdout.isatty():
+        return None
+    return shutil.get_terminal_size((120, 24)).columns
+
+
+def list_cooldown_banners(config: Config) -> list[str]:
+    state = load_state(config)
+    banners = []
+    global_until = parse_time(state.get("global_cooldown_until"))
+    reviewer_until = parse_time(state.get("reviewer_codex_cooldown_until"))
+    now = utc_now()
+    if global_until and global_until > now:
+        banners.append("global cooldown active until " + global_until.isoformat())
+    if reviewer_until and reviewer_until > now:
+        banners.append("reviewer Codex cooldown active until " + reviewer_until.isoformat())
+    return banners
 
 
 def list_sort_key(task: dict) -> tuple[str, str]:
@@ -410,51 +515,114 @@ def render_table_row(row: list[str], widths: list[int]) -> str:
     return "  ".join([*padded, row[-1]])
 
 
-def render_compact_list(tasks: list[dict], by_id: dict[str, dict], config: Config, color: "ListColor") -> str:
+def render_compact_list(
+    tasks: list[dict],
+    by_id: dict[str, dict],
+    config: Config,
+    color: "ListColor",
+    terminal_width: int | None = None,
+) -> str:
     header = ["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"]
-    row_groups = [compact_task_rows(task, by_id, config, color) for task in tasks]
-    rows = [row for group in row_groups for row in group]
-    widths = [max(visible_len(row[index]) for row in [header, *rows]) for index in range(len(header))]
+    row_groups = [compact_task_group(task, by_id, config, color) for task in tasks]
+    widths = compact_widths(header, row_groups, terminal_width)
     lines = [render_compact_row(header, widths)]
     for group in row_groups:
-        lines.extend(render_compact_row(row, widths) for row in group)
+        lines.extend(render_compact_group(group, widths, terminal_width))
     return "\n".join(lines)
 
 
-def compact_task_rows(task: dict, by_id: dict[str, dict], config: Config, color: "ListColor") -> list[list[str]]:
+def compact_task_group(task: dict, by_id: dict[str, dict], config: Config, color: "ListColor") -> dict[str, object]:
     dep_ids = dependency_id_cells(task.get("depends_on"), by_id, config, color)
     note_segments = note_cells(task, by_id, config)
-    row_count = max(2, len(dep_ids), len(note_segments))
-    rows = [
-        [
+    return {
+        "summary": [
             color.project(scalar_cell(task_project_id(task))),
             color.task_id(scalar_cell(task.get("id"))),
             color.status(status_cell(task, by_id, config)),
             scalar_cell(task.get("attempts", 0)),
-            dep_ids[0] if dep_ids else "-",
-            note_segments[0] if note_segments else "-",
         ],
-        [
-            color.title(task_title(task)),
-            "",
-            "",
-            "",
-            dep_ids[1] if len(dep_ids) > 1 else "",
-            note_segments[1] if len(note_segments) > 1 else "",
-        ],
+        "deps": dep_ids or ["-"],
+        "notes": note_segments or ["-"],
+        "title": color.title(task_title(task)),
+    }
+
+
+def compact_widths(header: list[str], row_groups: list[dict[str, object]], terminal_width: int | None) -> list[int]:
+    summary_rows = [group["summary"] for group in row_groups]
+    deps = [cell for group in row_groups for cell in group["deps"]]  # type: ignore[index]
+    notes = [cell for group in row_groups for cell in group["notes"]]  # type: ignore[index]
+    project = column_width(header[0], summary_rows, 0, cap=24 if terminal_width else None)
+    task_id = column_width(header[1], summary_rows, 1, cap=36 if terminal_width else None)
+    status = column_width(header[2], summary_rows, 2)
+    attempts = column_width(header[3], summary_rows, 3)
+    dep_width = max([visible_len(header[4]), *(visible_len(str(dep)) for dep in deps)] or [len(header[4])])
+    note_width = max([visible_len(header[5]), *(visible_len(str(note)) for note in notes)] or [len(header[5])])
+    widths = [project, task_id, status, attempts, dep_width, note_width]
+    if terminal_width is None:
+        return widths
+    fixed = sum(widths[:4]) + (len(widths) - 1) * 2
+    available = max(10, terminal_width - fixed)
+    desired_deps = min(dep_width, 38)
+    min_deps = min(max(visible_len(header[4]), 8), available - 4)
+    deps_share = max(min_deps, min(desired_deps, max(8, available // 3)))
+    note_share = max(visible_len(header[5]), available - deps_share)
+    if deps_share + note_share > available:
+        note_share = max(visible_len(header[5]), available - deps_share)
+    widths[4] = max(visible_len(header[4]), deps_share)
+    widths[5] = max(visible_len(header[5]), available - widths[4])
+    return widths
+
+
+def column_width(header: str, rows: list[object], index: int, cap: int | None = None) -> int:
+    values = [visible_len(header)]
+    for row in rows:
+        if isinstance(row, list) and index < len(row):
+            values.append(visible_len(str(row[index])))
+    width = max(values)
+    return min(width, cap) if cap else width
+
+
+def render_compact_group(group: dict[str, object], widths: list[int], terminal_width: int | None) -> list[str]:
+    deps = group["deps"] if isinstance(group["deps"], list) else ["-"]
+    notes = group["notes"] if isinstance(group["notes"], list) else ["-"]
+    dep_lines = wrap_cell_list([str(dep) for dep in deps], widths[4])
+    note_lines = wrap_cell_list([str(note) for note in notes], widths[5])
+    summary = group["summary"] if isinstance(group["summary"], list) else ["", "", "", ""]
+    first = [
+        fit_visible(str(summary[0]), widths[0]),
+        fit_visible(str(summary[1]), widths[1]),
+        fit_visible(str(summary[2]), widths[2]),
+        fit_visible(str(summary[3]), widths[3]),
+        dep_lines[0] if dep_lines else "-",
+        note_lines[0] if note_lines else "-",
     ]
-    rows.extend(
-        [
-            "",
-            "",
-            "",
-            "",
-            dep_ids[index] if index < len(dep_ids) else "",
-            note_segments[index] if index < len(note_segments) else "",
-        ]
-        for index in range(2, row_count)
-    )
-    return rows
+    lines = [render_compact_row(first, widths)]
+    title_width = max(10, (terminal_width or sum(widths) + 10) - 2)
+    for title_line in wrap_plain_text(str(group.get("title") or "-"), title_width):
+        lines.append("  " + title_line)
+    row_count = max(len(dep_lines), len(note_lines))
+    for index in range(1, row_count):
+        lines.append(
+            render_compact_row(
+                [
+                    "",
+                    "",
+                    "",
+                    "",
+                    dep_lines[index] if index < len(dep_lines) else "",
+                    note_lines[index] if index < len(note_lines) else "",
+                ],
+                widths,
+            )
+        )
+    return lines
+
+
+def wrap_cell_list(values: list[str], width: int) -> list[str]:
+    lines: list[str] = []
+    for value in values:
+        lines.extend(wrap_visible(value, width))
+    return lines or [""]
 
 
 def render_compact_row(row: list[str], widths: list[int]) -> str:
@@ -469,7 +637,7 @@ def list_table_row(task: dict, by_id: dict[str, dict], config: Config) -> list[s
         scalar_cell(status_cell(task, by_id, config)),
         scalar_cell(task_project_id(task)),
         scalar_cell(task.get("attempts", 0)),
-        deps_cell(task.get("depends_on"), by_id),
+        deps_cell(task.get("depends_on"), by_id, config),
         note_cell(task, by_id, config),
     ]
 
@@ -480,11 +648,18 @@ def scalar_cell(value: object) -> str:
     return str(value)
 
 
-def deps_cell(depends_on: object, by_id: dict[str, dict] | None = None, color: "ListColor | None" = None) -> str:
+def deps_cell(
+    depends_on: object,
+    by_id: dict[str, dict] | None = None,
+    config: Config | None = None,
+    color: "ListColor | None" = None,
+) -> str:
     if not isinstance(depends_on, list) or not depends_on:
         return "-"
     color = color or ListColor(False)
-    return ",".join(color.task_id(str(dep_id)) for dep_id in depends_on)
+    if by_id is None or config is None:
+        return ",".join(color.task_id(str(dep_id)) for dep_id in depends_on)
+    return ",".join(dependency_id_cell(str(dep_id), by_id, config, color) for dep_id in depends_on)
 
 
 def dependency_id_cells(depends_on: object, by_id: dict[str, dict], config: Config, color: "ListColor") -> list[str]:
@@ -495,15 +670,20 @@ def dependency_id_cells(depends_on: object, by_id: dict[str, dict], config: Conf
 
 def dependency_id_cell(dep_id: str, by_id: dict[str, dict], config: Config, color: "ListColor") -> str:
     dep = by_id.get(dep_id)
-    if dependency_satisfied(dep, config):
+    state = dependency_display_state(dep, config)
+    if state == "done":
         return color.satisfied_dependency(dep_id)
-    return color.task_id(dep_id)
+    return color.dependency(dep_id, state)
 
 
-def dependency_satisfied(dep: dict | None, config: Config) -> bool:
-    if not dep or dep.get("status") != "completed":
-        return False
-    return not config.dependency_requires_accepted_review or dep.get("review_status") == "accepted"
+def dependency_display_state(dep: dict | None, config: Config) -> str:
+    if not dep:
+        return "missing"
+    if dep.get("status") == "completed":
+        if config.dependency_requires_accepted_review and dep.get("review_status") != "accepted":
+            return "not_accepted"
+        return "done"
+    return "blocked"
 
 
 def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config | None = None) -> str:
@@ -521,6 +701,10 @@ def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config
         return "blocked_dependency"
     if task.get("resolution") and status in {"failed", "blocked_user"}:
         return "resolved"
+    if by_id is not None and config is not None:
+        subtask_status = blocking_subtask_effective_status(task, by_id, config)
+        if subtask_status:
+            return subtask_status
     if status == "completed":
         review = review_status(task)
         if review == "unreviewed":
@@ -540,22 +724,18 @@ def note_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
 
 
 def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
-    deps_ready = dependency_status(
-        task,
-        by_id,
-        require_accepted_review=config.dependency_requires_accepted_review,
-    )[0]
     notes = []
     if is_in_cooldown(task):
         notes.append("cooldown until " + scalar_cell(task.get("cooldown_until")))
     if startup_stalled(task):
         notes.append(startup_stall_note(task))
-    if not deps_ready:
-        notes.append("blocked by " + ",".join(dependency_blocker_labels(task, by_id, config)))
     if task.get("status") == "failed" and task.get("last_error"):
         notes.append("last error: " + one_line(task.get("last_error")))
     if task.get("status") == "running":
         notes.extend(running_notes(task, config))
+    blocking_subtasks = blocking_subtask_note_cell(task, by_id, config)
+    if blocking_subtasks:
+        notes.append(blocking_subtasks)
     subtask_note = subtask_note_cell(task)
     if subtask_note:
         notes.append(subtask_note)
@@ -633,6 +813,78 @@ def subtask_note_cell(task: dict) -> str:
     return ""
 
 
+def blocking_subtask_effective_status(task: dict, by_id: dict[str, dict], config: Config) -> str:
+    active = active_blocking_subtasks(task, by_id)
+    if not active:
+        return ""
+    statuses = [blocking_subtask_status(item, by_id, config) for item in active]
+    if any(status in {"missing", "failed", "blocked_user", "review_failed", "needs_followup", "subtasks_blocked"} for status in statuses):
+        return "subtasks_blocked"
+    return "waiting_subtasks"
+
+
+def blocking_subtask_note_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
+    ids = blocking_subtask_ids(task)
+    active = active_blocking_subtasks(task, by_id)
+    if not active:
+        return ""
+    counts: dict[str, int] = {}
+    for item in active:
+        status = blocking_subtask_status(item, by_id, config)
+        counts[status] = counts.get(status, 0) + 1
+    summary = ", ".join(f"{count} {status}" for status, count in sorted(counts.items())[:2])
+    return f"subtasks {len(active)}/{len(ids)} {summary}"
+
+
+def blocking_subtask_status(task: dict | None, by_id: dict[str, dict], config: Config) -> str:
+    if not task:
+        return "missing"
+    return status_cell_without_subtasks(task, by_id, config)
+
+
+def status_cell_without_subtasks(task: dict, by_id: dict[str, dict], config: Config) -> str:
+    status = str(task.get("status") or "-")
+    if (
+        status in RUNNABLE_STATUSES
+        and not dependency_status(
+            task,
+            by_id,
+            require_accepted_review=config.dependency_requires_accepted_review,
+        )[0]
+    ):
+        return "blocked_dependency"
+    if task.get("resolution") and status in {"failed", "blocked_user"}:
+        return "resolved"
+    if status == "completed":
+        review = review_status(task)
+        if review == "unreviewed":
+            return "awaiting_review"
+        if review == "rejected":
+            return "review_failed"
+        if review == "needs_followup":
+            return "needs_followup"
+        if review == "reviewing":
+            return "reviewing"
+    return status
+
+
+def active_blocking_subtasks(task: dict, by_id: dict[str, dict]) -> list[dict | None]:
+    active = []
+    for task_id in blocking_subtask_ids(task):
+        subtask = by_id.get(task_id)
+        if subtask and subtask.get("status") == "completed" and review_status(subtask) == "accepted":
+            continue
+        active.append(subtask)
+    return active
+
+
+def blocking_subtask_ids(task: dict) -> list[str]:
+    ids = task.get("blocking_subtask_ids")
+    if not isinstance(ids, list):
+        return []
+    return [str(item) for item in ids if str(item)]
+
+
 def startup_stalled(task: dict) -> bool:
     progress = task.get("last_progress")
     return bool(task.get("startup_stalled_at") or (isinstance(progress, dict) and progress.get("watchdog_reason")))
@@ -643,27 +895,6 @@ def startup_stall_note(task: dict) -> str:
     if status in {"runnable", "needs_resume", "running"}:
         return "startup stall retry evidence"
     return "startup stall history"
-
-
-def dependency_blocker_labels(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
-    return [
-        blocker["id"]
-        if blocker["reason"] == "not_completed"
-        else f"{blocker['id']}:{blocker['reason']}"
-        for blocker in dependency_blockers(
-            task,
-            by_id,
-            require_accepted_review=config.dependency_requires_accepted_review,
-        )
-    ]
-
-
-def dependency_label(dep_id: str, by_id: dict[str, dict]) -> str:
-    dep = by_id.get(dep_id)
-    if not dep:
-        return dep_id
-    label = task_title(dep)
-    return truncate_table_text(label, 48)
 
 
 def running_notes(task: dict, config: Config) -> list[str]:
@@ -703,10 +934,10 @@ class ListColor:
     CYAN = "\033[36m"
     LIGHT_CYAN = "\033[96m"
     BLUE = "\033[34m"
-    BG_RED = "\033[41;37m"
-    BG_YELLOW = "\033[43;30m"
-    BG_GREEN = "\033[42;30m"
-    BG_CYAN = "\033[46;30m"
+    BG_RED = "\033[101;30m"
+    BG_YELLOW = "\033[103;30m"
+    BG_GREEN = "\033[102;30m"
+    BG_CYAN = "\033[106;30m"
     BG_BLUE = "\033[104;30m"
     BG_DIM = "\033[100;37m"
     ID_COLORS = ("\033[35m", "\033[36m", "\033[34m", "\033[32m", "\033[33m", "\033[91m")
@@ -736,10 +967,22 @@ class ListColor:
             return f"{dep_id} (done)"
         return self.apply(dep_id, self.DIM)
 
+    def dependency(self, dep_id: str, state: str) -> str:
+        if state == "not_accepted":
+            label = f"{dep_id}:not_accepted" if self.enabled else f"{dep_id} (not_accepted)"
+            return self.apply(label, self.BG_YELLOW)
+        if state == "missing":
+            label = f"{dep_id}:missing" if self.enabled else f"{dep_id} (missing)"
+            return self.apply(label, self.BG_RED)
+        if state == "blocked":
+            label = dep_id if self.enabled else f"{dep_id} (blocked)"
+            return self.apply(label, self.BG_RED)
+        return self.task_id(dep_id)
+
     def status(self, status: str) -> str:
-        if status in {"failed", "blocked_user", "review_failed", "needs_followup", "blocked_dependency"}:
+        if status in {"failed", "blocked_user", "review_failed", "needs_followup", "blocked_dependency", "subtasks_blocked"}:
             return self.apply(status, self.BG_RED)
-        if status in {"awaiting_review", "reviewing"}:
+        if status in {"awaiting_review", "reviewing", "waiting_subtasks"}:
             return self.apply(status, self.BG_YELLOW)
         if status == "running":
             return self.apply(status, self.BG_CYAN)
@@ -766,12 +1009,147 @@ def visible_len(value: str) -> int:
         elif in_escape and char == "m":
             in_escape = False
         elif not in_escape:
-            length += 1
+            length += char_width(char)
     return length
+
+
+def char_width(char: str) -> int:
+    if unicodedata.combining(char):
+        return 0
+    if unicodedata.east_asian_width(char) in {"F", "W"}:
+        return 2
+    return 1
 
 
 def pad_visible(value: str, width: int) -> str:
     return value + " " * max(0, width - visible_len(value))
+
+
+def fit_visible(value: str, width: int) -> str:
+    if visible_len(value) <= width:
+        return value
+    return truncate_visible(value, width)
+
+
+def truncate_visible(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if width <= 3:
+        return visible_prefix(value, width)
+    return visible_prefix(value, width - 3).rstrip() + "..."
+
+
+def visible_prefix(value: str, width: int) -> str:
+    result = []
+    visible = 0
+    in_escape = False
+    for char in value:
+        if char == "\033":
+            in_escape = True
+            result.append(char)
+            continue
+        if in_escape:
+            result.append(char)
+            if char == "m":
+                in_escape = False
+            continue
+        char_len = char_width(char)
+        if visible + char_len > width:
+            break
+        visible += char_len
+        result.append(char)
+    if "\033[" in value:
+        result.append(ListColor.RESET)
+    return "".join(result)
+
+
+def wrap_cell(value: str, width: int) -> list[str]:
+    if visible_len(value) <= width:
+        return [value]
+    if "\033[" not in value:
+        return wrap_plain_text(value, width)
+    return wrap_ansi_hard(value, width)
+
+
+def wrap_visible(value: str, width: int) -> list[str]:
+    return wrap_cell(value, max(1, width))
+
+
+def wrap_plain_text(value: str, width: int) -> list[str]:
+    width = max(1, width)
+    words = str(value).split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if not current:
+            current = word
+        elif visible_len(current + " " + word) <= width:
+            current += " " + word
+        else:
+            lines.extend(wrap_plain_word(current, width))
+            current = word
+    if current:
+        lines.extend(wrap_plain_word(current, width))
+    return lines
+
+
+def wrap_plain_word(value: str, width: int) -> list[str]:
+    if visible_len(value) <= width:
+        return [value]
+    lines = []
+    current = ""
+    current_width = 0
+    for char in value:
+        char_len = char_width(char)
+        if current and current_width + char_len > width:
+            lines.append(current)
+            current = char
+            current_width = char_len
+        else:
+            current += char
+            current_width += char_len
+    if current:
+        lines.append(current)
+    return lines
+
+
+def wrap_ansi_hard(value: str, width: int) -> list[str]:
+    lines: list[str] = []
+    current: list[str] = []
+    current_width = 0
+    active_codes = ""
+    in_escape = False
+    escape = []
+    for char in value:
+        if char == "\033":
+            in_escape = True
+            escape = [char]
+            current.append(char)
+            continue
+        if in_escape:
+            escape.append(char)
+            current.append(char)
+            if char == "m":
+                in_escape = False
+                code = "".join(escape)
+                active_codes = "" if code == ListColor.RESET else code
+            continue
+        char_len = char_width(char)
+        if current_width and current_width + char_len > width:
+            if active_codes:
+                current.append(ListColor.RESET)
+            lines.append("".join(current))
+            current = [active_codes] if active_codes else []
+            current_width = 0
+        current.append(char)
+        current_width += char_len
+    if current:
+        if active_codes and (not current or current[-1] != ListColor.RESET):
+            current.append(ListColor.RESET)
+        lines.append("".join(current))
+    return lines or [""]
 
 
 def truncate_table_text(value: str, limit: int) -> str:

@@ -131,6 +131,9 @@ def compact_list_rows(output: str) -> list[dict[str, str]]:
     rows = []
     current: dict[str, str] | None = None
     for line in lines[1:]:
+        if current is not None and not current["TITLE"] and line.startswith("  ") and line.strip():
+            current["TITLE"] = line.strip()
+            continue
         parsed = {}
         for index, header in enumerate(headers):
             start = starts[index]
@@ -162,6 +165,10 @@ def compact_list_rows(output: str) -> list[dict[str, str]]:
         rows.append(row)
         current = row
     return rows
+
+
+def visible_line_widths(output: str) -> list[int]:
+    return [len(strip_ansi(line)) for line in output.splitlines()]
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -1157,8 +1164,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual("blocked_dependency", rows["child"]["STATUS"])
-            self.assertEqual("dep", rows["child"]["DEPS"])
-            self.assertIn("blocked by dep", rows["child"]["NOTE"])
+            self.assertEqual("dep (blocked)", rows["child"]["DEPS"])
+            self.assertNotIn("blocked by dep", rows["child"]["NOTE"])
             self.assertNotIn("\033[", output)
 
     def test_list_human_distinguishes_not_completed_and_not_accepted_dependency_blockers(self) -> None:
@@ -1185,8 +1192,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual("blocked_dependency", rows["child"]["STATUS"])
-            self.assertIn("blocked by not-completed,not-accepted:not_accepted", rows["child"]["NOTE"])
-            self.assertEqual("not-completed\nnot-accepted", rows["child"]["DEPS"])
+            self.assertNotIn("blocked by", rows["child"]["NOTE"])
+            self.assertEqual("not-completed (blocked)\nnot-accepted (not_accepted)", rows["child"]["DEPS"])
 
     def test_list_json_preserves_raw_status_for_dependency_blocked_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1246,7 +1253,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"], lines[0].split())
             self.assertTrue(lines[1].startswith("project-a"))
             self.assertIn("child-task", lines[1])
-            self.assertTrue(lines[2].startswith("Child task title"))
+            self.assertTrue(lines[2].startswith("  Child task title"))
             self.assertNotIn("title:", output)
             self.assertNotIn("(child-task)", output)
             self.assertEqual("parent-task (done)\nsecond-parent (done)", rows["child-task"]["DEPS"])
@@ -1310,12 +1317,12 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("\033[", auto_output)
             self.assertIn("\033[104;30mrunnable\033[0m", always_output)
             self.assertIn("\033[104;30mneeds_resume\033[0m", always_output)
-            self.assertIn("\033[43;30mawaiting_review\033[0m", always_output)
-            self.assertIn("\033[46;30mrunning\033[0m", always_output)
-            self.assertIn("\033[42;30mcompleted\033[0m", always_output)
-            self.assertIn("\033[41;37mfailed\033[0m", always_output)
+            self.assertIn("\033[103;30mawaiting_review\033[0m", always_output)
+            self.assertIn("\033[106;30mrunning\033[0m", always_output)
+            self.assertIn("\033[102;30mcompleted\033[0m", always_output)
+            self.assertIn("\033[101;30mfailed\033[0m", always_output)
             self.assertRegex(always_output, r"\033\[96m[^\n]*\033\[0m")
-            self.assertIn("\033[41;37mfailed\033[0m", no_color_output)
+            self.assertIn("\033[101;30mfailed\033[0m", no_color_output)
             self.assertNotIn("\033[", auto_no_color_output)
             self.assertNotIn("\033[", json_output)
             self.assertEqual(
@@ -1341,6 +1348,139 @@ class CliTests(unittest.TestCase):
             self.assertIn("dep-done (done)", never_output)
             self.assertIn("\033[2mdep-done\033[0m", always_output)
 
+    def test_list_dependency_blockers_are_shown_in_deps_not_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, dependency_requires_accepted_review=True)
+            config = Config.load(str(config_path))
+            create_task(config, "blocked dep", tmp, task_id="blocked-dep")
+            not_accepted = create_task(config, "not accepted", tmp, task_id="not-accepted")
+            not_accepted["status"] = "completed"
+            not_accepted["review_status"] = "unreviewed"
+            save_task(config, not_accepted)
+            create_task(
+                config,
+                "child",
+                tmp,
+                task_id="child",
+                depends_on=["blocked-dep", "not-accepted", "missing-dep"],
+            )
+
+            code, output = run_cli(["--config", str(config_path), "list", "--color=never"])
+            always_code, always_output = run_cli(["--config", str(config_path), "list", "--color=always"])
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, always_code)
+            self.assertEqual("blocked_dependency", rows["child"]["STATUS"])
+            self.assertIn("blocked-dep (blocked)", rows["child"]["DEPS"])
+            self.assertIn("not-accepted (not_accepted)", rows["child"]["DEPS"])
+            self.assertIn("missing-dep (missing)", rows["child"]["DEPS"])
+            self.assertNotIn("blocked by", rows["child"]["NOTE"])
+            self.assertIn("\033[101;30mblocked-dep\033[0m", always_output)
+            self.assertIn("\033[103;30mnot-accepted:not_accepted\033[0m", always_output)
+            self.assertIn("\033[101;30mmissing-dep:missing\033[0m", always_output)
+
+    def test_list_terminal_width_wraps_compact_rows_and_indents_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(
+                config,
+                "Very long task title that should wrap under the summary row without starting at column zero",
+                tmp,
+                task_id="short",
+                project_id="project-a",
+            )
+
+            with (
+                patch("codex_batch_runner.cli.sys.stdout.isatty", return_value=True),
+                patch("codex_batch_runner.cli.shutil.get_terminal_size", return_value=os.terminal_size((72, 24))),
+            ):
+                code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(all(width <= 72 for width in visible_line_widths(output)))
+            self.assertTrue(any(line.startswith("  Very long task title") for line in output.splitlines()))
+
+    def test_list_blocking_subtasks_affect_parent_effective_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            parent = create_task(config, "parent", tmp, task_id="parent")
+            parent["status"] = "completed"
+            parent["review_status"] = "unreviewed"
+            parent["blocking_subtask_ids"] = ["fix-running", "fix-failed", "fix-done"]
+            save_task(config, parent)
+            running = create_task(config, "running fix", tmp, task_id="fix-running")
+            running["status"] = "running"
+            save_task(config, running)
+            failed = create_task(config, "failed fix", tmp, task_id="fix-failed")
+            failed["status"] = "failed"
+            save_task(config, failed)
+            done = create_task(config, "done fix", tmp, task_id="fix-done")
+            done["status"] = "completed"
+            done["review_status"] = "accepted"
+            save_task(config, done)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--all", "--color=never"])
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertEqual("subtasks_blocked", rows["parent"]["STATUS"])
+            self.assertIn("subtasks 2/3", rows["parent"]["NOTE"])
+            self.assertIn("failed", rows["parent"]["NOTE"])
+
+            failed["status"] = "completed"
+            failed["review_status"] = "accepted"
+            save_task(config, failed)
+            code, output = run_cli(["--config", str(config_path), "list", "--all", "--color=never"])
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertEqual("waiting_subtasks", rows["parent"]["STATUS"])
+            self.assertIn("subtasks 1/3", rows["parent"]["NOTE"])
+
+    def test_list_shows_global_and_reviewer_cooldown_banners(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "task", tmp, task_id="task")
+            config.state_file.write_text(
+                json.dumps(
+                    {
+                        "global_cooldown_until": "2026-06-21T00:10:00+00:00",
+                        "reviewer_codex_cooldown_until": "2026-06-21T00:20:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fixed_now = datetime(2026, 6, 21, 0, 0, tzinfo=timezone.utc)
+
+            with patch("codex_batch_runner.cli.utc_now", return_value=fixed_now):
+                code, output = run_cli(["--config", str(config_path), "list"])
+
+            self.assertEqual(0, code)
+            self.assertIn("global cooldown active until 2026-06-21T00:10:00+00:00", output)
+            self.assertIn("reviewer Codex cooldown active until 2026-06-21T00:20:00+00:00", output)
+
+    def test_list_watch_rejects_json_and_supports_bounded_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "task", tmp, task_id="task")
+
+            code, output, stderr = run_cli_with_stderr(["--config", str(config_path), "list", "--watch", "--json"])
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("--watch cannot be used with --json", stderr)
+
+            code, output = run_cli(
+                ["--config", str(config_path), "list", "--watch", "--interval", "0.5", "--max-refreshes", "1"]
+            )
+            self.assertEqual(0, code)
+            self.assertIn("keys: q quit, r refresh, +/- interval", output)
+            self.assertIn("task", output)
+
     def test_list_color_uses_stable_task_id_color_in_dependency_cells(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -1353,7 +1493,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertIsNotNone(dep_color)
-            self.assertGreaterEqual(output.count(f"{dep_color.group(1)}dep-a\033[0m"), 2)
+            self.assertIn("\033[101;30mdep-a\033[0m", output)
 
     def test_list_running_task_shows_elapsed_and_progress_age(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2186,7 +2326,7 @@ class CliTests(unittest.TestCase):
             )
 
             self.assertEqual(0, list_code)
-            self.assertIn("blocked by dep:not_accepted", list_output)
+            self.assertIn("dep (not_accepted)", list_output)
             self.assertEqual(0, summary_code)
             self.assertIn("dependency_blockers:\n- dep: not_accepted", summary_output)
             self.assertEqual(0, review_code)
@@ -2324,7 +2464,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual("blocked_dependency", rows["child"]["STATUS"])
             self.assertEqual("runnable", rows["child"]["RAW_STATUS"])
-            self.assertIn("blocked by dep", rows["child"]["NOTE"])
+            self.assertEqual("dep (blocked)", rows["child"]["DEPS"])
+            self.assertNotIn("blocked by dep", rows["child"]["NOTE"])
 
     def test_list_verbose_does_not_change_json_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
