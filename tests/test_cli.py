@@ -2516,6 +2516,69 @@ class CliTests(unittest.TestCase):
             self.assertEqual("unreviewed", task["review_status"])
             self.assertEqual("needs_fix", task["reviewer_codex"]["decision"])
             self.assertIn("Update docs/spec.md", task["reviewer_codex"]["suggested_fix_prompt"])
+            self.assertTrue(task["reviewer_codex"]["auto_fix_allowed"])
+            self.assertEqual("low", task["reviewer_codex"]["auto_fix_risk"])
+            self.assertEqual(["missing-docs:docs-spec"], task["reviewer_codex"]["finding_fingerprints"])
+            self.assertEqual("needs_fix", task["chain_status"])
+            self.assertEqual("reviewer-fix", task["root_task_id"])
+            self.assertEqual("needs_fix", task["last_review_decision"])
+            self.assertEqual(1, task["review_attempts"])
+            self.assertEqual(0, task["fix_attempts"])
+            self.assertTrue(task["auto_fix_allowed"])
+            self.assertEqual(["missing-docs:docs-spec"], task["finding_fingerprints"])
+            self.assertIsNone(task["last_auto_fix_task_id"])
+            self.assertFalse(report["auto_review"]["follow_up_enqueued"])
+            self.assertEqual("needs_fix", report["chain"]["chain_status"])
+
+            summary_code, summary_output = run_cli(["--config", str(config_path), "summary", "reviewer-fix"])
+            list_code, list_output = run_cli(["--config", str(config_path), "list", "--project", "repo"])
+            bundle_code, bundle_output = run_cli(["--config", str(config_path), "review-bundle", "reviewer-fix", "--json"])
+            bundle = json.loads(bundle_output)
+
+            self.assertEqual(0, summary_code)
+            self.assertIn("chain_status=needs_fix", summary_output)
+            self.assertIn("## reviewer_codex", summary_output)
+            self.assertEqual(0, list_code)
+            self.assertIn("chain needs_fix after needs_fix", list_output)
+            self.assertEqual(0, bundle_code)
+            self.assertEqual("needs_fix", bundle["chain"]["chain_status"])
+            self.assertEqual("needs_fix", bundle["reviewer_codex"]["decision"])
+
+    def test_review_next_reviewer_codex_legacy_needs_fix_is_preserved_without_auto_enqueue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            config_path = write_config(
+                tmp,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                codex_command=[sys.executable, str(FAKE_CODEX), "reviewer_needs_fix_legacy"],
+            )
+            config = Config.load(str(config_path))
+            create_clean_completed_task(config, repo, "reviewer-legacy-fix")
+
+            code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--reviewer-codex", "--json"])
+            report = json.loads(output)
+            task = load_task(config, "reviewer-legacy-fix")
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["mutated"])
+            self.assertEqual("needs_fix", report["auto_review"]["decision"])
+            self.assertEqual("unreviewed", task["review_status"])
+            self.assertEqual("needs_fix", task["reviewer_codex"]["decision"])
+            self.assertFalse(task["reviewer_codex"]["auto_fix_allowed"])
+            self.assertEqual("", task["reviewer_codex"]["suggested_fix_prompt"])
+            self.assertEqual([], task["reviewer_codex"]["finding_fingerprints"])
+            self.assertEqual("needs_fix", task["chain_status"])
+            self.assertEqual("reviewer-legacy-fix", task["root_task_id"])
+            self.assertEqual(1, task["review_attempts"])
+            self.assertFalse(task["auto_fix_allowed"])
+            self.assertEqual([], task["finding_fingerprints"])
+            self.assertFalse(report["auto_review"]["follow_up_enqueued"])
 
     def test_review_next_reviewer_codex_invalid_json_records_failed_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

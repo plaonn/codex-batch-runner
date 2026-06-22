@@ -139,6 +139,18 @@ class QueueTests(unittest.TestCase):
             self.assertIsNone(task["category"])
             self.assertEqual([], task["labels"])
             self.assertIsNone(task["created_by"])
+            self.assertIsNone(task["root_task_id"])
+            self.assertIsNone(task["parent_task_id"])
+            self.assertEqual(0, task["review_cycle"])
+            self.assertEqual(0, task["review_attempts"])
+            self.assertEqual(0, task["fix_attempts"])
+            self.assertIsNone(task["chain_status"])
+            self.assertEqual([], task["review_findings"])
+            self.assertIsNone(task["last_review_decision"])
+            self.assertFalse(task["auto_fix_allowed"])
+            self.assertIsNone(task["auto_fix_budget"])
+            self.assertIsNone(task["last_auto_fix_task_id"])
+            self.assertEqual([], task["finding_fingerprints"])
 
     def test_create_task_accepts_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

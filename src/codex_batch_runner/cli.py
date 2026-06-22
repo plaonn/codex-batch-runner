@@ -494,9 +494,24 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
             notes.append("needs follow-up")
         elif review == "reviewing":
             notes.append("reviewing")
+        chain_note = chain_note_cell(task)
+        if chain_note:
+            notes.append(chain_note)
         if config.auto_review_mechanical_accept and needs_review(task):
             notes.append("mechanical auto-review enabled")
     return notes or ["-"]
+
+
+def chain_note_cell(task: dict) -> str:
+    chain_status = task.get("chain_status")
+    decision = task.get("last_review_decision")
+    if chain_status and decision:
+        return f"chain {chain_status} after {decision}"
+    if chain_status:
+        return f"chain {chain_status}"
+    if decision:
+        return f"reviewer {decision}"
+    return ""
 
 
 def startup_stalled(task: dict) -> bool:

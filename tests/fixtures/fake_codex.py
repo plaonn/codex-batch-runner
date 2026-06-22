@@ -128,12 +128,37 @@ def main() -> int:
                         }
                     ],
                     "required_human_checks": [],
+                    "auto_fix_allowed": True,
+                    "auto_fix_risk": "low",
                     "suggested_fix_prompt": "Update docs/spec.md to match the README behavior.",
+                    "finding_fingerprints": ["missing-docs:docs-spec"],
                     "reviewer_limits": {
                         "calls_used_this_run": 1,
                         "fix_loops_used_for_task": 0,
                         "cooldown_recommended_seconds": 0,
                     },
+                },
+            }
+        )
+        return 0
+
+    if mode == "reviewer_needs_fix_legacy":
+        emit(
+            {
+                "type": "turn.completed",
+                "response": {
+                    "task_id": task_id,
+                    "decision": "needs_fix",
+                    "confidence": "medium",
+                    "reason": "legacy reviewer result without optional fix-loop fields",
+                    "findings": [
+                        {
+                            "severity": "warning",
+                            "summary": "legacy finding",
+                            "evidence": "legacy evidence",
+                        }
+                    ],
+                    "required_human_checks": [],
                 },
             }
         )

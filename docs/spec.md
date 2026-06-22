@@ -148,6 +148,19 @@ codex-batch-runner/
 - `next_prompt`
 - `session_id`
 - `thread_id`
+- bounded review/fix chain metadata:
+  - `root_task_id`
+  - `parent_task_id`
+  - `review_cycle`
+  - `review_attempts`
+  - `fix_attempts`
+  - `chain_status`
+  - `review_findings`
+  - `last_review_decision`
+  - `auto_fix_allowed`
+  - `auto_fix_budget`
+  - `last_auto_fix_task_id`
+  - `finding_fingerprints`
 - `max_attempts`
 - `cooldown_until`
 - `last_error`
@@ -276,7 +289,10 @@ Reviewer Codex decision schema:
     }
   ],
   "required_human_checks": ["string"],
+  "auto_fix_allowed": false,
+  "auto_fix_risk": "low | medium | high",
   "suggested_fix_prompt": "string",
+  "finding_fingerprints": ["string"],
   "reviewer_limits": {
     "calls_used_this_run": 1,
     "fix_loops_used_for_task": 0,
@@ -291,6 +307,8 @@ Decision 의미:
 - `needs_fix`: 기본 방향은 맞지만 추가 수정이 필요합니다. 이 경우 `suggested_fix_prompt`를 구체적으로 작성합니다.
 - `needs_human`: 자동 판단에는 정보가 부족하거나 사람이 봐야 할 위험이 있습니다.
 - `failed_review`: reviewer 호출 자체가 실패했거나 schema 검증, rate-limit, timeout, cooldown, bundle 해석에 실패했습니다.
+
+`auto_fix_allowed`, `auto_fix_risk`, `suggested_fix_prompt`, `finding_fingerprints`, `reviewer_limits`는 bounded automatic review-fix loop를 위한 optional placeholder입니다. 기존 reviewer result가 이 필드를 생략해도 유효하며, 현재 구현은 값을 파싱하고 sanitized metadata로 보존하지만 fix task를 자동 생성하지 않습니다.
 
 자동 accept 조건은 보수적으로 제한합니다. Mechanical gates가 모두 통과하고, stale state 재확인이 통과하고, reviewer decision이 `pass`이며 `confidence=high`이고, findings에 `error`가 없고, required human check가 비어 있을 때만 accepted 반영 후보가 될 수 있습니다. Reviewer-backed auto-apply는 별도 config 또는 CLI로 명시적으로 켠 뒤에만 허용합니다.
 

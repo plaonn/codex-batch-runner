@@ -10,6 +10,7 @@ from .events import emit_task_event, transition_payload
 from .fs import ensure_dir
 from .lock import FileLock
 from .queue import (
+    chain_metadata,
     dependency_status,
     list_tasks,
     load_task,
@@ -18,7 +19,7 @@ from .queue import (
     task_project_id,
     task_project_root,
 )
-from .review_bundle import build_review_bundle
+from .review_bundle import build_review_bundle, sanitize_value
 from .reviewer_codex import reviewer_clear_pass, run_reviewer_codex
 from .state import in_global_cooldown, in_reviewer_codex_cooldown, mark_reviewer_codex_rate_limit
 from .summary import review_status
@@ -117,6 +118,7 @@ def build_review_next_apply_report_locked(
         report["mutated"] = reviewer_report["mutated"]
         report["review_status"] = reviewer_report.get("review_status", report.get("review_status"))
         report["auto_review"] = reviewer_report["auto_review"]
+        report["chain"] = chain_metadata(load_task(config, task_id))
         return report
 
     if not mechanical_enabled:
@@ -131,6 +133,7 @@ def build_review_next_apply_report_locked(
     applied = apply_mechanical_accept(config, task_id, expected)
     report["mutated"] = applied["mutated"]
     report["review_status"] = applied.get("review_status", report.get("review_status"))
+    report["chain"] = chain_metadata(load_task(config, task_id))
     report["auto_review"] = auto_review_summary(
         decision=applied["decision"],
         reason=applied["reason"],
@@ -183,6 +186,7 @@ def select_review_next_report(config: Config, filters: Namespace | None = None, 
         },
         "worktree_report": bundle.get("task_worktree"),
         "review_status": review_status(task),
+        "chain": chain_metadata(task),
         "bundle": concise_bundle(bundle),
         "_fingerprint": review_fingerprint(task, bundle),
         "mutated": False,
@@ -208,6 +212,7 @@ def no_selection_report(
         "gates": [],
         "dependencies": None,
         "review_status": None,
+        "chain": None,
         "bundle": None,
         "mutated": False,
     }
@@ -366,6 +371,8 @@ def concise_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
         "last_run": bundle.get("last_run"),
         "task_worktree": bundle.get("task_worktree"),
         "review_follow_up": bundle.get("review_follow_up"),
+        "reviewer_codex": bundle.get("reviewer_codex"),
+        "chain": bundle.get("chain"),
         "changed_files": bundle.get("changed_files"),
         "verification": bundle.get("verification"),
         "last_error": bundle.get("last_error"),
@@ -460,6 +467,8 @@ def apply_mechanical_accept(config: Config, task_id: str, expected_fingerprint: 
     task["review_status"] = "accepted"
     task["reviewed_at"] = iso_now()
     task["review_reason"] = "auto-accepted by local mechanical review gates"
+    if task.get("chain_status"):
+        task["chain_status"] = "accepted"
     save_task(config, task)
     emit_task_event(
         config,
@@ -552,6 +561,9 @@ def run_reviewer_phase(
         "findings": [],
         "required_human_checks": [],
         "suggested_fix_prompt": "",
+        "auto_fix_allowed": False,
+        "auto_fix_risk": "",
+        "finding_fingerprints": [],
         "reviewer_limits": {
             "calls_used_this_run": 1,
             "fix_loops_used_for_task": 0,
@@ -631,6 +643,7 @@ def apply_reviewer_accept(
     task["reviewed_at"] = iso_now()
     task["review_reason"] = "auto-accepted by reviewer Codex clear pass and local mechanical gates"
     task["reviewer_codex"] = compact_reviewer_result(reviewer_result)
+    update_task_chain_from_reviewer(task, reviewer_result, accepted=True)
     save_task(config, task)
     emit_task_event(
         config,
@@ -656,6 +669,7 @@ def apply_reviewer_accept(
 def record_reviewer_summary(config: Config, task_id: str, reviewer_result: dict[str, Any]) -> None:
     task = load_task(config, task_id)
     task["reviewer_codex"] = compact_reviewer_result(reviewer_result)
+    update_task_chain_from_reviewer(task, reviewer_result, accepted=False)
     save_task(config, task)
     emit_task_event(
         config,
@@ -669,18 +683,55 @@ def record_reviewer_summary(config: Config, task_id: str, reviewer_result: dict[
 
 def compact_reviewer_result(result: dict[str, Any]) -> dict[str, Any]:
     findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    fingerprints = result.get("finding_fingerprints") if isinstance(result.get("finding_fingerprints"), list) else []
     return {
         "decision": sanitize(result.get("decision")),
         "confidence": sanitize(result.get("confidence")),
         "reason": sanitize(result.get("reason")),
-        "findings": findings[:10],
-        "required_human_checks": result.get("required_human_checks", [])[:10]
+        "findings": sanitize_value(findings[:10]),
+        "required_human_checks": [sanitize(item) for item in result.get("required_human_checks", [])[:10]]
         if isinstance(result.get("required_human_checks"), list)
         else [],
+        "auto_fix_allowed": bool(result.get("auto_fix_allowed", False)),
+        "auto_fix_risk": sanitize(result.get("auto_fix_risk", "")),
         "suggested_fix_prompt": sanitize(result.get("suggested_fix_prompt", "")),
-        "reviewer_limits": result.get("reviewer_limits") if isinstance(result.get("reviewer_limits"), dict) else {},
+        "finding_fingerprints": [sanitize(item) for item in fingerprints[:20]],
+        "reviewer_limits": sanitize_value(result.get("reviewer_limits")) if isinstance(result.get("reviewer_limits"), dict) else {},
         "reviewed_at": sanitize(result.get("reviewed_at") or iso_now()),
     }
+
+
+def update_task_chain_from_reviewer(task: dict[str, Any], result: dict[str, Any], *, accepted: bool) -> None:
+    task_id = str(task.get("id") or "")
+    task["root_task_id"] = task.get("root_task_id") or task_id
+    task["parent_task_id"] = task.get("parent_task_id") or None
+    task["review_cycle"] = non_negative_int(task.get("review_cycle"))
+    task["review_attempts"] = non_negative_int(task.get("review_attempts")) + 1
+    task["fix_attempts"] = non_negative_int(task.get("fix_attempts"))
+    task["last_review_decision"] = sanitize(result.get("decision"))
+    task["review_findings"] = compact_reviewer_result(result).get("findings", [])
+    task["auto_fix_allowed"] = bool(result.get("auto_fix_allowed", False))
+    if isinstance(result.get("reviewer_limits"), dict):
+        task["auto_fix_budget"] = sanitize_value(result.get("reviewer_limits"))
+    fingerprints = result.get("finding_fingerprints") if isinstance(result.get("finding_fingerprints"), list) else []
+    if fingerprints:
+        task["finding_fingerprints"] = [sanitize(item) for item in fingerprints[:100]]
+    elif "finding_fingerprints" not in task:
+        task["finding_fingerprints"] = []
+    if accepted:
+        task["chain_status"] = "accepted"
+    elif result.get("decision") == "needs_fix":
+        task["chain_status"] = "needs_fix"
+    elif result.get("decision") in {"needs_human", "failed_review"}:
+        task["chain_status"] = "needs_human"
+    elif result.get("decision") == "pass":
+        task["chain_status"] = "needs_human"
+
+
+def non_negative_int(value: object) -> int:
+    if isinstance(value, int) and value >= 0:
+        return value
+    return 0
 
 
 def bundle_limit_error(config: Config, bundle: dict[str, Any]) -> str | None:
@@ -779,6 +830,16 @@ def render_review_next_report(report: dict[str, Any]) -> str:
                 f"- reviewer_codex_invoked: {str(bool(auto_review.get('reviewer_codex_invoked'))).lower()}",
             ]
         )
+    chain = report.get("chain") if isinstance(report.get("chain"), dict) else {}
+    if chain:
+        parts = [
+            f"status={chain.get('chain_status') or '-'}",
+            f"decision={chain.get('last_review_decision') or '-'}",
+            f"cycle={chain.get('review_cycle', '-')}",
+            f"review_attempts={chain.get('review_attempts', '-')}",
+            f"fix_attempts={chain.get('fix_attempts', '-')}",
+        ]
+        lines.append("chain: " + " ".join(parts))
     deps = report.get("dependencies") or {}
     blockers = deps.get("blockers") or []
     if blockers:

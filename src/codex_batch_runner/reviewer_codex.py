@@ -56,7 +56,10 @@ def build_reviewer_prompt(
         '"reason":"string",'
         '"findings":[{"severity":"info|warning|error","summary":"string","evidence":"string"}],'
         '"required_human_checks":["string"],'
+        '"auto_fix_allowed":false,'
+        '"auto_fix_risk":"low|medium|high",'
         '"suggested_fix_prompt":"string",'
+        '"finding_fingerprints":["string"],'
         '"reviewer_limits":{"calls_used_this_run":1,"fix_loops_used_for_task":0,"cooldown_recommended_seconds":0}'
         "}\n"
         "Only use decision=pass when the task clearly satisfies the prompt, verification is adequate, "
@@ -225,11 +228,17 @@ def validate_reviewer_result(result: dict[str, Any], task_id: str) -> str | None
         return "reviewer JSON required_human_checks must be strings"
     if not isinstance(result.get("suggested_fix_prompt", ""), str):
         return "reviewer JSON suggested_fix_prompt must be a string"
-    limits = result.get("reviewer_limits")
+    if "auto_fix_allowed" in result and not isinstance(result.get("auto_fix_allowed"), bool):
+        return "reviewer JSON auto_fix_allowed must be a boolean"
+    if "auto_fix_risk" in result and result.get("auto_fix_risk") not in {"low", "medium", "high"}:
+        return "reviewer JSON auto_fix_risk is invalid"
+    if "finding_fingerprints" in result and not string_list(result.get("finding_fingerprints")):
+        return "reviewer JSON finding_fingerprints must be strings"
+    limits = result.get("reviewer_limits", {})
     if not isinstance(limits, dict):
         return "reviewer JSON reviewer_limits must be an object"
     for key in ("calls_used_this_run", "fix_loops_used_for_task", "cooldown_recommended_seconds"):
-        if not isinstance(limits.get(key), int) or limits.get(key) < 0:
+        if key in limits and (not isinstance(limits.get(key), int) or limits.get(key) < 0):
             return f"reviewer JSON reviewer_limits.{key} must be a non-negative integer"
     return None
 
@@ -252,7 +261,12 @@ def sanitize_reviewer_result(result: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict)
         ],
         "required_human_checks": [sanitize(item) for item in result.get("required_human_checks", [])],
+        "auto_fix_allowed": bool(result.get("auto_fix_allowed", False)),
+        "auto_fix_risk": sanitize(result.get("auto_fix_risk", "")),
         "suggested_fix_prompt": sanitize(result.get("suggested_fix_prompt", "")),
+        "finding_fingerprints": [sanitize(item) for item in result.get("finding_fingerprints", [])]
+        if isinstance(result.get("finding_fingerprints"), list)
+        else [],
         "reviewer_limits": {
             "calls_used_this_run": int(limits.get("calls_used_this_run", 0)),
             "fix_loops_used_for_task": int(limits.get("fix_loops_used_for_task", 0)),

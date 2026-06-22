@@ -212,6 +212,8 @@ def apply_codex_result(config: Config, task: dict, result: CodexResult, *, git_s
         task["review_status"] = "unreviewed"
         task["reviewed_at"] = None
         task["review_reason"] = None
+        if task.get("root_task_id") or task.get("chain_status"):
+            task["chain_status"] = "awaiting_review"
         task["next_prompt"] = None
         task["completed_at"] = iso_now()
         save_task(config, task)

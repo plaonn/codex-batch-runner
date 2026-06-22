@@ -29,6 +29,7 @@ def render_task_summary(
     if task.get("cwd"):
         lines.append(f"cwd: {task.get('cwd')}")
     append_counters(lines, task)
+    append_chain_summary(lines, task)
     if task.get("cooldown_until") or is_in_cooldown(task):
         lines.append(f"cooldown_until: {task.get('cooldown_until')}")
     if task.get("resolution"):
@@ -64,6 +65,7 @@ def render_task_summary(
             lines.extend(f"- {blocker['id']}: {blocker['reason']}" for blocker in blockers)
 
     append_multiline_section(lines, "last_result", render_last_result(task.get("last_result")))
+    append_multiline_section(lines, "reviewer_codex", render_reviewer_codex(task.get("reviewer_codex")))
     append_multiline_section(lines, "worktree", render_worktree_metadata(task))
     append_multiline_section(lines, "git_status", render_git_status(task.get("git_status")))
     append_multiline_section(lines, "last_run", render_last_run(task.get("last_run")))
@@ -104,6 +106,65 @@ def render_last_result(last_result: object) -> str:
         lines.extend(f"- {sanitize(item)}" for item in verification)
     if last_result.get("next_prompt"):
         lines.extend(["next_prompt:", sanitize(last_result.get("next_prompt"))])
+    return "\n".join(lines)
+
+
+def append_chain_summary(lines: list[str], task: dict) -> None:
+    fields = []
+    for key in (
+        "root_task_id",
+        "parent_task_id",
+        "review_cycle",
+        "review_attempts",
+        "fix_attempts",
+        "chain_status",
+        "last_review_decision",
+        "auto_fix_allowed",
+        "last_auto_fix_task_id",
+    ):
+        value = task.get(key)
+        if meaningful_chain_value(key, value):
+            fields.append(f"{key}={sanitize(value)}")
+    if fields:
+        lines.append("chain: " + ", ".join(fields))
+
+
+def meaningful_chain_value(key: str, value: object) -> bool:
+    if value in (None, "", [], {}):
+        return False
+    if key in {"review_cycle", "review_attempts", "fix_attempts"} and value == 0:
+        return False
+    if key == "auto_fix_allowed" and value is False:
+        return False
+    return True
+
+
+def render_reviewer_codex(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    lines = []
+    for key in (
+        "decision",
+        "confidence",
+        "reason",
+        "auto_fix_allowed",
+        "auto_fix_risk",
+        "suggested_fix_prompt",
+    ):
+        if value.get(key) not in (None, "", [], {}):
+            lines.append(f"{key}: {display_value(sanitize(value.get(key)))}")
+    findings = value.get("findings") if isinstance(value.get("findings"), list) else []
+    if findings:
+        lines.append("findings:")
+        for finding in findings[:10]:
+            if isinstance(finding, dict):
+                lines.append("- " + sanitize(finding.get("summary") or finding))
+            else:
+                lines.append("- " + sanitize(finding))
+    fingerprints = value.get("finding_fingerprints") if isinstance(value.get("finding_fingerprints"), list) else []
+    if fingerprints:
+        lines.append("finding_fingerprints:")
+        lines.extend(f"- {sanitize(item)}" for item in fingerprints[:20])
     return "\n".join(lines)
 
 

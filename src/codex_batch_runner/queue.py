@@ -13,6 +13,29 @@ RUNNABLE_STATUSES = {"runnable", "needs_resume"}
 DEFAULT_HIDDEN_LIST_STATUSES = {"completed", "archived"}
 REVIEW_STATUSES = {"unreviewed", "accepted", "rejected", "needs_followup"}
 RESOLUTIONS = {"wont_fix", "superseded", "manual", "smoke", "duplicate"}
+CHAIN_STATUSES = {
+    "awaiting_review",
+    "reviewing",
+    "needs_fix",
+    "fixing",
+    "accepted",
+    "needs_human",
+    "loop_limit_reached",
+}
+CHAIN_METADATA_FIELDS = (
+    "root_task_id",
+    "parent_task_id",
+    "review_cycle",
+    "review_attempts",
+    "fix_attempts",
+    "chain_status",
+    "review_findings",
+    "last_review_decision",
+    "auto_fix_allowed",
+    "auto_fix_budget",
+    "last_auto_fix_task_id",
+    "finding_fingerprints",
+)
 SCHEMA_VERSION = 1
 
 
@@ -91,9 +114,9 @@ def set_review_status(
 
 def apply_follow_up_linkage(task: dict) -> None:
     task_id = str(task.get("id") or "")
-    task.setdefault("root_task_id", task_id)
-    task.setdefault("parent_task_id", None)
-    task.setdefault("review_cycle", 0)
+    task["root_task_id"] = task.get("root_task_id") or task_id
+    task["parent_task_id"] = task.get("parent_task_id") or None
+    task["review_cycle"] = int(task.get("review_cycle") or 0)
     task["chain_status"] = "needs_fix"
     linkage = {
         "source_task_id": task_id,
@@ -172,6 +195,18 @@ def create_task(
         "review_status": None,
         "reviewed_at": None,
         "review_reason": None,
+        "root_task_id": None,
+        "parent_task_id": None,
+        "review_cycle": 0,
+        "review_attempts": 0,
+        "fix_attempts": 0,
+        "chain_status": None,
+        "review_findings": [],
+        "last_review_decision": None,
+        "auto_fix_allowed": False,
+        "auto_fix_budget": None,
+        "last_auto_fix_task_id": None,
+        "finding_fingerprints": [],
         "project_root": str(project_root),
         "project_id": resolved_project_id,
         "category": category,
@@ -219,6 +254,20 @@ def clean_optional_text(value: object | None) -> str | None:
         return None
     cleaned = " ".join(str(value).split())
     return cleaned or None
+
+
+def chain_metadata(task: dict) -> dict:
+    return {key: task.get(key) for key in CHAIN_METADATA_FIELDS if meaningful_chain_value(key, task.get(key))}
+
+
+def meaningful_chain_value(key: str, value: object) -> bool:
+    if value in (None, "", [], {}):
+        return False
+    if key in {"review_cycle", "review_attempts", "fix_attempts"} and value == 0:
+        return False
+    if key == "auto_fix_allowed" and value is False:
+        return False
+    return True
 
 
 def title_from_prompt(prompt: str) -> str | None:

@@ -52,6 +52,8 @@ def build_review_bundle(
         "last_run": sanitize_value(task.get("last_run")) if isinstance(task.get("last_run"), dict) else None,
         "task_worktree": sanitize_value(task_worktree_report(task)),
         "review_follow_up": sanitize_value(task.get("review_follow_up")) if isinstance(task.get("review_follow_up"), dict) else None,
+        "reviewer_codex": sanitize_value(task.get("reviewer_codex")) if isinstance(task.get("reviewer_codex"), dict) else None,
+        "chain": chain_summary(task),
         "changed_files": changed_files,
         "verification": result_list(last_result, "verification"),
         "last_error": sanitize(task.get("last_error")) if task.get("last_error") else None,
@@ -89,15 +91,68 @@ def task_metadata(task: dict) -> dict[str, Any]:
         "root_task_id",
         "parent_task_id",
         "review_cycle",
+        "review_attempts",
+        "fix_attempts",
         "chain_status",
+        "last_review_decision",
+        "auto_fix_allowed",
+        "auto_fix_budget",
+        "last_auto_fix_task_id",
+        "finding_fingerprints",
     )
-    metadata = {key: sanitize_value(task.get(key)) for key in fields if task.get(key) is not None}
+    chain_fields = {
+        "root_task_id",
+        "parent_task_id",
+        "review_cycle",
+        "review_attempts",
+        "fix_attempts",
+        "chain_status",
+        "last_review_decision",
+        "auto_fix_allowed",
+        "auto_fix_budget",
+        "last_auto_fix_task_id",
+        "finding_fingerprints",
+    }
+    metadata = {
+        key: sanitize_value(task.get(key))
+        for key in fields
+        if task.get(key) is not None and (key not in chain_fields or meaningful_chain_value(key, task.get(key)))
+    }
     labels = task_labels(task)
     if labels:
         metadata["labels"] = sanitize_value(labels)
     metadata["project_id"] = sanitize(task_project_id(task))
     metadata["project_root"] = sanitize(task_project_root(task))
     return metadata
+
+
+def chain_summary(task: dict) -> dict[str, Any] | None:
+    fields = (
+        "root_task_id",
+        "parent_task_id",
+        "review_cycle",
+        "review_attempts",
+        "fix_attempts",
+        "chain_status",
+        "last_review_decision",
+        "auto_fix_allowed",
+        "auto_fix_budget",
+        "last_auto_fix_task_id",
+        "finding_fingerprints",
+        "review_findings",
+    )
+    summary = {key: sanitize_value(task.get(key)) for key in fields if meaningful_chain_value(key, task.get(key))}
+    return summary or None
+
+
+def meaningful_chain_value(key: str, value: object) -> bool:
+    if value in (None, "", [], {}):
+        return False
+    if key in {"review_cycle", "review_attempts", "fix_attempts"} and value == 0:
+        return False
+    if key == "auto_fix_allowed" and value is False:
+        return False
+    return True
 
 
 def resolution_summary(task: dict) -> dict[str, Any] | None:
@@ -428,6 +483,8 @@ def render_review_bundle(bundle: dict[str, Any]) -> str:
     append_object_section(lines, "last_run", bundle.get("last_run"))
     append_object_section(lines, "task_worktree", bundle.get("task_worktree"))
     append_object_section(lines, "review_follow_up", bundle.get("review_follow_up"))
+    append_object_section(lines, "reviewer_codex", bundle.get("reviewer_codex"))
+    append_object_section(lines, "chain", bundle.get("chain"))
     append_object_section(lines, "changed_files", bundle.get("changed_files"))
     append_list_section(lines, "verification", bundle.get("verification"))
     append_text_section(lines, "last_error", bundle.get("last_error"))
