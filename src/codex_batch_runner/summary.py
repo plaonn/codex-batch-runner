@@ -267,6 +267,13 @@ def render_last_run(last_run: object) -> str:
         "duration_seconds",
         "resume_id_used",
         "log_path",
+        "execution_profile",
+        "execution_profile_source",
+        "execution_profile_reason",
+        "model",
+        "codex_profile",
+        "config_override_keys",
+        "token_budget_hint",
         "watchdog_reason",
     ):
         if key in last_run:

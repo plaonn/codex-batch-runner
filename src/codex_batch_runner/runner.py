@@ -9,7 +9,7 @@ from typing import Any
 from .codex import FIRST_MEANINGFUL_STALL_REASON, STARTUP_STALL_REASON, CodexResult, run_codex
 from .config import Config
 from .events import emit_task_event, result_summary_payload, transition_payload
-from .execution_profiles import command_options, resolve_execution_settings
+from .execution_profiles import ExecutionSettings, command_options, resolve_execution_settings
 from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
 from .lock import FileLock
@@ -119,7 +119,7 @@ def run_next(config: Config) -> RunOutcome:
             resume_unavailable=resume_unavailable,
             execution_cwd=str(execution_cwd) if execution_cwd else None,
         )
-        profile_error = validate_execution_profile(config, task)
+        profile_settings, profile_error = validate_execution_profile(config, task)
         if profile_error:
             mark_profile_failure(config, task, profile_error)
             mark_run(config, task["id"])
@@ -161,7 +161,7 @@ def run_next(config: Config) -> RunOutcome:
             task["execution_worktree_status"] = "retained"
             task["execution_retained_at"] = iso_now()
             auto_commit_worktree_result(config, task, result, execution_cwd)
-        apply_codex_result(config, task, result, git_status_cwd=execution_cwd)
+        apply_codex_result(config, task, result, git_status_cwd=execution_cwd, execution_settings=profile_settings)
         outcome = RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
         return outcome
     finally:
@@ -177,12 +177,13 @@ def review_report_consumed_work(report: dict[str, Any]) -> bool:
     return bool(auto_review.get("reviewer_codex_invoked"))
 
 
-def validate_execution_profile(config: Config, task: dict[str, Any]) -> str | None:
+def validate_execution_profile(config: Config, task: dict[str, Any]) -> tuple[ExecutionSettings | None, str | None]:
     try:
-        command_options(resolve_execution_settings(config, task))
+        settings = resolve_execution_settings(config, task)
+        command_options(settings)
     except ValueError as exc:
-        return str(exc)
-    return None
+        return None, str(exc)
+    return settings, None
 
 
 def mark_profile_failure(config: Config, task: dict[str, Any], error_message: str) -> None:
@@ -216,9 +217,16 @@ def should_trigger_post_review_wake(config: Config) -> bool:
     return select_next_task(config) is not None or has_actionable_auto_review_candidate(config)
 
 
-def apply_codex_result(config: Config, task: dict, result: CodexResult, *, git_status_cwd: Path | None = None) -> None:
+def apply_codex_result(
+    config: Config,
+    task: dict,
+    result: CodexResult,
+    *,
+    git_status_cwd: Path | None = None,
+    execution_settings: ExecutionSettings | None = None,
+) -> None:
     task.setdefault("log_paths", []).append(str(result.log_path))
-    record_last_run(task, result)
+    record_last_run(task, result, execution_settings=execution_settings)
     if result.command_kind == "resume":
         task["resume_count"] = int(task.get("resume_count", 0)) + 1
     if result.session_id:
@@ -540,7 +548,7 @@ def startup_stall_error(reason: str, progress: dict[str, Any]) -> str:
     return "codex startup stalled before meaningful JSONL events"
 
 
-def record_last_run(task: dict, result: CodexResult) -> None:
+def record_last_run(task: dict, result: CodexResult, *, execution_settings: ExecutionSettings | None = None) -> None:
     finished_at = iso_now()
     started_at = task.get("started_at")
     task["last_run"] = {
@@ -552,8 +560,31 @@ def record_last_run(task: dict, result: CodexResult) -> None:
         "resume_id_used": result.resume_id_used,
         "log_path": str(result.log_path),
     }
+    if execution_settings and execution_settings_has_metadata(execution_settings):
+        task["last_run"]["execution_profile"] = execution_settings.profile_name
+        task["last_run"]["execution_profile_source"] = execution_settings.profile_source
+        task["last_run"]["execution_profile_reason"] = execution_settings.profile_reason
+        task["last_run"]["model"] = execution_settings.model
+        task["last_run"]["codex_profile"] = execution_settings.codex_profile
+        task["last_run"]["config_override_keys"] = sorted((execution_settings.config_overrides or {}).keys())
+        task["last_run"]["token_budget_hint"] = execution_settings.token_budget_hint
     if result.watchdog_reason:
         task["last_run"]["watchdog_reason"] = result.watchdog_reason
+
+
+def execution_settings_has_metadata(settings: ExecutionSettings) -> bool:
+    return any(
+        value not in (None, "", {})
+        for value in (
+            settings.profile_name,
+            settings.profile_source,
+            settings.profile_reason,
+            settings.model,
+            settings.codex_profile,
+            settings.config_overrides,
+            settings.token_budget_hint,
+        )
+    )
 
 
 def duration_seconds(started_at: object, finished_at: object) -> float | None:

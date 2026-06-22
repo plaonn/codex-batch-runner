@@ -534,6 +534,34 @@ class RunnerTests(unittest.TestCase):
             self.assertIsNone(task["last_run"]["resume_id_used"])
             self.assertIsNotNone(task["last_run"]["duration_seconds"])
 
+    def test_run_next_records_resolved_execution_profile_in_last_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            config = replace(
+                config,
+                default_execution_profile="normal",
+                execution_profiles={
+                    "normal": {"config_overrides": {"model_reasoning_effort": "medium"}},
+                    "deep": {"config_overrides": {"model_reasoning_effort": "high"}},
+                },
+            )
+            create_task(
+                config,
+                "do it",
+                tmp,
+                task_id="task-critical-worktree",
+                labels=["worktree-apply"],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "task-critical-worktree")
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("deep", task["last_run"]["execution_profile"])
+            self.assertEqual("high_risk_fallback", task["last_run"]["execution_profile_source"])
+            self.assertEqual("matched category/label: worktree-apply", task["last_run"]["execution_profile_reason"])
+            self.assertEqual(["model_reasoning_effort"], task["last_run"]["config_override_keys"])
+
     def test_run_next_worktree_disabled_uses_original_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")

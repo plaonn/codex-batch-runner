@@ -176,7 +176,7 @@ Codex가 `completed`를 반환하면 실행은 완료되지만, 검토 상태는
 
 `failed` 또는 `blocked_user` task를 운영상 더 추적하지 않아도 되면 `resolve`로 `resolution`을 기록할 수 있습니다. resolution이 기록된 failed/blocked task는 기본 `list`에서 숨겨지고, `list --all`이나 `summary`에서 확인할 수 있습니다.
 
-각 Codex 실행 뒤에는 task에 `last_run` metadata가 기록됩니다. 여기에는 `command_kind`, `returncode`, 시작/종료 시각, `duration_seconds`, 사용한 resume id, log path가 포함됩니다. `run_count`, `resume_count`, `rate_limit_count`, `failure_count` counters도 함께 유지됩니다.
+각 Codex 실행 뒤에는 task에 `last_run` metadata가 기록됩니다. 여기에는 `command_kind`, `returncode`, 시작/종료 시각, `duration_seconds`, 사용한 resume id, log path가 포함됩니다. Execution profile이 적용된 경우 resolved profile, source, reason, model/profile, override key 이름도 함께 기록됩니다. `run_count`, `resume_count`, `rate_limit_count`, `failure_count` counters도 함께 유지됩니다.
 
 Runner는 Codex stdout JSONL을 저장하는 동안 startup/no-progress watchdog도 함께 실행합니다. 이 watchdog은 일반적인 긴 작업 timeout이 아닙니다. 장시간 테스트나 실제 작업은 JSONL에서 의미 있는 진행 신호가 나온 뒤라면 기본적으로 종료하지 않습니다. 기본 동작은 Codex가 시작 후 아무 stdout도 쓰지 않거나, `session.started`/`thread.started`/`turn.started` 같은 startup event만 쓰고 의미 있는 event를 내지 않는 경우를 보수적으로 감지하는 것입니다. 기본값은 startup stall 약 4분, `turn.started` 이후 첫 meaningful event 약 7분이며, mid-run idle은 warning metadata만 남기고 자동 종료하지 않습니다.
 
@@ -313,7 +313,7 @@ Optional git worktree mode is disabled by default. When enabled with `worktree_m
 
 `worktree_root` may be relative to the active runner root. Public docs and examples should keep this path generic and local-only.
 
-Optional execution profiles are disabled by default. `default_execution_profile` applies to implementation tasks that do not specify `execution_profile`; `review_execution_profile` applies to reviewer Codex calls. A task-level `execution_profile` selects a named profile, and task-level `model`, `codex_profile`, or `codex_config_overrides` override values from that profile. If `default_execution_profile` is set and a task category or label is one of `runner`, `lock`, `resume`, `worktree`, `reviewer-codex`, `queue-mutation`, or `document`, cbr uses a configured `deep` profile by default when it exists.
+Optional execution profiles are disabled by default. `default_execution_profile` applies to implementation tasks that do not specify `execution_profile`; `review_execution_profile` applies to reviewer Codex calls. A task-level `execution_profile` selects a named profile, and task-level `model`, `codex_profile`, or `codex_config_overrides` override values from that profile. If `default_execution_profile` is set and a task category or label is one of `runner`, `runner-state`, `lock`, `resume`, `reviewer-codex`, `reviewer-safety`, `queue-mutation`, `worktree-critical`, `worktree-apply`, `worktree-recovery`, `stale-base`, or `rebase`, cbr uses a configured `deep` profile by fallback when it exists. General routing labels such as `worktree` or `docs` do not trigger `deep` by themselves. Each Codex execution records the resolved profile and fallback reason in `last_run`.
 
 ```json
 {

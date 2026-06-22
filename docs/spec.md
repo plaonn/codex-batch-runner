@@ -220,9 +220,9 @@ Command builder는 profile option을 `codex exec` 뒤에 삽입합니다. 예를
 
 `config_overrides`와 `codex_config_overrides`는 임의 `-c` 주입을 허용하지 않습니다. 현재 allowlist는 `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`입니다. Codex CLI가 dedicated `--reasoning-effort` flag를 노출하지 않는 버전이 있으므로 reasoning 관련 override는 이 allowlist 안에서만 보수적으로 허용합니다. Allowlist 밖의 key는 config load 또는 enqueue 단계에서 오류로 처리합니다.
 
-High-risk category/label에는 보수적 기본값을 적용합니다. Task가 명시적으로 `execution_profile`을 지정하지 않았고 `default_execution_profile`이 설정되어 있으며, category 또는 label이 `runner`, `lock`, `resume`, `worktree`, `reviewer-codex`, `queue-mutation`, `document` 중 하나이고 config에 `deep` profile이 있으면 runner는 `deep` profile을 사용합니다. 명시적 task profile은 이 자동 선택보다 우선합니다.
+High-risk category/label에는 보수적 fallback을 적용합니다. Task가 명시적으로 `execution_profile`을 지정하지 않았고 `default_execution_profile`이 설정되어 있으며, category 또는 label이 `runner`, `runner-state`, `lock`, `resume`, `reviewer-codex`, `reviewer-safety`, `queue-mutation`, `worktree-critical`, `worktree-apply`, `worktree-recovery`, `stale-base`, `rebase` 중 하나이고 config에 `deep` profile이 있으면 runner는 `deep` profile을 사용합니다. 일반 routing label인 `worktree`, `docs`, `document`는 단독으로 `deep`을 trigger하지 않습니다. 명시적 task profile은 이 fallback보다 우선합니다. 이 fallback은 추가 Codex 판단 호출을 수행하지 않고 task metadata와 config만 사용합니다.
 
-`cbr list`와 `cbr summary`는 task에 저장된 explicit execution metadata를 표시합니다. `cbr doctor`는 configured profile 이름, default/review profile 이름, profile별 model/profile 존재 여부와 override key 이름만 표시하고 override 값은 출력하지 않습니다.
+`cbr list`와 `cbr summary`는 task에 저장된 explicit execution metadata를 표시합니다. Runner는 각 Codex 실행의 `last_run`에 resolved `execution_profile`, source, reason, model/profile, override key 이름을 기록합니다. `cbr doctor`는 configured profile 이름, default/review profile 이름, profile별 model/profile 존재 여부와 override key 이름만 표시하고 override 값은 출력하지 않습니다.
 
 ## Review status
 

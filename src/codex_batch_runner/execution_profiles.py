@@ -10,19 +10,26 @@ SAFE_CONFIG_OVERRIDE_KEYS = {
     "model_verbosity",
 }
 HIGH_RISK_PROFILE_TERMS = {
-    "document",
     "lock",
     "queue-mutation",
+    "rebase",
     "resume",
     "reviewer-codex",
+    "reviewer-safety",
     "runner",
-    "worktree",
+    "runner-state",
+    "stale-base",
+    "worktree-apply",
+    "worktree-critical",
+    "worktree-recovery",
 }
 
 
 @dataclass(frozen=True)
 class ExecutionSettings:
     profile_name: str | None = None
+    profile_source: str | None = None
+    profile_reason: str | None = None
     model: str | None = None
     codex_profile: str | None = None
     config_overrides: dict[str, str] | None = None
@@ -108,8 +115,16 @@ def task_execution_metadata(
 def resolve_execution_settings(config: Any, task: dict[str, Any], *, reviewer: bool = False) -> ExecutionSettings:
     explicit_profile = task.get("execution_profile")
     profile_name = str(explicit_profile) if explicit_profile not in (None, "") else None
+    profile_source = "task" if profile_name else None
+    profile_reason = "explicit task execution_profile" if profile_name else None
     if profile_name is None:
-        profile_name = config.review_execution_profile if reviewer else default_profile_for_task(config, task)
+        if reviewer:
+            profile_name = config.review_execution_profile
+            if profile_name:
+                profile_source = "review_default"
+                profile_reason = "reviewer Codex default profile"
+        else:
+            profile_name, profile_source, profile_reason = default_profile_resolution(config, task)
     profile: dict[str, Any] = {}
     if profile_name:
         profile = config.execution_profiles.get(profile_name, {})
@@ -120,6 +135,8 @@ def resolve_execution_settings(config: Any, task: dict[str, Any], *, reviewer: b
     overrides.update(config_overrides_value("codex_config_overrides", task.get("codex_config_overrides", {})))
     return ExecutionSettings(
         profile_name=profile_name,
+        profile_source=profile_source,
+        profile_reason=profile_reason,
         model=task_value_or_profile(task, "model", profile),
         codex_profile=task_value_or_profile(task, "codex_profile", profile),
         config_overrides=overrides or None,
@@ -128,19 +145,31 @@ def resolve_execution_settings(config: Any, task: dict[str, Any], *, reviewer: b
 
 
 def default_profile_for_task(config: Any, task: dict[str, Any]) -> str | None:
+    profile_name, _, _ = default_profile_resolution(config, task)
+    return profile_name
+
+
+def default_profile_resolution(config: Any, task: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
     default = config.default_execution_profile
-    if default and "deep" in config.execution_profiles and high_risk_task(task):
-        return "deep"
-    return default
+    terms = high_risk_profile_terms(task)
+    if default and "deep" in config.execution_profiles and terms:
+        return "deep", "high_risk_fallback", "matched category/label: " + ", ".join(terms)
+    if default:
+        return default, "config_default", "default_execution_profile"
+    return None, None, None
 
 
 def high_risk_task(task: dict[str, Any]) -> bool:
+    return bool(high_risk_profile_terms(task))
+
+
+def high_risk_profile_terms(task: dict[str, Any]) -> list[str]:
     values = [task.get("category")]
     labels = task.get("labels")
     if isinstance(labels, list):
         values.extend(labels)
     normalized = {str(value).strip().lower() for value in values if value not in (None, "")}
-    return bool(normalized & HIGH_RISK_PROFILE_TERMS)
+    return sorted(normalized & HIGH_RISK_PROFILE_TERMS)
 
 
 def task_value_or_profile(task: dict[str, Any], key: str, profile: dict[str, Any]) -> str | None:

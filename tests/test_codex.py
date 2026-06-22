@@ -15,6 +15,7 @@ from codex_batch_runner.codex import (
     run_codex,
     should_use_resume,
 )
+from codex_batch_runner.execution_profiles import resolve_execution_settings
 
 
 class CodexParserTests(unittest.TestCase):
@@ -174,6 +175,35 @@ class CodexParserTests(unittest.TestCase):
             )
 
             self.assertEqual(["codex", "exec", "--model", "gpt-5", "--profile", "batch-deep", "prompt"], command)
+
+    def test_deep_profile_fallback_uses_narrow_risk_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            config = Config(
+                **{
+                    **config.__dict__,
+                    "default_execution_profile": "normal",
+                    "execution_profiles": {
+                        "normal": {"model": "gpt-5.4-mini"},
+                        "deep": {"model": "gpt-5.5"},
+                    },
+                }
+            )
+
+            general_worktree = resolve_execution_settings(
+                config,
+                {"id": "task-1", "category": "implementation", "labels": ["worktree"]},
+            )
+            critical_worktree = resolve_execution_settings(
+                config,
+                {"id": "task-2", "category": "implementation", "labels": ["worktree-apply"]},
+            )
+
+            self.assertEqual("normal", general_worktree.profile_name)
+            self.assertEqual("config_default", general_worktree.profile_source)
+            self.assertEqual("deep", critical_worktree.profile_name)
+            self.assertEqual("high_risk_fallback", critical_worktree.profile_source)
+            self.assertEqual("matched category/label: worktree-apply", critical_worktree.profile_reason)
 
     def test_should_use_resume_after_task_is_marked_running(self) -> None:
         task = {"status": "running", "resume_requested": True, "thread_id": "thread-123"}
