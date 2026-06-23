@@ -134,8 +134,9 @@ def compact_list_rows(output: str) -> list[dict[str, str]]:
     current: dict[str, str] | None = None
     current_project = ""
     for line in lines[1:]:
-        if line.startswith("[") and line.endswith("]"):
-            current_project = line.strip("[]")
+        section_line = line.rstrip()
+        if section_line.startswith("[") and section_line.endswith("]"):
+            current_project = section_line.strip("[]")
             current = None
             continue
         if headers == ["TITLE", "STATUS", "ATT", "DEPS", "NOTE"]:
@@ -2412,6 +2413,30 @@ class CliTests(unittest.TestCase):
         for status in color.STATUS_MARKERS:
             marker = color.status_marker(status)
             self.assertTrue(marker.startswith("\033[1;97;"), marker.encode())
+
+    def test_list_project_sections_use_color_stripe_only_when_color_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "work", tmp, task_id="work", project_id="project-a")
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=72):
+                always_code, always_output = run_cli(
+                    ["--config", str(config_path), "list", "--project", "project-a", "--color=always"]
+                )
+                never_code, never_output = run_cli(
+                    ["--config", str(config_path), "list", "--project", "project-a", "--color=never"]
+                )
+
+            always_section = always_output.splitlines()[0]
+            never_section = never_output.splitlines()[0]
+            self.assertEqual(0, always_code)
+            self.assertEqual(0, never_code)
+            self.assertTrue(always_section.startswith(ListColor.PROJECT_SECTION), always_section.encode())
+            self.assertTrue(always_section.endswith(ListColor.RESET), always_section.encode())
+            self.assertEqual(72, visible_line_widths(always_section)[0])
+            self.assertEqual("[project-a]", strip_ansi(always_section).rstrip())
+            self.assertEqual("[project-a]", never_section)
 
     def test_list_satisfied_dependency_uses_dim_color_or_done_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

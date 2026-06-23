@@ -914,7 +914,7 @@ def render_dependency_graph(
     for project in project_order:
         if lines:
             lines.append("")
-        lines.append(project_section_header(project, render_width))
+        lines.append(project_section_header(project, render_width, color))
         project_tasks = grouped[project]
         visible_ids = {str(task.get("id")) for task in project_tasks if task.get("id")}
         tree_parent_ids = {
@@ -1170,11 +1170,11 @@ def render_compact_list(
     project_groups = compact_project_groups(tasks, by_id, config, color, include_capacity=include_capacity)
     row_groups = [group for _, groups in project_groups for group in groups]
     if terminal_width is not None and terminal_width < compact_min_table_width(header, row_groups):
-        return render_compact_block_list(project_groups, terminal_width)
+        return render_compact_block_list(project_groups, terminal_width, color)
     widths = compact_widths(header, row_groups, terminal_width)
     lines = [render_compact_row(header, widths)]
     for project, groups in project_groups:
-        lines.append(project_section_header(project, terminal_width))
+        lines.append(project_section_header(project, terminal_width, color))
         for group in groups:
             lines.extend(render_compact_group(group, widths, terminal_width))
     return "\n".join(lines)
@@ -1315,11 +1315,16 @@ def task_display_cells(task: dict, by_id: dict[str, dict], config: Config, color
     }
 
 
-def project_section_header(project: str, terminal_width: int | None) -> str:
+def project_section_header(project: str, terminal_width: int | None, color: "ListColor | None" = None) -> str:
     label = f"[{project}]"
     if terminal_width is None:
+        return color.project_section(label) if color else label
+    width = max(1, terminal_width)
+    label = fit_visible(label, width)
+    if not color or not color.enabled:
         return label
-    return fit_visible(label, max(1, terminal_width))
+    label = pad_visible(label, width)
+    return color.project_section(label)
 
 
 def compact_min_table_width(header: list[str], row_groups: list[dict[str, object]]) -> int:
@@ -1447,12 +1452,16 @@ def force_ellipsis_visible(value: str, width: int) -> str:
     return truncate_visible(value, width)
 
 
-def render_compact_block_list(project_groups: list[tuple[str, list[dict[str, object]]]], terminal_width: int) -> str:
+def render_compact_block_list(
+    project_groups: list[tuple[str, list[dict[str, object]]]],
+    terminal_width: int,
+    color: "ListColor",
+) -> str:
     lines = []
     for project, row_groups in project_groups:
         if lines:
             lines.append("")
-        lines.append(f"[{fit_visible(project, max(1, terminal_width - 2))}]")
+        lines.append(project_section_header(project, terminal_width, color))
         for index, group in enumerate(row_groups):
             if index:
                 lines.append("")
@@ -2113,6 +2122,7 @@ class ListColor:
     BG_PASSIVE_NON_GREEN_RED = "\033[100;31m"
     BG_PASSIVE_NON_GREEN_BLUE = "\033[100;34m"
     BG_PASSIVE_WHITE = "\033[100;97m"
+    PROJECT_SECTION = "\033[1;96;100m"
     STATUS_MARKER_BLUE = "\033[1;97;44m"
     STATUS_MARKER_CYAN = "\033[1;97;46m"
     STATUS_MARKER_YELLOW = "\033[1;97;43m"
@@ -2230,6 +2240,9 @@ class ListColor:
 
     def project(self, project_id: str) -> str:
         return self.apply(project_id, self.LIGHT_CYAN)
+
+    def project_section(self, label: str) -> str:
+        return self.apply(label, self.PROJECT_SECTION)
 
     def title(self, title: str) -> str:
         return title
