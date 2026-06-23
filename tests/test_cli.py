@@ -1140,7 +1140,11 @@ class CliTests(unittest.TestCase):
             risks_by_level = {entry["key"]: entry for entry in report["groups"]["routing_risk"]}
             risks = {entry["key"]: entry for entry in report["groups"]["routing_risk_factor"]}
             scopes = {entry["key"]: entry for entry in report["groups"]["verification_scope"]}
+            decisions = {entry["key"]: entry for entry in report["groups"]["routing_decision"]}
+            profile_decisions = {entry["key"]: entry for entry in report["groups"]["profile_routing_decision"]}
             profile_experiments = {entry["key"]: entry for entry in report["groups"]["profile_experiment"]}
+            decision_key = "size=small risk=low verify=docs+unit"
+            profile_decision_key = "profile=small size=small risk=low verify=docs+unit"
 
             self.assertEqual(0, code)
             self.assertEqual("docs-only bounded change", report["task_rows"][0]["routing_reason"])
@@ -1155,6 +1159,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, risks["low-blast-radius"]["tasks"])
             self.assertEqual(1, scopes["unit"]["tasks"])
             self.assertEqual(1, scopes["docs"]["tasks"])
+            self.assertEqual(decision_key, report["task_rows"][0]["routing_decision"])
+            self.assertEqual(profile_decision_key, report["task_rows"][0]["profile_routing_decision"])
+            self.assertEqual(1, decisions[decision_key]["tasks"])
+            self.assertEqual(1, decisions[decision_key]["first_pass_accepted"])
+            self.assertEqual(1, profile_decisions[profile_decision_key]["tasks"])
             self.assertEqual(1, profile_experiments["small/downshift_probe"]["first_pass_accepted"])
 
     def test_routing_report_human_output_and_limit(self) -> None:
@@ -1188,6 +1197,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("## by_profile", output)
             self.assertIn("## by_routing_size", output)
             self.assertIn("## by_verification_scope", output)
+            self.assertIn("## by_routing_decision", output)
+            self.assertIn("## by_profile_routing_decision", output)
             self.assertIn("small", output)
 
     def test_routing_report_rejects_negative_limit(self) -> None:
