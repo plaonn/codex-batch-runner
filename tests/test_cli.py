@@ -1976,7 +1976,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
             self.assertIn("* ||blocked_dependency  [N] Very", output)
-            self.assertIn("| ├──────────────────── child title that", output)
+            self.assertIn("|       │               child title that", output)
             self.assertIn("|       └─ blocked  [N] Very", output)
             self.assertIn("|       │           dependency title that", output)
             self.assertNotIn("|\\", output)
@@ -2014,7 +2014,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 48 for width in visible_line_widths(output)))
             self.assertIn("├─ * ||blocked_dependency  [N] Very long first", output)
-            self.assertIn("│  | ├──────────────────── child source title", output)
+            self.assertIn("│  |       │               child source title", output)
             self.assertIn("│  |       └─ blocked  [N] Very long dependency", output)
             self.assertIn("│  |       │           under the dependency", output)
             self.assertIn("│  |       │           edge", output)
@@ -2097,16 +2097,16 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
             self.assertIn("* ..runnable  [N] Very long parent source", output)
-            self.assertIn("│ ├────────── title that should keep its", output)
-            self.assertIn("│ ├────────── subtask guide", output)
+            self.assertIn("│             title that should keep its", output)
+            self.assertIn("│             subtask guide", output)
             self.assertIn("├─ * ..runnable  [N] Very long first", output)
-            self.assertIn("│    ├────────── child source title that", output)
-            self.assertIn("│    ├────────── should wrap inside graph", output)
-            self.assertIn("│    ├────────── mode", output)
+            self.assertIn("│                child source title that", output)
+            self.assertIn("│                should wrap inside graph", output)
+            self.assertIn("│                mode", output)
             self.assertIn("└─ * ..runnable  [N] Very long second", output)
-            self.assertIn("│    ├────────── child source title that", output)
-            self.assertIn("│    ├────────── should keep its own", output)
-            self.assertIn("│    ├────────── wrapped guide", output)
+            self.assertIn("│                child source title that", output)
+            self.assertIn("│                should keep its own", output)
+            self.assertIn("│                wrapped guide", output)
 
     def test_list_graph_keeps_json_output_raw(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2185,20 +2185,20 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 51 for width in visible_line_widths(output)))
             self.assertIn("|       │", text)
-            self.assertIn("* ??awaiting_review  [N] Completed task awaiting\n| ├───────────────── review", text)
-            self.assertIn("* ||blocked_dependency  [N] Runnable task blocked\n| ├──────────────────── by dependencies", text)
+            self.assertIn("* ??awaiting_review  [N] Completed task awaiting\n|       │            review", text)
+            self.assertIn("* ||blocked_dependency  [N] Runnable task blocked\n|       │               by dependencies", text)
             self.assertIn(
                 "|       ├─ not_accepted  [N] Worktree dependency\n|       │                awaiting review",
                 text,
             )
             self.assertIn(
                 "* ||waiting_subtasks  [N] Parent task waiting for\n"
-                "│ ├────────────────── blocking subtask\n"
+                "│                     blocking subtask\n"
                 "└─ * ..runnable  [N] Blocking review fix subtask",
                 text,
             )
             self.assertNotIn("revie\nw", text)
-            self.assertNotIn("revi\n| ├───────────────── ew", text)
+            self.assertNotIn("revi\n|       │            ew", text)
             self.assertNotIn("awaitin\ng", text)
             self.assertNotIn("awai\n|       │                ting", text)
             self.assertNotIn("no\n|       │               t", text)
