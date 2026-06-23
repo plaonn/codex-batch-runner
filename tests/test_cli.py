@@ -2160,9 +2160,9 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("demo-missing", graph_output)
             self.assertIn("not_accepted", graph_output)
             self.assertIn("not_applied", graph_output)
-            self.assertIn("\033[1;37;43m??\033[0m\033[103;30mawaiting_review\033[0m", color_output)
-            self.assertIn("\033[1;37;46m>>\033[0m\033[106;30mrunning\033[0m", color_output)
-            self.assertIn("\033[1;37;43m||\033[0m\033[100;93mblocked_dependency\033[0m", color_output)
+            self.assertIn("\033[1;97;43m??\033[0m\033[103;30mawaiting_review\033[0m", color_output)
+            self.assertIn("\033[1;97;46m>>\033[0m\033[106;30mrunning\033[0m", color_output)
+            self.assertIn("\033[1;97;43m||\033[0m\033[100;93mblocked_dependency\033[0m", color_output)
             self.assertIn("\033[100;92mdone\033[0m", color_output)
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\*\033\[0m")
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\|\033\[0m       \033\[2m├─ \033\[0m")
@@ -2347,10 +2347,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("??awaiting_review", never_output)
             self.assertIn("==completed", never_output)
             self.assertIn("!!failed", never_output)
-            self.assertIn("\033[1;37;46m..\033[0m\033[100;96mrunnable\033[0m", always_output)
-            self.assertIn("\033[1;37;43m??\033[0m\033[103;30mawaiting_review\033[0m", always_output)
-            self.assertIn("\033[1;37;42m==\033[0m\033[100;92mcompleted\033[0m", always_output)
-            self.assertIn("\033[1;37;41m!!\033[0m\033[101;97mfailed\033[0m", always_output)
+            self.assertIn("\033[1;97;46m..\033[0m\033[100;96mrunnable\033[0m", always_output)
+            self.assertIn("\033[1;97;43m??\033[0m\033[103;30mawaiting_review\033[0m", always_output)
+            self.assertIn("\033[1;97;42m==\033[0m\033[100;92mcompleted\033[0m", always_output)
+            self.assertIn("\033[1;97;41m!!\033[0m\033[101;97mfailed\033[0m", always_output)
             self.assertIn("\033[100;96mrunnable\033[0m", always_output)
             self.assertIn("\033[104;97mneeds_resume\033[0m", always_output)
             self.assertIn("\033[103;30mawaiting_review\033[0m", always_output)
@@ -2366,12 +2366,12 @@ class CliTests(unittest.TestCase):
                 sorted(task["id"] for task in json.loads(json_output)),
             )
 
-    def test_status_markers_use_bold_white_foreground(self) -> None:
+    def test_status_markers_use_bold_bright_white_foreground(self) -> None:
         color = ListColor(enabled=True)
 
         for status in color.STATUS_MARKERS:
             marker = color.status_marker(status)
-            self.assertTrue(marker.startswith("\033[1;37;"), marker.encode())
+            self.assertTrue(marker.startswith("\033[1;97;"), marker.encode())
 
     def test_list_satisfied_dependency_uses_dim_color_or_done_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
