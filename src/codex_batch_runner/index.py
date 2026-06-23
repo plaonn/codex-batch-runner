@@ -83,6 +83,8 @@ def build_status_report(config: Config) -> dict[str, Any]:
         "source_task_files": source["task_files"],
         "source_event_files": source["event_files"],
         "source_event_rows": source["event_rows"],
+        "retained_tasks": None,
+        "retained_events": source["event_rows"],
         "indexed_tasks": None,
         "indexed_events": None,
         "last_rebuild_at": None,
@@ -103,6 +105,7 @@ def build_status_report(config: Config) -> dict[str, Any]:
                 return report
             report["indexed_tasks"] = scalar_count(conn, "tasks")
             report["indexed_events"] = scalar_count(conn, "events")
+            add_count_mismatch_warnings(report, conn, config, source)
             add_freshness_warnings(report, config, db_path)
     except sqlite3.DatabaseError as exc:
         report["warnings"].append(
@@ -462,6 +465,53 @@ def scalar_count(conn: sqlite3.Connection, table: str) -> int:
     return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
 
+def add_count_mismatch_warnings(
+    report: dict[str, Any],
+    conn: sqlite3.Connection,
+    config: Config,
+    source: dict[str, Any],
+) -> None:
+    current_source_counts = {
+        "source_task_files": source["task_files"],
+        "source_event_files": source["event_files"],
+        "source_event_rows": source["event_rows"],
+    }
+    for key, current in current_source_counts.items():
+        recorded = read_metadata_int(conn, key)
+        if recorded is not None and recorded != current:
+            report["warnings"].append(
+                f"index may be stale: {key} count mismatch "
+                f"(current retained source {current}, indexed metadata {recorded})"
+            )
+
+    table_counts = {
+        "indexed_tasks": report["indexed_tasks"],
+        "indexed_events": report["indexed_events"],
+        "indexed_dependencies": scalar_count(conn, "task_dependencies"),
+    }
+    for key, current in table_counts.items():
+        recorded = read_metadata_int(conn, key)
+        if recorded is not None and recorded != current:
+            report["warnings"].append(
+                f"index metadata mismatch: {key} recorded as {recorded}, SQLite table contains {current}"
+            )
+
+    retained_task_count = len(retained_tasks(config))
+    retained_event_count = source["event_rows"]
+    report["retained_tasks"] = retained_task_count
+    report["retained_events"] = retained_event_count
+    if report["indexed_tasks"] != retained_task_count:
+        report["warnings"].append(
+            "index may be stale: retained task count mismatch "
+            f"(current retained tasks {retained_task_count}, indexed table {report['indexed_tasks']})"
+        )
+    if report["indexed_events"] != retained_event_count:
+        report["warnings"].append(
+            "index may be stale: retained event row count mismatch "
+            f"(current retained event rows {retained_event_count}, indexed table {report['indexed_events']})"
+        )
+
+
 def add_freshness_warnings(report: dict[str, Any], config: Config, db_path: Path) -> None:
     try:
         db_mtime = db_path.stat().st_mtime
@@ -505,6 +555,8 @@ def render_status_report(report: dict[str, Any]) -> str:
         f"source_task_files: {report['source_task_files']}",
         f"source_event_files: {report['source_event_files']}",
         f"source_event_rows: {report['source_event_rows']}",
+        f"retained_tasks: {dash(report.get('retained_tasks'))}",
+        f"retained_events: {dash(report.get('retained_events'))}",
         f"indexed_tasks: {dash(report.get('indexed_tasks'))}",
         f"indexed_events: {dash(report.get('indexed_events'))}",
         f"last_rebuild_at: {report.get('last_rebuild_at') or '-'}",

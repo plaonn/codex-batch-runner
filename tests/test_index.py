@@ -137,6 +137,113 @@ class IndexCommandTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual(["task_created"], [event["event_type"] for event in events])
 
+    def test_index_status_warns_when_retained_task_file_is_deleted_after_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "work", tmp, task_id="deleted-task")
+
+            code, _ = run_cli(["--config", str(config_path), "index", "rebuild", "--apply"])
+            self.assertEqual(0, code)
+            (config.queue_dir / "deleted-task.json").unlink()
+
+            code, output = run_cli(["--config", str(config_path), "index", "status", "--json"])
+            status = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, status["source_task_files"])
+            self.assertEqual(0, status["retained_tasks"])
+            self.assertEqual(1, status["indexed_tasks"])
+            self.assert_count_mismatch_warning(status, "source_task_files")
+            self.assert_count_mismatch_warning(status, "retained task count")
+
+            code, output = run_cli(["--config", str(config_path), "list", "--json"])
+            self.assertEqual(0, code)
+            self.assertEqual([], json.loads(output))
+
+            code, output = run_cli(["--config", str(config_path), "events", "--json"])
+            events = json.loads(output)
+            self.assertEqual(0, code)
+            self.assertEqual(["task_created"], [event["event_type"] for event in events])
+
+    def test_index_status_warns_when_retained_event_file_is_deleted_after_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "work", tmp, task_id="event-source-deleted")
+
+            code, _ = run_cli(["--config", str(config_path), "index", "rebuild", "--apply"])
+            self.assertEqual(0, code)
+            for event_file in config.event_dir.glob("*.jsonl"):
+                event_file.unlink()
+
+            code, output = run_cli(["--config", str(config_path), "index", "status", "--json"])
+            status = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, status["source_event_files"])
+            self.assertEqual(0, status["source_event_rows"])
+            self.assertEqual(0, status["retained_events"])
+            self.assertEqual(1, status["indexed_events"])
+            self.assert_count_mismatch_warning(status, "source_event_files")
+            self.assert_count_mismatch_warning(status, "source_event_rows")
+            self.assert_count_mismatch_warning(status, "retained event row count")
+
+            code, output = run_cli(["--config", str(config_path), "list", "--json"])
+            tasks = json.loads(output)
+            self.assertEqual(0, code)
+            self.assertEqual(["event-source-deleted"], [task["id"] for task in tasks])
+
+            code, output = run_cli(["--config", str(config_path), "events", "--json"])
+            self.assertEqual(0, code)
+            self.assertEqual([], json.loads(output))
+
+    def test_index_status_warns_when_retained_event_rows_are_reduced_after_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "work", tmp, task_id="event-source-reduced")
+            event_file = next(config.event_dir.glob("*.jsonl"))
+            original_lines = event_file.read_text(encoding="utf-8").splitlines()
+            extra_event = {
+                "schema_version": 1,
+                "event_id": "extra-event",
+                "event_type": "extra_event",
+                "occurred_at": "2026-01-01T00:00:00+00:00",
+                "task_id": "event-source-reduced",
+                "summary": "extra event",
+                "payload": {},
+            }
+            event_file.write_text(
+                "\n".join([*original_lines, json.dumps(extra_event, sort_keys=True)]) + "\n",
+                encoding="utf-8",
+            )
+
+            code, _ = run_cli(["--config", str(config_path), "index", "rebuild", "--apply"])
+            self.assertEqual(0, code)
+            event_file.write_text(original_lines[0] + "\n", encoding="utf-8")
+
+            code, output = run_cli(["--config", str(config_path), "index", "status", "--json"])
+            status = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(1, status["source_event_files"])
+            self.assertEqual(1, status["source_event_rows"])
+            self.assertEqual(1, status["retained_events"])
+            self.assertEqual(2, status["indexed_events"])
+            self.assert_count_mismatch_warning(status, "source_event_rows")
+            self.assert_count_mismatch_warning(status, "retained event row count")
+
+            code, output = run_cli(["--config", str(config_path), "list", "--json"])
+            tasks = json.loads(output)
+            self.assertEqual(0, code)
+            self.assertEqual(["event-source-reduced"], [task["id"] for task in tasks])
+
+            code, output = run_cli(["--config", str(config_path), "events", "--json"])
+            events = json.loads(output)
+            self.assertEqual(0, code)
+            self.assertEqual(["task_created"], [event["event_type"] for event in events])
+
     def test_index_rebuild_excludes_local_runtime_paths_and_source_file_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp) / "private-repo-root"
@@ -238,6 +345,14 @@ class IndexCommandTests(unittest.TestCase):
                 self.assertNotIn(value, dumped)
             self.assertIn("Public title", dumped)
             self.assertIn("[REDACTED]", dumped)
+
+    def assert_count_mismatch_warning(self, status: dict[str, object], fragment: str) -> None:
+        warnings = status.get("warnings")
+        self.assertIsInstance(warnings, list)
+        text = " ".join(str(warning) for warning in warnings)
+        self.assertIn("stale", text)
+        self.assertIn("mismatch", text)
+        self.assertIn(fragment, text)
 
 
 def dump_sqlite_text(path: Path) -> str:
