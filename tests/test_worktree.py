@@ -88,6 +88,7 @@ def create_completed_worktree_task(
     task_id: str,
     *,
     review_status: str,
+    status: str = "completed",
 ) -> dict:
     create_task(config, "work", str(repo), task_id=task_id)
     assert run_cli(["--config", str(config_path), "worktree", "prepare", task_id, "--apply", "--json"])[0] == 0
@@ -95,7 +96,7 @@ def create_completed_worktree_task(
     worktree = Path(task["execution_worktree_path"])
     (worktree / "file.txt").write_text(f"base\n{task_id} discarded change\n", encoding="utf-8")
     git(worktree, "commit", "-am", f"{task_id} discarded change")
-    task["status"] = "completed"
+    task["status"] = status
     task["review_status"] = review_status
     save_task(config, task)
     return load_task(config, task_id)
@@ -266,8 +267,37 @@ class WorktreeTests(unittest.TestCase):
 
             self.assertEqual(1, code)
             self.assertIn("terminal discard resolution", report["errors"][0])
+            self.assertNotIn("review_status=rejected", report["errors"][0])
             self.assertTrue(worktree_path.exists())
             self.assertNotIn("execution_cleaned_at", load_task(config, "cleanup-followup"))
+
+    def test_cleanup_refuses_archived_needs_followup_without_terminal_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_completed_worktree_task(
+                config_path,
+                config,
+                repo,
+                "cleanup-archived-followup",
+                review_status="needs_followup",
+                status="archived",
+            )
+            worktree_path = Path(task["execution_worktree_path"])
+
+            code, report = run_cli(
+                ["--config", str(config_path), "worktree", "cleanup", "cleanup-archived-followup", "--dry-run", "--json"]
+            )
+
+            self.assertEqual(1, code)
+            self.assertIn("terminal discard resolution", report["errors"][0])
+            self.assertNotIn("review_status=rejected", report["errors"][0])
+            self.assertTrue(worktree_path.exists())
+            self.assertNotIn("execution_cleaned_at", load_task(config, "cleanup-archived-followup"))
 
     def test_cleanup_dry_run_reports_candidate_after_applied_worktree_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -500,6 +530,104 @@ class WorktreeTests(unittest.TestCase):
             self.assertEqual("discard", loaded["execution_cleanup_kind"])
             self.assertFalse(loaded["execution_cleanup_result_applied"])
             self.assertNotIn("execution_apply_status", loaded)
+
+    def test_cleanup_allows_archived_rejected_retained_worktree_as_discard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_completed_worktree_task(
+                config_path,
+                config,
+                repo,
+                "cleanup-archived-rejected",
+                review_status="rejected",
+                status="archived",
+            )
+            worktree_path = Path(task["execution_worktree_path"])
+
+            dry_code, dry_report = run_cli(
+                ["--config", str(config_path), "worktree", "cleanup", "cleanup-archived-rejected", "--dry-run", "--json"]
+            )
+            text_code, text_output = run_cli_text(
+                ["--config", str(config_path), "worktree", "cleanup", "cleanup-archived-rejected", "--dry-run"]
+            )
+
+            self.assertEqual(0, dry_code)
+            self.assertFalse(dry_report["applied"])
+            self.assertEqual("discard", dry_report["cleanup_kind"])
+            self.assertEqual("review_status=rejected", dry_report["cleanup_reason"])
+            self.assertEqual("cleanup_candidate", dry_report["classification"]["status"])
+            self.assertEqual(0, text_code)
+            self.assertIn("cleanup_kind: discard", text_output)
+            self.assertIn("cleanup_reason: review_status=rejected", text_output)
+            self.assertTrue(worktree_path.exists())
+            self.assertNotIn("execution_cleaned_at", load_task(config, "cleanup-archived-rejected"))
+
+            apply_code, apply_report = run_cli(
+                ["--config", str(config_path), "worktree", "cleanup", "cleanup-archived-rejected", "--apply", "--json"]
+            )
+            loaded = load_task(config, "cleanup-archived-rejected")
+            events = list_events(config, task_id="cleanup-archived-rejected", limit=0)
+
+            self.assertEqual(0, apply_code)
+            self.assertTrue(apply_report["applied"])
+            self.assertEqual("discard", apply_report["cleanup_kind"])
+            self.assertEqual("review_status=rejected", apply_report["cleanup_reason"])
+            self.assertIn("explicit discard", apply_report["classification"]["reason"])
+            self.assertFalse(worktree_path.exists())
+            self.assertEqual("cleaned", loaded["execution_worktree_status"])
+            self.assertEqual("discard", loaded["execution_cleanup_kind"])
+            self.assertEqual("review_status=rejected", loaded["execution_cleanup_reason"])
+            self.assertTrue(loaded["execution_cleanup_branch_retained"])
+            self.assertFalse(loaded["execution_cleanup_result_applied"])
+            self.assertNotIn("execution_apply_status", loaded)
+            self.assertIn("cbr/cleanup-archived-rejected", git(repo, "branch", "--list", "cbr/cleanup-archived-rejected"))
+            self.assertTrue(task_path(config, "cleanup-archived-rejected").exists())
+            self.assertTrue(any(event["event_type"] == "task_worktree_cleaned" for event in events))
+
+    def test_cleanup_allows_archived_terminal_resolution_retained_worktree_as_discard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_completed_worktree_task(
+                config_path,
+                config,
+                repo,
+                "cleanup-archived-resolution",
+                review_status="needs_followup",
+                status="archived",
+            )
+            task["resolution"] = "manual"
+            task["resolution_reason"] = "handled outside cbr"
+            save_task(config, task)
+            worktree_path = Path(task["execution_worktree_path"])
+
+            dry_code, dry_report = run_cli(
+                ["--config", str(config_path), "worktree", "cleanup", "cleanup-archived-resolution", "--dry-run", "--json"]
+            )
+            apply_code, apply_report = run_cli(
+                ["--config", str(config_path), "worktree", "cleanup", "cleanup-archived-resolution", "--apply", "--json"]
+            )
+            loaded = load_task(config, "cleanup-archived-resolution")
+
+            self.assertEqual(0, dry_code)
+            self.assertEqual("discard", dry_report["cleanup_kind"])
+            self.assertEqual("resolution=manual", dry_report["cleanup_reason"])
+            self.assertEqual("cleanup_candidate", dry_report["classification"]["status"])
+            self.assertEqual(0, apply_code)
+            self.assertTrue(apply_report["applied"])
+            self.assertEqual("discard", apply_report["cleanup_kind"])
+            self.assertEqual("resolution=manual", loaded["execution_cleanup_reason"])
+            self.assertFalse(worktree_path.exists())
+            self.assertEqual("cleaned", loaded["execution_worktree_status"])
 
     def test_summary_and_review_bundle_include_sanitized_worktree_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
