@@ -1868,6 +1868,7 @@ class ListColor:
     BLUE = "\033[34m"
     LIGHT_BLUE = "\033[94m"
     BLACK = "\033[30m"
+    GRAY = "\033[90m"
     WHITE = "\033[37m"
     BG_RED = "\033[101;30m"
     BG_YELLOW = "\033[103;30m"
@@ -1937,17 +1938,17 @@ class ListColor:
         "resolved": "--",
         "archived": "--",
     }
-    STATUS_MARKER_FOREGROUNDS_BY_STYLE = {
+    STATUS_MARKER_FOREGROUNDS_BY_BACKGROUND = {
         BG_RED: LIGHT_RED,
         BG_YELLOW: LIGHT_YELLOW,
         BG_GREEN: LIGHT_GREEN,
         BG_CYAN: LIGHT_CYAN,
         BG_BLUE: LIGHT_BLUE,
-        BG_DIM: WHITE,
-        BG_NEUTRAL_CYAN: LIGHT_CYAN,
-        BG_NEUTRAL_YELLOW: LIGHT_YELLOW,
-        BG_NEUTRAL_GREEN: GREEN,
-        BG_NEUTRAL_WHITE: WHITE,
+        BG_DIM: GRAY,
+        BG_NEUTRAL_CYAN: GRAY,
+        BG_NEUTRAL_YELLOW: GRAY,
+        BG_NEUTRAL_GREEN: GRAY,
+        BG_NEUTRAL_WHITE: GRAY,
     }
 
     def __init__(self, enabled: bool) -> None:
@@ -2024,7 +2025,7 @@ class ListColor:
         if not self.enabled:
             return marker
         style = self.ACTIVE_STATUS_STYLES.get(status) or self.PASSIVE_STATUS_STYLES.get(status)
-        foreground = self.STATUS_MARKER_FOREGROUNDS_BY_STYLE.get(style, self.WHITE)
+        foreground = self.STATUS_MARKER_FOREGROUNDS_BY_BACKGROUND.get(style, self.WHITE)
         return self.apply(marker, self.BG_MARKER + self.BOLD + foreground)
 
 
