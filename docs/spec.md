@@ -1058,9 +1058,9 @@ Event log가 필요한 이유:
 
 Notifier는 각자 cursor와 전송 상태를 public repository 밖에 저장합니다. 예를 들어 notifier는 `.codex-batch-runner/notify-state.json`이나 사용자 local config/state 파일에 마지막 처리 event file, byte offset, 마지막 event id, 전송 실패 retry metadata를 저장할 수 있습니다. Notifier state는 adapter별로 독립적이어야 하며, 한 notifier의 장애가 다른 notifier의 cursor를 변경하지 않아야 합니다.
 
-JSONL Codex attempt logs와 event logs는 장기 운영에서 계속 커질 수 있습니다. Retention policy는 review와 audit 요구사항이 충족된 뒤 오래된 runtime logs/events를 정리할 수 있어야 합니다. 장기 기본 정책은 60일보다 오래된 runtime log와 event file을 cleanup 후보에 포함하는 방향입니다. Current `cbr prune` reports old event JSONL files under configured `event_dir` as distinct event candidates and deletes them only when `--apply` is explicit. If notifier cursor state paths are configured, event pruning checks them before deleting old event files. Cursor state상 아직 처리되지 않았거나 fully processed 여부가 불확실한 event file은 삭제하지 않고 skipped warning으로 보고합니다.
+JSONL Codex attempt logs와 event logs는 장기 운영에서 계속 커질 수 있습니다. Retention policy는 review와 audit 요구사항이 충족된 뒤 오래된 runtime logs/events를 정리할 수 있어야 합니다. 장기 기본 정책은 60일보다 오래된 runtime log와 event file을 cleanup 후보에 포함하는 방향입니다. Current `cbr prune` reports old event JSONL files under configured `event_dir` as distinct event candidates and deletes them only when `--apply` is explicit. If notifier cursor state paths are configured, event pruning checks them before deleting old event files. Cursor state상 아직 처리되지 않았거나 fully processed 여부가 불확실한 event file은 삭제하지 않고 skipped warning으로 보고합니다. Event pruning 이후에는 retained file만으로 전체 과거 event history를 다시 만들 수 있다고 보장하지 않습니다. Rebuild 보장은 retained canonical task JSON과 retained event JSONL set에 적용합니다.
 
-SQLite는 초기 source of truth가 아니라 derived index/cache입니다. SQLite index는 task JSON 파일과 event log에서 재생성 가능해야 하며, dashboard, notification, search, automated review workflow가 빠르게 조회하기 위한 optional layer로 둡니다. SQLite 파일이 없거나 손상되어도 `cbr enqueue`, `cbr list`, `cbr run-next`, `cbr accept/reject`, `cbr prune` 같은 core command는 canonical task JSON 파일과 event log만으로 계속 동작해야 합니다. 복구 방법은 손상된 SQLite 파일을 삭제하고 task JSON 및 event log에서 index를 다시 build하는 것입니다.
+SQLite는 초기 source of truth가 아니라 derived read index/cache입니다. SQLite index는 retained task JSON 파일과 retained event log에서 재생성 가능해야 하며, dashboard, notification, search, read-heavy review/reporting view가 빠르게 조회하기 위한 optional layer로 둡니다. SQLite에는 prompt, transcript, raw Codex JSONL, session id, thread id, credential, environment value 같은 sensitive raw fields를 저장하지 않고 sanitized projection만 저장합니다. SQLite 파일이 없거나 손상되었거나 schema version이 맞지 않아도 `cbr enqueue`, `cbr list`, `cbr run-next`, `cbr accept/reject`, `cbr prune` 같은 core command는 canonical task JSON 파일과 event log만으로 계속 동작해야 합니다. 복구 방법은 손상된 SQLite 파일을 삭제하고 retained task JSON 및 retained event log에서 index를 다시 build하는 것입니다.
 
 Rough roadmap:
 
@@ -1068,8 +1068,8 @@ Rough roadmap:
 - Event writer helper: append-only JSONL writer, event id 생성, date partition, fsync/atomicity 기준, sanitizer를 구현합니다.
 - Existing command emission: enqueue, run-next state transitions, accept/reject/resolve, rate-limit detection, git metadata inspection, future queue mutation command에서 event를 기록합니다.
 - Prune/retention support: task/log cleanup report에 event file 후보를 포함하고 notifier cursor safety check를 적용합니다.
-- Optional SQLite index builder: task JSON과 event log를 읽어 rebuild 가능한 local SQLite cache를 생성합니다.
-- Dashboard/notification consumers: dashboard, Telegram notifier, search, automated review workflow는 SQLite가 있으면 index를 사용하고, 없으면 canonical JSON/event log fallback을 사용합니다.
+- Optional SQLite index builder: retained task JSON과 retained event log를 읽어 rebuild 가능한 sanitized local SQLite read index를 생성합니다.
+- Dashboard/notification consumers: dashboard, Telegram notifier, search, read-heavy reporting view는 SQLite가 있으면 index를 사용하고, 없으면 canonical JSON/event log fallback을 사용합니다.
 
 Telegram integration은 future optional adapter입니다. Core runner는 Telegram에 직접 의존하지 않고 append-only event log만 기록합니다. Telegram token, chat id, enable flag, rate limit, formatting option은 local-only config나 runtime state에만 저장하며 public docs와 examples에는 실제 값을 포함하지 않습니다.
 
