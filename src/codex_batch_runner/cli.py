@@ -1854,13 +1854,18 @@ def format_elapsed(seconds: int) -> str:
 
 class ListColor:
     RESET = "\033[0m"
+    BOLD = "\033[1m"
     DIM = "\033[2m"
     RED = "\033[31m"
+    LIGHT_RED = "\033[91m"
     YELLOW = "\033[33m"
+    LIGHT_YELLOW = "\033[93m"
     GREEN = "\033[32m"
+    LIGHT_GREEN = "\033[92m"
     CYAN = "\033[36m"
     LIGHT_CYAN = "\033[96m"
     BLUE = "\033[34m"
+    LIGHT_BLUE = "\033[94m"
     BLACK = "\033[30m"
     WHITE = "\033[37m"
     BG_RED = "\033[101;30m"
@@ -1932,14 +1937,14 @@ class ListColor:
         "archived": "--",
     }
     STATUS_MARKER_FOREGROUNDS_BY_STYLE = {
-        BG_RED: RED,
-        BG_YELLOW: YELLOW,
-        BG_GREEN: GREEN,
-        BG_CYAN: CYAN,
-        BG_BLUE: BLUE,
+        BG_RED: LIGHT_RED,
+        BG_YELLOW: LIGHT_YELLOW,
+        BG_GREEN: LIGHT_GREEN,
+        BG_CYAN: LIGHT_CYAN,
+        BG_BLUE: LIGHT_BLUE,
         BG_DIM: WHITE,
         BG_NEUTRAL_CYAN: LIGHT_CYAN,
-        BG_NEUTRAL_YELLOW: YELLOW,
+        BG_NEUTRAL_YELLOW: LIGHT_YELLOW,
         BG_NEUTRAL_GREEN: GREEN,
         BG_NEUTRAL_WHITE: WHITE,
     }
@@ -2019,7 +2024,7 @@ class ListColor:
             return marker
         style = self.ACTIVE_STATUS_STYLES.get(status) or self.PASSIVE_STATUS_STYLES.get(status)
         foreground = self.STATUS_MARKER_FOREGROUNDS_BY_STYLE.get(style, self.WHITE)
-        return self.apply(marker, self.BG_MARKER + foreground)
+        return self.apply(marker, self.BG_MARKER + self.BOLD + foreground)
 
 
 def list_colorizer(mode: str) -> ListColor:
