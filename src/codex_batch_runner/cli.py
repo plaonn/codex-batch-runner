@@ -1269,7 +1269,12 @@ def render_compact_block_list(project_groups: list[tuple[str, list[dict[str, obj
                 ("STATUS", str(summary[2])),
                 ("ID", str(summary[1])),
                 ("PROJECT", str(summary[0])),
-                ("TITLE", str(group.get("title") or "-")),
+                (
+                    "TITLE",
+                    str(group.get("title_value") or group.get("title") or "-"),
+                    str(group.get("title_prefix") or ""),
+                    str(group.get("title_continuation_prefix") or ""),
+                ),
             ]
             deps = group["deps"] if isinstance(group["deps"], list) else ["-"]
             notes = group["notes"] if isinstance(group["notes"], list) else ["-"]
@@ -1279,15 +1284,25 @@ def render_compact_block_list(project_groups: list[tuple[str, list[dict[str, obj
     return "\n".join(lines)
 
 
-def render_block_rows(rows: list[tuple[str, str]], terminal_width: int) -> list[str]:
-    label_width = max(visible_len(label) for label, _ in rows)
+def render_block_rows(rows: list[tuple[str, str] | tuple[str, str, str, str]], terminal_width: int) -> list[str]:
+    normalized: list[tuple[str, str, str, str]] = []
+    for row in rows:
+        if len(row) == 2:
+            label, value = row
+            normalized.append((label, value, "", ""))
+        else:
+            label, value, first_prefix, continuation_prefix = row
+            normalized.append((label, value, first_prefix, continuation_prefix))
+    label_width = max(visible_len(label) for label, _, _, _ in normalized)
     value_width = max(8, terminal_width - label_width - 2)
     lines = []
-    for label, value in rows:
-        wrapped = wrap_visible(value, value_width)
+    for label, value, first_prefix, continuation_prefix in normalized:
+        prefix_width = max(visible_len(first_prefix), visible_len(continuation_prefix))
+        wrapped = wrap_visible(value, max(1, value_width - prefix_width))
         for index, line in enumerate(wrapped):
-            prefix = (label + ":").ljust(label_width + 1) + " " if index == 0 else " " * (label_width + 2)
-            lines.append(prefix + line)
+            row_prefix = (label + ":").ljust(label_width + 1) + " " if index == 0 else " " * (label_width + 2)
+            value_prefix = first_prefix if index == 0 else continuation_prefix
+            lines.append(row_prefix + value_prefix + line)
     return lines
 
 

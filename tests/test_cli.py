@@ -2341,6 +2341,16 @@ class CliTests(unittest.TestCase):
             self.assertIn("  │  keeping tree rails visible", output)
             self.assertIn("  └─ [N] Second child", output)
 
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=50):
+                code, output = run_cli(["--config", str(config_path), "list", "--all", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(all(width <= 50 for width in visible_line_widths(output)))
+            self.assertIn("TITLE:   ├─ [N] Very long first child title", output)
+            self.assertIn("         │  should wrap while keeping tree rails", output)
+            self.assertIn("         │  visible", output)
+            self.assertIn("TITLE:   └─ [N] Second child", output)
+
     def test_list_default_keeps_hidden_subtasks_when_parent_is_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
