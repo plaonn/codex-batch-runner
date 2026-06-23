@@ -977,14 +977,11 @@ def render_dependency_graph_node(
         plain_dep_state = dependency_state_cell(dep, by_id, config, plain_color)
         dep_title = "missing dependency" if dep is None else compact_title(dep)
         title_style = color.dim_text if dep is None else lambda value: styled_compact_title_fragment(value, color, dim_title=True)
-        is_last = index == len(raw_dep_ids) - 1
-        connector_value = "└─ " if is_last else "├─ "
-        connector = color.dim_text(connector_value)
-        dependency_continuation = color.dim_text("│  ")
-        prefix = tree_continuation + rail + "       " + connector
-        continuation_prefix = tree_continuation + rail + "       " + dependency_continuation
-        plain_prefix = plain_tree_continuation + "|" + "       " + connector_value
-        plain_continuation_prefix = plain_tree_continuation + "|" + "       " + "│  "
+        edge_tail = dependency_graph_edge_tail(index)
+        prefix = tree_continuation + rail + color.dim_text(edge_tail)
+        continuation_prefix = tree_continuation + rail + color.dim_text(" " * visible_len(edge_tail))
+        plain_prefix = plain_tree_continuation + "|" + edge_tail
+        plain_continuation_prefix = plain_tree_continuation + "|" + (" " * visible_len(edge_tail))
         lines.extend(
             graph_content_lines(
                 prefix,
@@ -999,6 +996,12 @@ def render_dependency_graph_node(
             )
         )
     return lines
+
+
+def dependency_graph_edge_tail(index: int) -> str:
+    edge_width = 7
+    offset = min(max(0, index), edge_width - 1)
+    return (" " * offset) + "\\" + (" " * (edge_width - offset - 1))
 
 
 def styled_compact_title_fragment(value: str, color: "ListColor", *, dim_title: bool = False) -> str:
