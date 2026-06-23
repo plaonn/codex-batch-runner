@@ -154,6 +154,8 @@ def default_profile_resolution(config: Any, task: dict[str, Any]) -> tuple[str |
     terms = high_risk_profile_terms(task)
     if default and "deep" in config.execution_profiles and terms:
         return "deep", "high_risk_fallback", "matched category/label: " + ", ".join(terms)
+    if default and "small" in config.execution_profiles and small_profile_routing_candidate(task):
+        return "small", "low_risk_downshift", small_profile_routing_reason(task)
     if default:
         return default, "config_default", "default_execution_profile"
     return None, None, None
@@ -170,6 +172,33 @@ def high_risk_profile_terms(task: dict[str, Any]) -> list[str]:
         values.extend(labels)
     normalized = {str(value).strip().lower() for value in values if value not in (None, "")}
     return sorted(normalized & HIGH_RISK_PROFILE_TERMS)
+
+
+def small_profile_routing_candidate(task: dict[str, Any]) -> bool:
+    return (
+        normalized_task_value(task.get("routing_size")) in {"tiny", "small"}
+        and normalized_task_value(task.get("routing_risk")) == "low"
+        and set(normalized_task_list(task.get("verification_scope")) or ["none"]).issubset({"docs", "none"})
+    )
+
+
+def small_profile_routing_reason(task: dict[str, Any]) -> str:
+    size = normalized_task_value(task.get("routing_size")) or "unspecified"
+    risk = normalized_task_value(task.get("routing_risk")) or "unspecified"
+    scopes = normalized_task_list(task.get("verification_scope")) or ["none"]
+    return f"matched routing metadata: size={size} risk={risk} verify={'+'.join(sorted(scopes))}"
+
+
+def normalized_task_value(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    return str(value).strip().lower()
+
+
+def normalized_task_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [normalized for item in value if (normalized := normalized_task_value(item))]
 
 
 def task_value_or_profile(task: dict[str, Any], key: str, profile: dict[str, Any]) -> str | None:

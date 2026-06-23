@@ -205,6 +205,70 @@ class CodexParserTests(unittest.TestCase):
             self.assertEqual("high_risk_fallback", critical_worktree.profile_source)
             self.assertEqual("matched category/label: worktree-apply", critical_worktree.profile_reason)
 
+    def test_small_profile_fallback_uses_conservative_routing_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            config = Config(
+                **{
+                    **config.__dict__,
+                    "default_execution_profile": "normal",
+                    "execution_profiles": {
+                        "normal": {"model": "gpt-5.4-mini"},
+                        "small": {"model": "gpt-5-small"},
+                        "deep": {"model": "gpt-5.5"},
+                    },
+                }
+            )
+
+            low_risk_docs = resolve_execution_settings(
+                config,
+                {
+                    "id": "task-1",
+                    "routing_size": "small",
+                    "routing_risk": "low",
+                    "verification_scope": ["docs"],
+                },
+            )
+            wider_verification = resolve_execution_settings(
+                config,
+                {
+                    "id": "task-2",
+                    "routing_size": "small",
+                    "routing_risk": "low",
+                    "verification_scope": ["unit", "docs"],
+                },
+            )
+            high_risk_worktree = resolve_execution_settings(
+                config,
+                {
+                    "id": "task-3",
+                    "category": "implementation",
+                    "labels": ["worktree-apply"],
+                    "routing_size": "small",
+                    "routing_risk": "low",
+                    "verification_scope": ["docs"],
+                },
+            )
+            explicit_profile = resolve_execution_settings(
+                config,
+                {
+                    "id": "task-4",
+                    "execution_profile": "normal",
+                    "routing_size": "small",
+                    "routing_risk": "low",
+                    "verification_scope": ["docs"],
+                },
+            )
+
+            self.assertEqual("small", low_risk_docs.profile_name)
+            self.assertEqual("low_risk_downshift", low_risk_docs.profile_source)
+            self.assertEqual("matched routing metadata: size=small risk=low verify=docs", low_risk_docs.profile_reason)
+            self.assertEqual("normal", wider_verification.profile_name)
+            self.assertEqual("deep", high_risk_worktree.profile_name)
+            self.assertEqual("high_risk_fallback", high_risk_worktree.profile_source)
+            self.assertEqual("normal", explicit_profile.profile_name)
+            self.assertEqual("task", explicit_profile.profile_source)
+
     def test_should_use_resume_after_task_is_marked_running(self) -> None:
         task = {"status": "running", "resume_requested": True, "thread_id": "thread-123"}
 
