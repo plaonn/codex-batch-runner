@@ -2036,48 +2036,50 @@ class ListColor:
     BLUE = "\033[34m"
     BG_RED = "\033[101;97;1m"
     BG_YELLOW = "\033[103;30m"
-    BG_GREEN = "\033[102;30m"
-    BG_CYAN = "\033[106;30m"
-    BG_BLUE = "\033[104;30m"
     BG_DIM = "\033[100;37m"
-    BG_NEUTRAL_RED = "\033[100;91m"
-    BG_NEUTRAL_BLUE = "\033[100;94m"
-    BG_NEUTRAL_CYAN = "\033[100;96m"
-    BG_NEUTRAL_YELLOW = "\033[100;93m"
-    BG_NEUTRAL_GREEN = "\033[100;92m"
-    BG_NEUTRAL_WHITE = "\033[100;97m"
-    STATUS_MARKER_BLUE = "\033[104;97;1m"
-    STATUS_MARKER_CYAN = "\033[106;30;1m"
-    STATUS_MARKER_YELLOW = "\033[103;30;1m"
-    STATUS_MARKER_GREEN = "\033[102;30;1m"
-    STATUS_MARKER_RED = "\033[101;97;1m"
+    BG_ACTIVE_RED = "\033[101;97m"
+    BG_ACTIVE_BLUE = "\033[104;97m"
+    BG_ACTIVE_CYAN = "\033[106;30m"
+    BG_ACTIVE_YELLOW = "\033[103;30m"
+    BG_ACTIVE_GREEN = "\033[102;30m"
+    BG_PASSIVE_RED = "\033[100;31m"
+    BG_PASSIVE_BLUE = "\033[100;34m"
+    BG_PASSIVE_CYAN = "\033[100;96m"
+    BG_PASSIVE_YELLOW = "\033[100;93m"
+    BG_PASSIVE_GREEN = "\033[100;92m"
+    BG_PASSIVE_WHITE = "\033[100;97m"
+    STATUS_MARKER_BLUE = "\033[44;97;1m"
+    STATUS_MARKER_CYAN = "\033[46;97;1m"
+    STATUS_MARKER_YELLOW = "\033[43;97;1m"
+    STATUS_MARKER_GREEN = "\033[42;97;1m"
+    STATUS_MARKER_RED = "\033[41;97;1m"
     STATUS_MARKER_NEUTRAL = "\033[100;97;1m"
     ID_COLORS = ("\033[35m", "\033[36m", "\033[34m", "\033[32m", "\033[33m", "\033[91m")
     ACTIVE_STATUS_STYLES = {
-        "running": BG_NEUTRAL_CYAN,
-        "awaiting_review": BG_NEUTRAL_YELLOW,
-        "reviewing": BG_NEUTRAL_YELLOW,
-        "review_pass_pending": BG_NEUTRAL_GREEN,
-        "needs_resume": BG_NEUTRAL_BLUE,
-        "waiting_subtasks": BG_NEUTRAL_YELLOW,
+        "running": BG_ACTIVE_CYAN,
+        "awaiting_review": BG_ACTIVE_YELLOW,
+        "reviewing": BG_ACTIVE_YELLOW,
+        "review_pass_pending": BG_ACTIVE_GREEN,
+        "needs_resume": BG_ACTIVE_BLUE,
+        "waiting_subtasks": BG_ACTIVE_YELLOW,
         "cooldown": BG_DIM,
         "usage_exhausted": BG_DIM,
-        "failed": BG_NEUTRAL_RED,
-        "review_failed": BG_NEUTRAL_RED,
-        "needs_followup": BG_NEUTRAL_RED,
-        "review_needs_fix": BG_NEUTRAL_RED,
-        "blocked_user": BG_NEUTRAL_RED,
-        "subtasks_blocked": BG_NEUTRAL_RED,
-        "accepted_unapplied": BG_NEUTRAL_YELLOW,
+        "failed": BG_ACTIVE_RED,
+        "review_failed": BG_ACTIVE_RED,
+        "needs_followup": BG_ACTIVE_RED,
+        "review_needs_fix": BG_ACTIVE_RED,
+        "blocked_user": BG_ACTIVE_RED,
+        "subtasks_blocked": BG_ACTIVE_RED,
+        "accepted_unapplied": BG_ACTIVE_YELLOW,
     }
     PASSIVE_STATUS_STYLES = {
-        "runnable": BG_NEUTRAL_CYAN,
-        "blocked_dependency": BG_NEUTRAL_YELLOW,
-        "completed": BG_NEUTRAL_GREEN,
-        "accepted": BG_NEUTRAL_GREEN,
-        "done": BG_NEUTRAL_GREEN,
-        "resolved": BG_NEUTRAL_WHITE,
-        "archived": BG_NEUTRAL_WHITE,
+        "runnable": BG_PASSIVE_CYAN,
+        "blocked_dependency": BG_PASSIVE_YELLOW,
+        "completed": BG_PASSIVE_GREEN,
+        "accepted": BG_PASSIVE_GREEN,
+        "done": BG_PASSIVE_GREEN,
+        "resolved": BG_PASSIVE_WHITE,
+        "archived": BG_PASSIVE_WHITE,
     }
     DEPENDENCY_STATE_STYLES = {
         "missing": BG_RED,
