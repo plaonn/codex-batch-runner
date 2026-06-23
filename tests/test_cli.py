@@ -1876,7 +1876,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("demo-missing", graph_output)
             self.assertIn("not_accepted", graph_output)
             self.assertIn("not_applied", graph_output)
-            self.assertIn("\033[2mdone\033[0m", color_output)
+            self.assertIn("\033[100;92mdone\033[0m", color_output)
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\*\033\[0m")
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\|\033\[0m       \033\[2m├─ \033\[0m")
             self.assertIn("\033[32m[N]\033[0m", color_output)

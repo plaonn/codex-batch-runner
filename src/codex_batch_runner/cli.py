@@ -1753,6 +1753,7 @@ class ListColor:
         "blocked_dependency": BG_NEUTRAL_YELLOW,
         "completed": BG_NEUTRAL_GREEN,
         "accepted": BG_NEUTRAL_GREEN,
+        "done": BG_NEUTRAL_GREEN,
         "resolved": BG_NEUTRAL_WHITE,
         "archived": BG_NEUTRAL_WHITE,
     }
@@ -1822,7 +1823,7 @@ class ListColor:
 
     def dependency_state(self, state: str, style_status: str) -> str:
         if state == "done":
-            return self.apply(state, self.DIM)
+            return self.status_label(state, state)
         if state in self.DEPENDENCY_STATE_STYLES:
             return self.apply(state, self.DEPENDENCY_STATE_STYLES[state])
         if state == "blocked":
