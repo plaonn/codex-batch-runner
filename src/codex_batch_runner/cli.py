@@ -724,15 +724,14 @@ def dependency_graph_row(
     config: Config,
     color: "ListColor",
 ) -> list[str]:
-    task_id = scalar_cell(task.get("id"))
-    status = status_cell(task, by_id, config)
+    cells = task_display_cells(task, by_id, config, color)
     return [
-        color.project(scalar_cell(task_project_id(task))),
-        color.task_id(task_id),
-        color.status(status),
+        cells["project"],
+        cells["id"],
+        cells["status"],
         color.task_id(dep_id),
         color.dependency_state(dep_state, dep_style_status),
-        compact_title(task),
+        cells["title"],
         scalar_cell(dep_title),
     ]
 
@@ -853,18 +852,29 @@ def compact_task_group(
     color: "ListColor",
     tree_prefix: str = "",
 ) -> dict[str, object]:
+    cells = task_display_cells(task, by_id, config, color)
     dep_ids = dependency_id_cells(task.get("depends_on"), by_id, config, color)
     note_segments = note_cells(task, by_id, config)
     return {
         "summary": [
-            color.project(scalar_cell(task_project_id(task))),
-            color.task_id(scalar_cell(task.get("id"))),
-            color.status(status_cell(task, by_id, config)),
-            scalar_cell(task.get("attempts", 0)),
+            cells["project"],
+            cells["id"],
+            cells["status"],
+            cells["attempts"],
         ],
         "deps": dep_ids or ["-"],
         "notes": note_segments or ["-"],
-        "title": color.title(tree_prefix + compact_title(task)),
+        "title": color.title(tree_prefix + cells["title"]),
+    }
+
+
+def task_display_cells(task: dict, by_id: dict[str, dict], config: Config, color: "ListColor") -> dict[str, str]:
+    return {
+        "project": color.project(scalar_cell(task_project_id(task))),
+        "id": color.task_id(scalar_cell(task.get("id"))),
+        "status": color.status(status_cell(task, by_id, config)),
+        "attempts": scalar_cell(task.get("attempts", 0)),
+        "title": compact_title(task),
     }
 
 
