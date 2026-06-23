@@ -1685,7 +1685,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual("runnable", rows["child"]["status"])
             self.assertNotIn("blocked_dependency", output)
 
-    def test_list_graph_renders_dependency_edges_without_task_tree_connectors(self) -> None:
+    def test_list_graph_renders_dependency_children_without_git_edge_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp, dependency_requires_accepted_review=True)
             config = Config.load(str(config_path))
@@ -1718,15 +1718,13 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("review-dep", output)
             self.assertNotIn("missing-dep", output)
             self.assertIn("* blocked_dependency  Child work", output)
-            self.assertIn("|\\", output)
-            self.assertIn("| * done  Done dependency", output)
-            self.assertIn("| * not_accepted  Review dependency", output)
-            self.assertIn("| * missing  missing dependency", output)
-            self.assertIn("|/", output)
+            self.assertIn("    |-- done  Done dependency", output)
+            self.assertIn("    |-- not_accepted  Review dependency", output)
+            self.assertIn("    `-- missing  missing dependency", output)
+            self.assertNotIn("|\\", output)
+            self.assertNotIn("|/", output)
             self.assertNotIn("ATT", output)
             self.assertNotIn("note:", output)
-            self.assertNotIn("|--", output)
-            self.assertNotIn("`--", output)
 
     def test_list_graph_wraps_titles_without_breaking_graph_prefixes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1755,10 +1753,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
             self.assertIn("* blocked_dependency  Very long", output)
             self.assertIn("                      title that should", output)
-            self.assertIn("| * blocked  Very long dependency", output)
-            self.assertIn("|            that should wrap under the", output)
-            self.assertNotIn("|--", output)
-            self.assertNotIn("`--", output)
+            self.assertIn("    `-- blocked  Very long dependency", output)
+            self.assertIn("                 title that should wrap", output)
+            self.assertNotIn("|\\", output)
+            self.assertNotIn("|/", output)
 
     def test_list_graph_keeps_json_output_raw(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1801,14 +1799,16 @@ class CliTests(unittest.TestCase):
             self.assertIn("LAST_RESULT", verbose_output)
             self.assertIn("[demo]", graph_output)
             self.assertIn("* blocked_dependency  Runnable task blocked by dependencies", graph_output)
-            self.assertIn("| * done  Completed accepted dependency", graph_output)
+            self.assertIn("    |-- done  Completed accepted dependency", graph_output)
             self.assertNotIn("demo-blocked", graph_output)
             self.assertNotIn("demo-done", graph_output)
             self.assertNotIn("demo-missing", graph_output)
             self.assertIn("not_accepted", graph_output)
             self.assertIn("not_applied", graph_output)
             self.assertIn("\033[2mdone\033[0m", color_output)
+            self.assertIn("\033[2mCompleted accepted dependency\033[0m", color_output)
             self.assertIn("\033[103;30mnot_accepted\033[0m", color_output)
+            self.assertIn("\033[2mWorktree dependency awaiting review\033[0m", color_output)
             self.assertIn("\033[103;30maccepted_unapplied\033[0m", color_output)
             rows = json.loads(json_output)
             self.assertTrue(rows)

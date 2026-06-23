@@ -880,15 +880,23 @@ def render_dependency_graph_node(
     lines = graph_content_lines("* ", status, compact_title(task), terminal_width)
     depends_on = task.get("depends_on")
     raw_dep_ids = [str(dep_id) for dep_id in depends_on if str(dep_id)] if isinstance(depends_on, list) else []
-    if not raw_dep_ids:
-        return lines
-    lines.append("|\\")
-    for dep_id in raw_dep_ids:
+    for index, dep_id in enumerate(raw_dep_ids):
         dep = by_id.get(dep_id)
         dep_state = dependency_state_cell(dep, by_id, config, color)
         dep_title = "missing dependency" if dep is None else compact_title(dep)
-        lines.extend(graph_content_lines("| * ", dep_state, dep_title, terminal_width))
-    lines.append("|/")
+        is_last = index == len(raw_dep_ids) - 1
+        prefix = "    `-- " if is_last else "    |-- "
+        continuation_prefix = "        " if is_last else "    |   "
+        lines.extend(
+            graph_content_lines(
+                prefix,
+                dep_state,
+                dep_title,
+                terminal_width,
+                continuation_prefix=continuation_prefix,
+                title_style=color.dim_text,
+            )
+        )
     return lines
 
 
@@ -897,16 +905,25 @@ def dependency_state_cell(dep: dict | None, by_id: dict[str, dict], config: Conf
     return color.dependency_state(state, style_status)
 
 
-def graph_content_lines(prefix: str, label: str, title: str, terminal_width: int | None) -> list[str]:
-    line = f"{prefix}{label}  {title}"
+def graph_content_lines(
+    prefix: str,
+    label: str,
+    title: str,
+    terminal_width: int | None,
+    *,
+    continuation_prefix: str | None = None,
+    title_style=None,
+) -> list[str]:
+    style = title_style or (lambda value: value)
+    line = f"{prefix}{label}  {style(title)}"
     if terminal_width is None or visible_len(line) <= terminal_width:
         return [line]
     width = max(1, terminal_width)
     protected = f"{prefix}{label}  "
     title_width = max(1, width - visible_len(protected))
     title_lines = wrap_visible(title, title_width)
-    continuation_prefix = graph_continuation_prefix(prefix) + (" " * visible_len(label)) + "  "
-    return [protected + title_lines[0], *(continuation_prefix + item for item in title_lines[1:])]
+    continuation = (continuation_prefix or graph_continuation_prefix(prefix)) + (" " * visible_len(label)) + "  "
+    return [protected + style(title_lines[0]), *(continuation + style(item) for item in title_lines[1:])]
 
 
 def graph_continuation_prefix(prefix: str) -> str:
@@ -1741,6 +1758,9 @@ class ListColor:
 
     def title(self, title: str) -> str:
         return title
+
+    def dim_text(self, value: str) -> str:
+        return self.apply(value, self.DIM)
 
     def satisfied_dependency(self, dep_id: str) -> str:
         if not self.enabled or dep_id == "-":
