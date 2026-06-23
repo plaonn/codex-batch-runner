@@ -29,6 +29,7 @@ class Config:
     codex_cli_update_command: list[str] = field(default_factory=list)
     codex_cli_smoke_command: list[str] = field(default_factory=list)
     codex_cli_rollback_command: list[str] = field(default_factory=list)
+    codex_cli_maintenance_on_empty: bool = False
     dependency_requires_accepted_review: bool = False
     auto_review_mechanical_accept: bool = False
     auto_review_codex_enabled: bool = False
@@ -113,6 +114,10 @@ class Config:
             codex_cli_rollback_command=argv_list(
                 "codex_cli_rollback_command",
                 data.get("codex_cli_rollback_command", []),
+            ),
+            codex_cli_maintenance_on_empty=bool_value(
+                "codex_cli_maintenance_on_empty",
+                data.get("codex_cli_maintenance_on_empty", False),
             ),
             stale_lock_seconds=int(data.get("stale_lock_seconds", 21600)),
             rate_limit_cooldown_seconds=int(data.get("rate_limit_cooldown_seconds", 1800)),

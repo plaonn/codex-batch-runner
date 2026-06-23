@@ -2123,7 +2123,10 @@ def cmd_run_next(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(outcome.__dict__, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         task_part = f" task={outcome.task_id}" if outcome.task_id else ""
-        print(f"{outcome.status}: {outcome.message}{task_part}")
+        maintenance_part = ""
+        if outcome.maintenance:
+            maintenance_part = f" maintenance={outcome.maintenance.get('status') or 'unknown'}"
+        print(f"{outcome.status}: {outcome.message}{task_part}{maintenance_part}")
     return 0
 
 

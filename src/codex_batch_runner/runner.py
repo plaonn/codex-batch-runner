@@ -17,6 +17,7 @@ from .execution_profiles import ExecutionSettings, command_options, resolve_exec
 from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
 from .lock import FileLock
+from .maintenance import build_codex_cli_maintenance_report, run_codex_cli_maintenance
 from .prompts import build_prompt
 from .queue import is_in_cooldown, recover_stale_running_tasks, save_task, select_next_task
 from .review_next import build_review_next_apply_report_locked, has_actionable_auto_review_candidate
@@ -42,6 +43,7 @@ class RunOutcome:
     message: str
     task_id: str | None = None
     review: dict[str, Any] | None = None
+    maintenance: dict[str, Any] | None = None
 
 
 @dataclass
@@ -124,6 +126,8 @@ def run_next(config: Config) -> RunOutcome:
     if not claimed:
         if outcome and outcome.status in {"review_accepted", "review_fix_enqueued"} and should_trigger_post_review_wake(config):
             run_post_run_trigger(config)
+        elif outcome and outcome.status == "review_accepted":
+            outcome.maintenance = maybe_run_empty_codex_cli_maintenance(config)
         return outcome or RunOutcome(status="empty", message="no runnable task")
 
     task = claimed.task
@@ -139,6 +143,8 @@ def run_next(config: Config) -> RunOutcome:
 
     if outcome and outcome.task_id and should_trigger_post_run_wake(config, task):
         run_post_run_trigger(config)
+    elif outcome and outcome.task_id and outcome.status != "stale_finalization":
+        outcome.maintenance = maybe_run_empty_codex_cli_maintenance(config)
     return outcome
 
 
@@ -408,6 +414,23 @@ def should_trigger_post_review_wake(config: Config) -> bool:
     if is_runner_paused(config):
         return False
     return select_next_task(config) is not None or has_actionable_auto_review_candidate(config)
+
+
+def maybe_run_empty_codex_cli_maintenance(config: Config) -> dict[str, Any] | None:
+    if not config.codex_cli_maintenance_on_empty:
+        return None
+    if in_global_cooldown(config):
+        return None
+    if is_runner_paused(config):
+        return None
+    if select_next_task(config) is not None:
+        return None
+    if has_actionable_auto_review_candidate(config):
+        return None
+    report = build_codex_cli_maintenance_report(config)
+    if report.get("status") != "ready":
+        return None
+    return run_codex_cli_maintenance(config)
 
 
 def apply_codex_result(

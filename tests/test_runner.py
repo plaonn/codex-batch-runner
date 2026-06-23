@@ -131,6 +131,64 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(0, second["attempts"])
             self.assertEqual("unlocked\n", marker.read_text(encoding="utf-8"))
 
+    def test_run_next_runs_codex_cli_maintenance_after_last_task_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                make_config(tmp, "success"),
+                codex_cli_update_command=["codex", "update"],
+                codex_cli_smoke_command=["cbr", "doctor"],
+                codex_cli_maintenance_on_empty=True,
+            )
+            create_task(config, "work", tmp, task_id="task-1")
+
+            with patch.object(
+                runner_module,
+                "run_codex_cli_maintenance",
+                return_value={"status": "succeeded", "applied": True},
+            ) as maintenance:
+                outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("task-1", outcome.task_id)
+            self.assertEqual({"status": "succeeded", "applied": True}, outcome.maintenance)
+            maintenance.assert_called_once_with(config)
+
+    def test_run_next_does_not_run_codex_cli_maintenance_on_empty_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                make_config(tmp, "success"),
+                codex_cli_update_command=["codex", "update"],
+                codex_cli_smoke_command=["cbr", "doctor"],
+                codex_cli_maintenance_on_empty=True,
+            )
+
+            with patch.object(runner_module, "run_codex_cli_maintenance") as maintenance:
+                outcome = run_next(config)
+
+            self.assertEqual("empty", outcome.status)
+            self.assertIsNone(outcome.maintenance)
+            maintenance.assert_not_called()
+
+    def test_run_next_defers_codex_cli_maintenance_when_follow_up_work_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                make_config(tmp, "success"),
+                codex_cli_update_command=["codex", "update"],
+                codex_cli_smoke_command=["cbr", "doctor"],
+                codex_cli_maintenance_on_empty=True,
+            )
+            create_task(config, "first", tmp, task_id="task-1")
+            create_task(config, "second", tmp, task_id="task-2")
+
+            with patch.object(runner_module, "run_codex_cli_maintenance") as maintenance:
+                outcome = run_next(config)
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("task-1", outcome.task_id)
+            self.assertIsNone(outcome.maintenance)
+            self.assertEqual("runnable", load_task(config, "task-2")["status"])
+            maintenance.assert_not_called()
+
     def test_concurrent_run_next_can_claim_different_project_after_first_claim_releases_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_1 = Path(tmp) / "project-1"
@@ -328,6 +386,36 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("accepted", load_task(config, "reviewable-1")["review_status"])
             self.assertEqual("unreviewed", load_task(config, "reviewable-2")["review_status"])
             self.assertFalse(outcome.review["auto_review"]["reviewer_codex_invoked"])
+
+    def test_run_next_runs_codex_cli_maintenance_after_last_auto_review_accept_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = replace(
+                make_config(tmp, "success"),
+                auto_review_mechanical_accept=True,
+                codex_cli_update_command=["codex", "update"],
+                codex_cli_smoke_command=["cbr", "doctor"],
+                codex_cli_maintenance_on_empty=True,
+            )
+            create_clean_completed_task(config, repo, "reviewable")
+
+            with (
+                patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")),
+                patch.object(
+                    runner_module,
+                    "run_codex_cli_maintenance",
+                    return_value={"status": "succeeded", "applied": True},
+                ) as maintenance,
+            ):
+                outcome = run_next(config)
+
+            self.assertEqual("review_accepted", outcome.status)
+            self.assertEqual("reviewable", outcome.task_id)
+            self.assertEqual("accepted", load_task(config, "reviewable")["review_status"])
+            self.assertEqual({"status": "succeeded", "applied": True}, outcome.maintenance)
+            maintenance.assert_called_once_with(config)
 
     def test_run_next_auto_review_takes_precedence_over_runnable_task_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -526,7 +526,7 @@ Full stdout and stderr are written to the task attempt log under `log_dir`. Task
 
 `shell_task_timeout_seconds` configures the default timeout for shell tasks and defaults to `900`. A task-specific `--shell-timeout` overrides it.
 
-Future maintenance workflows such as Codex CLI update checks can use shell tasks as ordered dependency gates. A future `exclusive` or `maintenance_pause` mode should pause new admissions before running a solo maintenance task, clear the pause on success, and keep the pause on failure. That solo mode is not implemented by the current shell backend.
+Guarded Codex CLI maintenance is implemented as runner-level maintenance, not as a normal shell task. Shell tasks can still be used as ordered dependency gates for project-specific checks.
 
 Codex를 호출하지 않는 조건:
 
@@ -565,6 +565,8 @@ PYTHONPATH=src python3 -m codex_batch_runner maintenance codex-cli --apply
 ```
 
 `--apply` requires the queue to be idle, sets a runner pause, records doctor snapshots before and after the update, runs the configured update and smoke commands, and clears the pause only if both commands succeed. If update or smoke fails, the optional rollback command runs and the pause remains active for operator inspection. It does not choose an update source or infer the local installation method.
+
+If `codex_cli_maintenance_on_empty` is `true`, `cbr run-next` attempts the same guarded maintenance workflow after it has processed work and the queue has drained. This is event-driven: an already-empty scheduler tick returns `empty` and does not run maintenance again. Maintenance is also deferred when another runnable task, resumable task, running task, active cooldown, runner pause, or actionable auto-review candidate remains.
 
 ## Rate-limit 처리
 

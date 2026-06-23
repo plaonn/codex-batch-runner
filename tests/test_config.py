@@ -427,6 +427,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual([], config.codex_cli_update_command)
             self.assertEqual([], config.codex_cli_smoke_command)
             self.assertEqual([], config.codex_cli_rollback_command)
+            self.assertFalse(config.codex_cli_maintenance_on_empty)
 
     def test_manual_cooldown_wake_options_can_be_enabled_explicitly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -455,6 +456,7 @@ class ConfigTests(unittest.TestCase):
                         "codex_cli_update_command": ["npm", "install", "-g", "@openai/codex"],
                         "codex_cli_smoke_command": ["cbr", "doctor"],
                         "codex_cli_rollback_command": ["npm", "install", "-g", "@openai/codex@0.1.0"],
+                        "codex_cli_maintenance_on_empty": True,
                     }
                 ),
                 encoding="utf-8",
@@ -465,6 +467,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(["npm", "install", "-g", "@openai/codex"], config.codex_cli_update_command)
             self.assertEqual(["cbr", "doctor"], config.codex_cli_smoke_command)
             self.assertEqual(["npm", "install", "-g", "@openai/codex@0.1.0"], config.codex_cli_rollback_command)
+            self.assertTrue(config.codex_cli_maintenance_on_empty)
 
     def test_post_mutation_trigger_command_must_be_argv_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -500,6 +503,11 @@ class ConfigTests(unittest.TestCase):
             config_path.write_text(json.dumps({"codex_cli_rollback_command": "npm install old"}), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "codex_cli_rollback_command must be a list of strings"):
+                Config.load(str(config_path), root=Path(tmp))
+
+            config_path.write_text(json.dumps({"codex_cli_maintenance_on_empty": "true"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "codex_cli_maintenance_on_empty must be a boolean"):
                 Config.load(str(config_path), root=Path(tmp))
 
 

@@ -255,7 +255,7 @@ Shell attempt log는 stdout/stderr 전체를 task log file에 저장합니다. T
 
 `shell_task_timeout_seconds` config 기본값은 `900`입니다. `--shell-timeout` 또는 task `shell_timeout_seconds`가 있으면 해당 task에만 override합니다.
 
-Codex CLI update 같은 ordered maintenance workflow는 향후 shell task를 dependency gate로 사용할 수 있습니다. `exclusive` 또는 `maintenance_pause` solo task가 필요해지면 실행 전 새 admission을 pause하고, 성공 시 pause를 clear하며, 실패 시 pause를 유지하는 별도 runner-level policy로 추가해야 합니다. 현재 구현된 pause/unpause queue mutation은 개별 task 상태 변경이며, shell backend 자체는 solo maintenance mode를 구현하지 않습니다.
+Codex CLI update 같은 guarded maintenance workflow는 runner-level maintenance로 처리합니다. Shell task는 프로젝트별 ordered dependency gate로 사용할 수 있지만, runner pause를 잡고 queue idle gate를 확인하는 solo maintenance mode 자체는 shell backend가 아니라 별도 maintenance command가 담당합니다.
 
 ## Profile routing optimization policy
 
@@ -1522,8 +1522,11 @@ Config:
 - `codex_cli_update_command`: Codex CLI를 update하는 argv list command. 예: `["npm", "install", "-g", "@openai/codex"]`.
 - `codex_cli_smoke_command`: update 뒤 queue를 재개하기 전에 실행할 argv list smoke command.
 - `codex_cli_rollback_command`: optional argv list rollback command. 비어 있으면 rollback을 시도하지 않습니다.
+- `codex_cli_maintenance_on_empty`: `true`이면 `cbr run-next`가 실제 work 또는 auto-review accept를 처리한 뒤 queue가 비었을 때 guarded maintenance workflow를 1회 시도합니다. 이미 비어 있는 queue를 polling하는 tick에서는 실행하지 않습니다.
 
 `cbr maintenance codex-cli` 또는 `--dry-run`은 read-only readiness report입니다. `--apply`는 runner lock을 잡아 idle gate를 확인하고, 기존 runner pause가 없을 때만 `runner_pause`를 `Codex CLI maintenance`로 설정합니다. 이후 lock을 해제하고 `doctor-before.json`, update command log, `doctor-after-update.json`, smoke command log, `doctor-after-smoke.json`을 `log_dir/maintenance/codex-cli/run-*` 아래에 저장합니다. Update 또는 smoke가 실패하거나 timeout이면 optional rollback command를 실행하고 `doctor-after-rollback.json`을 저장한 뒤 pause를 유지하고 `status=failed`를 반환합니다. Rollback이 성공해도 queue를 자동 재개하지 않습니다. 둘 다 성공하면 같은 runner lock 아래에서 maintenance pause만 해제하고 post-mutation trigger를 실행할 수 있습니다. Maintenance event payload는 command stdout/stderr 원문을 저장하지 않고 return code, timeout 여부, byte count, log path만 기록합니다.
+
+`codex_cli_maintenance_on_empty=true`인 경우 자동 maintenance는 time interval 기반이 아니라 queue drain event 기반입니다. `run-next`가 아무 work도 처리하지 않은 `empty` poll에서는 실행하지 않으며, runnable/resumable/running task, active global cooldown, runner pause, actionable auto-review candidate가 남아 있으면 deferred됩니다.
 
 `cbr prune`은 오래된 cleanup 후보를 보고하거나 삭제합니다. 기본 동작은 dry-run이며 `--apply`를 명시하지 않으면 파일을 삭제하지 않습니다. Task/log 후보는 보수적으로 `status=archived` task와 `status=completed && review_status=accepted` task 중 `--older-than-days`보다 오래된 항목으로 제한합니다. Event 후보는 configured `event_dir` 아래에서 `--older-than-days`보다 오래된 `*.jsonl` 파일로 제한합니다. 기본 age는 30일입니다. Optional `notifier_cursor_state_paths` config 값 또는 반복 가능한 `--notifier-cursor-state` flag로 local-only notifier cursor state JSON 파일을 지정할 수 있습니다. 기본값은 빈 목록입니다.
 
