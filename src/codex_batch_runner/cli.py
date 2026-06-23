@@ -747,10 +747,10 @@ def demo_list_tasks() -> list[dict]:
         }
 
     return [
-        task("demo-ready", "Runnable task without dependencies", created_ago=900, execution_profile="small"),
+        task("demo-ready", "Prepare parser cleanup notes", created_ago=900, execution_profile="small"),
         task(
             "demo-done",
-            "Completed accepted dependency",
+            "Shared parser implementation complete",
             status="completed",
             created_ago=840,
             completed_at=ago(420),
@@ -759,7 +759,7 @@ def demo_list_tasks() -> list[dict]:
         ),
         task(
             "demo-review",
-            "Completed task awaiting review",
+            "CLI docs draft awaiting review",
             status="completed",
             attempts=1,
             depends_on=["demo-done"],
@@ -771,7 +771,7 @@ def demo_list_tasks() -> list[dict]:
         ),
         task(
             "demo-worktree-review",
-            "Worktree dependency awaiting review",
+            "Release checklist review pending",
             status="completed",
             attempts=1,
             created_ago=750,
@@ -783,13 +783,13 @@ def demo_list_tasks() -> list[dict]:
         ),
         task(
             "demo-blocked",
-            "Runnable task blocked by dependencies",
+            "Publish CLI parser release notes",
             depends_on=["demo-done", "demo-review", "demo-worktree-review", "demo-worktree", "demo-missing"],
             created_ago=720,
         ),
         task(
             "demo-worktree",
-            "Accepted worktree task not applied",
+            "Release checklist merge ready, not applied",
             status="completed",
             attempts=2,
             created_ago=660,
@@ -803,7 +803,7 @@ def demo_list_tasks() -> list[dict]:
         ),
         task(
             "demo-parent",
-            "Parent task waiting for blocking subtask",
+            "Release checklist approval pending",
             status="completed",
             created_ago=600,
             completed_at=ago(240),
@@ -812,7 +812,7 @@ def demo_list_tasks() -> list[dict]:
         ),
         task(
             "demo-subtask",
-            "Blocking review fix subtask",
+            "Fix release checklist review comments",
             created_ago=540,
             parent_task_id="demo-parent",
             subtask_for="demo-parent",
@@ -820,7 +820,7 @@ def demo_list_tasks() -> list[dict]:
         ),
         task(
             "demo-running",
-            "Running task with recent progress",
+            "Run full regression suite",
             status="running",
             attempts=1,
             created_ago=480,
