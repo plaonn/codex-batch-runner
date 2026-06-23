@@ -887,12 +887,20 @@ def render_dependency_graph(
             grouped[project] = []
             project_order.append(project)
         grouped[project].append(task)
+    render_width = graph_render_width(terminal_width)
     lines: list[str] = []
     for project in project_order:
         if lines:
             lines.append("")
-        lines.append(project_section_header(project, terminal_width))
-        for item in compact_tree_items(grouped[project], by_id):
+        lines.append(project_section_header(project, render_width))
+        project_tasks = grouped[project]
+        visible_ids = {str(task.get("id")) for task in project_tasks if task.get("id")}
+        tree_parent_ids = {
+            parent_id
+            for task in project_tasks
+            if (parent_id := compact_parent_task_id(task, visible_ids, by_id))
+        }
+        for item in compact_tree_items(project_tasks, by_id):
             task = item["task"] if isinstance(item.get("task"), dict) else {}
             tree_prefix_value = str(item.get("prefix") or "")
             lines.extend(
@@ -901,11 +909,18 @@ def render_dependency_graph(
                     by_id,
                     config,
                     color,
-                    terminal_width=terminal_width,
+                    terminal_width=render_width,
                     tree_prefix=tree_prefix_value,
+                    has_tree_children=str(task.get("id") or "") in tree_parent_ids,
                 )
             )
     return "\n".join(lines)
+
+
+def graph_render_width(terminal_width: int | None) -> int | None:
+    if terminal_width is None:
+        return None
+    return max(1, terminal_width - 1)
 
 
 def render_dependency_graph_node(
@@ -915,6 +930,7 @@ def render_dependency_graph_node(
     color: "ListColor",
     terminal_width: int | None = None,
     tree_prefix: str = "",
+    has_tree_children: bool = False,
 ) -> list[str]:
     status = color.status(status_cell(task, by_id, config))
     branch_key = scalar_cell(task.get("id"))
@@ -924,7 +940,11 @@ def render_dependency_graph_node(
     rail = color.graph_branch(branch_key, "|")
     styled_tree_prefix = color.dim_text(tree_prefix) if tree_prefix else ""
     tree_continuation = color.dim_text(tree_continuation_prefix(tree_prefix)) if tree_prefix else ""
-    source_continuation_prefix = tree_continuation + (rail if raw_dep_ids else " ") + " " if tree_prefix or raw_dep_ids else None
+    if tree_prefix or raw_dep_ids or has_tree_children:
+        source_guide = rail if raw_dep_ids else color.dim_text("│") if has_tree_children else " "
+        source_continuation_prefix = tree_continuation + source_guide + " "
+    else:
+        source_continuation_prefix = None
     lines = graph_content_lines(
         styled_tree_prefix + marker + " ",
         status,
