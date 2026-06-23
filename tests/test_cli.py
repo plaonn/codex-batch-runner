@@ -1571,6 +1571,35 @@ class CliTests(unittest.TestCase):
             self.assertEqual("runnable", {task["id"]: task for task in json.loads(graph_output)}["child"]["status"])
             self.assertNotIn("WAITS_FOR", graph_output)
 
+    def test_list_demo_renders_without_reading_queue_or_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            with patch("codex_batch_runner.cli.list_tasks", side_effect=AssertionError("demo read queue")), patch(
+                "codex_batch_runner.cli.load_state",
+                side_effect=AssertionError("demo read state"),
+            ):
+                compact_code, compact_output = run_cli(["--config", str(config_path), "list", "--demo", "--color=never"])
+                verbose_code, verbose_output = run_cli(["--config", str(config_path), "list", "--demo", "--verbose"])
+                graph_code, graph_output = run_cli(["--config", str(config_path), "list", "--demo", "--graph"])
+                json_code, json_output = run_cli(["--config", str(config_path), "list", "--demo", "--json"])
+
+            self.assertEqual(0, compact_code)
+            self.assertEqual(0, verbose_code)
+            self.assertEqual(0, graph_code)
+            self.assertEqual(0, json_code)
+            self.assertIn("demo-ready", compact_output)
+            self.assertIn("demo-blocked", compact_output)
+            self.assertIn("demo-parent", compact_output)
+            self.assertIn("`-- Blocking review fix subtask", compact_output)
+            self.assertIn("LAST_RESULT", verbose_output)
+            self.assertIn("WAITS_FOR", graph_output)
+            self.assertIn("demo-missing", graph_output)
+            self.assertIn("not_accepted", graph_output)
+            self.assertIn("not_applied", graph_output)
+            rows = json.loads(json_output)
+            self.assertTrue(rows)
+            self.assertTrue(all(task.get("demo") is True for task in rows))
+
     def test_list_default_filtering_keeps_dependency_blocked_runnable_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
