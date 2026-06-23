@@ -622,8 +622,9 @@ def wait_for_watch_action(interval: float) -> tuple[str, float]:
 
 
 def render_list_output(config: Config, args: argparse.Namespace, terminal_width: int | None = None) -> str:
-    tasks = demo_list_tasks() if args.demo else list_tasks(config)
-    by_id = {task.get("id"): task for task in tasks}
+    all_tasks = demo_list_tasks() if args.demo else list_tasks(config)
+    tasks = list(all_tasks)
+    by_id = {task.get("id"): task for task in all_tasks}
     explicit_filter = bool(
         args.status
         or args.project_id
@@ -652,8 +653,12 @@ def render_list_output(config: Config, args: argparse.Namespace, terminal_width:
         tasks = [task for task in tasks if review_status(task) == "unreviewed"]
     if args.needs_review:
         tasks = [task for task in tasks if needs_review(task)]
-    if not explicit_filter and not args.all:
-        tasks = default_visible_tasks_with_subtasks(tasks, by_id)
+    if not args.all:
+        if explicit_filter:
+            if not args.json:
+                tasks = visible_tasks_with_subtasks(tasks, all_tasks, by_id)
+        else:
+            tasks = default_visible_tasks_with_subtasks(tasks, by_id)
     tasks.sort(key=list_sort_key)
     if args.json:
         return json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True)
@@ -828,17 +833,34 @@ def demo_list_tasks() -> list[dict]:
 
 def default_visible_tasks_with_subtasks(tasks: list[dict], by_id: dict[str, dict]) -> list[dict]:
     visible_ids = {str(task.get("id")) for task in tasks if task.get("id") and visible_by_default(task)}
+    return tasks_matching_visible_ids_with_subtasks(tasks, visible_ids, by_id)
+
+
+def visible_tasks_with_subtasks(
+    visible_tasks: list[dict],
+    candidate_tasks: list[dict],
+    by_id: dict[str, dict],
+) -> list[dict]:
+    visible_ids = {str(task.get("id")) for task in visible_tasks if task.get("id")}
+    return tasks_matching_visible_ids_with_subtasks(candidate_tasks, visible_ids, by_id)
+
+
+def tasks_matching_visible_ids_with_subtasks(
+    candidate_tasks: list[dict],
+    visible_ids: set[str],
+    by_id: dict[str, dict],
+) -> list[dict]:
     changed = True
     while changed:
         changed = False
-        for task in tasks:
+        for task in candidate_tasks:
             task_id = str(task.get("id") or "")
             if not task_id or task_id in visible_ids or task.get("status") == "archived" or task.get("resolution"):
                 continue
             if has_visible_parent(task, visible_ids, by_id):
                 visible_ids.add(task_id)
                 changed = True
-    return [task for task in tasks if str(task.get("id") or "") in visible_ids]
+    return [task for task in candidate_tasks if str(task.get("id") or "") in visible_ids]
 
 
 def has_visible_parent(task: dict, visible_ids: set[str], by_id: dict[str, dict]) -> bool:

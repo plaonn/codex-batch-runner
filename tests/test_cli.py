@@ -2593,6 +2593,35 @@ class CliTests(unittest.TestCase):
             self.assertEqual("└─ [N] Accepted child", rows["child"]["TITLE"])
             self.assertNotIn("independent", rows)
 
+    def test_list_review_filter_keeps_hidden_subtasks_when_parent_is_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            parent = create_task(config, "Parent work", tmp, task_id="parent", project_id="project-a")
+            parent["status"] = "completed"
+            parent["review_status"] = "unreviewed"
+            save_task(config, parent)
+            child = create_task(config, "Accepted child", tmp, task_id="child", project_id="project-a")
+            child["status"] = "completed"
+            child["review_status"] = "accepted"
+            child["parent_task_id"] = "parent"
+            save_task(config, child)
+            independent = create_task(config, "Accepted independent", tmp, task_id="independent", project_id="project-a")
+            independent["status"] = "completed"
+            independent["review_status"] = "accepted"
+            save_task(config, independent)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--needs-review", "--color=never"])
+            json_code, json_output = run_cli(["--config", str(config_path), "list", "--needs-review", "--json"])
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, json_code)
+            self.assertEqual("awaiting_review", rows["parent"]["STATUS"])
+            self.assertEqual("└─ [N] Accepted child", rows["child"]["TITLE"])
+            self.assertNotIn("independent", rows)
+            self.assertEqual(["parent"], [task["id"] for task in json.loads(json_output)])
+
     def test_list_blocking_subtasks_affect_parent_effective_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
