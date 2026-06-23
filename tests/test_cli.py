@@ -1930,6 +1930,37 @@ class CliTests(unittest.TestCase):
             self.assertIn("│  |                   under the dependency edge", output)
             self.assertIn("└─ * ..runnable  [N] Second child source", output)
 
+    def test_list_graph_wraps_dependency_sibling_tree_continuations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(
+                config,
+                "Very long first dependency title that should keep its sibling tree rail",
+                tmp,
+                task_id="dep1",
+                project_id="project-a",
+            )
+            create_task(config, "Second dependency", tmp, task_id="dep2", project_id="project-a")
+            create_task(
+                config,
+                "Source task with multiple dependencies",
+                tmp,
+                task_id="child",
+                project_id="project-a",
+                depends_on=["dep1", "dep2"],
+            )
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=48):
+                code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--graph", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(all(width <= 48 for width in visible_line_widths(output)))
+            self.assertIn("|       ├─ blocked  [N] Very long first", output)
+            self.assertIn("|       │           dependency title that should", output)
+            self.assertIn("|       │           keep its sibling tree rail", output)
+            self.assertIn("|       └─ blocked  [N] Second dependency", output)
+
     def test_list_graph_wraps_subtask_tree_without_dependency_rails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
