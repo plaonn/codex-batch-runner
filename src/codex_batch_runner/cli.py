@@ -1754,8 +1754,12 @@ class ListColor:
         return self.status_label(status, status)
 
     def status_label(self, label: str, status: str) -> str:
-        style = self.ACTIVE_STATUS_STYLES.get(status) or self.PASSIVE_STATUS_STYLES.get(status)
-        return self.apply(label, style) if style else label
+        style = (
+            self.ACTIVE_STATUS_STYLES.get(status)
+            or self.PASSIVE_STATUS_STYLES.get(status)
+            or self.BG_NEUTRAL_WHITE
+        )
+        return self.apply(label, style)
 
 
 def list_colorizer(mode: str) -> ListColor:
