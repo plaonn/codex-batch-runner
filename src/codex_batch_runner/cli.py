@@ -888,8 +888,8 @@ def render_dependency_graph_node(
         dep_state = dependency_state_cell(dep, by_id, config, color)
         dep_title = "missing dependency" if dep is None else compact_title(dep)
         is_last = index == len(raw_dep_ids) - 1
-        prefix = "|   `-- " if is_last else "|   |-- "
-        continuation_prefix = "|       " if is_last else "|   |   "
+        prefix = "    `-- " if is_last else "    |-- "
+        continuation_prefix = "        " if is_last else "    |   "
         lines.extend(
             graph_content_lines(
                 prefix,
