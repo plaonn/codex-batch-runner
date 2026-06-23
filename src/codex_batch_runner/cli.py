@@ -133,6 +133,11 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("--unreviewed", action="store_true", help="show completed tasks waiting for review")
     list_cmd.add_argument("--needs-review", action="store_true", help="show tasks that need operator review")
     list_cmd.add_argument("--verbose", action="store_true", help="include compact result and run summary columns")
+    list_cmd.add_argument(
+        "--dependency-graph",
+        action="store_true",
+        help="print a human dependency edge list instead of the compact task list",
+    )
     list_cmd.add_argument("--json", action="store_true", help="print JSON")
     list_cmd.add_argument("--watch", action="store_true", help="refresh the human list until interrupted")
     list_cmd.add_argument("--interval", type=float, default=2.0, help="seconds between --watch refreshes (default: 2.0)")
@@ -599,6 +604,9 @@ def render_list_output(config: Config, args: argparse.Namespace, terminal_width:
         return json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True)
     color = list_colorizer(args.color)
     banners = list_cooldown_banners(config)
+    if args.dependency_graph:
+        output = render_dependency_graph(tasks, by_id, config, color)
+        return "\n".join([*banners, output]) if banners else output
     if not args.verbose:
         output = render_compact_list(tasks, by_id, config, color, terminal_width=terminal_width)
         return "\n".join([*banners, output]) if banners else output
@@ -678,6 +686,54 @@ def render_table(header: list[str], rows: list[list[str]]) -> str:
 def render_table_row(row: list[str], widths: list[int]) -> str:
     padded = [cell.ljust(widths[index]) for index, cell in enumerate(row[:-1])]
     return "  ".join([*padded, row[-1]])
+
+
+def render_visible_table(header: list[str], rows: list[list[str]]) -> str:
+    widths = [
+        max(visible_len(row[index]) for row in [header, *rows])
+        for index in range(len(header))
+    ]
+    return "\n".join(render_compact_row(row, widths) for row in [header, *rows])
+
+
+def render_dependency_graph(tasks: list[dict], by_id: dict[str, dict], config: Config, color: "ListColor") -> str:
+    header = ["PROJECT", "TASK", "STATUS", "WAITS_FOR", "DEP_STATE", "TASK_TITLE", "DEP_TITLE"]
+    rows: list[list[str]] = []
+    for task in tasks:
+        deps = task.get("depends_on")
+        dep_ids = [str(dep_id) for dep_id in deps if str(dep_id)] if isinstance(deps, list) else []
+        if not dep_ids:
+            rows.append(dependency_graph_row(task, "-", "none", "", "-", by_id, config, color))
+            continue
+        for dep_id in dep_ids:
+            dep = by_id.get(dep_id)
+            dep_state, dep_style_status = dependency_display_state(dep, by_id, config)
+            dep_title = task_title(dep) if dep else "-"
+            rows.append(dependency_graph_row(task, dep_id, dep_state, dep_style_status, dep_title, by_id, config, color))
+    return render_visible_table(header, rows)
+
+
+def dependency_graph_row(
+    task: dict,
+    dep_id: str,
+    dep_state: str,
+    dep_style_status: str,
+    dep_title: str,
+    by_id: dict[str, dict],
+    config: Config,
+    color: "ListColor",
+) -> list[str]:
+    task_id = scalar_cell(task.get("id"))
+    status = status_cell(task, by_id, config)
+    return [
+        color.project(scalar_cell(task_project_id(task))),
+        color.task_id(task_id),
+        color.status(status),
+        color.task_id(dep_id),
+        color.dependency_state(dep_state, dep_style_status),
+        compact_title(task),
+        scalar_cell(dep_title),
+    ]
 
 
 def render_compact_list(
@@ -1504,6 +1560,16 @@ class ListColor:
             return self.status_label(label, style_status)
         label = dep_id if self.enabled else f"{dep_id} ({state})"
         return self.status_label(label, state)
+
+    def dependency_state(self, state: str, style_status: str) -> str:
+        if state == "none":
+            return state
+        if state == "done":
+            return self.status_label(state, "completed")
+        if state == "blocked":
+            return self.status_label(state, style_status)
+        style = self.DEPENDENCY_STATE_STYLES.get(state)
+        return self.apply(state, style) if style else state
 
     def status(self, status: str) -> str:
         return self.status_label(status, status)

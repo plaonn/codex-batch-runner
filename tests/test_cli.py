@@ -1480,6 +1480,60 @@ class CliTests(unittest.TestCase):
             self.assertEqual("runnable", rows["child"]["status"])
             self.assertNotIn("blocked_dependency", output)
 
+    def test_list_dependency_graph_renders_edges_without_task_tree_connectors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, dependency_requires_accepted_review=True)
+            config = Config.load(str(config_path))
+            done = create_task(config, "Done dependency", tmp, task_id="done-dep", project_id="project-a")
+            done["status"] = "completed"
+            done["review_status"] = "accepted"
+            save_task(config, done)
+            not_accepted = create_task(config, "Review dependency", tmp, task_id="review-dep", project_id="project-a")
+            not_accepted["status"] = "completed"
+            not_accepted["review_status"] = "unreviewed"
+            save_task(config, not_accepted)
+            child = create_task(
+                config,
+                "Child work",
+                tmp,
+                task_id="child",
+                project_id="project-a",
+                depends_on=["done-dep", "review-dep", "missing-dep"],
+            )
+            child["parent_task_id"] = "done-dep"
+            save_task(config, child)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--dependency-graph"])
+            lines = list_lines(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(["PROJECT", "TASK", "STATUS", "WAITS_FOR", "DEP_STATE", "TASK_TITLE", "DEP_TITLE"], lines[0].split())
+            self.assertIn("child", output)
+            self.assertIn("done-dep", output)
+            self.assertIn("review-dep", output)
+            self.assertIn("missing-dep", output)
+            self.assertIn("done", output)
+            self.assertIn("not_accepted", output)
+            self.assertIn("missing", output)
+            self.assertNotIn("|--", output)
+            self.assertNotIn("`--", output)
+
+    def test_list_dependency_graph_keeps_json_output_raw(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "dep", tmp, task_id="dep")
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"], project_id="project-a")
+
+            graph_code, graph_output = run_cli(["--config", str(config_path), "list", "--dependency-graph", "--json"])
+            plain_code, plain_output = run_cli(["--config", str(config_path), "list", "--json"])
+
+            self.assertEqual(0, graph_code)
+            self.assertEqual(0, plain_code)
+            self.assertEqual(json.loads(plain_output), json.loads(graph_output))
+            self.assertEqual("runnable", {task["id"]: task for task in json.loads(graph_output)}["child"]["status"])
+            self.assertNotIn("WAITS_FOR", graph_output)
+
     def test_list_default_filtering_keeps_dependency_blocked_runnable_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
