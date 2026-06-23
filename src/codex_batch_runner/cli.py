@@ -1730,7 +1730,7 @@ class ListColor:
     BG_DIM = "\033[100;37m"
     BG_NEUTRAL_CYAN = "\033[100;96m"
     BG_NEUTRAL_YELLOW = "\033[100;93m"
-    BG_NEUTRAL_GREEN = "\033[100;92m"
+    BG_NEUTRAL_GREEN = "\033[100;32m"
     BG_NEUTRAL_WHITE = "\033[100;37m"
     ID_COLORS = ("\033[35m", "\033[36m", "\033[34m", "\033[32m", "\033[33m", "\033[91m")
     ACTIVE_STATUS_STYLES = {
