@@ -1359,7 +1359,7 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config, include_capac
     if include_capacity and task.get("status") in RUNNABLE_STATUSES:
         capacity = capacity_blockers(config, task)
         if capacity:
-            notes.append("capacity blocked: " + ",".join(capacity))
+            notes.append("waiting for capacity: " + ",".join(capacity))
     if is_in_cooldown(task):
         notes.append(cooldown_note(task))
     elif task.get("status") == "needs_resume" and not capacity and dependency_status(
@@ -1367,11 +1367,11 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config, include_capac
         by_id,
         require_accepted_review=config.dependency_requires_accepted_review,
     )[0]:
-        notes.append("resume ready")
+        notes.append("ready to resume")
     if startup_stalled(task):
         notes.append(startup_stall_note(task))
     if task.get("status") == "failed" and task.get("last_error"):
-        notes.append("last error: " + one_line(task.get("last_error")))
+        notes.append("error: " + one_line(task.get("last_error")))
     if task.get("status") == "running":
         notes.extend(running_notes(task, config))
     blocking_subtasks = blocking_subtask_note_cell(task, by_id, config)
@@ -1387,17 +1387,8 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config, include_capac
     if scheduling_note:
         notes.append(scheduling_note)
     if task.get("resolution"):
-        notes.append("resolution: " + str(task.get("resolution")))
+        notes.append("resolved: " + str(task.get("resolution")))
     if task.get("status") == "completed" and not task.get("resolution"):
-        review = review_status(task)
-        if review == "unreviewed":
-            notes.append("awaiting review")
-        elif review == "rejected":
-            notes.append("review failed")
-        elif review == "needs_followup":
-            notes.append("needs follow-up")
-        elif review == "reviewing":
-            notes.append("reviewing")
         notes.extend(completed_timing_notes(task))
         chain_note = chain_note_cell(task)
         if chain_note:
@@ -1430,10 +1421,10 @@ def completed_timing_notes(task: dict) -> list[str]:
     completed = parse_time(task.get("completed_at"))
     if completed:
         seconds = max(0, int((utc_now() - completed).total_seconds()))
-        notes.append(f"completed {format_elapsed(seconds)} ago")
+        notes.append(f"done {format_elapsed(seconds)} ago")
     duration = task_duration_seconds(task)
     if duration is not None:
-        notes.append(f"duration {format_elapsed(duration)}")
+        notes.append(f"ran {format_elapsed(duration)}")
     return notes
 
 
@@ -1459,24 +1450,24 @@ def scheduling_note_cell(task: dict) -> str:
         fields.append(f"pool={pool}")
     if priority != "normal":
         fields.append(f"priority={priority}")
-    return "scheduling: " + ", ".join(fields) if fields else ""
+    return ", ".join(fields) if fields else ""
 
 
 def worktree_apply_note(task: dict) -> str:
     if task.get("execution_mode") != "git_worktree":
         return ""
     if task.get("execution_conflict_fix_status") == "queued" and task.get("execution_conflict_fix_task_id"):
-        return "conflict-fix subtask queued"
+        return "conflict fix queued"
     if task.get("execution_rebase_status") == "blocked":
-        return "worktree rebase blocked"
+        return "rebase blocked"
     if task.get("execution_rebase_status") == "rebased" and review_status(task) != "accepted":
-        return "worktree rebased; awaiting re-review"
+        return "rebased; re-review needed"
     if review_status(task) != "accepted":
         return ""
     if task.get("execution_apply_status") == "applied":
         target = one_line(task.get("execution_apply_target") or "main")
-        return f"worktree applied to {target}"
-    return "worktree not applied"
+        return f"applied to {target}"
+    return "not applied"
 
 
 def execution_profile_note(task: dict) -> str:
@@ -1528,13 +1519,43 @@ def execution_profile_marker(task: dict) -> str:
 def chain_note_cell(task: dict) -> str:
     chain_status = task.get("chain_status")
     decision = task.get("last_review_decision")
+    if decision == "needs_fix":
+        return "fix requested"
+    if decision == "needs_human":
+        return "human review needed"
+    if decision == "failed_review":
+        return "review failed"
     if chain_status and decision:
-        return f"chain {chain_status} after {decision}"
+        return f"{chain_status_note_label(chain_status)} after {review_decision_note_label(decision)}"
     if chain_status:
-        return f"chain {chain_status}"
+        return chain_status_note_label(chain_status)
     if decision:
-        return f"reviewer {decision}"
+        return review_decision_note_label(decision)
     return ""
+
+
+def chain_status_note_label(value: object) -> str:
+    labels = {
+        "awaiting_review": "review pending",
+        "accepted": "review accepted",
+        "fixing": "fix running",
+        "needs_fix": "fix needed",
+        "needs_human": "human review needed",
+        "waiting_fix": "waiting for fix",
+    }
+    status = str(value or "")
+    return labels.get(status, "chain " + one_line(status))
+
+
+def review_decision_note_label(value: object) -> str:
+    labels = {
+        "needs_fix": "fix requested",
+        "needs_human": "human review needed",
+        "failed_review": "review failed",
+        "pass": "review passed",
+    }
+    decision = str(value or "")
+    return labels.get(decision, "review " + one_line(decision))
 
 
 def subtask_note_cell(task: dict, by_id: dict[str, dict] | None = None) -> str:
@@ -1544,10 +1565,19 @@ def subtask_note_cell(task: dict, by_id: dict[str, dict] | None = None) -> str:
     if subtask_for and by_id and by_id.get(str(subtask_for)):
         subtask_for_label = f"{dependency_label(str(subtask_for), by_id)} ({subtask_for})"
     if subtask_type and subtask_for:
-        return f"subtask {subtask_type} for {subtask_for_label}"
+        return f"{subtask_type_note_label(subtask_type)} for {subtask_for_label}"
     if subtask_type:
-        return f"subtask {subtask_type}"
+        return subtask_type_note_label(subtask_type)
     return ""
+
+
+def subtask_type_note_label(value: object) -> str:
+    labels = {
+        "auto_review_fix": "review fix",
+        "conflict_fix": "conflict fix",
+    }
+    subtask_type = str(value or "")
+    return labels.get(subtask_type, "subtask " + one_line(subtask_type))
 
 
 def blocking_subtask_effective_status(task: dict, by_id: dict[str, dict], config: Config) -> str:
@@ -1569,10 +1599,28 @@ def blocking_subtask_note_cell(task: dict, by_id: dict[str, dict], config: Confi
     for item in active:
         status = blocking_subtask_status(item, by_id, config)
         counts[status] = counts.get(status, 0) + 1
-    summary = ", ".join(f"{count} {status}" for status, count in sorted(counts.items())[:2])
+    summary = ", ".join(f"{count} {subtask_status_note_label(status)}" for status, count in sorted(counts.items())[:2])
     timing = active_subtask_timing_summary(active, by_id, config)
-    note = f"subtasks {len(active)}/{len(ids)} {summary}"
+    note = f"waiting on {len(active)}/{len(ids)} subtasks: {summary}"
     return f"{note}, {timing}" if timing else note
+
+
+def subtask_status_note_label(status: str) -> str:
+    labels = {
+        "awaiting_review": "review pending",
+        "blocked_dependency": "dependency blocked",
+        "blocked_user": "blocked",
+        "failed": "failed",
+        "missing": "missing",
+        "needs_followup": "fix needed",
+        "review_failed": "review failed",
+        "reviewing": "reviewing",
+        "running": "running",
+        "runnable": "ready",
+        "subtasks_blocked": "subtask blocked",
+        "waiting_subtasks": "waiting",
+    }
+    return labels.get(status, one_line(status))
 
 
 def active_subtask_timing_summary(active: list[dict | None], by_id: dict[str, dict], config: Config) -> str:
@@ -1583,13 +1631,13 @@ def active_subtask_timing_summary(active: list[dict | None], by_id: dict[str, di
         if status in {"failed", "blocked_user", "review_failed", "needs_followup", "subtasks_blocked"}
     ]
     if blocked:
-        return oldest_age_note(blocked, ("completed_at", "updated_at", "started_at"), "blocked")
+        return oldest_age_note(blocked, ("completed_at", "updated_at", "started_at"), "oldest blocked")
     running = [task for task, status in status_rows if status == "running"]
     if running:
-        return oldest_age_note(running, ("started_at", "updated_at"), "running")
+        return oldest_age_note(running, ("started_at", "updated_at"), "oldest running")
     review = [task for task, status in status_rows if status in {"awaiting_review", "reviewing"}]
     if review:
-        return oldest_age_note(review, ("completed_at", "updated_at", "started_at"), "awaiting review")
+        return oldest_age_note(review, ("completed_at", "updated_at", "started_at"), "oldest review")
     return ""
 
 
@@ -1670,8 +1718,8 @@ def startup_stalled(task: dict) -> bool:
 def startup_stall_note(task: dict) -> str:
     status = str(task.get("status") or "")
     if status in {"runnable", "needs_resume", "running"}:
-        return "startup stall retry evidence"
-    return "startup stall history"
+        return "startup stalled; retrying"
+    return "startup stalled earlier"
 
 
 def dependency_blocker_labels(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
