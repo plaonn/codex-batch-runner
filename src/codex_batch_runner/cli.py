@@ -1924,25 +1924,19 @@ class ListColor:
     BOLD = "\033[1m"
     DIM = "\033[2m"
     RED = "\033[31m"
-    LIGHT_RED = "\033[91m"
     YELLOW = "\033[33m"
     LIGHT_YELLOW = "\033[93m"
     GREEN = "\033[32m"
-    LIGHT_GREEN = "\033[92m"
     CYAN = "\033[36m"
     LIGHT_CYAN = "\033[96m"
     BLUE = "\033[34m"
-    LIGHT_BLUE = "\033[94m"
-    BLACK = "\033[30m"
-    GRAY = "\033[90m"
-    WHITE = "\033[37m"
+    BRIGHT_WHITE = "\033[97m"
     BG_RED = "\033[101;30m"
     BG_YELLOW = "\033[103;30m"
     BG_GREEN = "\033[102;30m"
     BG_CYAN = "\033[106;30m"
     BG_BLUE = "\033[104;30m"
-    BG_MARKER = "\033[48;5;238m"
-    BG_MARKER_NEUTRAL = "\033[107m"
+    BG_MARKER = "\033[100m"
     BG_DIM = "\033[100;37m"
     BG_NEUTRAL_CYAN = "\033[100;96m"
     BG_NEUTRAL_YELLOW = "\033[100;93m"
@@ -2009,26 +2003,6 @@ class ListColor:
         "resolved": "--",
         "archived": "--",
     }
-    STATUS_MARKER_FOREGROUNDS_BY_BACKGROUND = {
-        BG_RED: LIGHT_RED,
-        BG_YELLOW: LIGHT_YELLOW,
-        BG_GREEN: LIGHT_GREEN,
-        BG_CYAN: LIGHT_CYAN,
-        BG_BLUE: LIGHT_BLUE,
-        BG_DIM: GRAY,
-        BG_NEUTRAL_CYAN: GRAY,
-        BG_NEUTRAL_YELLOW: GRAY,
-        BG_NEUTRAL_GREEN: GRAY,
-        BG_NEUTRAL_WHITE: GRAY,
-    }
-    NEUTRAL_STATUS_MARKER_BACKGROUNDS = {
-        BG_DIM,
-        BG_NEUTRAL_CYAN,
-        BG_NEUTRAL_YELLOW,
-        BG_NEUTRAL_GREEN,
-        BG_NEUTRAL_WHITE,
-    }
-
     def __init__(self, enabled: bool) -> None:
         self.enabled = enabled
 
@@ -2102,10 +2076,7 @@ class ListColor:
         marker = self.STATUS_MARKERS.get(status, "--")
         if not self.enabled:
             return marker
-        style = self.ACTIVE_STATUS_STYLES.get(status) or self.PASSIVE_STATUS_STYLES.get(status)
-        foreground = self.STATUS_MARKER_FOREGROUNDS_BY_BACKGROUND.get(style, self.WHITE)
-        background = self.BG_MARKER_NEUTRAL if style in self.NEUTRAL_STATUS_MARKER_BACKGROUNDS else self.BG_MARKER
-        return self.apply(marker, background + self.BOLD + foreground)
+        return self.apply(marker, self.BG_MARKER + self.BOLD + self.BRIGHT_WHITE)
 
 
 def list_colorizer(mode: str) -> ListColor:
