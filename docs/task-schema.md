@@ -140,10 +140,6 @@ runner는 Codex 최종 응답이 `completed`이면 `review_status=unreviewed`를
 - `title`: 사람이 목록에서 구분하기 쉬운 짧은 제목. 없으면 prompt 첫 줄, 그것도 없으면 id로 fallback합니다.
 - `description`: 사람이 읽는 선택 설명. 실행 prompt를 대체하지 않습니다.
 
-향후 후보 필드:
-
-- `source_thread_id`: 확인 가능한 경우 등록을 요청한 Codex thread id
-
 기존 task와 호환되어야 합니다. metadata가 없는 task는 `cwd`를 `project_root` fallback으로 사용하고, `project_id`는 fallback root의 basename으로 계산하며, `category`와 `labels`는 비워 둡니다. `title`이 없는 task는 list 표시에서 prompt 첫 줄 또는 id를 fallback으로 사용합니다.
 
 관련 CLI:
@@ -187,4 +183,4 @@ Accepted-review dependency mode는 dependent work에 더 엄격하고 안전한 
 
 의존 task가 `failed` 또는 `blocked_user`인 경우 dependent task를 자동 실패시키지 않음. `list` 또는 `show`에서 dependency blocked 상태를 표시하고 runner는 해당 task를 건너뜀.
 
-마이그레이션은 기본값 `false`로 기존 queue behavior를 유지하면서 completed task의 review state를 정리한 뒤, operator가 accepted review를 dependency gate로 쓸 준비가 되었을 때 `dependency_requires_accepted_review=true`를 설정하는 순서로 진행함. 전환 직후 completed-but-unaccepted dependency를 가진 child task는 runnable 목록에서 제외될 수 있으며, `list`, `summary`, `review-bundle`, `review-next`, `doctor` report에서 blocker reason을 확인함. Optional worktree isolation roadmap은 기본 호환성 정책을 유지하더라도 completed-but-unreviewed 결과와 독립적인 후속 작업이 main worktree를 더럽히거나 unrelated task state를 섞지 않고 공존하도록 만드는 방향임.
+마이그레이션은 기본값 `false`로 기존 queue behavior를 유지하면서 completed task의 review state를 정리한 뒤, operator가 accepted review를 dependency gate로 쓸 준비가 되었을 때 `dependency_requires_accepted_review=true`를 설정하는 순서로 진행함. 전환 직후 completed-but-unaccepted dependency를 가진 child task는 runnable 목록에서 제외될 수 있으며, `list`, `summary`, `review-bundle`, `review-next`, `doctor` report에서 blocker reason을 확인함.
