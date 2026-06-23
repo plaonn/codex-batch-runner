@@ -1729,6 +1729,43 @@ class CliTests(unittest.TestCase):
             self.assertEqual(["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
             self.assertTrue(any(line.startswith("  Table title") for line in output.splitlines()))
 
+    def test_list_mid_width_abbreviates_ids_to_preserve_note_width(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            dep = create_task(config, "dependency", tmp, task_id="task-2026-06-22T160751-381010Z0000")
+            dep["status"] = "completed"
+            dep["review_status"] = "accepted"
+            save_task(config, dep)
+            task = create_task(
+                config,
+                "Task title",
+                tmp,
+                task_id="task-2026-06-23T002728-133408Z0000",
+                project_id="codex-batch-runner",
+                depends_on=["task-2026-06-22T160751-381010Z0000"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["completed_at"] = "2026-06-21T00:05:00+00:00"
+            task["last_run"] = {"duration_seconds": 3723.4}
+            save_task(config, task)
+            fixed_now = datetime(2026, 6, 21, 0, 10, tzinfo=timezone.utc)
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=104), patch(
+                "codex_batch_runner.cli.utc_now",
+                return_value=fixed_now,
+            ):
+                code, output = run_cli(["--config", str(config_path), "list", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertEqual(["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+            self.assertRegex(output, r"task-2026\.\.\.[^\s]*3408Z0000")
+            self.assertRegex(output, r"task-[^\s]*\.\.\.[^\s]*0Z0000 \(done\)")
+            self.assertIn("completed 5m ago", output)
+            self.assertIn("duration 1h 02m", output)
+            self.assertTrue(all(width <= 104 for width in visible_line_widths(output)))
+
     def test_list_compact_groups_by_project_and_renders_subtask_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

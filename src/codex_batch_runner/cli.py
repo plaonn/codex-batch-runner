@@ -64,6 +64,9 @@ from .wake import schedule_manual_cooldown_wake
 from .worktree import build_apply_report, build_cleanup_report, build_prepare_report, render_worktree_report, task_worktree_metadata
 
 WATCH_RESTART_MESSAGE = "cbr source changed since this watch started; restart watch to use updated code"
+COMPACT_TABLE_MIN_NOTE_WIDTH = 28
+COMPACT_TABLE_MIN_ID_WIDTH = 18
+COMPACT_TABLE_MIN_DEPS_WIDTH = 10
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -818,7 +821,7 @@ def compact_widths(header: list[str], row_groups: list[dict[str, object]], termi
     summary_rows = [group["summary"] for group in row_groups]
     deps = [cell for group in row_groups for cell in group["deps"]]  # type: ignore[index]
     notes = [cell for group in row_groups for cell in group["notes"]]  # type: ignore[index]
-    project = column_width(header[0], summary_rows, 0, cap=24 if terminal_width else None)
+    project = column_width(header[0], summary_rows, 0, cap=18 if terminal_width else None)
     task_id = column_width(header[1], summary_rows, 1, cap=36 if terminal_width else None)
     status = column_width(header[2], summary_rows, 2)
     attempts = column_width(header[3], summary_rows, 3)
@@ -827,16 +830,30 @@ def compact_widths(header: list[str], row_groups: list[dict[str, object]], termi
     widths = [project, task_id, status, attempts, dep_width, note_width]
     if terminal_width is None:
         return widths
-    fixed = sum(widths[:4]) + (len(widths) - 1) * 2
+    fixed = project + status + attempts + (len(widths) - 1) * 2
     available = max(10, terminal_width - fixed)
-    desired_deps = min(dep_width, 38)
-    min_deps = min(max(visible_len(header[4]), 8), available - 4)
-    deps_share = max(min_deps, min(desired_deps, max(8, available // 3)))
-    note_share = max(visible_len(header[5]), available - deps_share)
-    if deps_share + note_share > available:
-        note_share = max(visible_len(header[5]), available - deps_share)
+    min_id = min(task_id, max(visible_len(header[1]), COMPACT_TABLE_MIN_ID_WIDTH))
+    min_deps = min(dep_width, max(visible_len(header[4]), COMPACT_TABLE_MIN_DEPS_WIDTH))
+    min_note = min(note_width, max(visible_len(header[5]), COMPACT_TABLE_MIN_NOTE_WIDTH))
+    if available < min_id + min_deps + min_note:
+        min_note = max(visible_len(header[5]), available - min_id - min_deps)
+    note_share = min(note_width, max(visible_len(header[5]), min_note))
+    remaining = max(0, available - note_share)
+    deps_share = min(dep_width, max(min_deps, min(24, remaining // 2 if remaining >= 2 else remaining)))
+    id_share = min(task_id, max(visible_len(header[1]), remaining - deps_share))
+    if id_share < min_id and deps_share > min_deps:
+        take = min(min_id - id_share, deps_share - min_deps)
+        id_share += take
+        deps_share -= take
+    if deps_share < min_deps and id_share > min_id:
+        take = min(min_deps - deps_share, id_share - min_id)
+        deps_share += take
+        id_share -= take
+    if id_share + deps_share + note_share < available:
+        note_share = min(note_width, note_share + available - id_share - deps_share - note_share)
+    widths[1] = max(visible_len(header[1]), id_share)
     widths[4] = max(visible_len(header[4]), deps_share)
-    widths[5] = max(visible_len(header[5]), available - widths[4])
+    widths[5] = max(visible_len(header[5]), available - widths[1] - widths[4])
     return widths
 
 
@@ -852,12 +869,12 @@ def column_width(header: str, rows: list[object], index: int, cap: int | None = 
 def render_compact_group(group: dict[str, object], widths: list[int], terminal_width: int | None) -> list[str]:
     deps = group["deps"] if isinstance(group["deps"], list) else ["-"]
     notes = group["notes"] if isinstance(group["notes"], list) else ["-"]
-    dep_lines = wrap_cell_list([str(dep) for dep in deps], widths[4])
+    dep_lines = wrap_cell_list([fit_dependency_identifier(str(dep), widths[4]) for dep in deps], widths[4])
     note_lines = wrap_cell_list([str(note) for note in notes], widths[5])
     summary = group["summary"] if isinstance(group["summary"], list) else ["", "", "", ""]
     first = [
         fit_visible(str(summary[0]), widths[0]),
-        fit_visible(str(summary[1]), widths[1]),
+        fit_middle_visible(str(summary[1]), widths[1]),
         fit_visible(str(summary[2]), widths[2]),
         fit_visible(str(summary[3]), widths[3]),
         dep_lines[0] if dep_lines else "-",
@@ -1529,6 +1546,38 @@ def fit_visible(value: str, width: int) -> str:
     if visible_len(value) <= width:
         return value
     return truncate_visible(value, width)
+
+
+def fit_middle_visible(value: str, width: int) -> str:
+    if visible_len(value) <= width:
+        return value
+    if "\033[" in value:
+        return fit_visible(value, width)
+    if width <= 0:
+        return ""
+    if width <= 3:
+        return value[:width]
+    remaining = width - 3
+    prefix = max(1, remaining // 2)
+    suffix = max(1, remaining - prefix)
+    if prefix + suffix >= len(value):
+        return value[:width]
+    return value[:prefix].rstrip() + "..." + value[-suffix:]
+
+
+def fit_dependency_identifier(value: str, width: int) -> str:
+    if visible_len(value) <= width:
+        return value
+    if "\033[" in value:
+        return fit_visible(value, width)
+    for separator in (" (", ":"):
+        if separator in value:
+            base, suffix = value.split(separator, 1)
+            suffix = separator + suffix
+            base_width = max(1, width - visible_len(suffix))
+            if base_width >= 4:
+                return fit_middle_visible(base, base_width) + suffix
+    return fit_middle_visible(value, width)
 
 
 def truncate_visible(value: str, width: int) -> str:
