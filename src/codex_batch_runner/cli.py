@@ -924,7 +924,9 @@ def render_dependency_graph(
         source_prefixes = dependency_graph_source_prefixes(len(source_nodes), fanins)
         for index, task in enumerate(source_nodes):
             if index in fanins:
-                lines.append(format_dependency_graph_prefix(fanins[index]["connector"], str(task.get("id") or ""), color))
+                connector = dependency_graph_connector_prefix(source_prefixes[index])
+                if connector:
+                    lines.append(format_dependency_graph_prefix(connector, str(task.get("id") or ""), color))
             lines.extend(
                 render_dependency_graph_source_node(
                     task,
@@ -1061,10 +1063,16 @@ def dependency_graph_fanins(source_nodes: list[dict], source_id_to_index: dict[s
         connector_offset = min(width - 1, len(dep_indices))
         fanins[target_index] = {
             "dep_indices": dep_indices,
-            "connector": (" " * connector_offset) + "\\|",
             "target_offset": min(6, connector_offset + 1),
         }
     return fanins
+
+
+def dependency_graph_connector_prefix(source_prefix: str) -> str:
+    star_index = source_prefix.find("*")
+    if star_index <= 0:
+        return ""
+    return (" " * (star_index - 1)) + "\\|"
 
 
 def dependency_graph_source_prefixes(source_count: int, fanins: dict[int, dict[str, object]]) -> list[str]:

@@ -245,6 +245,14 @@ def visible_line_widths(output: str) -> list[int]:
     return [len(strip_ansi(line)) for line in output.splitlines()]
 
 
+def assert_graph_connector_attaches(test_case: unittest.TestCase, output: str, target_marker: str) -> None:
+    lines = [strip_ansi(line) for line in output.splitlines()]
+    target_index = next(index for index, line in enumerate(lines) if target_marker in line)
+    connector_line = lines[target_index - 1]
+    test_case.assertIn("|", connector_line)
+    test_case.assertEqual(connector_line.index("|"), lines[target_index].index("*"))
+
+
 def git(cwd: Path, *args: str) -> str:
     result = subprocess.run(["git", "-C", str(cwd), *args], check=True, stdout=subprocess.PIPE, text=True)
     return result.stdout.strip()
@@ -2009,6 +2017,7 @@ class CliTests(unittest.TestCase):
             self.assertIn(" \\ *    ==completed  [N] Add parser tests", output)
             self.assertIn("  \\|", output)
             self.assertIn("   *    ..runnable  [N] Wire parser into CLI", output)
+            assert_graph_connector_attaches(self, output, "Wire parser into CLI")
             self.assertIn("*       ||waiting_subtasks  [N] Release CLI parser change", output)
             self.assertIn("└─ ??awaiting_review  [N] Fix review comments for parser change", output)
             self.assertNotIn("└─ * ??awaiting_review", output)
@@ -2259,6 +2268,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("  \\ *   ??awaiting_review  [N] Release checklist review pending", graph_output)
             self.assertIn("   \\ *  ??accepted_unapplied  [N] Release checklist merge ready, not applied", graph_output)
             self.assertIn("     *  ||blocked_dependency  [N] Publish CLI parser release notes", graph_output)
+            assert_graph_connector_attaches(self, graph_output, "CLI docs draft awaiting review")
+            assert_graph_connector_attaches(self, graph_output, "Publish CLI parser release notes")
             self.assertIn("*       ||waiting_subtasks  [N] Release checklist approval pending", graph_output)
             self.assertIn("        └─ ..runnable  [N] Fix release checklist review comments", graph_output)
             self.assertNotIn("└─ * ..runnable", graph_output)
