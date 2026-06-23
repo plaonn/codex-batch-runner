@@ -632,7 +632,14 @@ def render_list_output(config: Config, args: argparse.Namespace, terminal_width:
     color = list_colorizer(args.color)
     banners = [] if args.demo else list_cooldown_banners(config)
     if args.graph:
-        output = render_dependency_graph(tasks, by_id, config, color)
+        output = render_dependency_graph(
+            tasks,
+            by_id,
+            config,
+            color,
+            terminal_width=terminal_width,
+            include_capacity=not args.demo,
+        )
         return "\n".join([*banners, output]) if banners else output
     if not args.verbose:
         output = render_compact_list(tasks, by_id, config, color, terminal_width=terminal_width, include_capacity=not args.demo)
@@ -834,51 +841,65 @@ def render_table_row(row: list[str], widths: list[int]) -> str:
     return "  ".join([*padded, row[-1]])
 
 
-def render_visible_table(header: list[str], rows: list[list[str]]) -> str:
-    widths = [
-        max(visible_len(row[index]) for row in [header, *rows])
-        for index in range(len(header))
-    ]
-    return "\n".join(render_compact_row(row, widths) for row in [header, *rows])
-
-
-def render_dependency_graph(tasks: list[dict], by_id: dict[str, dict], config: Config, color: "ListColor") -> str:
-    header = ["PROJECT", "TASK", "STATUS", "WAITS_FOR", "DEP_STATE", "TASK_TITLE", "DEP_TITLE"]
-    rows: list[list[str]] = []
-    for task in tasks:
-        deps = task.get("depends_on")
-        dep_ids = [str(dep_id) for dep_id in deps if str(dep_id)] if isinstance(deps, list) else []
-        if not dep_ids:
-            rows.append(dependency_graph_row(task, "-", "none", "", "-", by_id, config, color))
-            continue
-        for dep_id in dep_ids:
-            dep = by_id.get(dep_id)
-            dep_state, dep_style_status = dependency_display_state(dep, by_id, config)
-            dep_title = task_title(dep) if dep else "-"
-            rows.append(dependency_graph_row(task, dep_id, dep_state, dep_style_status, dep_title, by_id, config, color))
-    return render_visible_table(header, rows)
-
-
-def dependency_graph_row(
-    task: dict,
-    dep_id: str,
-    dep_state: str,
-    dep_style_status: str,
-    dep_title: str,
+def render_dependency_graph(
+    tasks: list[dict],
     by_id: dict[str, dict],
     config: Config,
     color: "ListColor",
+    terminal_width: int | None = None,
+    include_capacity: bool = True,
+) -> str:
+    if not tasks:
+        return "(no tasks)"
+    grouped: dict[str, list[dict]] = {}
+    project_order: list[str] = []
+    for task in tasks:
+        project = task_project_id(task)
+        if project not in grouped:
+            grouped[project] = []
+            project_order.append(project)
+        grouped[project].append(task)
+    lines: list[str] = []
+    for project in project_order:
+        if lines:
+            lines.append("")
+        lines.append(project_section_header(project, terminal_width))
+        for task in grouped[project]:
+            lines.extend(render_dependency_graph_node(task, by_id, config, color, include_capacity=include_capacity))
+    if terminal_width is None:
+        return "\n".join(lines)
+    return "\n".join(fit_graph_line(line, max(1, terminal_width)) for line in lines)
+
+
+def fit_graph_line(line: str, width: int) -> str:
+    if "\033[" in line:
+        return line
+    return fit_visible(line, width)
+
+
+def render_dependency_graph_node(
+    task: dict,
+    by_id: dict[str, dict],
+    config: Config,
+    color: "ListColor",
+    include_capacity: bool = True,
 ) -> list[str]:
     cells = task_display_cells(task, by_id, config, color)
-    return [
-        cells["project"],
-        cells["id"],
-        cells["status"],
-        color.task_id(dep_id),
-        color.dependency_state(dep_state, dep_style_status),
-        cells["title"],
-        scalar_cell(dep_title),
-    ]
+    lines = [f"{cells['id']}  {cells['status']}  ATT {cells['attempts']}  {cells['title']}"]
+    note = note_cell(task, by_id, config, include_capacity=include_capacity)
+    if note != "-":
+        lines.append("  note: " + note)
+    dep_ids = dependency_id_cells(task.get("depends_on"), by_id, config, color)
+    depends_on = task.get("depends_on")
+    raw_dep_ids = [str(dep_id) for dep_id in depends_on if str(dep_id)] if isinstance(depends_on, list) else []
+    if not raw_dep_ids:
+        lines.append("  -> - (none)")
+    else:
+        for dep_id, dep_cell in zip(raw_dep_ids, dep_ids):
+            dep = by_id.get(dep_id)
+            dep_title = "missing dependency" if dep is None else task_title(dep)
+            lines.append(f"  -> {dep_cell}  {dep_title}")
+    return lines
 
 
 def render_compact_list(
@@ -1671,6 +1692,7 @@ class ListColor:
         "needs_followup": BG_RED,
         "blocked_user": BG_RED,
         "subtasks_blocked": BG_RED,
+        "accepted_unapplied": BG_YELLOW,
     }
     PASSIVE_STATUS_STYLES = {
         "runnable": BG_NEUTRAL_CYAN,
@@ -1726,16 +1748,6 @@ class ListColor:
             return self.status_label(label, style_status)
         label = dep_id if self.enabled else f"{dep_id} ({state})"
         return self.status_label(label, state)
-
-    def dependency_state(self, state: str, style_status: str) -> str:
-        if state == "none":
-            return state
-        if state == "done":
-            return self.status_label(state, "completed")
-        if state == "blocked":
-            return self.status_label(state, style_status)
-        style = self.DEPENDENCY_STATE_STYLES.get(state)
-        return self.apply(state, style) if style else state
 
     def status(self, status: str) -> str:
         return self.status_label(status, status)
