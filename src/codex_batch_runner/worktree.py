@@ -292,7 +292,7 @@ def cleanup_eligibility(task: dict[str, Any]) -> dict[str, Any]:
             )
         }
 
-    if status == "completed" and review == "accepted":
+    if status in {"completed", "archived"} and review == "accepted":
         return {
             "error": (
                 "worktree cleanup requires execution_apply_status=applied before removing retained worktree; "
@@ -306,7 +306,7 @@ def cleanup_eligibility(task: dict[str, Any]) -> dict[str, Any]:
     if status not in {"completed", "archived"}:
         return {"error": "worktree cleanup is only allowed for completed, archived, or resolved terminal worktree tasks"}
 
-    if status == "completed" and review == "rejected":
+    if status in {"completed", "archived"} and review == "rejected":
         return {"cleanup_kind": "discard", "cleanup_reason": "review_status=rejected"}
 
     if review == "needs_followup":
