@@ -1942,6 +1942,7 @@ class ListColor:
     BG_CYAN = "\033[106;30m"
     BG_BLUE = "\033[104;30m"
     BG_MARKER = "\033[48;5;238m"
+    BG_MARKER_NEUTRAL = "\033[107m"
     BG_DIM = "\033[100;37m"
     BG_NEUTRAL_CYAN = "\033[100;96m"
     BG_NEUTRAL_YELLOW = "\033[100;93m"
@@ -2020,6 +2021,13 @@ class ListColor:
         BG_NEUTRAL_GREEN: GRAY,
         BG_NEUTRAL_WHITE: GRAY,
     }
+    NEUTRAL_STATUS_MARKER_BACKGROUNDS = {
+        BG_DIM,
+        BG_NEUTRAL_CYAN,
+        BG_NEUTRAL_YELLOW,
+        BG_NEUTRAL_GREEN,
+        BG_NEUTRAL_WHITE,
+    }
 
     def __init__(self, enabled: bool) -> None:
         self.enabled = enabled
@@ -2096,7 +2104,8 @@ class ListColor:
             return marker
         style = self.ACTIVE_STATUS_STYLES.get(status) or self.PASSIVE_STATUS_STYLES.get(status)
         foreground = self.STATUS_MARKER_FOREGROUNDS_BY_BACKGROUND.get(style, self.WHITE)
-        return self.apply(marker, self.BG_MARKER + self.BOLD + foreground)
+        background = self.BG_MARKER_NEUTRAL if style in self.NEUTRAL_STATUS_MARKER_BACKGROUNDS else self.BG_MARKER
+        return self.apply(marker, background + self.BOLD + foreground)
 
 
 def list_colorizer(mode: str) -> ListColor:
