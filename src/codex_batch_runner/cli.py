@@ -877,19 +877,21 @@ def render_dependency_graph_node(
     terminal_width: int | None = None,
 ) -> list[str]:
     status = color.status(status_cell(task, by_id, config))
-    lines = graph_content_lines("* ", status, compact_title(task), terminal_width)
+    branch_key = scalar_cell(task.get("id"))
+    lines = graph_content_lines(color.graph_branch(branch_key, "*") + " ", status, compact_title(task), terminal_width)
     depends_on = task.get("depends_on")
     raw_dep_ids = [str(dep_id) for dep_id in depends_on if str(dep_id)] if isinstance(depends_on, list) else []
     if not raw_dep_ids:
         return lines
-    lines.append("|\\")
+    rail = color.graph_branch(branch_key, "|")
     for index, dep_id in enumerate(raw_dep_ids):
         dep = by_id.get(dep_id)
         dep_state = dependency_state_cell(dep, by_id, config, color)
         dep_title = "missing dependency" if dep is None else compact_title(dep)
         is_last = index == len(raw_dep_ids) - 1
-        prefix = "    `-- " if is_last else "    |-- "
-        continuation_prefix = "        " if is_last else "    |   "
+        connector = color.dim_text("└─ " if is_last else "├─ ")
+        prefix = rail + "       " + connector
+        continuation_prefix = rail + "          "
         lines.extend(
             graph_content_lines(
                 prefix,
@@ -900,7 +902,6 @@ def render_dependency_graph_node(
                 title_style=color.dim_text,
             )
         )
-    lines.append("|/")
     return lines
 
 
@@ -1756,6 +1757,12 @@ class ListColor:
             return task_id
         index = zlib.crc32(task_id.encode("utf-8")) % len(self.ID_COLORS)
         return self.apply(task_id, self.ID_COLORS[index])
+
+    def graph_branch(self, key: str, value: str) -> str:
+        if not self.enabled or not value:
+            return value
+        index = zlib.crc32(key.encode("utf-8")) % len(self.ID_COLORS)
+        return self.apply(value, self.ID_COLORS[index])
 
     def project(self, project_id: str) -> str:
         return self.apply(project_id, self.LIGHT_CYAN)
