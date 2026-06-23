@@ -1957,6 +1957,67 @@ class CliTests(unittest.TestCase):
             self.assertEqual("runnable", rows["child"]["status"])
             self.assertNotIn("blocked_dependency", output)
 
+    @unittest.expectedFailure
+    def test_list_graph_contract_separates_dependency_edges_from_subtask_rows(self) -> None:
+        """Contract for the pending list --graph renderer rewrite."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, dependency_requires_accepted_review=True)
+            config = Config.load(str(config_path))
+            shared_parser = create_task(config, "Build shared parser", tmp, task_id="shared-parser", project_id="project-a")
+            shared_parser["status"] = "completed"
+            shared_parser["review_status"] = "accepted"
+            save_task(config, shared_parser)
+            parser_tests = create_task(config, "Add parser tests", tmp, task_id="parser-tests", project_id="project-a")
+            parser_tests["status"] = "completed"
+            parser_tests["review_status"] = "accepted"
+            save_task(config, parser_tests)
+            create_task(
+                config,
+                "Wire parser into CLI",
+                tmp,
+                task_id="wire-cli",
+                project_id="project-a",
+                depends_on=["shared-parser", "parser-tests"],
+            )
+            release = create_task(config, "Release CLI parser change", tmp, task_id="release-cli", project_id="project-a")
+            release["status"] = "completed"
+            release["review_status"] = "accepted"
+            release["blocking_subtask_ids"] = ["fix-review"]
+            save_task(config, release)
+            fix_review = create_task(
+                config,
+                "Fix review comments for parser change",
+                tmp,
+                task_id="fix-review",
+                project_id="project-a",
+            )
+            fix_review["status"] = "completed"
+            fix_review["review_status"] = "unreviewed"
+            fix_review["parent_task_id"] = "release-cli"
+            fix_review["subtask_for"] = "release-cli"
+            fix_review["subtask_type"] = "auto_review_fix"
+            save_task(config, fix_review)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--graph", "--color=never"])
+            color_code, color_output = run_cli(
+                ["--config", str(config_path), "list", "--project", "project-a", "--graph", "--color=always"]
+            )
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, color_code)
+            self.assertIn("[project-a]", output)
+            self.assertIn("*       ==completed  [N] Build shared parser", output)
+            self.assertIn(" \\ *    ==completed  [N] Add parser tests", output)
+            self.assertIn("  \\|", output)
+            self.assertIn("   *    ||blocked_dependency  [N] Wire parser into CLI", output)
+            self.assertIn("*       ||waiting_subtasks  [N] Release CLI parser change", output)
+            self.assertIn("└─ ??awaiting_review  [N] Fix review comments for parser change", output)
+            self.assertNotIn("└─ * ??awaiting_review", output)
+            self.assertNotIn("Build shared parser", strip_ansi(color_output).split("Wire parser into CLI", maxsplit=1)[1])
+            self.assertIn("\033[2mFix review comments for parser change\033[0m", color_output)
+            self.assertNotIn("\033[2mBuild shared parser\033[0m", color_output)
+            self.assertNotIn("\033[2mAdd parser tests\033[0m", color_output)
+
     def test_list_graph_renders_dependencies_as_git_style_edges(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp, dependency_requires_accepted_review=True)
