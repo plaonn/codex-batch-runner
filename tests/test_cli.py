@@ -1713,16 +1713,50 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual("[project-a]", lines[0])
-            self.assertIn("child", output)
-            self.assertIn("done-dep", output)
-            self.assertIn("review-dep", output)
-            self.assertIn("missing-dep", output)
-            self.assertIn("* child  blocked_dependency  ATT 0  Child work", output)
+            self.assertNotIn("child", output)
+            self.assertNotIn("done-dep", output)
+            self.assertNotIn("review-dep", output)
+            self.assertNotIn("missing-dep", output)
+            self.assertIn("* blocked_dependency  Child work", output)
             self.assertIn("|\\", output)
-            self.assertIn("| * done-dep (done)  Done dependency", output)
-            self.assertIn("| * review-dep (not_accepted)  Review dependency", output)
-            self.assertIn("| * missing-dep (missing)  missing dependency", output)
+            self.assertIn("| * done  Done dependency", output)
+            self.assertIn("| * not_accepted  Review dependency", output)
+            self.assertIn("| * missing  missing dependency", output)
             self.assertIn("|/", output)
+            self.assertNotIn("ATT", output)
+            self.assertNotIn("note:", output)
+            self.assertNotIn("|--", output)
+            self.assertNotIn("`--", output)
+
+    def test_list_graph_wraps_titles_without_breaking_graph_prefixes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(
+                config,
+                "Very long dependency title that should wrap under the dependency edge",
+                tmp,
+                task_id="dep",
+                project_id="project-a",
+            )
+            create_task(
+                config,
+                "Very long child title that should wrap under the source node",
+                tmp,
+                task_id="child",
+                project_id="project-a",
+                depends_on=["dep"],
+            )
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=42):
+                code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--graph"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
+            self.assertIn("* blocked_dependency  Very long", output)
+            self.assertIn("                      title that should", output)
+            self.assertIn("| * blocked  Very long dependency", output)
+            self.assertIn("|            that should wrap under the", output)
             self.assertNotIn("|--", output)
             self.assertNotIn("`--", output)
 
@@ -1766,13 +1800,15 @@ class CliTests(unittest.TestCase):
             self.assertIn("`-- Blocking review fix subtask", compact_output)
             self.assertIn("LAST_RESULT", verbose_output)
             self.assertIn("[demo]", graph_output)
-            self.assertIn("* demo-blocked  blocked_dependency", graph_output)
-            self.assertIn("| * demo-done (done)", graph_output)
-            self.assertIn("demo-missing", graph_output)
+            self.assertIn("* blocked_dependency  Runnable task blocked by dependencies", graph_output)
+            self.assertIn("| * done  Completed accepted dependency", graph_output)
+            self.assertNotIn("demo-blocked", graph_output)
+            self.assertNotIn("demo-done", graph_output)
+            self.assertNotIn("demo-missing", graph_output)
             self.assertIn("not_accepted", graph_output)
             self.assertIn("not_applied", graph_output)
-            self.assertIn("\033[2mdemo-done\033[0m", color_output)
-            self.assertIn("\033[103;30mdemo-worktree-review:not_accepted\033[0m", color_output)
+            self.assertIn("\033[2mdone\033[0m", color_output)
+            self.assertIn("\033[103;30mnot_accepted\033[0m", color_output)
             self.assertIn("\033[103;30maccepted_unapplied\033[0m", color_output)
             rows = json.loads(json_output)
             self.assertTrue(rows)

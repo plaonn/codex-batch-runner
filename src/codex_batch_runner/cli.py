@@ -865,16 +865,8 @@ def render_dependency_graph(
             lines.append("")
         lines.append(project_section_header(project, terminal_width))
         for task in grouped[project]:
-            lines.extend(render_dependency_graph_node(task, by_id, config, color, include_capacity=include_capacity))
-    if terminal_width is None:
-        return "\n".join(lines)
-    return "\n".join(fit_graph_line(line, max(1, terminal_width)) for line in lines)
-
-
-def fit_graph_line(line: str, width: int) -> str:
-    if "\033[" in line:
-        return line
-    return fit_visible(line, width)
+            lines.extend(render_dependency_graph_node(task, by_id, config, color, terminal_width=terminal_width))
+    return "\n".join(lines)
 
 
 def render_dependency_graph_node(
@@ -882,25 +874,46 @@ def render_dependency_graph_node(
     by_id: dict[str, dict],
     config: Config,
     color: "ListColor",
-    include_capacity: bool = True,
+    terminal_width: int | None = None,
 ) -> list[str]:
-    cells = task_display_cells(task, by_id, config, color)
-    lines = [f"* {cells['id']}  {cells['status']}  ATT {cells['attempts']}  {cells['title']}"]
-    note = note_cell(task, by_id, config, include_capacity=include_capacity)
-    dep_ids = dependency_id_cells(task.get("depends_on"), by_id, config, color)
+    status = color.status(status_cell(task, by_id, config))
+    lines = graph_content_lines("* ", status, compact_title(task), terminal_width)
     depends_on = task.get("depends_on")
     raw_dep_ids = [str(dep_id) for dep_id in depends_on if str(dep_id)] if isinstance(depends_on, list) else []
-    if note != "-":
-        lines.append(("| note: " if raw_dep_ids else "  note: ") + note)
     if not raw_dep_ids:
         return lines
     lines.append("|\\")
-    for dep_id, dep_cell in zip(raw_dep_ids, dep_ids):
+    for dep_id in raw_dep_ids:
         dep = by_id.get(dep_id)
-        dep_title = "missing dependency" if dep is None else task_title(dep)
-        lines.append(f"| * {dep_cell}  {dep_title}")
+        dep_state = dependency_state_cell(dep, by_id, config, color)
+        dep_title = "missing dependency" if dep is None else compact_title(dep)
+        lines.extend(graph_content_lines("| * ", dep_state, dep_title, terminal_width))
     lines.append("|/")
     return lines
+
+
+def dependency_state_cell(dep: dict | None, by_id: dict[str, dict], config: Config, color: "ListColor") -> str:
+    state, style_status = dependency_display_state(dep, by_id, config)
+    return color.dependency_state(state, style_status)
+
+
+def graph_content_lines(prefix: str, label: str, title: str, terminal_width: int | None) -> list[str]:
+    line = f"{prefix}{label}  {title}"
+    if terminal_width is None or visible_len(line) <= terminal_width:
+        return [line]
+    width = max(1, terminal_width)
+    protected = f"{prefix}{label}  "
+    title_width = max(1, width - visible_len(protected))
+    title_lines = wrap_visible(title, title_width)
+    continuation_prefix = graph_continuation_prefix(prefix) + (" " * visible_len(label)) + "  "
+    return [protected + title_lines[0], *(continuation_prefix + item for item in title_lines[1:])]
+
+
+def graph_continuation_prefix(prefix: str) -> str:
+    width = visible_len(prefix)
+    if prefix.startswith("|") and width > 0:
+        return "|" + (" " * (width - 1))
+    return " " * width
 
 
 def render_compact_list(
@@ -1749,6 +1762,15 @@ class ListColor:
             return self.status_label(label, style_status)
         label = dep_id if self.enabled else f"{dep_id} ({state})"
         return self.status_label(label, state)
+
+    def dependency_state(self, state: str, style_status: str) -> str:
+        if state == "done":
+            return self.apply(state, self.DIM)
+        if state in self.DEPENDENCY_STATE_STYLES:
+            return self.apply(state, self.DEPENDENCY_STATE_STYLES[state])
+        if state == "blocked":
+            return self.status_label(state, style_status)
+        return self.status_label(state, state)
 
     def status(self, status: str) -> str:
         return self.status_label(status, status)
