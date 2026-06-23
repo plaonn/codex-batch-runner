@@ -1075,9 +1075,13 @@ def graph_continuation_gap(width: int, fill: str | None = None) -> str:
         return ""
     if fill is None:
         return " " * width
+    connector = "├"
+    styled_connector = connector
+    if "\033[" in fill:
+        styled_connector = ListColor(True).dim_text(connector)
     fill_width = max(1, visible_len(fill))
     body_width = width - 1
-    body = ""
+    body = styled_connector
     while visible_len(body) + fill_width <= body_width:
         body += fill
     return body + (" " * max(0, body_width - visible_len(body))) + " "
