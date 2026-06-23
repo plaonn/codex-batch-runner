@@ -18,6 +18,7 @@ PREPARE_OK_STATUSES = {"runnable", "needs_resume"}
 WORKTREE_RETAINED_STATUSES = {"prepared", "running", "retained", "cleanup_candidate"}
 APPLY_OK_WORKTREE_STATUSES = {"prepared", "retained", "cleanup_candidate"}
 CLEANUP_OK_WORKTREE_STATUSES = {"prepared", "retained", "cleanup_candidate"}
+DISCARD_CLEANUP_RESOLUTIONS = {"duplicate", "manual", "superseded", "wont_fix"}
 
 
 def sanitize_branch_name(task_id: str) -> str:
@@ -199,9 +200,12 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
         report["classification"] = {"status": "missing", "reason": "task has no worktree metadata"}
         report["errors"].append("worktree cleanup requires retained worktree metadata; missing: " + ", ".join(missing))
         return report
-    eligibility_error = cleanup_eligibility_error(task)
-    if eligibility_error:
-        report["errors"].append(eligibility_error)
+    eligibility = cleanup_eligibility(task)
+    if eligibility.get("cleanup_kind"):
+        report["cleanup_kind"] = eligibility["cleanup_kind"]
+        report["cleanup_reason"] = eligibility.get("cleanup_reason")
+    if eligibility.get("error"):
+        report["errors"].append(str(eligibility["error"]))
         return report
     try:
         validate_branch_name(branch)
@@ -230,9 +234,17 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
         git(repo_root, "worktree", "remove", str(worktree_path))
     task["execution_worktree_status"] = "cleaned"
     task["execution_cleaned_at"] = iso_now()
+    task["execution_cleanup_kind"] = eligibility.get("cleanup_kind")
+    task["execution_cleanup_reason"] = eligibility.get("cleanup_reason")
+    task["execution_cleanup_branch_retained"] = True
+    task["execution_cleanup_result_applied"] = eligibility.get("cleanup_kind") == "applied"
     save_task(config, task)
     report["applied"] = True
-    report["classification"] = {**classification, "status": "cleaned", "reason": "worktree cleaned; branch retained"}
+    if eligibility.get("cleanup_kind") == "discard":
+        reason = "worktree cleaned after explicit discard; branch retained; task result was not applied"
+    else:
+        reason = "worktree cleaned; branch retained"
+    report["classification"] = {**classification, "status": "cleaned", "reason": reason}
     write_event_nonfatal(
         config,
         "task_worktree_cleaned",
@@ -246,25 +258,71 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
             execution_worktree_status="cleaned",
             execution_apply_status=task.get("execution_apply_status"),
             execution_applied_head=task.get("execution_applied_head"),
+            execution_cleanup_kind=task.get("execution_cleanup_kind"),
+            execution_cleanup_reason=task.get("execution_cleanup_reason"),
+            execution_cleanup_branch_retained=task.get("execution_cleanup_branch_retained"),
+            execution_cleanup_result_applied=task.get("execution_cleanup_result_applied"),
         ),
     )
     return report
 
 
 def cleanup_eligibility_error(task: dict[str, Any]) -> str | None:
+    eligibility = cleanup_eligibility(task)
+    error = eligibility.get("error")
+    return str(error) if error else None
+
+
+def cleanup_eligibility(task: dict[str, Any]) -> dict[str, Any]:
     if task.get("execution_mode") != "git_worktree":
-        return "worktree cleanup requires execution_mode=git_worktree"
-    if not (
-        (task.get("status") == "completed" and task.get("review_status") == "accepted")
-        or task.get("status") == "archived"
-    ):
-        return "worktree cleanup is only allowed for archived or completed accepted tasks"
-    if not has_applied_worktree_metadata(task):
-        return (
-            "worktree cleanup requires execution_apply_status=applied before removing retained worktree; "
-            f"found execution_apply_status={task.get('execution_apply_status') or '-'}"
+        return {"error": "worktree cleanup requires execution_mode=git_worktree"}
+
+    status = str(task.get("status") or "")
+    review = str(task.get("review_status") or "")
+    resolution = str(task.get("resolution") or "")
+    applied = has_applied_worktree_metadata(task)
+
+    if applied:
+        if (status == "completed" and review == "accepted") or status == "archived":
+            return {"cleanup_kind": "applied", "cleanup_reason": "execution_apply_status=applied"}
+        return {
+            "error": (
+                "worktree cleanup found applied metadata, but applied cleanup is only allowed for "
+                "archived or completed accepted tasks"
+            )
+        }
+
+    if status == "completed" and review == "accepted":
+        return {
+            "error": (
+                "worktree cleanup requires execution_apply_status=applied before removing retained worktree; "
+                f"found execution_apply_status={task.get('execution_apply_status') or '-'}"
+            )
+        }
+
+    if resolution in DISCARD_CLEANUP_RESOLUTIONS and status in {"archived", "blocked_user", "completed", "failed"} and review != "accepted":
+        return {"cleanup_kind": "discard", "cleanup_reason": f"resolution={resolution}"}
+
+    if status not in {"completed", "archived"}:
+        return {"error": "worktree cleanup is only allowed for completed, archived, or resolved terminal worktree tasks"}
+
+    if status == "completed" and review == "rejected":
+        return {"cleanup_kind": "discard", "cleanup_reason": "review_status=rejected"}
+
+    if review == "needs_followup":
+        return {
+            "error": (
+                "worktree cleanup requires execution_apply_status=applied or an explicit terminal discard "
+                "resolution before removing a needs_followup retained worktree"
+            )
+        }
+
+    return {
+        "error": (
+            "worktree cleanup requires execution_apply_status=applied, review_status=rejected, "
+            "or terminal resolution=duplicate|manual|superseded|wont_fix"
         )
-    return None
+    }
 
 
 def has_applied_worktree_metadata(task: dict[str, Any]) -> bool:
@@ -1068,6 +1126,10 @@ def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
         ("execution_conflict_fix_task_id", "conflict_fix_task_id"),
         ("execution_conflict_fix_queued_at", "conflict_fix_queued_at"),
         ("execution_cleaned_at", "cleaned_at"),
+        ("execution_cleanup_kind", "cleanup_kind"),
+        ("execution_cleanup_reason", "cleanup_reason"),
+        ("execution_cleanup_branch_retained", "cleanup_branch_retained"),
+        ("execution_cleanup_result_applied", "cleanup_result_applied"),
     ):
         value = task.get(source)
         if value not in (None, ""):
@@ -1182,7 +1244,7 @@ def render_worktree_report(report: dict[str, Any]) -> str:
         f"task_id: {report.get('task_id')}",
         f"applied: {str(bool(report.get('applied'))).lower()}",
     ]
-    for key in ("branch", "worktree_path", "base_ref", "base_head", "apply_status"):
+    for key in ("branch", "worktree_path", "base_ref", "base_head", "apply_status", "cleanup_kind", "cleanup_reason"):
         if report.get(key):
             lines.append(f"{key}: {report.get(key)}")
     for key in ("branch_head", "main_head", "apply_target", "apply_strategy", "planned_action"):

@@ -818,6 +818,10 @@ Task metadata model:
 - `execution_conflict_fix_task_id`: stale-base conflict를 port하기 위해 enqueue된 linked conflict-fix task id
 - `execution_conflict_fix_queued_at`: conflict-fix subtask enqueue 시각
 - `execution_apply_via_task_id`: parent task result가 linked conflict-fix task apply를 통해 integration target에 반영된 경우 해당 task id
+- `execution_cleanup_kind`: worktree cleanup 종류. 현재 값은 `applied` 또는 `discard`
+- `execution_cleanup_reason`: cleanup 허용 근거. 예: `execution_apply_status=applied`, `resolution=superseded`, `review_status=rejected`
+- `execution_cleanup_branch_retained`: cleanup이 local branch를 보존했는지 여부. 현재 cleanup command는 항상 `true`를 기록합니다.
+- `execution_cleanup_result_applied`: cleanup 당시 task result가 integration target에 적용된 상태였는지 여부
 
 Branch naming and base policy:
 
@@ -845,9 +849,11 @@ Review, reject, follow-up, accept model:
 
 Cleanup and retention:
 
-- 기본 retention은 보수적입니다. `failed`, `blocked_user`, `needs_resume`, `completed + unreviewed`, `completed + rejected`, `completed + needs_followup` task의 worktree는 review와 recovery를 위해 보존합니다.
-- `execution_apply_status=applied` metadata가 있는 `completed + accepted` 또는 `archived` worktree task만 cleanup 후보가 됩니다. Accepted-but-not-applied task는 review는 끝났지만 main 반영이 끝나지 않은 상태이므로 retained worktree cleanup 대상이 아닙니다.
+- 기본 retention은 보수적입니다. unresolved `failed`, unresolved `blocked_user`, `needs_resume`, `completed + unreviewed`, `completed + needs_followup` task의 worktree는 review와 recovery를 위해 보존합니다. `completed + rejected` task나 terminal discard resolution이 있는 failed/blocked/completed/archived task는 result가 명시적으로 거부 또는 폐기된 상태이므로 discard cleanup 후보가 될 수 있습니다.
+- Applied cleanup은 `execution_apply_status=applied` metadata가 있는 `completed + accepted` 또는 `archived` worktree task만 후보가 됩니다. Accepted-but-not-applied task는 review는 끝났지만 main 반영이 끝나지 않은 상태이므로 retained worktree cleanup 대상이 아닙니다.
+- Discard cleanup은 result를 적용하지 않기로 명시 결정한 retained worktree task에만 허용합니다. 허용 근거는 `review_status=rejected` 또는 terminal discard resolution allowlist(`superseded`, `wont_fix`, `duplicate`, `manual`)입니다. Resolution-based discard cleanup은 terminal task status(`failed`, `blocked_user`, `completed`, `archived`)에서만 허용합니다. `needs_followup`만으로는 terminal 상태가 아니므로 cleanup 후보가 아니며, `smoke` resolution은 적용 포기 의미가 명확하지 않아 allowlist에서 제외합니다.
 - `cbr worktree cleanup`은 기본 dry-run이며, `--apply`가 명시되고 cleanup guard가 통과한 경우에만 retained task worktree를 삭제합니다. Local branch, task JSON, runtime log, event log, private state는 삭제하지 않습니다. Task/log/event 파일 삭제는 별도 `cbr prune` semantics를 통해서만 수행합니다.
+- Discard cleanup apply는 worktree만 삭제하고 branch를 보존하며 `execution_cleanup_kind=discard`, `execution_cleanup_reason`, `execution_cleanup_branch_retained=true`, `execution_cleanup_result_applied=false` metadata와 sanitized `task_worktree_cleaned` event를 남깁니다. Dry-run/human report는 applied cleanup과 discard cleanup을 `cleanup_kind`/`cleanup_reason`으로 구분합니다.
 - Cleanup guard는 target path가 configured `worktree_root` 아래인지, path가 비어 있지 않은지, Git worktree registry에 등록된 path인지, task metadata와 branch가 일치하는지, worktree metadata가 missing/stale/recovery_required 상태가 아닌지 확인해야 합니다.
 - Branch deletion은 worktree 삭제와 별도 phase입니다. 기본은 local branch 보존이며, branch 삭제는 merged/applied 상태와 explicit option을 요구합니다.
 
@@ -887,7 +893,7 @@ Next minimal implementation task:
 
 - `cbr worktree prepare TASK_ID --dry-run|--apply`: `worktree_mode=task`일 때만 task-specific branch와 worktree를 준비합니다. Apply mode는 queue lock 아래에서 task metadata를 갱신하고 `task_worktree_prepared` event를 기록합니다.
 - `cbr worktree apply TASK_ID --dry-run|--apply`: `completed + accepted` worktree task branch를 main worktree에 반영할 수 있는지 검증합니다. `--apply`는 main HEAD가 `execution_base_head`와 같으면 queue lock 아래에서 `git merge --ff-only`를 수행하고, main HEAD가 `execution_base_head` 이후로 forward-only 이동했으면 clean stale-base rebase만 task branch/worktree에 수행한 뒤 re-review로 돌립니다. Stale-base conflict는 bounded `worktree_conflict_fix` subtask를 최대 한 개 enqueue합니다. Dirty main, non-linear main movement, branch에 적용할 commit이 없는 상태는 main과 task branch를 변경하지 않고 거부합니다. 성공해도 worktree와 branch는 보존합니다.
-- `cbr worktree cleanup TASK_ID --dry-run|--apply`: `execution_apply_status=applied` metadata가 있는 `completed + accepted` 또는 `archived` task의 retained worktree만 정리합니다. Cleanup은 configured `worktree_root` 아래의 Git registry에 등록된 path와 task metadata branch가 일치할 때만 수행하며, local branch, task JSON, runtime log, event log는 보존합니다. Apply mode는 queue lock 아래에서 `execution_worktree_status=cleaned`를 기록하고 `task_worktree_cleaned` event를 남깁니다.
+- `cbr worktree cleanup TASK_ID --dry-run|--apply`: applied cleanup은 `execution_apply_status=applied` metadata가 있는 `completed + accepted` 또는 `archived` task의 retained worktree만 정리합니다. Discard cleanup은 `review_status=rejected` 또는 terminal discard resolution(`superseded`, `wont_fix`, `duplicate`, `manual`)이 있는 retained worktree를 정리할 수 있습니다. Resolution-based discard cleanup은 `failed`, `blocked_user`, `completed`, `archived` task에만 허용합니다. Cleanup은 configured `worktree_root` 아래의 Git registry에 등록된 path와 task metadata branch가 일치할 때만 수행하며, local branch, task JSON, runtime log, event log는 보존합니다. Apply mode는 queue lock 아래에서 `execution_worktree_status=cleaned`와 cleanup kind/reason metadata를 기록하고 `task_worktree_cleaned` event를 남깁니다.
 - 두 명령은 Codex를 호출하지 않습니다. `run-next`는 같은 prepare/recovery 규칙을 사용해 selected task worktree를 준비합니다. Existing branch/worktree가 metadata와 맞지 않거나 path/registry 상태가 불일치하면 `recovery_required`로 보고하고 자동 복구하지 않습니다.
 
 ## Project routing metadata

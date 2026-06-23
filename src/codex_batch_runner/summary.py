@@ -283,6 +283,10 @@ def render_worktree_metadata(task: dict) -> str:
         "worktree_root",
         "repo_root",
         "cleaned_at",
+        "cleanup_kind",
+        "cleanup_reason",
+        "cleanup_branch_retained",
+        "cleanup_result_applied",
     ):
         if key in metadata:
             lines.append(f"{key}: {display_value(metadata.get(key))}")
