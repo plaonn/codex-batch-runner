@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any
 
 from .config import Config
+from .execution_profiles import small_profile_routing_candidate
 from .queue import list_tasks, task_labels, task_project_id, task_project_root
 from .timeutil import iso_now
 from .transcript import sanitize
@@ -110,13 +111,7 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
     attempts = int(task.get("attempts") or 0)
     review_status = completed_review_status(task)
     reviewer_decision = str(reviewer.get("decision") or task.get("last_review_decision") or "")
-    candidate = small_profile_candidate(
-        profile=profile,
-        resolved_profile=resolved_profile,
-        routing_size=routing_size,
-        routing_risk=routing_risk,
-        scopes=scopes,
-    )
+    candidate = small_profile_candidate(task, profile=profile, resolved_profile=resolved_profile)
     return {
         "id": task.get("id"),
         "profile": profile,
@@ -149,17 +144,13 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def small_profile_candidate(
+    task: dict[str, Any],
     *,
     profile: str,
     resolved_profile: str,
-    routing_size: str,
-    routing_risk: str,
-    scopes: list[str],
 ) -> bool:
     return (
-        sanitize(routing_size) in {"tiny", "small"}
-        and sanitize(routing_risk) == "low"
-        and set(scopes or ["none"]).issubset({"docs", "none"})
+        small_profile_routing_candidate(task)
         and sanitize(profile) != "small"
         and sanitize(resolved_profile) != "small"
     )
