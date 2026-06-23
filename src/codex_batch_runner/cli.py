@@ -10,6 +10,7 @@ import sys
 import time
 import unicodedata
 import zlib
+from datetime import timedelta
 from pathlib import Path
 
 from .apply_plan import apply_queue_mutation_plan, build_apply_plan_report, render_apply_plan_report
@@ -34,6 +35,9 @@ from .queue import (
     RESOLUTIONS,
     RUNNABLE_STATUSES,
     TASK_PRIORITIES,
+    ROUTING_RISKS,
+    ROUTING_SIZES,
+    VERIFICATION_SCOPES,
     archive_task,
     capacity_blockers,
     create_task,
@@ -124,6 +128,9 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument("--routing-reason", help="public-safe reason for the profile/provider routing decision")
     enqueue.add_argument("--routing-risk-factor", action="append", default=[], help="public-safe routing risk factor, repeatable")
     enqueue.add_argument("--routing-experiment", help="routing experiment label such as baseline, downshift_probe, upshift_guard, or manual")
+    enqueue.add_argument("--routing-size", choices=ROUTING_SIZES, help="public-safe pre-enqueue work size estimate")
+    enqueue.add_argument("--routing-risk", choices=ROUTING_RISKS, help="public-safe pre-enqueue implementation risk estimate")
+    enqueue.add_argument("--verification-scope", action="append", choices=VERIFICATION_SCOPES, default=[], help="public-safe verification scope tag, repeatable")
     enqueue.add_argument("--capacity-pool", default="codex", help="capacity pool for scheduler admission (default: codex)")
     enqueue.add_argument("--priority", choices=TASK_PRIORITIES, default="normal", help="task priority within a project (default: normal)")
     enqueue.set_defaults(func=cmd_enqueue)
@@ -139,6 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("--unreviewed", action="store_true", help="show completed tasks waiting for review")
     list_cmd.add_argument("--needs-review", action="store_true", help="show tasks that need operator review")
     list_cmd.add_argument("--verbose", action="store_true", help="include compact result and run summary columns")
+    list_cmd.add_argument("--demo", action="store_true", help="render synthetic demo tasks without reading the queue")
     list_cmd.add_argument(
         "--graph",
         action="store_true",
@@ -400,6 +408,9 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         routing_reason=args.routing_reason,
         routing_risk_factors=args.routing_risk_factor,
         routing_experiment=args.routing_experiment,
+        routing_size=args.routing_size,
+        routing_risk=args.routing_risk,
+        verification_scope=args.verification_scope,
         execution_backend=args.backend,
         shell_command=shell_command,
         shell_timeout_seconds=args.shell_timeout_seconds,
@@ -583,7 +594,7 @@ def wait_for_watch_action(interval: float) -> tuple[str, float]:
 
 
 def render_list_output(config: Config, args: argparse.Namespace, terminal_width: int | None = None) -> str:
-    tasks = list_tasks(config)
+    tasks = demo_list_tasks() if args.demo else list_tasks(config)
     by_id = {task.get("id"): task for task in tasks}
     explicit_filter = bool(
         args.status
@@ -619,19 +630,19 @@ def render_list_output(config: Config, args: argparse.Namespace, terminal_width:
     if args.json:
         return json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True)
     color = list_colorizer(args.color)
-    banners = list_cooldown_banners(config)
+    banners = [] if args.demo else list_cooldown_banners(config)
     if args.graph:
         output = render_dependency_graph(tasks, by_id, config, color)
         return "\n".join([*banners, output]) if banners else output
     if not args.verbose:
-        output = render_compact_list(tasks, by_id, config, color, terminal_width=terminal_width)
+        output = render_compact_list(tasks, by_id, config, color, terminal_width=terminal_width, include_capacity=not args.demo)
         return "\n".join([*banners, output]) if banners else output
     header = ["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"]
     header.append("PROFILE")
     header.extend(["RAW_STATUS", "LAST_RESULT", "LAST_RUN", "LAST_ERROR"])
     rows = []
     for task in tasks:
-        row = list_table_row(task, by_id, config)
+        row = list_table_row(task, by_id, config, include_capacity=not args.demo)
         row.extend(verbose_table_cells(task))
         rows.append(row)
     output = render_table(header, rows)
@@ -659,6 +670,125 @@ def list_cooldown_banners(config: Config) -> list[str]:
 
 def list_sort_key(task: dict) -> tuple[str, str]:
     return (str(task.get("created_at") or ""), str(task.get("id") or ""))
+
+
+def demo_list_tasks() -> list[dict]:
+    now = utc_now()
+
+    def ago(seconds: int) -> str:
+        return (now - timedelta(seconds=seconds)).isoformat()
+
+    def task(
+        task_id: str,
+        title: str,
+        *,
+        status: str = "runnable",
+        attempts: int = 0,
+        depends_on: list[str] | None = None,
+        created_ago: int = 0,
+        **extra: object,
+    ) -> dict:
+        return {
+            "id": task_id,
+            "title": title,
+            "description": None,
+            "prompt": "Synthetic demo task. This task is not stored in the queue.",
+            "cwd": "/demo/repo",
+            "project_id": "demo",
+            "category": "demo",
+            "labels": ["demo"],
+            "status": status,
+            "attempts": attempts,
+            "depends_on": depends_on or [],
+            "created_at": ago(created_ago),
+            "updated_at": ago(max(0, created_ago - 60)),
+            "demo": True,
+            **extra,
+        }
+
+    return [
+        task("demo-ready", "Runnable task without dependencies", created_ago=900, execution_profile="small"),
+        task(
+            "demo-done",
+            "Completed accepted dependency",
+            status="completed",
+            created_ago=840,
+            completed_at=ago(420),
+            review_status="accepted",
+            last_run={"duration_seconds": 180},
+        ),
+        task(
+            "demo-review",
+            "Completed task awaiting review",
+            status="completed",
+            attempts=1,
+            depends_on=["demo-done"],
+            created_ago=780,
+            completed_at=ago(300),
+            review_status="unreviewed",
+            last_result={"status": "completed", "summary": "demo result"},
+            last_run={"command_kind": "exec", "returncode": 0, "duration_seconds": 240},
+        ),
+        task(
+            "demo-worktree-review",
+            "Worktree dependency awaiting review",
+            status="completed",
+            attempts=1,
+            created_ago=750,
+            completed_at=ago(260),
+            review_status="unreviewed",
+            execution_mode="git_worktree",
+            execution_worktree_status="retained",
+            execution_worktree_branch="codex/demo-worktree-review",
+        ),
+        task(
+            "demo-blocked",
+            "Runnable task blocked by dependencies",
+            depends_on=["demo-done", "demo-review", "demo-worktree-review", "demo-worktree", "demo-missing"],
+            created_ago=720,
+        ),
+        task(
+            "demo-worktree",
+            "Accepted worktree task not applied",
+            status="completed",
+            attempts=2,
+            created_ago=660,
+            completed_at=ago(180),
+            review_status="accepted",
+            execution_mode="git_worktree",
+            execution_apply_status="pending",
+            execution_worktree_status="retained",
+            execution_worktree_branch="codex/demo-worktree",
+            last_run={"command_kind": "exec", "returncode": 0, "duration_seconds": 360},
+        ),
+        task(
+            "demo-parent",
+            "Parent task waiting for blocking subtask",
+            status="completed",
+            created_ago=600,
+            completed_at=ago(240),
+            review_status="unreviewed",
+            blocking_subtask_ids=["demo-subtask"],
+        ),
+        task(
+            "demo-subtask",
+            "Blocking review fix subtask",
+            created_ago=540,
+            parent_task_id="demo-parent",
+            subtask_for="demo-parent",
+            subtask_type="auto_review_fix",
+        ),
+        task(
+            "demo-running",
+            "Running task with recent progress",
+            status="running",
+            attempts=1,
+            created_ago=480,
+            started_at=ago(125),
+            last_progress={"last_jsonl_event_at": ago(35), "jsonl_event_count": 14},
+            execution_profile="deep",
+        ),
+    ]
 
 
 def default_visible_tasks_with_subtasks(tasks: list[dict], by_id: dict[str, dict]) -> list[dict]:
@@ -739,15 +869,14 @@ def dependency_graph_row(
     config: Config,
     color: "ListColor",
 ) -> list[str]:
-    task_id = scalar_cell(task.get("id"))
-    status = status_cell(task, by_id, config)
+    cells = task_display_cells(task, by_id, config, color)
     return [
-        color.project(scalar_cell(task_project_id(task))),
-        color.task_id(task_id),
-        color.status(status),
+        cells["project"],
+        cells["id"],
+        cells["status"],
         color.task_id(dep_id),
         color.dependency_state(dep_state, dep_style_status),
-        compact_title(task),
+        cells["title"],
         scalar_cell(dep_title),
     ]
 
@@ -758,9 +887,10 @@ def render_compact_list(
     config: Config,
     color: "ListColor",
     terminal_width: int | None = None,
+    include_capacity: bool = True,
 ) -> str:
     header = ["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"]
-    project_groups = compact_project_groups(tasks, by_id, config, color)
+    project_groups = compact_project_groups(tasks, by_id, config, color, include_capacity=include_capacity)
     row_groups = [group for _, groups in project_groups for group in groups]
     if terminal_width is not None and terminal_width < 80:
         return render_compact_block_list(project_groups, terminal_width)
@@ -778,6 +908,7 @@ def compact_project_groups(
     by_id: dict[str, dict],
     config: Config,
     color: "ListColor",
+    include_capacity: bool = True,
 ) -> list[tuple[str, list[dict[str, object]]]]:
     grouped: dict[str, list[dict]] = {}
     project_order: list[str] = []
@@ -791,7 +922,14 @@ def compact_project_groups(
         (
             project,
             [
-                compact_task_group(item["task"], by_id, config, color, tree_prefix=item["prefix"])
+                compact_task_group(
+                    item["task"],
+                    by_id,
+                    config,
+                    color,
+                    tree_prefix=item["prefix"],
+                    include_capacity=include_capacity,
+                )
                 for item in compact_tree_items(grouped[project], by_id)
             ],
         )
@@ -867,19 +1005,31 @@ def compact_task_group(
     config: Config,
     color: "ListColor",
     tree_prefix: str = "",
+    include_capacity: bool = True,
 ) -> dict[str, object]:
+    cells = task_display_cells(task, by_id, config, color)
     dep_ids = dependency_id_cells(task.get("depends_on"), by_id, config, color)
-    note_segments = note_cells(task, by_id, config)
+    note_segments = note_cells(task, by_id, config, include_capacity=include_capacity)
     return {
         "summary": [
-            color.project(scalar_cell(task_project_id(task))),
-            color.task_id(scalar_cell(task.get("id"))),
-            color.status(status_cell(task, by_id, config)),
-            scalar_cell(task.get("attempts", 0)),
+            cells["project"],
+            cells["id"],
+            cells["status"],
+            cells["attempts"],
         ],
         "deps": dep_ids or ["-"],
         "notes": note_segments or ["-"],
-        "title": color.title(tree_prefix + compact_title(task)),
+        "title": color.title(tree_prefix + cells["title"]),
+    }
+
+
+def task_display_cells(task: dict, by_id: dict[str, dict], config: Config, color: "ListColor") -> dict[str, str]:
+    return {
+        "project": color.project(scalar_cell(task_project_id(task))),
+        "id": color.task_id(scalar_cell(task.get("id"))),
+        "status": color.status(status_cell(task, by_id, config)),
+        "attempts": scalar_cell(task.get("attempts", 0)),
+        "title": compact_title(task),
     }
 
 
@@ -1021,7 +1171,7 @@ def render_compact_row(row: list[str], widths: list[int]) -> str:
     return "  ".join([*padded, row[-1]])
 
 
-def list_table_row(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
+def list_table_row(task: dict, by_id: dict[str, dict], config: Config, include_capacity: bool = True) -> list[str]:
     return [
         scalar_cell(task.get("id")),
         scalar_cell(truncate_table_text(compact_title(task), 72)),
@@ -1029,7 +1179,7 @@ def list_table_row(task: dict, by_id: dict[str, dict], config: Config) -> list[s
         scalar_cell(task_project_id(task)),
         scalar_cell(task.get("attempts", 0)),
         deps_cell(task.get("depends_on"), by_id, config),
-        note_cell(task, by_id, config),
+        note_cell(task, by_id, config, include_capacity=include_capacity),
     ]
 
 
@@ -1116,15 +1266,15 @@ def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config
     return status
 
 
-def note_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
-    notes = note_cells(task, by_id, config)
+def note_cell(task: dict, by_id: dict[str, dict], config: Config, include_capacity: bool = True) -> str:
+    notes = note_cells(task, by_id, config, include_capacity=include_capacity)
     return "; ".join(notes) if notes else "-"
 
 
-def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
+def note_cells(task: dict, by_id: dict[str, dict], config: Config, include_capacity: bool = True) -> list[str]:
     notes = []
     capacity = []
-    if task.get("status") in RUNNABLE_STATUSES:
+    if include_capacity and task.get("status") in RUNNABLE_STATUSES:
         capacity = capacity_blockers(config, task)
         if capacity:
             notes.append("capacity blocked: " + ",".join(capacity))

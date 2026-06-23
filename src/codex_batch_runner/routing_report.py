@@ -56,7 +56,12 @@ def build_routing_report(
             "label": summarize_groups(group_rows_by_label(rows)),
             "profile_category": summarize_groups(group_rows(rows, "profile_category")),
             "routing_experiment": summarize_groups(group_rows(rows, "routing_experiment")),
+            "routing_size": summarize_groups(group_rows(rows, "routing_size")),
+            "routing_risk": summarize_groups(group_rows(rows, "routing_risk")),
             "routing_risk_factor": summarize_groups(group_rows_by_risk_factor(rows)),
+            "verification_scope": summarize_groups(group_rows_by_verification_scope(rows)),
+            "routing_decision": summarize_groups(group_rows(rows, "routing_decision")),
+            "profile_routing_decision": summarize_groups(group_rows(rows, "profile_routing_decision")),
             "profile_experiment": summarize_groups(group_rows(rows, "profile_experiment")),
         },
     }
@@ -89,6 +94,10 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
     profile = str(task.get("execution_profile") or "default")
     category = str(task.get("category") or "uncategorized")
     routing_experiment = str(task.get("routing_experiment") or "unspecified")
+    routing_size = str(task.get("routing_size") or "unspecified")
+    routing_risk = str(task.get("routing_risk") or "unspecified")
+    scopes = verification_scope(task)
+    decision_key = routing_decision_key(routing_size, routing_risk, scopes)
     reviewer = task.get("reviewer_codex") if isinstance(task.get("reviewer_codex"), dict) else {}
     last_run = task.get("last_run") if isinstance(task.get("last_run"), dict) else {}
     duration = number(last_run.get("duration_seconds"))
@@ -104,6 +113,11 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
         "routing_reason": sanitize(task.get("routing_reason")) if task.get("routing_reason") else "",
         "routing_risk_factors": routing_risk_factors(task),
         "routing_experiment": sanitize(routing_experiment),
+        "routing_size": sanitize(routing_size),
+        "routing_risk": sanitize(routing_risk),
+        "verification_scope": scopes,
+        "routing_decision": decision_key,
+        "profile_routing_decision": f"profile={sanitize(profile)} {decision_key}",
         "profile_experiment": f"{profile}/{sanitize(routing_experiment)}",
         "status": str(task.get("status") or ""),
         "review_status": review_status,
@@ -158,12 +172,34 @@ def group_rows_by_risk_factor(rows: list[dict[str, Any]]) -> dict[str, list[dict
     return groups
 
 
+def group_rows_by_verification_scope(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        scopes = row.get("verification_scope") if isinstance(row.get("verification_scope"), list) else ["none"]
+        for scope in scopes or ["none"]:
+            groups[str(scope)].append(row)
+    return groups
+
+
 def routing_risk_factors(task: dict[str, Any]) -> list[str]:
     factors = task.get("routing_risk_factors")
     if not isinstance(factors, list):
         return ["none"]
     cleaned = [sanitize(item) for item in factors if str(item).strip()]
     return cleaned or ["none"]
+
+
+def verification_scope(task: dict[str, Any]) -> list[str]:
+    scopes = task.get("verification_scope")
+    if not isinstance(scopes, list):
+        return ["none"]
+    cleaned = [sanitize(item) for item in scopes if str(item).strip()]
+    return cleaned or ["none"]
+
+
+def routing_decision_key(routing_size: str, routing_risk: str, scopes: list[str]) -> str:
+    scope_key = "+".join(sorted(scopes or ["none"]))
+    return f"size={sanitize(routing_size)} risk={sanitize(routing_risk)} verify={scope_key}"
 
 
 def summarize_groups(groups: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -246,7 +282,20 @@ def render_routing_report(report: dict[str, Any]) -> str:
     if active_filters:
         lines.append("filters: " + " ".join(active_filters))
     groups = report.get("groups") if isinstance(report.get("groups"), dict) else {}
-    for group_name in ("profile", "category", "label", "profile_category", "routing_experiment", "routing_risk_factor", "profile_experiment"):
+    for group_name in (
+        "profile",
+        "category",
+        "label",
+        "profile_category",
+        "routing_experiment",
+        "routing_size",
+        "routing_risk",
+        "routing_risk_factor",
+        "verification_scope",
+        "routing_decision",
+        "profile_routing_decision",
+        "profile_experiment",
+    ):
         entries = groups.get(group_name) if isinstance(groups.get(group_name), list) else []
         lines.append("")
         lines.append(f"## by_{group_name}")

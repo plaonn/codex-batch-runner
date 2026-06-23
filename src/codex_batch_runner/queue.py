@@ -19,6 +19,9 @@ RESOLVABLE_COMPLETED_REVIEW_STATUSES = {"rejected", "needs_followup"}
 EXECUTION_BACKENDS = {"codex", "shell"}
 TASK_PRIORITIES = ("asap", "high", "normal", "low", "background")
 TASK_PRIORITY_RANK = {name: index for index, name in enumerate(TASK_PRIORITIES)}
+ROUTING_SIZES = ("tiny", "small", "medium", "large", "xlarge")
+ROUTING_RISKS = ("low", "medium", "high")
+VERIFICATION_SCOPES = ("none", "docs", "lint", "typecheck", "unit", "integration", "e2e", "smoke", "manual", "build")
 CHAIN_STATUSES = {
     "awaiting_review",
     "reviewing",
@@ -205,6 +208,9 @@ def create_task(
     routing_reason: str | None = None,
     routing_risk_factors: list[str] | None = None,
     routing_experiment: str | None = None,
+    routing_size: str | None = None,
+    routing_risk: str | None = None,
+    verification_scope: list[str] | None = None,
     execution_backend: str = "codex",
     shell_command: list[str] | None = None,
     shell_timeout_seconds: int | None = None,
@@ -227,6 +233,9 @@ def create_task(
     execution_backend = validate_execution_backend(execution_backend)
     capacity_pool = validate_capacity_pool(capacity_pool)
     task_priority = validate_task_priority(task_priority)
+    routing_size = validate_optional_choice("routing_size", routing_size, ROUTING_SIZES)
+    routing_risk = validate_optional_choice("routing_risk", routing_risk, ROUTING_RISKS)
+    verification_scope = validate_choice_list("verification_scope", verification_scope, VERIFICATION_SCOPES)
     if execution_backend == "codex" and shell_command:
         raise ValueError("shell_command requires execution_backend=shell")
     shell_command = validate_shell_command(shell_command) if execution_backend == "shell" else None
@@ -268,6 +277,9 @@ def create_task(
         "routing_reason": clean_optional_text(routing_reason),
         "routing_risk_factors": clean_text_list(routing_risk_factors),
         "routing_experiment": clean_optional_text(routing_experiment),
+        "routing_size": routing_size,
+        "routing_risk": routing_risk,
+        "verification_scope": verification_scope,
         "prompt": prompt,
         "next_prompt": None,
         "cwd": str(cwd_path),
@@ -317,6 +329,9 @@ def create_task(
             has_routing_reason=bool(task.get("routing_reason")),
             routing_risk_factor_count=len(task.get("routing_risk_factors") or []),
             routing_experiment=task.get("routing_experiment"),
+            routing_size=task.get("routing_size"),
+            routing_risk=task.get("routing_risk"),
+            verification_scope_count=len(task.get("verification_scope") or []),
             subtask_type=task.get("subtask_type"),
             subtask_for=task.get("subtask_for"),
             blocks_root_completion=task.get("blocks_root_completion"),
@@ -353,6 +368,23 @@ def validate_task_priority(value: object) -> str:
     if priority not in TASK_PRIORITY_RANK:
         raise ValueError("task_priority must be one of: " + ", ".join(TASK_PRIORITIES))
     return priority
+
+
+def validate_optional_choice(name: str, value: object | None, choices: tuple[str, ...]) -> str | None:
+    cleaned = clean_optional_text(value)
+    if cleaned is None:
+        return None
+    if cleaned not in choices:
+        raise ValueError(f"{name} must be one of: " + ", ".join(choices))
+    return cleaned
+
+
+def validate_choice_list(name: str, values: list[str] | None, choices: tuple[str, ...]) -> list[str]:
+    cleaned = clean_text_list(values)
+    invalid = [value for value in cleaned if value not in choices]
+    if invalid:
+        raise ValueError(f"{name} entries must be one of: " + ", ".join(choices))
+    return cleaned
 
 
 def validate_shell_command(value: object) -> list[str]:

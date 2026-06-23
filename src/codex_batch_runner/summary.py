@@ -177,13 +177,16 @@ def append_execution_profile_summary(lines: list[str], task: dict) -> None:
 
 def append_routing_summary(lines: list[str], task: dict) -> None:
     fields = []
-    for key in ("routing_experiment", "routing_reason"):
+    for key in ("routing_experiment", "routing_size", "routing_risk", "routing_reason"):
         value = task.get(key)
         if value not in (None, "", [], {}):
             fields.append(f"{key}={sanitize(value)}")
     risk_factors = task.get("routing_risk_factors")
     if isinstance(risk_factors, list) and risk_factors:
         fields.append("routing_risk_factors=" + ",".join(sanitize(item) for item in risk_factors))
+    verification_scope = task.get("verification_scope")
+    if isinstance(verification_scope, list) and verification_scope:
+        fields.append("verification_scope=" + ",".join(sanitize(item) for item in verification_scope))
     if fields:
         lines.append("routing: " + ", ".join(fields))
 
