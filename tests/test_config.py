@@ -424,6 +424,8 @@ class ConfigTests(unittest.TestCase):
             config = Config.load(root=Path(tmp))
 
             self.assertEqual([], config.post_mutation_trigger_command)
+            self.assertEqual([], config.codex_cli_update_command)
+            self.assertEqual([], config.codex_cli_smoke_command)
 
     def test_manual_cooldown_wake_options_can_be_enabled_explicitly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -442,6 +444,24 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual("macos_launchd", config.manual_cooldown_wake_scheduler)
             self.assertEqual(["launchctl", "start", "com.example.codex-batch-runner"], config.manual_cooldown_wake_command)
+
+    def test_codex_cli_maintenance_commands_can_be_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "codex_cli_update_command": ["npm", "install", "-g", "@openai/codex"],
+                        "codex_cli_smoke_command": ["cbr", "doctor"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertEqual(["npm", "install", "-g", "@openai/codex"], config.codex_cli_update_command)
+            self.assertEqual(["cbr", "doctor"], config.codex_cli_smoke_command)
 
     def test_post_mutation_trigger_command_must_be_argv_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -462,6 +482,16 @@ class ConfigTests(unittest.TestCase):
             config_path.write_text(json.dumps({"manual_cooldown_wake_command": "codex exec"}), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "manual_cooldown_wake_command must be a list of strings"):
+                Config.load(str(config_path), root=Path(tmp))
+
+            config_path.write_text(json.dumps({"codex_cli_update_command": "npm update"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "codex_cli_update_command must be a list of strings"):
+                Config.load(str(config_path), root=Path(tmp))
+
+            config_path.write_text(json.dumps({"codex_cli_smoke_command": "cbr doctor"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "codex_cli_smoke_command must be a list of strings"):
                 Config.load(str(config_path), root=Path(tmp))
 
 

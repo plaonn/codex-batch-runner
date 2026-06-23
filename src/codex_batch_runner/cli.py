@@ -21,6 +21,12 @@ from .execution_profiles import config_overrides_value
 from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
 from .lock import FileLock
+from .maintenance import (
+    build_codex_cli_maintenance_report,
+    dump_json,
+    render_codex_cli_maintenance_report,
+    run_codex_cli_maintenance,
+)
 from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
 from .post_accept import accept_task_and_integrate
 from .queue import (
@@ -298,6 +304,15 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="check local cbr health and Codex CLI version without running Codex exec")
     doctor.add_argument("--json", action="store_true", help="print JSON")
     doctor.set_defaults(func=cmd_doctor)
+
+    maintenance = sub.add_parser("maintenance", help="run guarded local maintenance workflows")
+    maintenance_sub = maintenance.add_subparsers(dest="maintenance_command", required=True)
+    codex_cli = maintenance_sub.add_parser("codex-cli", help="run configured Codex CLI update and smoke commands")
+    codex_cli_mode = codex_cli.add_mutually_exclusive_group()
+    codex_cli_mode.add_argument("--dry-run", action="store_true", help="report readiness; this is the default")
+    codex_cli_mode.add_argument("--apply", action="store_true", help="pause admissions, run update and smoke, then clear pause")
+    codex_cli.add_argument("--json", action="store_true", help="print JSON")
+    codex_cli.set_defaults(func=cmd_maintenance_codex_cli)
 
     prune = sub.add_parser("prune", help="report or remove old archived and accepted tasks")
     prune.add_argument(
@@ -2319,6 +2334,15 @@ def cmd_doctor(config: Config, args: argparse.Namespace) -> int:
     else:
         print(render_doctor_report(report), end="")
     return 0 if report["ok"] else 1
+
+
+def cmd_maintenance_codex_cli(config: Config, args: argparse.Namespace) -> int:
+    report = run_codex_cli_maintenance(config) if args.apply else build_codex_cli_maintenance_report(config)
+    if args.json:
+        print(dump_json(report), end="")
+    else:
+        print(render_codex_cli_maintenance_report(report), end="")
+    return 0 if report.get("status") in {"ready", "succeeded"} else 1
 
 
 def cmd_prune(config: Config, args: argparse.Namespace) -> int:

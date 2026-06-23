@@ -1489,7 +1489,7 @@ Doctor는 기본적으로 Codex application bundle 안의 별도 executable과 c
 
 ## Codex CLI maintenance policy
 
-현재 runner는 Codex CLI automatic update를 수행하지 않음. Update는 JSONL schema, resume semantics, permission/sandbox behavior, final response handling을 바꿀 수 있음. 잘못된 update 뒤 자동 실행이 계속되면 usage-limit tokens를 낭비할 수 있고, 설치 방식에 따라 rollback path가 불명확할 수 있음.
+현재 runner는 Codex CLI automatic update discovery를 수행하지 않음. Update는 JSONL schema, resume semantics, permission/sandbox behavior, final response handling을 바꿀 수 있음. 잘못된 update 뒤 자동 실행이 계속되면 usage-limit tokens를 낭비할 수 있고, 설치 방식에 따라 rollback path가 불명확할 수 있음.
 
 권장 운영 정책:
 
@@ -1497,7 +1497,16 @@ Doctor는 기본적으로 Codex application bundle 안의 별도 executable과 c
 - Idle 기준은 active runner lock 없음, active global cooldown 없음, `runnable`/`needs_resume`/`running` task 없음.
 - Manual update 전후에 `cbr doctor --json` 결과를 기록해 configured executable, resolved executable, `codex --version` output을 비교 가능하게 함.
 - Manual update 뒤에는 `cbr doctor`와 runner deployment에 맞는 focused tests 또는 smoke command를 실행한 뒤 queued work를 재개함.
-- Automatic update는 별도 rollback strategy, compatibility smoke, idle gate, operator approval flow가 설계되기 전까지 추가하지 않음.
+- Automatic update discovery는 별도 rollback strategy, compatibility smoke, idle gate, operator approval flow가 설계되기 전까지 추가하지 않음.
+
+`cbr maintenance codex-cli`는 운영자가 config에 명시한 update/smoke command를 guarded maintenance workflow로 실행합니다. 이 명령은 최신 버전을 찾거나 설치 방식을 추론하지 않습니다.
+
+Config:
+
+- `codex_cli_update_command`: Codex CLI를 update하는 argv list command. 예: `["npm", "install", "-g", "@openai/codex"]`.
+- `codex_cli_smoke_command`: update 뒤 queue를 재개하기 전에 실행할 argv list smoke command.
+
+`cbr maintenance codex-cli` 또는 `--dry-run`은 read-only readiness report입니다. `--apply`는 runner lock을 잡아 idle gate를 확인하고, 기존 runner pause가 없을 때만 `runner_pause`를 `Codex CLI maintenance`로 설정합니다. 이후 lock을 해제하고 `doctor-before.json`, update command log, `doctor-after-update.json`, smoke command log, `doctor-after-smoke.json`을 `log_dir/maintenance/codex-cli/run-*` 아래에 저장합니다. Update 또는 smoke가 실패하거나 timeout이면 pause를 유지하고 `status=failed`를 반환합니다. 둘 다 성공하면 같은 runner lock 아래에서 maintenance pause만 해제하고 post-mutation trigger를 실행할 수 있습니다. Maintenance event payload는 command stdout/stderr 원문을 저장하지 않고 return code, timeout 여부, byte count, log path만 기록합니다.
 
 `cbr prune`은 오래된 cleanup 후보를 보고하거나 삭제합니다. 기본 동작은 dry-run이며 `--apply`를 명시하지 않으면 파일을 삭제하지 않습니다. Task/log 후보는 보수적으로 `status=archived` task와 `status=completed && review_status=accepted` task 중 `--older-than-days`보다 오래된 항목으로 제한합니다. Event 후보는 configured `event_dir` 아래에서 `--older-than-days`보다 오래된 `*.jsonl` 파일로 제한합니다. 기본 age는 30일입니다. Optional `notifier_cursor_state_paths` config 값 또는 반복 가능한 `--notifier-cursor-state` flag로 local-only notifier cursor state JSON 파일을 지정할 수 있습니다. 기본값은 빈 목록입니다.
 

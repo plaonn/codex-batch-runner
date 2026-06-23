@@ -629,6 +629,126 @@ class CliTests(unittest.TestCase):
             self.assertTrue(state["runner_pause"]["active"])
             self.assertEqual("operator drain", state["runner_pause"]["reason"])
 
+    def test_maintenance_codex_cli_dry_run_reports_missing_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output = run_cli(["--config", str(config_path), "maintenance", "codex-cli", "--dry-run"])
+
+            self.assertEqual(1, code)
+            self.assertIn("status: blocked", output)
+            self.assertIn("codex_cli_update_command is not configured", output)
+            self.assertIn("codex_cli_smoke_command is not configured", output)
+
+    def test_maintenance_codex_cli_apply_requires_idle_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "marker.log"
+            command = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('ran', encoding='utf-8')",
+                str(marker),
+            ]
+            config_path = write_config(
+                tmp,
+                extra={
+                    "codex_cli_update_command": command,
+                    "codex_cli_smoke_command": command,
+                },
+            )
+            create_task(Config.load(str(config_path)), "do work", tmp, task_id="ready-task")
+
+            code, output = run_cli(["--config", str(config_path), "maintenance", "codex-cli", "--apply", "--json"])
+
+            self.assertEqual(1, code)
+            report = json.loads(output)
+            self.assertEqual("blocked", report["status"])
+            self.assertIn("task ready-task is runnable", report["blockers"])
+            self.assertFalse(marker.exists())
+            self.assertFalse(load_state(Config.load(str(config_path)))["runner_pause"]["active"])
+
+    def test_maintenance_codex_cli_apply_runs_update_smoke_and_clears_pause(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "marker.log"
+            trigger_marker = Path(tmp) / "trigger.log"
+            append_command = (
+                "from pathlib import Path; import sys; "
+                "Path(sys.argv[1]).open('a', encoding='utf-8').write(sys.argv[2] + '\\n')"
+            )
+            update = [sys.executable, "-c", append_command, str(marker), "update"]
+            smoke = [sys.executable, "-c", append_command, str(marker), "smoke"]
+            trigger = [sys.executable, "-c", append_command, str(trigger_marker), "trigger"]
+            config_path = write_config(
+                tmp,
+                trigger,
+                extra={
+                    "codex_cli_update_command": update,
+                    "codex_cli_smoke_command": smoke,
+                    "shell_task_timeout_seconds": 10,
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "maintenance", "codex-cli", "--apply", "--json"])
+
+            self.assertEqual(0, code)
+            report = json.loads(output)
+            self.assertEqual("succeeded", report["status"])
+            self.assertTrue(report["pause_cleared"])
+            self.assertEqual(["update", "smoke"], marker.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(["trigger"], trigger_marker.read_text(encoding="utf-8").splitlines())
+            state = load_state(Config.load(str(config_path)))
+            self.assertFalse(state["runner_pause"]["active"])
+            self.assertTrue(Path(report["doctor_before_path"]).is_file())
+            self.assertTrue(Path(report["doctor_after_update_path"]).is_file())
+            self.assertTrue(Path(report["doctor_after_smoke_path"]).is_file())
+            self.assertTrue(Path(report["update"]["log_path"]).is_file())
+            self.assertTrue(Path(report["smoke"]["log_path"]).is_file())
+            events = list_events(Config.load(str(config_path)), limit=10)
+            self.assertTrue(any(event["event_type"] == "codex_cli_maintenance_completed" for event in events))
+            self.assertEqual(
+                2,
+                len([event for event in events if event["event_type"] == "runner_pause_updated"]),
+            )
+
+    def test_maintenance_codex_cli_apply_keeps_pause_when_smoke_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "marker.log"
+            trigger_marker = Path(tmp) / "trigger.log"
+            update = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('update', encoding='utf-8')",
+                str(marker),
+            ]
+            smoke = [sys.executable, "-c", "import sys; sys.exit(9)"]
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('trigger', encoding='utf-8')",
+                str(trigger_marker),
+            ]
+            config_path = write_config(
+                tmp,
+                trigger,
+                extra={
+                    "codex_cli_update_command": update,
+                    "codex_cli_smoke_command": smoke,
+                    "shell_task_timeout_seconds": 10,
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "maintenance", "codex-cli", "--apply", "--json"])
+
+            self.assertEqual(1, code)
+            report = json.loads(output)
+            self.assertEqual("failed", report["status"])
+            self.assertIn("smoke command failed", report["blockers"])
+            self.assertFalse(report["pause_cleared"])
+            state = load_state(Config.load(str(config_path)))
+            self.assertTrue(state["runner_pause"]["active"])
+            self.assertEqual("Codex CLI maintenance", state["runner_pause"]["reason"])
+            self.assertFalse(trigger_marker.exists())
+
     def test_post_mutation_trigger_runs_after_enqueue_and_review_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "trigger.log"

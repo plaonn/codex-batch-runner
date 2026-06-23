@@ -538,7 +538,7 @@ Core state-changing commands also append sanitized audit events. Initial event t
 
 ## Codex CLI maintenance
 
-`codex-batch-runner` does not automatically update the Codex CLI. CLI updates can change JSONL event shape, resume behavior, permission and sandbox handling, or final response behavior. A bad update can also waste usage-limit tokens before the operator notices, and rollback may be unclear when the installed CLI came from a standalone package, an app bundle, or another local installation method.
+`codex-batch-runner` does not automatically discover Codex CLI updates. CLI updates can change JSONL event shape, resume behavior, permission and sandbox handling, or final response behavior. A bad update can also waste usage-limit tokens before the operator notices, and rollback may be unclear when the installed CLI came from a standalone package, an app bundle, or another local installation method.
 
 Recommended maintenance policy:
 
@@ -548,6 +548,15 @@ Recommended maintenance policy:
 - After a manual update, run `cbr doctor` and the focused test or smoke command relevant to the runner deployment before allowing queued work to continue.
 - Do not compare against an app-bundled Codex binary by default. If a system has a bundled CLI inside an installed Codex application, inspect it only as an optional manual investigation.
 - Do not hash large binaries during routine checks. A hash could be added later as an explicit verbose/deep diagnostic, not as default doctor behavior.
+
+If `codex_cli_update_command` and `codex_cli_smoke_command` are configured, `cbr maintenance codex-cli` provides a guarded operator-approved workflow:
+
+```bash
+PYTHONPATH=src python3 -m codex_batch_runner maintenance codex-cli --dry-run
+PYTHONPATH=src python3 -m codex_batch_runner maintenance codex-cli --apply
+```
+
+`--apply` requires the queue to be idle, sets a runner pause, records doctor snapshots before and after the update, runs the configured update and smoke commands, and clears the pause only if both commands succeed. It does not choose an update source or infer the local installation method.
 
 ## Rate-limit 처리
 
