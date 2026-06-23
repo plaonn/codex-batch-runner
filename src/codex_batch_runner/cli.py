@@ -1413,6 +1413,11 @@ def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config
     if status == "completed":
         review = review_status(task)
         if review == "unreviewed":
+            reviewer_decision = pending_reviewer_decision(task)
+            if reviewer_decision == "needs_fix":
+                return "review_needs_fix"
+            if reviewer_decision == "pass":
+                return "review_pass_pending"
             return "awaiting_review"
         if review == "rejected":
             return "review_failed"
@@ -1466,6 +1471,9 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config, include_capac
     if task.get("resolution"):
         notes.append("resolved: " + str(task.get("resolution")))
     if task.get("status") == "completed" and not task.get("resolution"):
+        reviewer_note = pending_reviewer_note(task)
+        if reviewer_note:
+            notes.append(reviewer_note)
         notes.extend(completed_timing_notes(task))
         chain_note = chain_note_cell(task)
         if chain_note:
@@ -1611,6 +1619,28 @@ def chain_note_cell(task: dict) -> str:
     return ""
 
 
+def pending_reviewer_note(task: dict) -> str:
+    decision = pending_reviewer_decision(task)
+    if decision == "needs_fix":
+        return "reviewer needs fix; run reject --follow-up"
+    if decision == "pass":
+        return "reviewer passed; run accept"
+    return ""
+
+
+def pending_reviewer_decision(task: dict) -> str:
+    if task.get("status") != "completed" or review_status(task) != "unreviewed":
+        return ""
+    reviewer = task.get("reviewer_codex") if isinstance(task.get("reviewer_codex"), dict) else {}
+    decision = str(reviewer.get("decision") or task.get("last_review_decision") or "")
+    chain_status = str(task.get("chain_status") or "")
+    if decision == "needs_fix" or chain_status == "needs_fix":
+        return "needs_fix"
+    if decision == "pass":
+        return "pass"
+    return ""
+
+
 def chain_status_note_label(value: object) -> str:
     labels = {
         "awaiting_review": "review pending",
@@ -1662,7 +1692,16 @@ def blocking_subtask_effective_status(task: dict, by_id: dict[str, dict], config
     if not active:
         return ""
     statuses = [blocking_subtask_status(item, by_id, config) for item in active]
-    if any(status in {"missing", "failed", "blocked_user", "review_failed", "needs_followup", "subtasks_blocked"} for status in statuses):
+    blocked_statuses = {
+        "missing",
+        "failed",
+        "blocked_user",
+        "review_failed",
+        "needs_followup",
+        "review_needs_fix",
+        "subtasks_blocked",
+    }
+    if any(status in blocked_statuses for status in statuses):
         return "subtasks_blocked"
     return "waiting_subtasks"
 
@@ -1690,6 +1729,8 @@ def subtask_status_note_label(status: str) -> str:
         "failed": "failed",
         "missing": "missing",
         "needs_followup": "fix needed",
+        "review_needs_fix": "review fix needed",
+        "review_pass_pending": "accept pending",
         "review_failed": "review failed",
         "reviewing": "reviewing",
         "running": "running",
@@ -1705,14 +1746,14 @@ def active_subtask_timing_summary(active: list[dict | None], by_id: dict[str, di
     blocked = [
         task
         for task, status in status_rows
-        if status in {"failed", "blocked_user", "review_failed", "needs_followup", "subtasks_blocked"}
+        if status in {"failed", "blocked_user", "review_failed", "needs_followup", "review_needs_fix", "subtasks_blocked"}
     ]
     if blocked:
         return oldest_age_note(blocked, ("completed_at", "updated_at", "started_at"), "oldest blocked")
     running = [task for task, status in status_rows if status == "running"]
     if running:
         return oldest_age_note(running, ("started_at", "updated_at"), "oldest running")
-    review = [task for task, status in status_rows if status in {"awaiting_review", "reviewing"}]
+    review = [task for task, status in status_rows if status in {"awaiting_review", "reviewing", "review_pass_pending"}]
     if review:
         return oldest_age_note(review, ("completed_at", "updated_at", "started_at"), "oldest review")
     return ""
@@ -1760,6 +1801,11 @@ def status_cell_without_subtasks(task: dict, by_id: dict[str, dict], config: Con
     if status == "completed":
         review = review_status(task)
         if review == "unreviewed":
+            reviewer_decision = pending_reviewer_decision(task)
+            if reviewer_decision == "needs_fix":
+                return "review_needs_fix"
+            if reviewer_decision == "pass":
+                return "review_pass_pending"
             return "awaiting_review"
         if review == "rejected":
             return "review_failed"
@@ -1886,6 +1932,7 @@ class ListColor:
         "running": BG_CYAN,
         "awaiting_review": BG_YELLOW,
         "reviewing": BG_YELLOW,
+        "review_pass_pending": BG_GREEN,
         "needs_resume": BG_BLUE,
         "waiting_subtasks": BG_YELLOW,
         "cooldown": BG_DIM,
@@ -1893,6 +1940,7 @@ class ListColor:
         "failed": BG_RED,
         "review_failed": BG_RED,
         "needs_followup": BG_RED,
+        "review_needs_fix": BG_RED,
         "blocked_user": BG_RED,
         "subtasks_blocked": BG_RED,
         "accepted_unapplied": BG_YELLOW,
@@ -1926,6 +1974,7 @@ class ListColor:
         "running": ">>",
         "awaiting_review": "??",
         "reviewing": "??",
+        "review_pass_pending": "??",
         "accepted_unapplied": "??",
         "completed": "==",
         "accepted": "==",
@@ -1933,6 +1982,7 @@ class ListColor:
         "failed": "!!",
         "review_failed": "!!",
         "needs_followup": "!!",
+        "review_needs_fix": "!!",
         "blocked_user": "!!",
         "subtasks_blocked": "!!",
         "resolved": "--",

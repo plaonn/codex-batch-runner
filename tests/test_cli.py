@@ -1658,6 +1658,95 @@ class CliTests(unittest.TestCase):
             self.assertEqual("needs_followup", rows["followup"]["STATUS"])
             self.assertNotIn("accepted", rows)
 
+    def test_list_distinguishes_pending_reviewer_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            for task_id in ("plain", "needs-fix", "chain-fix", "pass", "chain-pass"):
+                task = create_task(config, task_id, tmp, task_id=task_id, project_id="project-a")
+                task["status"] = "completed"
+                task["review_status"] = "unreviewed"
+                save_task(config, task)
+            needs_fix = load_task(config, "needs-fix")
+            needs_fix["reviewer_codex"] = {"decision": "needs_fix"}
+            save_task(config, needs_fix)
+            chain_fix = load_task(config, "chain-fix")
+            chain_fix["chain_status"] = "needs_fix"
+            save_task(config, chain_fix)
+            passed = load_task(config, "pass")
+            passed["reviewer_codex"] = {"decision": "pass"}
+            save_task(config, passed)
+            chain_pass = load_task(config, "chain-pass")
+            chain_pass["chain_status"] = "awaiting_review"
+            chain_pass["last_review_decision"] = "pass"
+            save_task(config, chain_pass)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
+            needs_review_code, needs_review_output = run_cli(
+                ["--config", str(config_path), "list", "--project", "project-a", "--needs-review", "--color=never"]
+            )
+            json_code, json_output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--json"])
+            graph_code, graph_output = run_cli(
+                ["--config", str(config_path), "list", "--project", "project-a", "--graph", "--color=never"]
+            )
+            color_code, color_output = run_cli(
+                ["--config", str(config_path), "list", "--project", "project-a", "--color=always"]
+            )
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, needs_review_code)
+            self.assertEqual(0, json_code)
+            self.assertEqual(0, graph_code)
+            self.assertEqual(0, color_code)
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+            self.assertEqual("awaiting_review", rows["plain"]["STATUS"])
+            self.assertEqual("review_needs_fix", rows["needs-fix"]["STATUS"])
+            self.assertEqual("review_needs_fix", rows["chain-fix"]["STATUS"])
+            self.assertEqual("review_pass_pending", rows["pass"]["STATUS"])
+            self.assertEqual("review_pass_pending", rows["chain-pass"]["STATUS"])
+            self.assertIn("reviewer needs fix; run reject --follow-up", rows["needs-fix"]["NOTE"])
+            self.assertIn("reviewer needs fix; run reject --follow-up", rows["chain-fix"]["NOTE"])
+            self.assertIn("reviewer passed; run accept", rows["pass"]["NOTE"])
+            self.assertIn("reviewer passed; run accept", rows["chain-pass"]["NOTE"])
+            needs_review_rows = {row["ID"]: row for row in compact_list_rows(needs_review_output)}
+            self.assertEqual(set(rows), set(needs_review_rows))
+            self.assertEqual("review_needs_fix", needs_review_rows["needs-fix"]["STATUS"])
+            self.assertEqual("review_pass_pending", needs_review_rows["pass"]["STATUS"])
+            json_tasks = {task["id"]: task for task in json.loads(json_output)}
+            self.assertEqual("completed", json_tasks["needs-fix"]["status"])
+            self.assertEqual("unreviewed", json_tasks["needs-fix"]["review_status"])
+            self.assertNotIn("review_needs_fix", json_output)
+            self.assertNotIn("review_pass_pending", json_output)
+            self.assertIn("* !!review_needs_fix  [N] needs-fix", graph_output)
+            self.assertIn("* ??review_pass_pending  [N] pass", graph_output)
+            self.assertIn("\033[101;30mreview_needs_fix\033[0m", color_output)
+            self.assertIn("\033[102;30mreview_pass_pending\033[0m", color_output)
+
+    def test_list_narrow_wraps_pending_reviewer_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "Long reviewer-fix task title that should wrap",
+                tmp,
+                task_id="needs-fix",
+                project_id="project-a",
+            )
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["reviewer_codex"] = {"decision": "needs_fix"}
+            save_task(config, task)
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=52):
+                code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(all(width <= 52 for width in visible_line_widths(output)))
+            self.assertIn("STATUS:  !!review_needs_fix", output)
+            self.assertIn("NOTE:    reviewer needs fix; run reject", output)
+            self.assertIn("--follow-up", output)
+
     def test_list_note_hides_mechanical_auto_review_capability_noise(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp, auto_review_mechanical_accept=True)
