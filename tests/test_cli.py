@@ -1827,11 +1827,48 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
             self.assertIn("* || blocked_dependency  [N] Very", output)
-            self.assertIn("                         child title that", output)
+            self.assertIn("|                        child title that", output)
             self.assertIn("|       └─ blocked  [N] Very", output)
             self.assertIn("|                   dependency title that", output)
             self.assertNotIn("|\\", output)
             self.assertNotIn("|/", output)
+
+    def test_list_graph_wraps_subtask_tree_and_dependency_rails_together(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "Parent source task", tmp, task_id="parent", project_id="project-a")
+            first_child = create_task(
+                config,
+                "Very long first child source title that should wrap inside graph mode",
+                tmp,
+                task_id="child1",
+                project_id="project-a",
+                depends_on=["dep"],
+            )
+            first_child["parent_task_id"] = "parent"
+            save_task(config, first_child)
+            second_child = create_task(config, "Second child source", tmp, task_id="child2", project_id="project-a")
+            second_child["parent_task_id"] = "parent"
+            save_task(config, second_child)
+            create_task(
+                config,
+                "Very long dependency title that should wrap under the dependency edge",
+                tmp,
+                task_id="dep",
+                project_id="project-a",
+            )
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=48):
+                code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--graph", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(all(width <= 48 for width in visible_line_widths(output)))
+            self.assertIn("├─ * || blocked_dependency  [N] Very long first", output)
+            self.assertIn("│  |                        child source title", output)
+            self.assertIn("│  |       └─ blocked  [N] Very long dependency", output)
+            self.assertIn("│  |                   under the dependency edge", output)
+            self.assertIn("└─ * .. runnable  [N] Second child source", output)
 
     def test_list_graph_keeps_json_output_raw(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2215,6 +2252,34 @@ class CliTests(unittest.TestCase):
             self.assertEqual("├─ [N] Child work", rows["child"]["TITLE"])
             self.assertEqual("└─ [N] Follow-up work", rows["followup"]["TITLE"])
             self.assertEqual("[N] Other project", rows["other"]["TITLE"])
+
+    def test_list_compact_wraps_subtask_tree_prefix_continuations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "Parent title", tmp, task_id="parent", project_id="project-a")
+            first_child = create_task(
+                config,
+                "Very long first child title that should wrap while keeping tree rails visible",
+                tmp,
+                task_id="child1",
+                project_id="project-a",
+            )
+            first_child["parent_task_id"] = "parent"
+            save_task(config, first_child)
+            second_child = create_task(config, "Second child", tmp, task_id="child2", project_id="project-a")
+            second_child["parent_task_id"] = "parent"
+            save_task(config, second_child)
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=86):
+                code, output = run_cli(["--config", str(config_path), "list", "--all", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(all(width <= 86 for width in visible_line_widths(output)))
+            self.assertIn("  ├─ [N] Very long first child", output)
+            self.assertIn("  │  title that should wrap while", output)
+            self.assertIn("  │  keeping tree rails visible", output)
+            self.assertIn("  └─ [N] Second child", output)
 
     def test_list_default_keeps_hidden_subtasks_when_parent_is_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
