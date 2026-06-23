@@ -1998,7 +1998,6 @@ def format_elapsed(seconds: int) -> str:
 
 class ListColor:
     RESET = "\033[0m"
-    BOLD = "\033[1m"
     DIM = "\033[2m"
     RED = "\033[31m"
     YELLOW = "\033[33m"
@@ -2007,35 +2006,41 @@ class ListColor:
     CYAN = "\033[36m"
     LIGHT_CYAN = "\033[96m"
     BLUE = "\033[34m"
-    BRIGHT_WHITE = "\033[97m"
-    BG_RED = "\033[101;30m"
+    BG_RED = "\033[101;97;1m"
     BG_YELLOW = "\033[103;30m"
     BG_GREEN = "\033[102;30m"
     BG_CYAN = "\033[106;30m"
     BG_BLUE = "\033[104;30m"
-    BG_MARKER = "\033[100m"
     BG_DIM = "\033[100;37m"
+    BG_NEUTRAL_RED = "\033[100;91m"
+    BG_NEUTRAL_BLUE = "\033[100;94m"
     BG_NEUTRAL_CYAN = "\033[100;96m"
     BG_NEUTRAL_YELLOW = "\033[100;93m"
-    BG_NEUTRAL_GREEN = "\033[100;32m"
-    BG_NEUTRAL_WHITE = "\033[100;37m"
+    BG_NEUTRAL_GREEN = "\033[100;92m"
+    BG_NEUTRAL_WHITE = "\033[100;97m"
+    STATUS_MARKER_BLUE = "\033[104;97;1m"
+    STATUS_MARKER_CYAN = "\033[106;30;1m"
+    STATUS_MARKER_YELLOW = "\033[103;30;1m"
+    STATUS_MARKER_GREEN = "\033[102;30;1m"
+    STATUS_MARKER_RED = "\033[101;97;1m"
+    STATUS_MARKER_NEUTRAL = "\033[100;97;1m"
     ID_COLORS = ("\033[35m", "\033[36m", "\033[34m", "\033[32m", "\033[33m", "\033[91m")
     ACTIVE_STATUS_STYLES = {
-        "running": BG_CYAN,
-        "awaiting_review": BG_YELLOW,
-        "reviewing": BG_YELLOW,
-        "review_pass_pending": BG_GREEN,
-        "needs_resume": BG_BLUE,
-        "waiting_subtasks": BG_YELLOW,
+        "running": BG_NEUTRAL_CYAN,
+        "awaiting_review": BG_NEUTRAL_YELLOW,
+        "reviewing": BG_NEUTRAL_YELLOW,
+        "review_pass_pending": BG_NEUTRAL_GREEN,
+        "needs_resume": BG_NEUTRAL_BLUE,
+        "waiting_subtasks": BG_NEUTRAL_YELLOW,
         "cooldown": BG_DIM,
         "usage_exhausted": BG_DIM,
-        "failed": BG_RED,
-        "review_failed": BG_RED,
-        "needs_followup": BG_RED,
-        "review_needs_fix": BG_RED,
-        "blocked_user": BG_RED,
-        "subtasks_blocked": BG_RED,
-        "accepted_unapplied": BG_YELLOW,
+        "failed": BG_NEUTRAL_RED,
+        "review_failed": BG_NEUTRAL_RED,
+        "needs_followup": BG_NEUTRAL_RED,
+        "review_needs_fix": BG_NEUTRAL_RED,
+        "blocked_user": BG_NEUTRAL_RED,
+        "subtasks_blocked": BG_NEUTRAL_RED,
+        "accepted_unapplied": BG_NEUTRAL_YELLOW,
     }
     PASSIVE_STATUS_STYLES = {
         "runnable": BG_NEUTRAL_CYAN,
@@ -2080,6 +2085,31 @@ class ListColor:
         "resolved": "--",
         "archived": "--",
     }
+    STATUS_MARKER_STYLES = {
+        "runnable": STATUS_MARKER_CYAN,
+        "needs_resume": STATUS_MARKER_BLUE,
+        "cooldown": STATUS_MARKER_NEUTRAL,
+        "usage_exhausted": STATUS_MARKER_NEUTRAL,
+        "blocked_dependency": STATUS_MARKER_YELLOW,
+        "waiting_subtasks": STATUS_MARKER_YELLOW,
+        "running": STATUS_MARKER_CYAN,
+        "awaiting_review": STATUS_MARKER_YELLOW,
+        "reviewing": STATUS_MARKER_YELLOW,
+        "review_pass_pending": STATUS_MARKER_GREEN,
+        "accepted_unapplied": STATUS_MARKER_YELLOW,
+        "completed": STATUS_MARKER_GREEN,
+        "accepted": STATUS_MARKER_GREEN,
+        "done": STATUS_MARKER_GREEN,
+        "failed": STATUS_MARKER_RED,
+        "review_failed": STATUS_MARKER_RED,
+        "needs_followup": STATUS_MARKER_RED,
+        "review_needs_fix": STATUS_MARKER_RED,
+        "blocked_user": STATUS_MARKER_RED,
+        "subtasks_blocked": STATUS_MARKER_RED,
+        "resolved": STATUS_MARKER_NEUTRAL,
+        "archived": STATUS_MARKER_NEUTRAL,
+    }
+
     def __init__(self, enabled: bool) -> None:
         self.enabled = enabled
 
@@ -2153,7 +2183,7 @@ class ListColor:
         marker = self.STATUS_MARKERS.get(status, "--")
         if not self.enabled:
             return marker
-        return self.apply(marker, self.BG_MARKER + self.BOLD + self.BRIGHT_WHITE)
+        return self.apply(marker, self.STATUS_MARKER_STYLES.get(status, self.STATUS_MARKER_NEUTRAL))
 
 
 def list_colorizer(mode: str) -> ListColor:
