@@ -885,20 +885,21 @@ def render_dependency_graph_node(
     include_capacity: bool = True,
 ) -> list[str]:
     cells = task_display_cells(task, by_id, config, color)
-    lines = [f"{cells['id']}  {cells['status']}  ATT {cells['attempts']}  {cells['title']}"]
+    lines = [f"* {cells['id']}  {cells['status']}  ATT {cells['attempts']}  {cells['title']}"]
     note = note_cell(task, by_id, config, include_capacity=include_capacity)
-    if note != "-":
-        lines.append("  note: " + note)
     dep_ids = dependency_id_cells(task.get("depends_on"), by_id, config, color)
     depends_on = task.get("depends_on")
     raw_dep_ids = [str(dep_id) for dep_id in depends_on if str(dep_id)] if isinstance(depends_on, list) else []
+    if note != "-":
+        lines.append(("| note: " if raw_dep_ids else "  note: ") + note)
     if not raw_dep_ids:
-        lines.append("  -> - (none)")
-    else:
-        for dep_id, dep_cell in zip(raw_dep_ids, dep_ids):
-            dep = by_id.get(dep_id)
-            dep_title = "missing dependency" if dep is None else task_title(dep)
-            lines.append(f"  -> {dep_cell}  {dep_title}")
+        return lines
+    lines.append("|\\")
+    for dep_id, dep_cell in zip(raw_dep_ids, dep_ids):
+        dep = by_id.get(dep_id)
+        dep_title = "missing dependency" if dep is None else task_title(dep)
+        lines.append(f"| * {dep_cell}  {dep_title}")
+    lines.append("|/")
     return lines
 
 
