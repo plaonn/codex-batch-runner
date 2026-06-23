@@ -949,9 +949,13 @@ def render_dependency_graph_node(
         plain_source_guide = "|" if raw_dep_ids else "│" if has_tree_children else " "
         source_continuation_prefix = tree_continuation + source_guide + " "
         plain_source_continuation_prefix = plain_tree_continuation + plain_source_guide + " "
+        source_continuation_fill = color.dim_text("─")
+        plain_source_continuation_fill = "─"
     else:
         source_continuation_prefix = None
         plain_source_continuation_prefix = None
+        source_continuation_fill = None
+        plain_source_continuation_fill = None
     lines = graph_content_lines(
         styled_tree_prefix + marker + " ",
         status,
@@ -962,6 +966,8 @@ def render_dependency_graph_node(
         plain_prefix=tree_prefix + "* ",
         plain_label=plain_status,
         plain_continuation_prefix=plain_source_continuation_prefix,
+        continuation_fill=source_continuation_fill,
+        plain_continuation_fill=plain_source_continuation_fill,
     )
     if not raw_dep_ids:
         return lines
@@ -1024,6 +1030,8 @@ def graph_content_lines(
     plain_label: str | None = None,
     plain_title: str | None = None,
     plain_continuation_prefix: str | None = None,
+    continuation_fill: str | None = None,
+    plain_continuation_fill: str | None = None,
 ) -> list[str]:
     style = title_style or (lambda value: value)
     plain_prefix_value = prefix if plain_prefix is None else plain_prefix
@@ -1042,8 +1050,14 @@ def graph_content_lines(
         if plain_continuation_prefix is None
         else plain_continuation_prefix
     )
-    continuation = continuation_base + (" " * visible_len(plain_label_value)) + "  "
-    plain_continuation = plain_continuation_base + (" " * visible_len(plain_label_value)) + "  "
+    label_gap_width = visible_len(plain_label_value) + 2
+    continuation_gap = graph_continuation_gap(label_gap_width, continuation_fill)
+    plain_continuation_gap = graph_continuation_gap(
+        label_gap_width,
+        continuation_fill if plain_continuation_fill is None else plain_continuation_fill,
+    )
+    continuation = continuation_base + continuation_gap
+    plain_continuation = plain_continuation_base + plain_continuation_gap
     return wrap_prefixed_plain_value(
         plain_title_value,
         width,
@@ -1053,6 +1067,20 @@ def graph_content_lines(
         plain_continuation_prefix=plain_continuation,
         style=style,
     )
+
+
+def graph_continuation_gap(width: int, fill: str | None = None) -> str:
+    width = max(0, width)
+    if width == 0:
+        return ""
+    if fill is None:
+        return " " * width
+    fill_width = max(1, visible_len(fill))
+    body_width = width - 1
+    body = ""
+    while visible_len(body) + fill_width <= body_width:
+        body += fill
+    return body + (" " * max(0, body_width - visible_len(body))) + " "
 
 
 def graph_continuation_prefix(prefix: str) -> str:
