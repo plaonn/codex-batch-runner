@@ -2186,7 +2186,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue(all(width <= 51 for width in visible_line_widths(output)))
             self.assertIn("|       │", text)
             self.assertNotIn("revie\nw", text)
+            self.assertNotIn("revi\n|                    ew", text)
             self.assertNotIn("awaitin\ng", text)
+            self.assertNotIn("awai\n|       │                ting", text)
+            self.assertNotIn("no\n|       │               t", text)
 
     def test_list_default_filtering_keeps_dependency_blocked_runnable_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

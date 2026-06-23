@@ -2267,6 +2267,7 @@ def wrap_ansi_hard(value: str, width: int) -> list[str]:
     active_codes = ""
     in_escape = False
     escape = []
+    last_space_index: int | None = None
     for char in value:
         if char == "\033":
             in_escape = True
@@ -2283,11 +2284,23 @@ def wrap_ansi_hard(value: str, width: int) -> list[str]:
             continue
         char_len = char_width(char)
         if current_width and current_width + char_len > width:
-            if active_codes:
-                current.append(ListColor.RESET)
-            lines.append("".join(current))
-            current = [active_codes] if active_codes else []
-            current_width = 0
+            if last_space_index is not None:
+                line_parts = current[:last_space_index]
+                remainder = current[last_space_index + 1 :]
+                if active_codes:
+                    line_parts.append(ListColor.RESET)
+                lines.append("".join(line_parts))
+                current = ([active_codes] if active_codes else []) + remainder
+                current_width = visible_len("".join(remainder))
+                last_space_index = None
+            else:
+                if active_codes:
+                    current.append(ListColor.RESET)
+                lines.append("".join(current))
+                current = [active_codes] if active_codes else []
+                current_width = 0
+        if char.isspace():
+            last_space_index = len(current)
         current.append(char)
         current_width += char_len
     if current:
