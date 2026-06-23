@@ -426,6 +426,11 @@ def mechanical_gates(task: dict, bundle: dict[str, Any]) -> list[dict[str, Any]]
             f"changed_files_count={len(changed_files) if isinstance(changed_files, list) else 'missing'}",
         ),
         gate("dependencies_ready", bool(deps.get("ready")), dependency_detail(deps)),
+        gate(
+            "worktree_metadata_recoverable",
+            worktree_metadata_recoverable(bundle),
+            worktree_metadata_detail(bundle),
+        ),
         gate("git_clean", repo.get("dirty") is False, git_clean_detail(repo)),
         gate(
             "no_unpushed_commits",
@@ -460,6 +465,35 @@ def dependency_detail(deps: dict[str, Any]) -> str:
     if blocked_by:
         return "blocked_by=" + ",".join(str(item) for item in blocked_by)
     return "ready=true"
+
+
+def worktree_metadata_recoverable(bundle: dict[str, Any]) -> bool:
+    report = bundle.get("task_worktree") if isinstance(bundle.get("task_worktree"), dict) else {}
+    metadata = report.get("metadata") if isinstance(report.get("metadata"), dict) else {}
+    if metadata.get("execution_mode") != "git_worktree":
+        return True
+    if report.get("recovery_required"):
+        return False
+    return not bool(report.get("missing_metadata"))
+
+
+def worktree_metadata_detail(bundle: dict[str, Any]) -> str:
+    report = bundle.get("task_worktree") if isinstance(bundle.get("task_worktree"), dict) else {}
+    metadata = report.get("metadata") if isinstance(report.get("metadata"), dict) else {}
+    if metadata.get("execution_mode") != "git_worktree":
+        return "not a git_worktree task"
+    issues: list[str] = []
+    missing = report.get("missing_metadata")
+    if isinstance(missing, list) and missing:
+        issues.append("missing=" + ",".join(str(item) for item in missing))
+    stale = report.get("stale_metadata")
+    if isinstance(stale, list) and stale:
+        issues.append("stale=" + ",".join(str(item) for item in stale))
+    if report.get("recovery_required"):
+        issues.append("recovery_required=true")
+    if issues:
+        return "; ".join(issues)
+    return "git_worktree metadata is recoverable"
 
 
 def git_clean_detail(repo: dict[str, Any]) -> str:

@@ -827,7 +827,7 @@ class WorktreeTests(unittest.TestCase):
             self.assertEqual(0, bundle_code)
             self.assertEqual("cbr/follow-link", bundle["review_follow_up"]["source_branch"])
 
-    def test_review_next_reports_worktree_warnings_without_failing_gates(self) -> None:
+    def test_review_next_blocks_auto_review_for_recovery_required_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -858,13 +858,25 @@ class WorktreeTests(unittest.TestCase):
 
             code, output = run_cli_text(["--config", str(config_path), "review-next", "--dry-run", "--json"])
             report = json.loads(output)
+            gate_status = {gate["name"]: gate for gate in report["gates"]}
+            apply_code, apply_report = run_cli(
+                ["--config", str(config_path), "review-next", "--apply", "--mechanical-auto-accept", "--json"]
+            )
 
             self.assertEqual(0, code)
             self.assertTrue(report["selected"])
             self.assertIn("worktree_report", report)
             self.assertTrue(report["worktree_report"]["recovery_required"])
             self.assertIn("worktree_path", report["worktree_report"]["stale_metadata"])
-            self.assertTrue(report["gates_ok"])
+            self.assertFalse(report["gates_ok"])
+            self.assertFalse(gate_status["worktree_metadata_recoverable"]["ok"])
+            self.assertIn("worktree_path", gate_status["worktree_metadata_recoverable"]["detail"])
+            self.assertIn("recovery_required=true", gate_status["worktree_metadata_recoverable"]["detail"])
+            self.assertEqual(0, apply_code)
+            self.assertFalse(apply_report["mutated"])
+            self.assertEqual("needs_human", apply_report["auto_review"]["decision"])
+            self.assertIn("worktree_metadata_recoverable", apply_report["auto_review"]["failing_gates"])
+            self.assertEqual("unreviewed", load_task(config, "stale-worktree")["review_status"])
 
     def test_apply_dry_run_reports_fast_forward_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
