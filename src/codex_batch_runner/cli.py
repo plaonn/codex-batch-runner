@@ -72,7 +72,14 @@ from .timeutil import parse_time, utc_now
 from .transcript import render_task_transcript
 from .triggers import run_post_mutation_trigger
 from .wake import schedule_manual_cooldown_wake
-from .worktree import build_apply_report, build_cleanup_report, build_prepare_report, render_worktree_report, task_worktree_metadata
+from .worktree import (
+    build_apply_report,
+    build_branch_prune_report,
+    build_cleanup_report,
+    build_prepare_report,
+    render_worktree_report,
+    task_worktree_metadata,
+)
 
 WATCH_RESTART_MESSAGE = "cbr source changed since this watch started; restart watch to use updated code"
 COMPACT_TABLE_MIN_NOTE_WIDTH = 28
@@ -366,6 +373,14 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_mode.add_argument("--apply", action="store_true", help="remove the worktree and store task metadata under the queue lock")
     worktree_cleanup.add_argument("--json", action="store_true", help="print JSON")
     worktree_cleanup.set_defaults(func=cmd_worktree_cleanup)
+
+    worktree_branch_prune = worktree_sub.add_parser("branch-prune", help="delete an eligible cleaned local task branch")
+    worktree_branch_prune.add_argument("task_id")
+    branch_prune_mode = worktree_branch_prune.add_mutually_exclusive_group(required=True)
+    branch_prune_mode.add_argument("--dry-run", action="store_true", help="report branch prune eligibility")
+    branch_prune_mode.add_argument("--apply", action="store_true", help="delete the local task branch with git branch -d under the queue lock")
+    worktree_branch_prune.add_argument("--json", action="store_true", help="print JSON")
+    worktree_branch_prune.set_defaults(func=cmd_worktree_branch_prune)
 
     worktree_apply = worktree_sub.add_parser("apply", help="fast-forward an accepted task worktree branch into the main worktree")
     worktree_apply.add_argument("task_id")
@@ -2624,6 +2639,15 @@ def cmd_worktree_prepare(config: Config, args: argparse.Namespace) -> int:
 
 def cmd_worktree_cleanup(config: Config, args: argparse.Namespace) -> int:
     report = build_cleanup_report(config, args.task_id, apply=args.apply)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_worktree_report(report), end="")
+    return 1 if report.get("errors") else 0
+
+
+def cmd_worktree_branch_prune(config: Config, args: argparse.Namespace) -> int:
+    report = build_branch_prune_report(config, args.task_id, apply=args.apply)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:

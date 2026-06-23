@@ -46,6 +46,12 @@ def build_cleanup_report(config: Config, task_id: str, *, apply: bool = False) -
     return _build_cleanup_report_locked(config, task_id, apply=False)
 
 
+def build_branch_prune_report(config: Config, task_id: str, *, apply: bool = False) -> dict[str, Any]:
+    if apply:
+        return _with_lock(config, task_id, lambda: _build_branch_prune_report_locked(config, task_id, apply=True))
+    return _build_branch_prune_report_locked(config, task_id, apply=False)
+
+
 def build_apply_report(config: Config, task_id: str, *, apply: bool = False) -> dict[str, Any]:
     if apply:
         return _with_lock(config, task_id, lambda: build_apply_report_locked(config, task_id, apply=True))
@@ -265,6 +271,222 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
         ),
     )
     return report
+
+
+def _build_branch_prune_report_locked(config: Config, task_id: str, *, apply: bool) -> dict[str, Any]:
+    task = load_task(config, task_id)
+    report = base_report("branch-prune", task, apply)
+    report["planned_action"] = "git branch -d <execution_branch>"
+    validate_branch_prune_report(task, report)
+    if report["errors"] or not apply:
+        return report
+    if report.get("branch_exists") is False:
+        return report
+
+    repo_root = Path(str(report["repo_root"]))
+    branch = str(report["branch"])
+    head = str(report.get("branch_head") or "")
+    git(repo_root, "branch", "-d", branch)
+    now = iso_now()
+    task["execution_branch_prune_status"] = "pruned"
+    task["execution_branch_pruned_at"] = now
+    task["execution_branch_prune_reason"] = report.get("prune_reason")
+    task["execution_branch_pruned_head"] = head
+    task["execution_cleanup_branch_retained"] = False
+    save_task(config, task)
+    report["applied"] = True
+    report["classification"] = {"status": "pruned", "reason": "local task branch deleted with git branch -d"}
+    write_event_nonfatal(
+        config,
+        "task_worktree_branch_pruned",
+        task=task,
+        source="worktree branch-prune",
+        summary=f"pruned worktree branch for task {task_id}",
+        payload=transition_payload(
+            task,
+            execution_mode=task.get("execution_mode"),
+            execution_branch=branch,
+            execution_worktree_status=task.get("execution_worktree_status"),
+            execution_apply_status=task.get("execution_apply_status"),
+            execution_applied_head=task.get("execution_applied_head"),
+            execution_branch_prune_status=task.get("execution_branch_prune_status"),
+            execution_branch_prune_reason=task.get("execution_branch_prune_reason"),
+            execution_branch_pruned_head=task.get("execution_branch_pruned_head"),
+        ),
+    )
+    return report
+
+
+def validate_branch_prune_report(task: dict[str, Any], report: dict[str, Any]) -> None:
+    gates: list[dict[str, Any]] = []
+    report["gates"] = gates
+
+    def gate(name: str, ok: bool, detail: str, error_detail: str | None = None) -> None:
+        gates.append({"name": name, "ok": ok, "detail": detail})
+        if not ok:
+            report["errors"].append(error_detail or detail)
+
+    gate(
+        "execution_mode_git_worktree",
+        task.get("execution_mode") == "git_worktree",
+        f"execution_mode={task.get('execution_mode') or '-'}",
+        "branch prune requires execution_mode=git_worktree",
+    )
+
+    branch = str(task.get("execution_branch") or "").strip()
+    repo_raw = task.get("execution_repo_root") or task.get("project_root") or task.get("cwd")
+    missing = [
+        name
+        for name, value in (
+            ("execution_branch", branch),
+            ("execution_repo_root", repo_raw),
+            ("execution_worktree_status", task.get("execution_worktree_status")),
+        )
+        if not value
+    ]
+    gate(
+        "required_branch_metadata",
+        not missing,
+        "required branch metadata present" if not missing else "missing: " + ", ".join(missing),
+        "branch prune requires worktree branch metadata; missing: " + ", ".join(missing),
+    )
+    gate(
+        "worktree_status_cleaned",
+        task.get("execution_worktree_status") == "cleaned",
+        f"execution_worktree_status={task.get('execution_worktree_status') or '-'}",
+        "branch prune requires execution_worktree_status=cleaned",
+    )
+    gate(
+        "cleanup_was_applied",
+        task.get("execution_cleanup_kind") == "applied" and task.get("execution_cleanup_result_applied") is True,
+        (
+            f"execution_cleanup_kind={task.get('execution_cleanup_kind') or '-'} "
+            f"execution_cleanup_result_applied={task.get('execution_cleanup_result_applied')}"
+        ),
+        "branch prune is currently limited to applied worktree cleanup; discard-cleaned branches are retained",
+    )
+    gate(
+        "execution_apply_status_applied",
+        task.get("execution_apply_status") == "applied",
+        f"execution_apply_status={task.get('execution_apply_status') or '-'}",
+        "branch prune requires execution_apply_status=applied",
+    )
+    gate(
+        "task_accepted_or_archived",
+        (task.get("status") == "completed" and task.get("review_status") == "accepted") or task.get("status") == "archived",
+        f"status={task.get('status') or '-'} review_status={task.get('review_status') or '-'}",
+        "branch prune requires an applied completed+accepted or archived task",
+    )
+    if missing or not branch or not repo_raw:
+        report["gates_ok"] = False
+        return
+
+    branch_valid = True
+    try:
+        validate_branch_name(branch)
+    except ValueError as exc:
+        branch_valid = False
+        gate("branch_ref_valid", False, str(exc))
+    if branch_valid:
+        gate("branch_ref_valid", True, "branch name passes git ref validation")
+
+    namespace_ok = branch.startswith("cbr/") and not branch.startswith("origin/")
+    protected = is_protected_branch_name(branch, task)
+    gate(
+        "branch_namespace_cbr",
+        namespace_ok and not protected,
+        f"branch={branch}",
+        "branch prune only deletes local cbr/* task branches; protected, remote, and non-cbr branches are rejected",
+    )
+    expected_branch = sanitize_branch_name(str(task.get("id") or ""))
+    report["expected_branch"] = expected_branch
+    gate(
+        "branch_matches_task_id",
+        branch == expected_branch,
+        f"branch={branch} expected_branch={expected_branch}",
+        "branch prune requires execution_branch to match the sanitized task id branch",
+    )
+    if not branch_valid:
+        report["gates_ok"] = False
+        return
+
+    try:
+        repo_root = Path(str(repo_raw)).expanduser().resolve()
+        repo_top = git(repo_root, "rev-parse", "--show-toplevel")
+        registry = worktree_registry(repo_root)
+        branch_state = local_branch_state(repo_root, branch)
+        current_branch = git_optional(repo_root, "symbolic-ref", "--quiet", "--short", "HEAD") or "HEAD"
+    except (OSError, subprocess.CalledProcessError) as exc:
+        gate("git_state_available", False, clean_git_exception(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc))
+        report["gates_ok"] = False
+        return
+
+    report.update(
+        {
+            "repo_root": repo_top,
+            "branch": branch,
+            "branch_exists": branch_state.get("exists"),
+            "current_branch": current_branch,
+            "prune_reason": "execution_apply_status=applied",
+        }
+    )
+    if branch_state.get("head"):
+        report["branch_head"] = branch_state.get("head")
+    if not branch_state.get("exists"):
+        report["classification"] = {"status": "missing", "reason": "local task branch is already absent; nothing to prune"}
+        report["gates_ok"] = not report["errors"]
+        return
+
+    gate("git_state_available", True, "git state is available")
+    checked_out = registry_entry_for_branch(registry, branch) is not None
+    gate(
+        "branch_not_checked_out",
+        not checked_out,
+        "branch is not checked out in any git worktree" if not checked_out else "branch is checked out in a git worktree",
+        "branch prune refuses a branch checked out in the git worktree registry",
+    )
+    gate(
+        "branch_not_current",
+        current_branch != branch,
+        f"current_branch={current_branch}",
+        "branch prune refuses the current checked-out branch",
+    )
+    expected_head = branch_prune_expected_head(task)
+    report["expected_head"] = expected_head
+    gate(
+        "expected_head_available",
+        bool(expected_head),
+        f"expected_head={expected_head or '-'}",
+        "branch prune requires reliable expected head metadata such as execution_applied_head",
+    )
+    if expected_head:
+        gate(
+            "branch_head_matches_expected",
+            branch_state.get("head") == expected_head,
+            f"branch_head={branch_state.get('head') or '-'} expected_head={expected_head}",
+            "branch HEAD does not match recorded expected head metadata",
+        )
+    if not report["errors"]:
+        report["classification"] = {"status": "eligible", "reason": "local applied cbr task branch can be pruned"}
+    report["gates_ok"] = not report["errors"]
+
+
+def branch_prune_expected_head(task: dict[str, Any]) -> str | None:
+    for key in ("execution_applied_head", "execution_branch_head", "execution_rebased_head"):
+        value = str(task.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def is_protected_branch_name(branch: str, task: dict[str, Any]) -> bool:
+    if branch in {"main", "master", "develop"} or branch.startswith("release/") or branch.startswith("origin/"):
+        return True
+    for key in ("execution_apply_target", "execution_base_ref", "execution_merge_target"):
+        target = str(task.get(key) or "").strip()
+        if target and target != "HEAD" and branch == target:
+            return True
+    return False
 
 
 def cleanup_eligibility_error(task: dict[str, Any]) -> str | None:
@@ -1130,6 +1352,10 @@ def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
         ("execution_cleanup_reason", "cleanup_reason"),
         ("execution_cleanup_branch_retained", "cleanup_branch_retained"),
         ("execution_cleanup_result_applied", "cleanup_result_applied"),
+        ("execution_branch_prune_status", "branch_prune_status"),
+        ("execution_branch_pruned_at", "branch_pruned_at"),
+        ("execution_branch_prune_reason", "branch_prune_reason"),
+        ("execution_branch_pruned_head", "branch_pruned_head"),
     ):
         value = task.get(source)
         if value not in (None, ""):
@@ -1244,10 +1470,19 @@ def render_worktree_report(report: dict[str, Any]) -> str:
         f"task_id: {report.get('task_id')}",
         f"applied: {str(bool(report.get('applied'))).lower()}",
     ]
-    for key in ("branch", "worktree_path", "base_ref", "base_head", "apply_status", "cleanup_kind", "cleanup_reason"):
+    for key in (
+        "branch",
+        "worktree_path",
+        "base_ref",
+        "base_head",
+        "apply_status",
+        "cleanup_kind",
+        "cleanup_reason",
+        "prune_reason",
+    ):
         if report.get(key):
             lines.append(f"{key}: {report.get(key)}")
-    for key in ("branch_head", "main_head", "apply_target", "apply_strategy", "planned_action"):
+    for key in ("branch_head", "expected_head", "main_head", "apply_target", "apply_strategy", "planned_action"):
         if report.get(key):
             lines.append(f"{key}: {report.get(key)}")
     rebase = report.get("rebase")

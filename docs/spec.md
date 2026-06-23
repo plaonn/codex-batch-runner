@@ -837,6 +837,10 @@ Task metadata model:
 - `execution_cleanup_reason`: cleanup 허용 근거. 예: `execution_apply_status=applied`, `resolution=superseded`, `review_status=rejected`
 - `execution_cleanup_branch_retained`: cleanup이 local branch를 보존했는지 여부. 현재 cleanup command는 항상 `true`를 기록합니다.
 - `execution_cleanup_result_applied`: cleanup 당시 task result가 integration target에 적용된 상태였는지 여부
+- `execution_branch_prune_status`: local task branch pruning 결과. 성공 시 `pruned`
+- `execution_branch_pruned_at`: local task branch pruning 시각
+- `execution_branch_prune_reason`: branch pruning 허용 근거. 현재 값은 `execution_apply_status=applied`
+- `execution_branch_pruned_head`: 삭제 직전 local task branch `HEAD`
 
 Branch naming and base policy:
 
@@ -870,7 +874,11 @@ Cleanup and retention:
 - `cbr worktree cleanup`은 기본 dry-run이며, `--apply`가 명시되고 cleanup guard가 통과한 경우에만 retained task worktree를 삭제합니다. Local branch, task JSON, runtime log, event log, private state는 삭제하지 않습니다. Task/log/event 파일 삭제는 별도 `cbr prune` semantics를 통해서만 수행합니다.
 - Discard cleanup apply는 worktree만 삭제하고 branch를 보존하며 `execution_cleanup_kind=discard`, `execution_cleanup_reason`, `execution_cleanup_branch_retained=true`, `execution_cleanup_result_applied=false` metadata와 sanitized `task_worktree_cleaned` event를 남깁니다. Dry-run/human report는 applied cleanup과 discard cleanup을 `cleanup_kind`/`cleanup_reason`으로 구분합니다.
 - Cleanup guard는 target path가 configured `worktree_root` 아래인지, path가 비어 있지 않은지, Git worktree registry에 등록된 path인지, task metadata와 branch가 일치하는지, worktree metadata가 missing/stale/recovery_required 상태가 아닌지 확인해야 합니다.
-- Branch deletion은 worktree 삭제와 별도 phase입니다. 기본은 local branch 보존이며, branch 삭제는 merged/applied 상태와 explicit option을 요구합니다.
+- Branch deletion은 worktree 삭제와 별도 phase입니다. 기본은 local branch 보존이며, `cbr worktree cleanup`은 branch를 삭제하지 않습니다.
+- `cbr worktree branch-prune TASK_ID --dry-run|--apply`는 cleaned worktree task의 local branch pruning 가능 여부를 별도로 보고하거나 적용합니다. 이 command는 worktree directory, remote branch, task JSON, runtime log, event log를 삭제하지 않습니다. `--apply`는 queue lock 아래에서 dry-run과 같은 validation을 다시 수행하고 `git branch -d <execution_branch>`만 사용합니다. Force deletion은 지원하지 않습니다.
+- 현재 branch pruning 허용 범위는 보수적으로 applied cleanup에 한정합니다. 대상 task는 `execution_mode=git_worktree`, `execution_branch` 보유, `execution_worktree_status=cleaned`, `execution_cleanup_kind=applied`, `execution_cleanup_result_applied=true`, `execution_apply_status=applied`, `completed + accepted` 또는 `archived` 상태여야 합니다. Discard cleanup(`execution_cleanup_kind=discard`, `execution_cleanup_result_applied=false`) branch는 result가 적용되지 않은 local evidence로 간주해 보존하며, future policy에서 별도 허용 여부를 결정합니다.
+- Branch pruning guard는 branch name이 Git ref validation을 통과하고 local `cbr/*` task branch namespace 안에 있으며 task id에서 산출한 sanitized branch와 일치하는지 확인합니다. `main`, `master`, `develop`, `release/*`, `origin/*`, configured apply/base target과 일치하는 branch, current checked-out branch, non-cbr branch는 거부합니다. Git worktree registry에서 해당 branch가 checkout된 곳이 있으면 거부합니다. Local branch가 이미 없으면 no-op report state로 처리하고 destructive path로 보지 않습니다.
+- Branch pruning은 가능한 경우 branch `HEAD`를 expected head metadata(`execution_applied_head`, fallback `execution_branch_head` 또는 `execution_rebased_head`)와 비교합니다. Reliable expected head가 없거나 현재 local branch `HEAD`가 expected head와 다르면 거부합니다. 성공 시 `execution_branch_prune_status=pruned`, `execution_branch_pruned_at`, `execution_branch_prune_reason`, `execution_branch_pruned_head`, `execution_cleanup_branch_retained=false`를 task metadata에 기록하고 sanitized `task_worktree_branch_pruned` event를 남깁니다.
 
 Stale worktree recovery and failure handling:
 

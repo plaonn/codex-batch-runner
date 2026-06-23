@@ -81,6 +81,12 @@ def create_applied_worktree_task(config_path: Path, config: Config, repo: Path, 
     return load_task(config, task_id)
 
 
+def create_cleaned_applied_worktree_task(config_path: Path, config: Config, repo: Path, task_id: str) -> dict:
+    task = create_applied_worktree_task(config_path, config, repo, task_id)
+    assert run_cli(["--config", str(config_path), "worktree", "cleanup", task_id, "--apply", "--json"])[0] == 0
+    return load_task(config, task_id)
+
+
 def create_completed_worktree_task(
     config_path: Path,
     config: Config,
@@ -371,6 +377,193 @@ class WorktreeTests(unittest.TestCase):
             events = list_events(config, task_id="cleanup", limit=0)
             self.assertTrue(any(event["event_type"] == "task_worktree_cleaned" for event in events))
             self.assertNotIn("prompt", json.dumps(events))
+
+    def test_branch_prune_dry_run_reports_applied_cleaned_branch_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_cleaned_applied_worktree_task(config_path, config, repo, "branch-prune-dry")
+
+            code, report = run_cli(
+                ["--config", str(config_path), "worktree", "branch-prune", "branch-prune-dry", "--dry-run", "--json"]
+            )
+            text_code, text_output = run_cli_text(
+                ["--config", str(config_path), "worktree", "branch-prune", "branch-prune-dry", "--dry-run"]
+            )
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["applied"])
+            self.assertTrue(report["gates_ok"])
+            self.assertEqual("eligible", report["classification"]["status"])
+            self.assertEqual(task["execution_applied_head"], report["expected_head"])
+            self.assertEqual(task["execution_applied_head"], report["branch_head"])
+            self.assertIn("cbr/branch-prune-dry", git(repo, "branch", "--list", "cbr/branch-prune-dry"))
+            self.assertEqual(0, text_code)
+            self.assertIn("classification: eligible", text_output)
+
+    def test_branch_prune_apply_deletes_local_branch_only_and_records_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_cleaned_applied_worktree_task(config_path, config, repo, "branch-prune-apply")
+            worktree_path = Path(task["execution_worktree_path"])
+
+            code, report = run_cli(
+                ["--config", str(config_path), "worktree", "branch-prune", "branch-prune-apply", "--apply", "--json"]
+            )
+            loaded = load_task(config, "branch-prune-apply")
+            events = list_events(config, task_id="branch-prune-apply", limit=0)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["applied"])
+            self.assertEqual("pruned", report["classification"]["status"])
+            self.assertEqual("", git(repo, "branch", "--list", "cbr/branch-prune-apply"))
+            self.assertFalse(worktree_path.exists())
+            self.assertEqual("cleaned", loaded["execution_worktree_status"])
+            self.assertEqual("pruned", loaded["execution_branch_prune_status"])
+            self.assertEqual(task["execution_applied_head"], loaded["execution_branch_pruned_head"])
+            self.assertFalse(loaded["execution_cleanup_branch_retained"])
+            self.assertTrue(task_path(config, "branch-prune-apply").exists())
+            prune_event = next(event for event in events if event["event_type"] == "task_worktree_branch_pruned")
+            self.assertEqual("pruned", prune_event["payload"]["execution_branch_prune_status"])
+            self.assertNotIn("prompt", json.dumps(events))
+
+    def test_branch_prune_rejects_protected_and_non_cbr_branch_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_task(config, "work", str(repo), task_id="branch-prune-protected")
+            head = git(repo, "rev-parse", "HEAD")
+            task.update(
+                {
+                    "status": "completed",
+                    "review_status": "accepted",
+                    "execution_mode": "git_worktree",
+                    "execution_branch": "main",
+                    "execution_repo_root": str(repo),
+                    "execution_worktree_status": "cleaned",
+                    "execution_apply_status": "applied",
+                    "execution_applied_head": head,
+                    "execution_cleanup_kind": "applied",
+                    "execution_cleanup_result_applied": True,
+                }
+            )
+            save_task(config, task)
+
+            protected_code, protected_report = run_cli(
+                ["--config", str(config_path), "worktree", "branch-prune", "branch-prune-protected", "--dry-run", "--json"]
+            )
+            task["execution_branch"] = "feature/task"
+            save_task(config, task)
+            non_cbr_code, non_cbr_report = run_cli(
+                ["--config", str(config_path), "worktree", "branch-prune", "branch-prune-protected", "--dry-run", "--json"]
+            )
+
+            self.assertEqual(1, protected_code)
+            self.assertTrue(any("only deletes local cbr/* task branches" in error for error in protected_report["errors"]))
+            self.assertIn("main", git(repo, "branch", "--list", "main"))
+            self.assertEqual(1, non_cbr_code)
+            self.assertTrue(any("only deletes local cbr/* task branches" in error for error in non_cbr_report["errors"]))
+
+    def test_branch_prune_rejects_checked_out_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_cleaned_applied_worktree_task(config_path, config, repo, "branch-prune-checked-out")
+            checkout_path = root / "checked-out"
+            git(repo, "worktree", "add", str(checkout_path), task["execution_branch"])
+
+            code, report = run_cli(
+                ["--config", str(config_path), "worktree", "branch-prune", "branch-prune-checked-out", "--dry-run", "--json"]
+            )
+
+            self.assertEqual(1, code)
+            self.assertIn("branch prune refuses a branch checked out", report["errors"][0])
+            self.assertIn("cbr/branch-prune-checked-out", git(repo, "branch", "--list", "cbr/branch-prune-checked-out"))
+
+    def test_branch_prune_missing_branch_is_noop_report_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_cleaned_applied_worktree_task(config_path, config, repo, "branch-prune-missing")
+            git(repo, "branch", "-d", "cbr/branch-prune-missing")
+
+            code, report = run_cli(
+                ["--config", str(config_path), "worktree", "branch-prune", "branch-prune-missing", "--apply", "--json"]
+            )
+
+            self.assertEqual(0, code)
+            self.assertFalse(report["applied"])
+            self.assertFalse(report["branch_exists"])
+            self.assertEqual("missing", report["classification"]["status"])
+            self.assertEqual("cleaned", load_task(config, "branch-prune-missing")["execution_worktree_status"])
+
+    def test_branch_prune_rejects_unreviewed_and_discard_cleanup_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            unreviewed = create_completed_worktree_task(
+                config_path,
+                config,
+                repo,
+                "branch-prune-unreviewed",
+                review_status="unreviewed",
+            )
+            unreviewed["execution_worktree_status"] = "cleaned"
+            unreviewed["execution_cleanup_kind"] = "applied"
+            unreviewed["execution_cleanup_result_applied"] = True
+            unreviewed["execution_apply_status"] = "applied"
+            unreviewed["execution_applied_head"] = git(repo, "rev-parse", unreviewed["execution_branch"])
+            save_task(config, unreviewed)
+            followup = create_completed_worktree_task(
+                config_path,
+                config,
+                repo,
+                "branch-prune-followup",
+                review_status="needs_followup",
+            )
+            followup["resolution"] = "superseded"
+            save_task(config, followup)
+            self.assertEqual(
+                0,
+                run_cli(["--config", str(config_path), "worktree", "cleanup", "branch-prune-followup", "--apply", "--json"])[0],
+            )
+
+            unreviewed_code, unreviewed_report = run_cli(
+                ["--config", str(config_path), "worktree", "branch-prune", "branch-prune-unreviewed", "--dry-run", "--json"]
+            )
+            followup_code, followup_report = run_cli(
+                ["--config", str(config_path), "worktree", "branch-prune", "branch-prune-followup", "--dry-run", "--json"]
+            )
+
+            self.assertEqual(1, unreviewed_code)
+            self.assertTrue(any("completed+accepted" in error for error in unreviewed_report["errors"]))
+            self.assertEqual(1, followup_code)
+            self.assertIn("discard-cleaned branches are retained", followup_report["errors"][0])
 
     def test_cleanup_refuses_missing_stale_and_recovery_required_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
