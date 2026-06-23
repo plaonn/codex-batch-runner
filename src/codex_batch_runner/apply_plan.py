@@ -8,7 +8,7 @@ from .execution_profiles import optional_profile_name
 from .events import emit_task_event
 from .fs import read_json
 from .lock import FileLock
-from .queue import list_tasks, load_task, save_task
+from .queue import ROUTING_RISKS, ROUTING_SIZES, VERIFICATION_SCOPES, list_tasks, load_task, save_task
 from .triggers import run_post_mutation_trigger
 
 
@@ -66,6 +66,10 @@ APPLY_MUTATION_FIELDS = {
     "execution_profile",
     "routing_reason",
     "routing_risk_factors",
+    "routing_experiment",
+    "routing_size",
+    "routing_risk",
+    "verification_scope",
 }
 SAFE_STATUS_VALUES = {
     "runnable",
@@ -298,9 +302,9 @@ def normalized_field_updates(fields: dict[str, Any]) -> dict[str, Any]:
             updates[field] = [str(item) for item in value] if isinstance(value, list) else []
         elif field == "status":
             updates[field] = str(value)
-        elif field in {"execution_profile", "routing_reason"}:
+        elif field in {"execution_profile", "routing_reason", "routing_experiment", "routing_size", "routing_risk"}:
             updates[field] = None if value is None else str(value)
-        elif field == "routing_risk_factors":
+        elif field in {"routing_risk_factors", "verification_scope"}:
             updates[field] = [str(item) for item in value] if isinstance(value, list) else []
     return updates
 
@@ -327,6 +331,10 @@ def mutation_summary(task: dict[str, Any]) -> dict[str, Any]:
             "execution_profile": task.get("execution_profile"),
             "routing_reason": task.get("routing_reason"),
             "routing_risk_factors": task.get("routing_risk_factors"),
+            "routing_experiment": task.get("routing_experiment"),
+            "routing_size": task.get("routing_size"),
+            "routing_risk": task.get("routing_risk"),
+            "verification_scope": task.get("verification_scope"),
         }
     )
 
@@ -383,6 +391,43 @@ def validate_safe_field_updates(config: Config, operation: dict, task_id: str, o
             optional_profile_name("execution_profile", fields.get("execution_profile"), config.execution_profiles)
         except ValueError as exc:
             add_op_error(report, op_report, f"{task_id}: {exc}")
+    validate_choice_field(fields, "routing_size", ROUTING_SIZES, task_id, op_report, report)
+    validate_choice_field(fields, "routing_risk", ROUTING_RISKS, task_id, op_report, report)
+    validate_choice_list_field(fields, "verification_scope", VERIFICATION_SCOPES, task_id, op_report, report)
+
+
+def validate_choice_field(
+    fields: dict,
+    field: str,
+    choices: tuple[str, ...],
+    task_id: str,
+    op_report: dict,
+    report: dict,
+) -> None:
+    if field not in fields or fields.get(field) is None:
+        return
+    value = str(fields.get(field))
+    if value not in choices:
+        add_op_error(report, op_report, f"{task_id}: {field} must be one of: " + ", ".join(choices))
+
+
+def validate_choice_list_field(
+    fields: dict,
+    field: str,
+    choices: tuple[str, ...],
+    task_id: str,
+    op_report: dict,
+    report: dict,
+) -> None:
+    if field not in fields:
+        return
+    value = fields.get(field)
+    if not isinstance(value, list):
+        add_op_error(report, op_report, f"{task_id}: {field} must be a list")
+        return
+    invalid = [str(item) for item in value if str(item) not in choices]
+    if invalid:
+        add_op_error(report, op_report, f"{task_id}: {field} entries must be one of: " + ", ".join(choices))
 
 
 def validate_apply_supported_operations(plan: object) -> list[str]:

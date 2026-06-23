@@ -893,6 +893,14 @@ class CliTests(unittest.TestCase):
                     "low-blast-radius",
                     "--routing-experiment",
                     "downshift_probe",
+                    "--routing-size",
+                    "small",
+                    "--routing-risk",
+                    "low",
+                    "--verification-scope",
+                    "unit",
+                    "--verification-scope",
+                    "docs",
                     "--prompt",
                     "work",
                 ]
@@ -904,6 +912,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual("docs-only bounded change", task["routing_reason"])
             self.assertEqual(["public-docs", "low-blast-radius"], task["routing_risk_factors"])
             self.assertEqual("downshift_probe", task["routing_experiment"])
+            self.assertEqual("small", task["routing_size"])
+            self.assertEqual("low", task["routing_risk"])
+            self.assertEqual(["unit", "docs"], task["verification_scope"])
 
     def test_enqueue_records_shell_command_json_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1113,6 +1124,9 @@ class CliTests(unittest.TestCase):
                 routing_reason="docs-only bounded change",
                 routing_risk_factors=["public-docs", "low-blast-radius"],
                 routing_experiment="downshift_probe",
+                routing_size="small",
+                routing_risk="low",
+                verification_scope=["unit", "docs"],
             )
             task["status"] = "completed"
             task["review_status"] = "accepted"
@@ -1122,15 +1136,25 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
             report = json.loads(output)
             experiments = {entry["key"]: entry for entry in report["groups"]["routing_experiment"]}
+            sizes = {entry["key"]: entry for entry in report["groups"]["routing_size"]}
+            risks_by_level = {entry["key"]: entry for entry in report["groups"]["routing_risk"]}
             risks = {entry["key"]: entry for entry in report["groups"]["routing_risk_factor"]}
+            scopes = {entry["key"]: entry for entry in report["groups"]["verification_scope"]}
             profile_experiments = {entry["key"]: entry for entry in report["groups"]["profile_experiment"]}
 
             self.assertEqual(0, code)
             self.assertEqual("docs-only bounded change", report["task_rows"][0]["routing_reason"])
             self.assertEqual(["public-docs", "low-blast-radius"], report["task_rows"][0]["routing_risk_factors"])
+            self.assertEqual("small", report["task_rows"][0]["routing_size"])
+            self.assertEqual("low", report["task_rows"][0]["routing_risk"])
+            self.assertEqual(["unit", "docs"], report["task_rows"][0]["verification_scope"])
             self.assertEqual(1, experiments["downshift_probe"]["tasks"])
+            self.assertEqual(1, sizes["small"]["tasks"])
+            self.assertEqual(1, risks_by_level["low"]["tasks"])
             self.assertEqual(1, risks["public-docs"]["tasks"])
             self.assertEqual(1, risks["low-blast-radius"]["tasks"])
+            self.assertEqual(1, scopes["unit"]["tasks"])
+            self.assertEqual(1, scopes["docs"]["tasks"])
             self.assertEqual(1, profile_experiments["small/downshift_probe"]["first_pass_accepted"])
 
     def test_routing_report_human_output_and_limit(self) -> None:
@@ -1162,6 +1186,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("# routing report", output)
             self.assertIn("tasks: 2 of 3 filtered", output)
             self.assertIn("## by_profile", output)
+            self.assertIn("## by_routing_size", output)
+            self.assertIn("## by_verification_scope", output)
             self.assertIn("small", output)
 
     def test_routing_report_rejects_negative_limit(self) -> None:
@@ -2491,6 +2517,10 @@ class CliTests(unittest.TestCase):
                                 "execution_profile": "small",
                                 "routing_reason": "docs-only bounded change",
                                 "routing_risk_factors": ["public-docs", "low-blast-radius"],
+                                "routing_experiment": "downshift_probe",
+                                "routing_size": "small",
+                                "routing_risk": "low",
+                                "verification_scope": ["unit", "docs"],
                             },
                         }
                     ],
@@ -2506,6 +2536,10 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("execution_profile", task)
             self.assertIsNone(task["routing_reason"])
             self.assertEqual([], task["routing_risk_factors"])
+            self.assertIsNone(task["routing_experiment"])
+            self.assertIsNone(task["routing_size"])
+            self.assertIsNone(task["routing_risk"])
+            self.assertEqual([], task["verification_scope"])
 
     def test_apply_plan_dry_run_rejects_missing_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2655,6 +2689,10 @@ class CliTests(unittest.TestCase):
                                 "execution_profile": "small",
                                 "routing_reason": "docs-only bounded change",
                                 "routing_risk_factors": ["public-docs", "low-blast-radius"],
+                                "routing_experiment": "downshift_probe",
+                                "routing_size": "small",
+                                "routing_risk": "low",
+                                "verification_scope": ["unit", "docs"],
                             },
                         }
                     ],
@@ -2679,6 +2717,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual("small", task["execution_profile"])
             self.assertEqual("docs-only bounded change", task["routing_reason"])
             self.assertEqual(["public-docs", "low-blast-radius"], task["routing_risk_factors"])
+            self.assertEqual("downshift_probe", task["routing_experiment"])
+            self.assertEqual("small", task["routing_size"])
+            self.assertEqual("low", task["routing_risk"])
+            self.assertEqual(["unit", "docs"], task["verification_scope"])
             self.assertEqual(["x"], marker.read_text(encoding="utf-8").splitlines())
             self.assertEqual("task_mutated", events[0]["event_type"])
             self.assertEqual(
@@ -2688,16 +2730,24 @@ class CliTests(unittest.TestCase):
                     "description",
                     "execution_profile",
                     "labels",
+                    "routing_experiment",
                     "routing_reason",
+                    "routing_risk",
                     "routing_risk_factors",
+                    "routing_size",
                     "status",
                     "title",
+                    "verification_scope",
                 ],
                 events[0]["payload"]["changed_fields"],
             )
             self.assertEqual("small", events[0]["payload"]["after"]["execution_profile"])
             self.assertEqual("docs-only bounded change", events[0]["payload"]["after"]["routing_reason"])
             self.assertEqual(["public-docs", "low-blast-radius"], events[0]["payload"]["after"]["routing_risk_factors"])
+            self.assertEqual("downshift_probe", events[0]["payload"]["after"]["routing_experiment"])
+            self.assertEqual("small", events[0]["payload"]["after"]["routing_size"])
+            self.assertEqual("low", events[0]["payload"]["after"]["routing_risk"])
+            self.assertEqual(["unit", "docs"], events[0]["payload"]["after"]["verification_scope"])
 
     def test_apply_plan_apply_rejects_stale_expected_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3310,6 +3360,9 @@ class CliTests(unittest.TestCase):
                 routing_reason="runner-state risk",
                 routing_risk_factors=["queue-mutation"],
                 routing_experiment="upshift_guard",
+                routing_size="medium",
+                routing_risk="high",
+                verification_scope=["unit", "integration"],
             )
             task["status"] = "completed"
             task["review_status"] = "unreviewed"
@@ -3344,7 +3397,12 @@ class CliTests(unittest.TestCase):
             self.assertIn("project_id: project-a", output)
             self.assertIn("category: implementation", output)
             self.assertIn("labels: queue", output)
-            self.assertIn("routing: routing_experiment=upshift_guard, routing_reason=runner-state risk, routing_risk_factors=queue-mutation", output)
+            self.assertIn(
+                "routing: routing_experiment=upshift_guard, routing_size=medium, routing_risk=high, "
+                "routing_reason=runner-state risk, routing_risk_factors=queue-mutation, "
+                "verification_scope=unit,integration",
+                output,
+            )
             self.assertIn("summary:", output)
             self.assertIn("Implemented token [REDACTED] handling.", output)
             self.assertIn("commits:", output)
@@ -3506,6 +3564,9 @@ class CliTests(unittest.TestCase):
                 routing_reason="baseline route",
                 routing_risk_factors=["normal-risk"],
                 routing_experiment="baseline",
+                routing_size="medium",
+                routing_risk="medium",
+                verification_scope=["unit"],
             )
             task["status"] = "completed"
             task["review_status"] = "unreviewed"
@@ -3526,6 +3587,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual("baseline route", bundle["task"]["routing_reason"])
             self.assertEqual(["normal-risk"], bundle["task"]["routing_risk_factors"])
             self.assertEqual("baseline", bundle["task"]["routing_experiment"])
+            self.assertEqual("medium", bundle["task"]["routing_size"])
+            self.assertEqual("medium", bundle["task"]["routing_risk"])
+            self.assertEqual(["unit"], bundle["task"]["verification_scope"])
             self.assertEqual("completed", bundle["status"])
             self.assertEqual(["unit tests"], bundle["verification"])
             self.assertFalse(bundle["transcript_contents_included"])
