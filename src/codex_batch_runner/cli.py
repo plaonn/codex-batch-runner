@@ -880,13 +880,16 @@ def render_dependency_graph_node(
     lines = graph_content_lines("* ", status, compact_title(task), terminal_width)
     depends_on = task.get("depends_on")
     raw_dep_ids = [str(dep_id) for dep_id in depends_on if str(dep_id)] if isinstance(depends_on, list) else []
+    if not raw_dep_ids:
+        return lines
+    lines.append("|\\")
     for index, dep_id in enumerate(raw_dep_ids):
         dep = by_id.get(dep_id)
         dep_state = dependency_state_cell(dep, by_id, config, color)
         dep_title = "missing dependency" if dep is None else compact_title(dep)
         is_last = index == len(raw_dep_ids) - 1
-        prefix = "    `-- " if is_last else "    |-- "
-        continuation_prefix = "        " if is_last else "    |   "
+        prefix = "|   `-- " if is_last else "|   |-- "
+        continuation_prefix = "|       " if is_last else "|   |   "
         lines.extend(
             graph_content_lines(
                 prefix,
@@ -897,6 +900,7 @@ def render_dependency_graph_node(
                 title_style=color.dim_text,
             )
         )
+    lines.append("|/")
     return lines
 
 
