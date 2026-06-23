@@ -28,6 +28,9 @@ from .queue import (
     RESOLUTIONS,
     RUNNABLE_STATUSES,
     TASK_PRIORITIES,
+    ROUTING_RISKS,
+    ROUTING_SIZES,
+    VERIFICATION_SCOPES,
     archive_task,
     capacity_blockers,
     create_task,
@@ -118,6 +121,9 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument("--routing-reason", help="public-safe reason for the profile/provider routing decision")
     enqueue.add_argument("--routing-risk-factor", action="append", default=[], help="public-safe routing risk factor, repeatable")
     enqueue.add_argument("--routing-experiment", help="routing experiment label such as baseline, downshift_probe, upshift_guard, or manual")
+    enqueue.add_argument("--routing-size", choices=ROUTING_SIZES, help="public-safe pre-enqueue work size estimate")
+    enqueue.add_argument("--routing-risk", choices=ROUTING_RISKS, help="public-safe pre-enqueue implementation risk estimate")
+    enqueue.add_argument("--verification-scope", action="append", choices=VERIFICATION_SCOPES, default=[], help="public-safe verification scope tag, repeatable")
     enqueue.add_argument("--capacity-pool", default="codex", help="capacity pool for scheduler admission (default: codex)")
     enqueue.add_argument("--priority", choices=TASK_PRIORITIES, default="normal", help="task priority within a project (default: normal)")
     enqueue.set_defaults(func=cmd_enqueue)
@@ -385,6 +391,9 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         routing_reason=args.routing_reason,
         routing_risk_factors=args.routing_risk_factor,
         routing_experiment=args.routing_experiment,
+        routing_size=args.routing_size,
+        routing_risk=args.routing_risk,
+        verification_scope=args.verification_scope,
         execution_backend=args.backend,
         shell_command=shell_command,
         shell_timeout_seconds=args.shell_timeout_seconds,

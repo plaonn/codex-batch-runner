@@ -276,7 +276,7 @@ PYTHONPATH=src python3 -m codex_batch_runner apply-plan queue-plan.json --apply
 
 `apply-plan`은 기본적으로 read-only dry-run으로 동작합니다. `--dry-run`을 생략해도 task JSON을 쓰지 않고 Codex를 실행하지 않으며 post-mutation hook도 호출하지 않습니다. Dry-run은 plan schema, 지원 operation 이름, 대상 task 존재 여부, running task 대상 금지, operation별 `expected` stale check, dependency cycle 가능성, plan 또는 operation 단위 `reason` 존재 여부를 확인하고 human report 또는 JSON report를 출력합니다. Report는 raw prompt, log path, session/thread id, credential/token 같은 민감한 plan 값을 redaction합니다.
 
-실제 queue 변경은 `--apply`를 명시한 경우에만 수행됩니다. Apply mode는 runner와 같은 queue lock을 잡은 뒤 같은 validation을 다시 실행하고, 검증이 통과한 경우에만 제한된 field(`title`, `description`, `category`, `labels`, `depends_on`, `status`, `execution_profile`, `routing_reason`, `routing_risk_factors`)를 atomic JSON write로 갱신합니다. `running` task 대상 mutation과 `status=running` 전환은 거부하고, `execution_profile`이 제공되면 config의 `execution_profiles`에 정의된 이름인지 검증합니다. 적용된 변경은 sanitized `task_mutated` event로 기록하고, 변경이 있었을 때 configured `post_mutation_trigger_command`를 실행합니다. Profile mutation이 자주 필요해지면 별도 convenience wrapper command를 추가할 수 있지만, 현재 canonical safe mutation surface는 계속 `apply-plan`입니다.
+실제 queue 변경은 `--apply`를 명시한 경우에만 수행됩니다. Apply mode는 runner와 같은 queue lock을 잡은 뒤 같은 validation을 다시 실행하고, 검증이 통과한 경우에만 제한된 field(`title`, `description`, `category`, `labels`, `depends_on`, `status`, `execution_profile`, `routing_reason`, `routing_risk_factors`, `routing_experiment`, `routing_size`, `routing_risk`, `verification_scope`)를 atomic JSON write로 갱신합니다. `running` task 대상 mutation과 `status=running` 전환은 거부하고, `execution_profile`이 제공되면 config의 `execution_profiles`에 정의된 이름인지 검증하며, `routing_size`/`routing_risk`는 allowlisted enum 값만 허용합니다. 적용된 변경은 sanitized `task_mutated` event로 기록하고, 변경이 있었을 때 configured `post_mutation_trigger_command`를 실행합니다. Profile mutation이 자주 필요해지면 별도 convenience wrapper command를 추가할 수 있지만, 현재 canonical safe mutation surface는 계속 `apply-plan`입니다.
 
 task별 git worktree 준비와 정리는 명시적 명령으로도 수행할 수 있습니다. `worktree_mode=task`에서는 `run-next`가 실행 가능한 task를 처리하기 직전에 같은 prepare/recovery guard를 적용하고, 통과한 경우 task worktree를 Codex 실행 `cwd`로 사용합니다. `worktree_mode=disabled`는 기존처럼 task의 원래 `cwd`에서 실행합니다.
 
@@ -350,12 +350,16 @@ PYTHONPATH=src python3 -m codex_batch_runner enqueue \
   --routing-risk-factor public-docs \
   --routing-risk-factor low-blast-radius \
   --routing-experiment downshift_probe \
+  --routing-size small \
+  --routing-risk low \
+  --verification-scope unit \
+  --verification-scope docs \
   --prompt-file task.md
 ```
 
-`routing_experiment` is an audit label, not an enforced policy. Common labels are `baseline`, `downshift_probe`, `upshift_guard`, and `manual`.
+`routing_experiment` is an audit label, not an enforced policy. Common labels are `baseline`, `downshift_probe`, `upshift_guard`, and `manual`. `routing_size` is an allowlisted pre-enqueue size estimate (`tiny`, `small`, `medium`, `large`, `xlarge`), `routing_risk` is an allowlisted implementation risk estimate (`low`, `medium`, `high`), and `verification_scope` is a repeatable allowlisted tag (`none`, `docs`, `lint`, `typecheck`, `unit`, `integration`, `e2e`, `smoke`, `manual`, `build`) describing expected verification coverage.
 
-`routing-report` is a read-only profile routing report for tuning profile selection over time. It groups recent tasks by profile, category, label, profile/category pair, routing experiment, routing risk factor, and profile/experiment pair, then reports accepted counts, first-pass accepted counts, needs-fix/rejected rates, auto-fix task frequency, attempts, duration, and a simple cost proxy based on attempts/runs/duration. It supports the same project/category/label narrowing style as list:
+`routing-report` is a read-only profile routing report for tuning profile selection over time. It groups recent tasks by profile, category, label, profile/category pair, routing experiment, routing size, routing risk, routing risk factor, verification scope, and profile/experiment pair, then reports accepted counts, first-pass accepted counts, needs-fix/rejected rates, auto-fix task frequency, attempts, duration, and a simple cost proxy based on attempts/runs/duration. It supports the same project/category/label narrowing style as list:
 
 ```bash
 PYTHONPATH=src python3 -m codex_batch_runner routing-report --project codex-batch-runner
