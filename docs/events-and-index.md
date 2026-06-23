@@ -24,7 +24,7 @@ Index에는 prompt, next prompt, transcript, raw Codex JSONL, session id, thread
 `cbr index rebuild --dry-run`은 retained task/event files를 읽어 rebuild plan과 count를 보고하지만 SQLite 파일을 쓰지 않습니다. `cbr index rebuild --apply`는 retained task JSON과 retained event JSONL에서 deterministic하게 새 SQLite DB를 만든 뒤 atomic replace로 반영합니다. Pruned task/event file은 source of truth에서 사라졌으므로 다음 apply rebuild 뒤 index에서도 사라집니다.
 
 
-## Event log and derived SQLite index roadmap
+## Event log and derived SQLite index model
 
 dashboard, Telegram notification, automatic review, queue mutation 기능이 커지기 전에 runtime record의 계층을 명확히 둡니다. 지금 단계에서 모든 queue 상태를 full SQL canonical storage로 옮기는 것은 권장하지 않습니다. 초기 source of truth는 계속 task JSON 파일입니다. task JSON 파일은 사람이 읽고 복구할 수 있는 canonical queue state이며, Codex attempt output은 attempt별 JSONL 로그로 보존합니다.
 
@@ -55,7 +55,7 @@ dashboard, Telegram notification, automatic review, queue mutation 기능이 커
 - `git_push_detected`: task 결과 또는 local inspection에서 push 상태 변화가 관측됨
 - `notification_sent`: notifier가 event에 대한 외부 알림 전송을 완료함
 
-현재 구현은 snake_case 이름을 사용합니다. `task.accepted`, `task.rejected` 같은 세부 review decision은 `task_reviewed` event의 `review_status` payload field로 표현합니다. `lock.stale_recovered` 같은 더 세부적인 상태 변화는 future event type 또는 `task_mutated` subtype/status field로 표현할 수 있습니다.
+현재 구현은 snake_case 이름을 사용합니다. `task.accepted`, `task.rejected` 같은 세부 review decision은 `task_reviewed` event의 `review_status` payload field로 표현합니다. `lock.stale_recovered` 같은 더 세부적인 상태 변화는 추가 event type 또는 `task_mutated` subtype/status field로 표현할 수 있습니다.
 
 각 event payload는 consumer에 필요한 최소 안전 필드만 포함합니다.
 
@@ -95,13 +95,4 @@ JSONL Codex attempt logs와 event logs는 장기 운영에서 계속 커질 수 
 
 SQLite는 초기 source of truth가 아니라 derived index/cache입니다. SQLite index는 task JSON 파일과 event log에서 재생성 가능해야 하며, dashboard, notification, search, automated review workflow가 빠르게 조회하기 위한 optional layer로 둡니다. SQLite 파일이 없거나 손상되어도 `cbr enqueue`, `cbr list`, `cbr run-next`, `cbr accept/reject`, `cbr prune` 같은 core command는 canonical task JSON 파일과 event log만으로 계속 동작해야 합니다. 복구 방법은 손상된 SQLite 파일을 삭제하고 task JSON 및 event log에서 index를 다시 build하는 것입니다.
 
-Rough roadmap:
-
-- Event schema spec: event envelope, snake_case event type, required fields, payload safety rule, versioning, retention interaction을 확정합니다.
-- Event writer helper: append-only JSONL writer, event id 생성, date partition, fsync/atomicity 기준, sanitizer를 구현합니다.
-- Existing command emission: enqueue, run-next state transitions, accept/reject/resolve, rate-limit detection, git metadata inspection, future queue mutation command에서 event를 기록합니다.
-- Prune/retention support: task/log cleanup report에 event file 후보를 포함하고 notifier cursor safety check를 적용합니다.
-- Optional SQLite index builder: task JSON과 event log를 읽어 rebuild 가능한 local SQLite cache를 생성합니다.
-- Dashboard/notification consumers: dashboard, Telegram notifier, search, automated review workflow는 SQLite가 있으면 index를 사용하고, 없으면 canonical JSON/event log fallback을 사용합니다.
-
-Telegram integration은 future optional adapter입니다. Core runner는 Telegram에 직접 의존하지 않고 append-only event log만 기록합니다. Telegram token, chat id, enable flag, rate limit, formatting option은 local-only config나 runtime state에만 저장하며 public docs와 examples에는 실제 값을 포함하지 않습니다.
+Telegram integration은 optional adapter입니다. Core runner는 Telegram에 직접 의존하지 않고 append-only event log만 기록합니다. Telegram token, chat id, enable flag, rate limit, formatting option은 local-only config나 runtime state에만 저장하며 public docs와 examples에는 실제 값을 포함하지 않습니다.

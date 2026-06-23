@@ -141,19 +141,6 @@ codex-batch-runner/
 `.codex-batch-runner/`는 gitignore 대상임.
 
 
-## Future local web dashboard
-
-향후 read-only local web dashboard를 둘 수 있음.
-
-초기 방향:
-
-- `python -m codex_batch_runner web`
-- localhost 전용
-- 별도 DB 없이 기존 task/state/log/rate-limit evidence JSON을 읽음
-- task table, status counts, review status, dependency graph, task detail, transcript, rate-limit events를 표시함
-- 초기 버전에는 write action을 넣지 않음
-
-
 ## macOS launchd 운영
 
 macOS 기본 운영 방식은 launchd임.
