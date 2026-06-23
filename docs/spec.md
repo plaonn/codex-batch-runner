@@ -1396,6 +1396,7 @@ cbr list --demo --graph
 cbr run-next
 cbr show TASK_ID
 cbr summary TASK_ID
+cbr routing-report --project project-id --json
 cbr logs TASK_ID
 cbr transcript TASK_ID
 cbr archive TASK_ID
