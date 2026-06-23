@@ -1785,11 +1785,14 @@ class ListColor:
     CYAN = "\033[36m"
     LIGHT_CYAN = "\033[96m"
     BLUE = "\033[34m"
+    BLACK = "\033[30m"
+    WHITE = "\033[37m"
     BG_RED = "\033[101;30m"
     BG_YELLOW = "\033[103;30m"
     BG_GREEN = "\033[102;30m"
     BG_CYAN = "\033[106;30m"
     BG_BLUE = "\033[104;30m"
+    BG_MARKER = "\033[47m"
     BG_DIM = "\033[100;37m"
     BG_NEUTRAL_CYAN = "\033[100;96m"
     BG_NEUTRAL_YELLOW = "\033[100;93m"
@@ -1829,6 +1832,50 @@ class ListColor:
         "[S]": CYAN,
         "[N]": GREEN,
         "[D]": YELLOW,
+    }
+    STATUS_MARKERS = {
+        "runnable": "..",
+        "needs_resume": "..",
+        "cooldown": "..",
+        "usage_exhausted": "..",
+        "blocked_dependency": "||",
+        "waiting_subtasks": "||",
+        "running": ">>",
+        "awaiting_review": "??",
+        "reviewing": "??",
+        "accepted_unapplied": "??",
+        "completed": "==",
+        "accepted": "==",
+        "done": "==",
+        "failed": "!!",
+        "review_failed": "!!",
+        "needs_followup": "!!",
+        "blocked_user": "!!",
+        "subtasks_blocked": "!!",
+        "resolved": "--",
+        "archived": "--",
+    }
+    STATUS_MARKER_COLORS = {
+        "runnable": LIGHT_CYAN,
+        "needs_resume": BLUE,
+        "cooldown": BLACK,
+        "usage_exhausted": BLACK,
+        "blocked_dependency": YELLOW,
+        "waiting_subtasks": YELLOW,
+        "running": CYAN,
+        "awaiting_review": YELLOW,
+        "reviewing": YELLOW,
+        "accepted_unapplied": YELLOW,
+        "completed": GREEN,
+        "accepted": GREEN,
+        "done": GREEN,
+        "failed": RED,
+        "review_failed": RED,
+        "needs_followup": RED,
+        "blocked_user": RED,
+        "subtasks_blocked": RED,
+        "resolved": BLACK,
+        "archived": BLACK,
     }
 
     def __init__(self, enabled: bool) -> None:
@@ -1894,11 +1941,18 @@ class ListColor:
         return self.status_label(state, state)
 
     def status(self, status: str) -> str:
-        return self.status_label(status, status)
+        return self.status_marker(status) + " " + self.status_label(status, status)
 
     def status_label(self, label: str, status: str) -> str:
         style = self.ACTIVE_STATUS_STYLES.get(status) or self.PASSIVE_STATUS_STYLES.get(status)
         return self.apply(label, style) if style else label
+
+    def status_marker(self, status: str) -> str:
+        marker = self.STATUS_MARKERS.get(status, "--")
+        if not self.enabled:
+            return marker
+        foreground = self.STATUS_MARKER_COLORS.get(status, self.WHITE)
+        return self.apply(marker, self.BG_MARKER + foreground)
 
 
 def list_colorizer(mode: str) -> ListColor:
