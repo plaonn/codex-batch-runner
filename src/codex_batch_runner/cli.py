@@ -879,8 +879,19 @@ def render_dependency_graph(
         if lines:
             lines.append("")
         lines.append(project_section_header(project, terminal_width))
-        for task in grouped[project]:
-            lines.extend(render_dependency_graph_node(task, by_id, config, color, terminal_width=terminal_width))
+        for item in compact_tree_items(grouped[project], by_id):
+            task = item["task"] if isinstance(item.get("task"), dict) else {}
+            tree_prefix_value = str(item.get("prefix") or "")
+            lines.extend(
+                render_dependency_graph_node(
+                    task,
+                    by_id,
+                    config,
+                    color,
+                    terminal_width=terminal_width,
+                    tree_prefix=tree_prefix_value,
+                )
+            )
     return "\n".join(lines)
 
 
@@ -890,28 +901,34 @@ def render_dependency_graph_node(
     config: Config,
     color: "ListColor",
     terminal_width: int | None = None,
+    tree_prefix: str = "",
 ) -> list[str]:
     status = color.status(status_cell(task, by_id, config))
     branch_key = scalar_cell(task.get("id"))
+    depends_on = task.get("depends_on")
+    raw_dep_ids = [str(dep_id) for dep_id in depends_on if str(dep_id)] if isinstance(depends_on, list) else []
+    marker = color.graph_branch(branch_key, "*")
+    rail = color.graph_branch(branch_key, "|")
+    styled_tree_prefix = color.dim_text(tree_prefix) if tree_prefix else ""
+    tree_continuation = color.dim_text(tree_continuation_prefix(tree_prefix)) if tree_prefix else ""
+    source_continuation_prefix = tree_continuation + (rail if raw_dep_ids else " ") + " " if tree_prefix or raw_dep_ids else None
     lines = graph_content_lines(
-        color.graph_branch(branch_key, "*") + " ",
+        styled_tree_prefix + marker + " ",
         status,
         styled_compact_title(task, color),
         terminal_width,
+        continuation_prefix=source_continuation_prefix,
     )
-    depends_on = task.get("depends_on")
-    raw_dep_ids = [str(dep_id) for dep_id in depends_on if str(dep_id)] if isinstance(depends_on, list) else []
     if not raw_dep_ids:
         return lines
-    rail = color.graph_branch(branch_key, "|")
     for index, dep_id in enumerate(raw_dep_ids):
         dep = by_id.get(dep_id)
         dep_state = dependency_state_cell(dep, by_id, config, color)
         dep_title = color.dim_text("missing dependency") if dep is None else styled_compact_title(dep, color, dim_title=True)
         is_last = index == len(raw_dep_ids) - 1
         connector = color.dim_text("└─ " if is_last else "├─ ")
-        prefix = rail + "       " + connector
-        continuation_prefix = rail + "          "
+        prefix = tree_continuation + rail + "       " + connector
+        continuation_prefix = tree_continuation + rail + "          "
         lines.extend(
             graph_content_lines(
                 prefix,
@@ -955,6 +972,15 @@ def graph_continuation_prefix(prefix: str) -> str:
     if prefix.startswith("|") and width > 0:
         return "|" + (" " * (width - 1))
     return " " * width
+
+
+def tree_continuation_prefix(prefix: str) -> str:
+    if not prefix:
+        return ""
+    parts = [prefix[index : index + 4] for index in range(0, max(0, len(prefix) - 3), 4)]
+    connector = prefix[-3:]
+    parts.append("│  " if connector == "├─ " else "   ")
+    return "".join(parts)
 
 
 def render_compact_list(
@@ -1102,6 +1128,9 @@ def compact_task_group(
         "deps": dep_ids or ["-"],
         "notes": note_segments or ["-"],
         "title": compact_group_title(task, color, tree_prefix),
+        "title_prefix": color.dim_text(tree_prefix) if tree_prefix else "",
+        "title_continuation_prefix": color.dim_text(tree_continuation_prefix(tree_prefix)) if tree_prefix else "",
+        "title_value": styled_compact_title(task, color, dim_title=bool(tree_prefix)),
     }
 
 
@@ -1187,7 +1216,15 @@ def render_compact_group(group: dict[str, object], widths: list[int], terminal_w
     ]
     title_cell_width = sum(widths[:4]) + 6
     title_width = max(10, title_cell_width - 2)
-    title_lines = ["  " + line for line in wrap_visible(str(group.get("title") or "-"), title_width)]
+    title_prefix = str(group.get("title_prefix") or "")
+    title_continuation_prefix = str(group.get("title_continuation_prefix") or "")
+    title_value = str(group.get("title_value") or group.get("title") or "-")
+    title_value_width = max(1, title_width - visible_len(title_prefix))
+    wrapped_title = wrap_visible(title_value, title_value_width)
+    title_lines = [
+        "  " + (title_prefix if index == 0 else title_continuation_prefix) + line
+        for index, line in enumerate(wrapped_title)
+    ]
     lines = [render_compact_row(first, widths)]
     row_count = max(len(title_lines), len(dep_lines) - 1, len(note_lines) - 1)
     detail_widths = [title_cell_width, widths[4], widths[5]]
