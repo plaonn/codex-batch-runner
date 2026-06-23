@@ -1978,7 +1978,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("* ||blocked_dependency  [N] Very", output)
             self.assertIn("|                       child title that", output)
             self.assertIn("|       └─ blocked  [N] Very", output)
-            self.assertIn("|                   dependency title that", output)
+            self.assertIn("|       │           dependency title that", output)
             self.assertNotIn("|\\", output)
             self.assertNotIn("|/", output)
 
@@ -2016,7 +2016,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("├─ * ||blocked_dependency  [N] Very long first", output)
             self.assertIn("│  |                       child source title", output)
             self.assertIn("│  |       └─ blocked  [N] Very long dependency", output)
-            self.assertIn("│  |                   under the dependency edge", output)
+            self.assertIn("│  |       │           under the dependency edge", output)
             self.assertIn("└─ * ..runnable  [N] Second child source", output)
 
     def test_list_graph_wraps_dependency_sibling_tree_continuations(self) -> None:
@@ -2030,7 +2030,13 @@ class CliTests(unittest.TestCase):
                 task_id="dep1",
                 project_id="project-a",
             )
-            create_task(config, "Second dependency", tmp, task_id="dep2", project_id="project-a")
+            create_task(
+                config,
+                "Very long second dependency title that should keep its own wrapped guide",
+                tmp,
+                task_id="dep2",
+                project_id="project-a",
+            )
             create_task(
                 config,
                 "Source task with multiple dependencies",
@@ -2048,7 +2054,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("|       ├─ blocked  [N] Very long first", output)
             self.assertIn("|       │           dependency title that should", output)
             self.assertIn("|       │           keep its sibling tree rail", output)
-            self.assertIn("|       └─ blocked  [N] Second dependency", output)
+            self.assertIn("|       └─ blocked  [N] Very long second", output)
+            self.assertIn("|       │           dependency title that should", output)
+            self.assertIn("|       │           keep its own wrapped guide", output)
 
     def test_list_graph_wraps_subtask_tree_without_dependency_rails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2064,7 +2072,13 @@ class CliTests(unittest.TestCase):
             )
             first_child["parent_task_id"] = "parent"
             save_task(config, first_child)
-            second_child = create_task(config, "Second child source", tmp, task_id="child2", project_id="project-a")
+            second_child = create_task(
+                config,
+                "Very long second child source title that should keep its own wrapped guide",
+                tmp,
+                task_id="child2",
+                project_id="project-a",
+            )
             second_child["parent_task_id"] = "parent"
             save_task(config, second_child)
 
@@ -2076,7 +2090,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("├─ * ..runnable  [N] Very long first", output)
             self.assertIn("│                source title that should", output)
             self.assertIn("│                wrap inside graph mode", output)
-            self.assertIn("└─ * ..runnable  [N] Second child source", output)
+            self.assertIn("└─ * ..runnable  [N] Very long second", output)
+            self.assertIn("│                child source title that", output)
+            self.assertIn("│                should keep its own", output)
+            self.assertIn("│                wrapped guide", output)
 
     def test_list_graph_keeps_json_output_raw(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2476,7 +2493,13 @@ class CliTests(unittest.TestCase):
             )
             first_child["parent_task_id"] = "parent"
             save_task(config, first_child)
-            second_child = create_task(config, "Second child", tmp, task_id="child2", project_id="project-a")
+            second_child = create_task(
+                config,
+                "Very long second child title that should keep its own wrapped guide",
+                tmp,
+                task_id="child2",
+                project_id="project-a",
+            )
             second_child["parent_task_id"] = "parent"
             save_task(config, second_child)
 
@@ -2488,7 +2511,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("  ├─ [N] Very long first child", output)
             self.assertIn("  │  title that should wrap while", output)
             self.assertIn("  │  keeping tree rails visible", output)
-            self.assertIn("  └─ [N] Second child", output)
+            self.assertIn("  └─ [N] Very long second child", output)
+            self.assertIn("  │  title that should keep its", output)
+            self.assertIn("  │  own wrapped guide", output)
 
             with patch("codex_batch_runner.cli.compact_terminal_width", return_value=50):
                 code, output = run_cli(["--config", str(config_path), "list", "--all", "--color=never"])
@@ -2498,7 +2523,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("TITLE:   ├─ [N] Very long first child title", output)
             self.assertIn("         │  should wrap while keeping tree rails", output)
             self.assertIn("         │  visible", output)
-            self.assertIn("TITLE:   └─ [N] Second child", output)
+            self.assertIn("TITLE:   └─ [N] Very long second child title", output)
+            self.assertIn("         │  should keep its own wrapped guide", output)
 
     def test_list_default_keeps_hidden_subtasks_when_parent_is_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

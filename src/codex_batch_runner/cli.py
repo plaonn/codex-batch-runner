@@ -940,7 +940,7 @@ def render_dependency_graph_node(
         dep_title = color.dim_text("missing dependency") if dep is None else styled_compact_title(dep, color, dim_title=True)
         is_last = index == len(raw_dep_ids) - 1
         connector = color.dim_text("└─ " if is_last else "├─ ")
-        dependency_continuation = color.dim_text("   " if is_last else "│  ")
+        dependency_continuation = color.dim_text("│  ")
         prefix = tree_continuation + rail + "       " + connector
         continuation_prefix = tree_continuation + rail + "       " + dependency_continuation
         lines.extend(
@@ -991,7 +991,7 @@ def tree_continuation_prefix(prefix: str) -> str:
         return ""
     parts = [prefix[index : index + 4] for index in range(0, max(0, len(prefix) - 3), 4)]
     connector = prefix[-3:]
-    parts.append("│  " if connector == "├─ " else "   ")
+    parts.append("│  " if connector in {"├─ ", "└─ "} else "   ")
     return "".join(parts)
 
 
