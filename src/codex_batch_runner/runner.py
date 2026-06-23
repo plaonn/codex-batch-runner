@@ -146,6 +146,11 @@ def claim_next_implementation_task_locked(
     config: Config,
     review_report: dict[str, Any] | None = None,
 ) -> tuple[ClaimedRun | None, RunOutcome | None]:
+    if is_runner_paused(config):
+        pause = get_runner_pause(config)
+        mark_run(config, None)
+        return None, RunOutcome(status="paused", message=runner_pause_message(pause))
+
     task = select_next_task(config)
     if not task:
         if review_report and review_report.get("selected"):

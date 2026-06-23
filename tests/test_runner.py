@@ -746,6 +746,35 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("runnable", load_task(config, "ready-task")["status"])
             self.assertIsNone(load_state(config)["last_task_id"])
 
+    def test_run_next_rechecks_runner_pause_before_claiming_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(config, "ready", tmp, task_id="ready-task")
+            config.state_file.write_text(
+                json.dumps(
+                    {
+                        "runner_pause": {
+                            "active": True,
+                            "reason": "operator drain window",
+                            "paused_at": "2026-06-22T00:00:00+00:00",
+                            "paused_by": "ops",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch("codex_batch_runner.runner.is_runner_paused", side_effect=[False, True]),
+                patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")),
+            ):
+                outcome = run_next(config)
+
+            self.assertEqual("paused", outcome.status)
+            self.assertIn("operator drain window", outcome.message)
+            self.assertEqual("runnable", load_task(config, "ready-task")["status"])
+            self.assertIsNone(load_state(config)["last_task_id"])
+
     def test_run_next_does_not_trigger_when_runner_pause_is_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "trigger.log"
@@ -759,7 +788,7 @@ class RunnerTests(unittest.TestCase):
             create_task(config, "first", tmp, task_id="task-1")
             create_task(config, "second", tmp, task_id="task-2")
 
-            with patch("codex_batch_runner.runner.is_runner_paused", side_effect=[False, True]):
+            with patch("codex_batch_runner.runner.is_runner_paused", side_effect=[False, False, True]):
                 outcome = run_next(config)
 
             self.assertEqual("completed", outcome.status)

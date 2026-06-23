@@ -20,6 +20,7 @@ from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write
 from .execution_profiles import config_overrides_value
 from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
+from .lock import FileLock
 from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
 from .post_accept import accept_task_and_integrate
 from .queue import (
@@ -2158,9 +2159,15 @@ def cmd_pause_show(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_pause_set(config: Config, args: argparse.Namespace) -> int:
-    previous = get_runner_pause(config)
-    paused_by = args.by or os.environ.get("USER") or os.environ.get("USERNAME")
-    current = set_runner_pause(config, args.reason, paused_by)
+    lock = FileLock(config.lock_file, config.stale_lock_seconds)
+    if not lock.acquire():
+        raise RuntimeError("another runner is active; retry pause command")
+    try:
+        previous = get_runner_pause(config)
+        paused_by = args.by or os.environ.get("USER") or os.environ.get("USERNAME")
+        current = set_runner_pause(config, args.reason, paused_by)
+    finally:
+        lock.release()
     write_event_nonfatal(
         config,
         "runner_pause_updated",
@@ -2175,8 +2182,14 @@ def cmd_pause_set(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_pause_clear(config: Config, args: argparse.Namespace) -> int:
-    previous = clear_runner_pause(config)
-    current = get_runner_pause(config)
+    lock = FileLock(config.lock_file, config.stale_lock_seconds)
+    if not lock.acquire():
+        raise RuntimeError("another runner is active; retry pause command")
+    try:
+        previous = clear_runner_pause(config)
+        current = get_runner_pause(config)
+    finally:
+        lock.release()
     write_event_nonfatal(
         config,
         "runner_pause_updated",
