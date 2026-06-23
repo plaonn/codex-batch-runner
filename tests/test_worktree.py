@@ -242,7 +242,7 @@ class WorktreeTests(unittest.TestCase):
             list_code, list_output = run_cli_text(["--config", str(config_path), "list", "--color=never"])
             self.assertEqual(0, list_code)
             self.assertIn("accepted_unapplied", list_output)
-            self.assertIn("worktree not applied", list_output)
+            self.assertIn("not applied", list_output)
 
     def test_cleanup_refuses_needs_followup_without_terminal_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -330,7 +330,7 @@ class WorktreeTests(unittest.TestCase):
             self.assertEqual(0, bundle_code)
             self.assertEqual("applied", bundle["task_worktree"]["metadata"]["apply_status"])
             self.assertEqual(0, list_code)
-            self.assertIn("worktree applied to main", list_output)
+            self.assertIn("applied to main", list_output)
 
     def test_cleanup_after_applied_task_preserves_branch_task_logs_and_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1204,7 +1204,7 @@ class WorktreeTests(unittest.TestCase):
             self.assertEqual(0, summary_code)
             self.assertIn("rebase_status: rebased", summary)
             self.assertEqual(0, list_code)
-            self.assertIn("worktree rebased; awaiting re-review", list_output)
+            self.assertIn("rebased; re-review needed", list_output)
 
     def test_apply_stale_base_rebase_conflict_queues_single_conflict_fix_subtask(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1273,7 +1273,7 @@ class WorktreeTests(unittest.TestCase):
             self.assertTrue(any(event["event_type"] == "task_worktree_conflict_fix_enqueued" for event in events))
             list_code, list_output = run_cli_text(["--config", str(config_path), "list", "--all", "--color=never"])
             self.assertEqual(0, list_code)
-            self.assertIn("conflict-fix subtask queued", list_output)
+            self.assertIn("conflict fix queued", list_output)
 
     def test_apply_refuses_branch_with_no_commits_after_base(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

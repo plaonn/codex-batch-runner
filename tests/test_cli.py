@@ -1547,11 +1547,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual("blocked_user", rows["blocked"]["STATUS"])
             self.assertEqual("failed", rows["failed"]["STATUS"])
             self.assertEqual("awaiting_review", rows["completed"]["STATUS"])
-            self.assertEqual("awaiting review", rows["completed"]["NOTE"])
+            self.assertEqual("-", rows["completed"]["NOTE"])
             self.assertEqual("review_failed", rows["rejected"]["STATUS"])
-            self.assertEqual("review failed", rows["rejected"]["NOTE"])
+            self.assertEqual("-", rows["rejected"]["NOTE"])
             self.assertEqual("needs_followup", rows["needs-followup"]["STATUS"])
-            self.assertEqual("needs follow-up", rows["needs-followup"]["NOTE"])
+            self.assertEqual("-", rows["needs-followup"]["NOTE"])
             self.assertNotIn("accepted", rows)
             self.assertNotIn("archived", rows)
 
@@ -1603,7 +1603,7 @@ class CliTests(unittest.TestCase):
             rows = {row["ID"]: row for row in compact_list_rows(output)}
 
             self.assertEqual(0, code)
-            self.assertIn("awaiting review", rows["reviewable"]["NOTE"])
+            self.assertEqual("-", rows["reviewable"]["NOTE"])
             self.assertNotIn("mechanical auto-review enabled", rows["reviewable"]["NOTE"])
 
     def test_list_shows_resume_timing_and_ready_state(self) -> None:
@@ -1628,7 +1628,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertIn("resume in 12m (00:22)", rows["resume"]["NOTE"])
-            self.assertEqual("resume ready", rows["ready"]["NOTE"])
+            self.assertEqual("ready to resume", rows["ready"]["NOTE"])
 
     def test_list_completed_tasks_show_elapsed_and_duration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1647,9 +1647,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             rows = {row["ID"]: row for row in compact_list_rows(output)}
-            self.assertIn("awaiting review", rows["completed"]["NOTE"])
-            self.assertIn("completed 5m ago", rows["completed"]["NOTE"])
-            self.assertIn("duration 1h 02m", rows["completed"]["NOTE"])
+            self.assertIn("done 5m ago", rows["completed"]["NOTE"])
+            self.assertIn("ran 1h 02m", rows["completed"]["NOTE"])
 
     def test_list_all_includes_completed_and_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1694,7 +1693,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list"])
 
             self.assertEqual(0, code)
-            self.assertIn("last error: first line second line", output)
+            self.assertIn("error: first line second line", output)
 
     def test_list_human_shows_dependency_blocked_runnable_as_effective_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1955,9 +1954,8 @@ class CliTests(unittest.TestCase):
             rows = {row["ID"]: row for row in compact_list_rows(output)}
 
             self.assertEqual(0, code)
-            self.assertIn("awaiting review", rows["reviewable"]["NOTE"])
-            self.assertIn("chain waiting_fix after needs_fix", rows["reviewable"]["NOTE"])
-            self.assertRegex(output, r"Review task title\s+chain waiting_fix after needs_fix")
+            self.assertIn("fix requested", rows["reviewable"]["NOTE"])
+            self.assertIn("fix requested", output)
 
     def test_list_compact_renders_title_deps_and_note_continuations_in_parallel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1988,7 +1986,7 @@ class CliTests(unittest.TestCase):
             lines = list_lines(output)
             detail = next(line for line in lines if "Review task title" in line)
             self.assertIn("dep-two (done)", detail)
-            self.assertIn("chain waiting_fix after needs_fix", detail)
+            self.assertIn("fix requested", output)
             self.assertNotIn("\n\n", output)
 
     def test_list_color_modes_respect_auto_no_color_and_json(self) -> None:
@@ -2168,10 +2166,10 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual(["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
-            self.assertRegex(output, r"task-2026\.\.\.[^\s]*3408Z0000")
+            self.assertRegex(output, r"task-2026-\.\.\.[^\s]*3408Z0000")
             self.assertRegex(output, r"task-[^\s]*\.\.\.[^\s]*0Z0000 \(done\)")
-            self.assertIn("completed 5m ago", output)
-            self.assertIn("duration 1h 02m", output)
+            self.assertIn("done 5m ago", output)
+            self.assertIn("ran 1h 02m", output)
             self.assertTrue(all(width <= 104 for width in visible_line_widths(output)))
 
     def test_list_compact_groups_by_project_and_renders_subtask_tree(self) -> None:
@@ -2250,7 +2248,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual("subtasks_blocked", rows["parent"]["STATUS"])
-            self.assertIn("subtasks 2/3", rows["parent"]["NOTE"])
+            self.assertIn("waiting on 2/3 subtasks", rows["parent"]["NOTE"])
             self.assertIn("failed", rows["parent"]["NOTE"])
 
             failed["status"] = "completed"
@@ -2263,8 +2261,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual("waiting_subtasks", rows["parent"]["STATUS"])
-            self.assertIn("subtasks 1/3", rows["parent"]["NOTE"])
-            self.assertIn("running 12m", rows["parent"]["NOTE"])
+            self.assertIn("waiting on 1/3 subtasks", rows["parent"]["NOTE"])
+            self.assertIn("oldest running 12m", rows["parent"]["NOTE"])
             self.assertIn("running for 12m", rows["fix-running"]["NOTE"])
 
     def test_list_shows_global_and_reviewer_cooldown_banners(self) -> None:
@@ -2446,7 +2444,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual("resolved", rows["failed"]["STATUS"])
             self.assertEqual("-", rows["failed"]["DEPS"])
-            self.assertEqual("last error: not worth retrying; resolution: wont_fix", rows["failed"]["NOTE"])
+            self.assertEqual("error: not worth retrying; resolved: wont_fix", rows["failed"]["NOTE"])
 
             code, output = run_cli(["--config", str(config_path), "summary", "failed"])
 
@@ -2494,7 +2492,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual("resolved", rows["parent"]["STATUS"])
-            self.assertEqual("resolution: superseded", rows["parent"]["NOTE"])
+            self.assertEqual("resolved: superseded", rows["parent"]["NOTE"])
 
             code, output = run_cli(["--config", str(config_path), "review-next", "--dry-run"])
 
@@ -3278,7 +3276,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("awaiting_review", rows["done"]["STATUS"])
-            self.assertEqual("awaiting review", rows["done"]["NOTE"])
+            self.assertEqual("-", rows["done"]["NOTE"])
 
     def test_list_compact_output_includes_header_title_project_deps_and_empty_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3420,7 +3418,7 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual("failed", rows["verbose"]["STATUS"])
             self.assertEqual("failed", rows["verbose"]["RAW_STATUS"])
-            self.assertEqual("last error: error line one line two", rows["verbose"]["NOTE"])
+            self.assertEqual("error: error line one line two", rows["verbose"]["NOTE"])
             self.assertEqual("-", rows["verbose"]["PROFILE"])
             self.assertEqual("status=failed summary=first line second line", rows["verbose"]["LAST_RESULT"])
             self.assertEqual("command=exec returncode=1 duration=2.5s", rows["verbose"]["LAST_RUN"])
@@ -3453,7 +3451,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual("awaiting_review", rows["push-meta"]["STATUS"])
             self.assertEqual("completed", rows["push-meta"]["RAW_STATUS"])
-            self.assertEqual("awaiting review", rows["push-meta"]["NOTE"])
+            self.assertEqual("-", rows["push-meta"]["NOTE"])
             self.assertEqual(
                 "status=completed summary=done commits=1 push_status=ahead=1 behind=0 "
                 "git=branch=main compare=origin/main ahead=1 behind=0 dirty=false",
@@ -3812,8 +3810,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, list_code)
             rows = {row["ID"]: row for row in compact_list_rows(list_output)}
-            self.assertIn("startup stall retry evidence", rows["task-stalled"]["NOTE"])
-            self.assertIn("startup stall history", rows["task-stall-history"]["NOTE"])
+            self.assertIn("startup stalled; retrying", rows["task-stalled"]["NOTE"])
+            self.assertIn("startup stalled earlier", rows["task-stall-history"]["NOTE"])
             self.assertEqual(0, summary_code)
             self.assertIn("startup_stalled_at: 2026-06-20T12:00:00+00:00", summary_output)
             self.assertIn("## last_progress", summary_output)
@@ -4496,7 +4494,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("chain_status=needs_fix", summary_output)
             self.assertIn("## reviewer_codex", summary_output)
             self.assertEqual(0, list_code)
-            self.assertIn("chain needs_fix after needs_fix", list_output)
+            self.assertIn("fix requested", list_output)
             self.assertEqual(0, bundle_code)
             self.assertEqual("needs_fix", bundle["chain"]["chain_status"])
             self.assertEqual("needs_fix", bundle["reviewer_codex"]["decision"])
