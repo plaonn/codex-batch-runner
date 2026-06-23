@@ -52,6 +52,7 @@ def build_routing_report(
         "task_rows": rows,
         "groups": {
             "profile": summarize_groups(group_rows(rows, "profile")),
+            "resolved_profile": summarize_groups(group_rows(rows, "resolved_profile")),
             "category": summarize_groups(group_rows(rows, "category")),
             "label": summarize_groups(group_rows_by_label(rows)),
             "profile_category": summarize_groups(group_rows(rows, "profile_category")),
@@ -62,6 +63,10 @@ def build_routing_report(
             "verification_scope": summarize_groups(group_rows_by_verification_scope(rows)),
             "routing_decision": summarize_groups(group_rows(rows, "routing_decision")),
             "profile_routing_decision": summarize_groups(group_rows(rows, "profile_routing_decision")),
+            "resolved_profile_routing_decision": summarize_groups(
+                group_rows(rows, "resolved_profile_routing_decision")
+            ),
+            "small_profile_candidate": summarize_groups(group_rows(rows, "small_profile_candidate")),
             "profile_experiment": summarize_groups(group_rows(rows, "profile_experiment")),
         },
     }
@@ -92,6 +97,8 @@ def filter_tasks(
 
 def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
     profile = str(task.get("execution_profile") or "default")
+    last_run = task.get("last_run") if isinstance(task.get("last_run"), dict) else {}
+    resolved_profile = str(last_run.get("execution_profile") or task.get("execution_profile") or "default")
     category = str(task.get("category") or "uncategorized")
     routing_experiment = str(task.get("routing_experiment") or "unspecified")
     routing_size = str(task.get("routing_size") or "unspecified")
@@ -99,14 +106,21 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
     scopes = verification_scope(task)
     decision_key = routing_decision_key(routing_size, routing_risk, scopes)
     reviewer = task.get("reviewer_codex") if isinstance(task.get("reviewer_codex"), dict) else {}
-    last_run = task.get("last_run") if isinstance(task.get("last_run"), dict) else {}
     duration = number(last_run.get("duration_seconds"))
     attempts = int(task.get("attempts") or 0)
     review_status = completed_review_status(task)
     reviewer_decision = str(reviewer.get("decision") or task.get("last_review_decision") or "")
+    candidate = small_profile_candidate(
+        profile=profile,
+        resolved_profile=resolved_profile,
+        routing_size=routing_size,
+        routing_risk=routing_risk,
+        scopes=scopes,
+    )
     return {
         "id": task.get("id"),
         "profile": profile,
+        "resolved_profile": resolved_profile,
         "category": category,
         "profile_category": f"{profile}/{category}",
         "labels": task_labels(task) or ["unlabeled"],
@@ -118,6 +132,8 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
         "verification_scope": scopes,
         "routing_decision": decision_key,
         "profile_routing_decision": f"profile={sanitize(profile)} {decision_key}",
+        "resolved_profile_routing_decision": f"profile={sanitize(resolved_profile)} {decision_key}",
+        "small_profile_candidate": "candidate" if candidate else "not_candidate",
         "profile_experiment": f"{profile}/{sanitize(routing_experiment)}",
         "status": str(task.get("status") or ""),
         "review_status": review_status,
@@ -130,6 +146,23 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
         "is_auto_fix_task": task.get("subtask_type") == "auto_review_fix",
         "has_auto_fix": bool(task.get("last_auto_fix_task_id") or int(task.get("fix_attempts") or 0)),
     }
+
+
+def small_profile_candidate(
+    *,
+    profile: str,
+    resolved_profile: str,
+    routing_size: str,
+    routing_risk: str,
+    scopes: list[str],
+) -> bool:
+    return (
+        sanitize(routing_size) in {"tiny", "small"}
+        and sanitize(routing_risk) == "low"
+        and set(scopes or ["none"]).issubset({"docs", "none"})
+        and sanitize(profile) != "small"
+        and sanitize(resolved_profile) != "small"
+    )
 
 
 def completed_review_status(task: dict[str, Any]) -> str:
@@ -284,6 +317,7 @@ def render_routing_report(report: dict[str, Any]) -> str:
     groups = report.get("groups") if isinstance(report.get("groups"), dict) else {}
     for group_name in (
         "profile",
+        "resolved_profile",
         "category",
         "label",
         "profile_category",
@@ -294,6 +328,8 @@ def render_routing_report(report: dict[str, Any]) -> str:
         "verification_scope",
         "routing_decision",
         "profile_routing_decision",
+        "resolved_profile_routing_decision",
+        "small_profile_candidate",
         "profile_experiment",
     ):
         entries = groups.get(group_name) if isinstance(groups.get(group_name), list) else []

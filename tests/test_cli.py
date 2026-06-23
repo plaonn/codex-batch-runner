@@ -1362,6 +1362,63 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, profile_decisions[profile_decision_key]["tasks"])
             self.assertEqual(1, profile_experiments["small/downshift_probe"]["first_pass_accepted"])
 
+    def test_routing_report_exposes_resolved_profile_and_small_candidate_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                extra={
+                    "default_execution_profile": "normal",
+                    "execution_profiles": {
+                        "small": {"model": "gpt-5-small"},
+                        "normal": {"model": "gpt-5"},
+                    },
+                },
+            )
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="defaulted-normal",
+                project_id="project-a",
+                category="docs",
+                labels=["docs"],
+                routing_size="small",
+                routing_risk="low",
+                verification_scope=["docs"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            task["attempts"] = 1
+            task["last_run"] = {"execution_profile": "normal", "duration_seconds": 10}
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
+            report = json.loads(output)
+            profiles = {entry["key"]: entry for entry in report["groups"]["profile"]}
+            resolved_profiles = {entry["key"]: entry for entry in report["groups"]["resolved_profile"]}
+            profile_decisions = {entry["key"]: entry for entry in report["groups"]["profile_routing_decision"]}
+            resolved_profile_decisions = {
+                entry["key"]: entry for entry in report["groups"]["resolved_profile_routing_decision"]
+            }
+            small_candidates = {entry["key"]: entry for entry in report["groups"]["small_profile_candidate"]}
+            row = report["task_rows"][0]
+
+            self.assertEqual(0, code)
+            self.assertEqual("default", row["profile"])
+            self.assertEqual("normal", row["resolved_profile"])
+            self.assertEqual("profile=default size=small risk=low verify=docs", row["profile_routing_decision"])
+            self.assertEqual(
+                "profile=normal size=small risk=low verify=docs",
+                row["resolved_profile_routing_decision"],
+            )
+            self.assertEqual("candidate", row["small_profile_candidate"])
+            self.assertEqual(1, profiles["default"]["tasks"])
+            self.assertEqual(1, resolved_profiles["normal"]["tasks"])
+            self.assertEqual(1, profile_decisions["profile=default size=small risk=low verify=docs"]["tasks"])
+            self.assertEqual(1, resolved_profile_decisions["profile=normal size=small risk=low verify=docs"]["tasks"])
+            self.assertEqual(1, small_candidates["candidate"]["tasks"])
+
     def test_routing_report_groups_missing_routing_metadata_under_fallback_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -1439,10 +1496,13 @@ class CliTests(unittest.TestCase):
             self.assertIn("# routing report", output)
             self.assertIn("tasks: 2 of 3 filtered", output)
             self.assertIn("## by_profile", output)
+            self.assertIn("## by_resolved_profile", output)
             self.assertIn("## by_routing_size", output)
             self.assertIn("## by_verification_scope", output)
             self.assertIn("## by_routing_decision", output)
             self.assertIn("## by_profile_routing_decision", output)
+            self.assertIn("## by_resolved_profile_routing_decision", output)
+            self.assertIn("## by_small_profile_candidate", output)
             self.assertIn("small", output)
 
     def test_routing_report_rejects_negative_limit(self) -> None:
