@@ -932,7 +932,10 @@ def render_dependency_graph_node(
     tree_prefix: str = "",
     has_tree_children: bool = False,
 ) -> list[str]:
-    status = color.status(status_cell(task, by_id, config))
+    plain_color = ListColor(False)
+    status_value = status_cell(task, by_id, config)
+    status = color.status(status_value)
+    plain_status = plain_color.status(status_value)
     branch_key = scalar_cell(task.get("id"))
     depends_on = task.get("depends_on")
     raw_dep_ids = [str(dep_id) for dep_id in depends_on if str(dep_id)] if isinstance(depends_on, list) else []
@@ -940,29 +943,42 @@ def render_dependency_graph_node(
     rail = color.graph_branch(branch_key, "|")
     styled_tree_prefix = color.dim_text(tree_prefix) if tree_prefix else ""
     tree_continuation = color.dim_text(tree_continuation_prefix(tree_prefix)) if tree_prefix else ""
+    plain_tree_continuation = tree_continuation_prefix(tree_prefix) if tree_prefix else ""
     if tree_prefix or raw_dep_ids or has_tree_children:
         source_guide = rail if raw_dep_ids else color.dim_text("│") if has_tree_children else " "
+        plain_source_guide = "|" if raw_dep_ids else "│" if has_tree_children else " "
         source_continuation_prefix = tree_continuation + source_guide + " "
+        plain_source_continuation_prefix = plain_tree_continuation + plain_source_guide + " "
     else:
         source_continuation_prefix = None
+        plain_source_continuation_prefix = None
     lines = graph_content_lines(
         styled_tree_prefix + marker + " ",
         status,
-        styled_compact_title(task, color),
+        compact_title(task),
         terminal_width,
         continuation_prefix=source_continuation_prefix,
+        title_style=lambda value: styled_compact_title_fragment(value, color),
+        plain_prefix=tree_prefix + "* ",
+        plain_label=plain_status,
+        plain_continuation_prefix=plain_source_continuation_prefix,
     )
     if not raw_dep_ids:
         return lines
     for index, dep_id in enumerate(raw_dep_ids):
         dep = by_id.get(dep_id)
         dep_state = dependency_state_cell(dep, by_id, config, color)
-        dep_title = color.dim_text("missing dependency") if dep is None else styled_compact_title(dep, color, dim_title=True)
+        plain_dep_state = dependency_state_cell(dep, by_id, config, plain_color)
+        dep_title = "missing dependency" if dep is None else compact_title(dep)
+        title_style = color.dim_text if dep is None else lambda value: styled_compact_title_fragment(value, color, dim_title=True)
         is_last = index == len(raw_dep_ids) - 1
-        connector = color.dim_text("└─ " if is_last else "├─ ")
+        connector_value = "└─ " if is_last else "├─ "
+        connector = color.dim_text(connector_value)
         dependency_continuation = color.dim_text("│  ")
         prefix = tree_continuation + rail + "       " + connector
         continuation_prefix = tree_continuation + rail + "       " + dependency_continuation
+        plain_prefix = plain_tree_continuation + "|" + "       " + connector_value
+        plain_continuation_prefix = plain_tree_continuation + "|" + "       " + "│  "
         lines.extend(
             graph_content_lines(
                 prefix,
@@ -970,9 +986,25 @@ def render_dependency_graph_node(
                 dep_title,
                 terminal_width,
                 continuation_prefix=continuation_prefix,
+                title_style=title_style,
+                plain_prefix=plain_prefix,
+                plain_label=plain_dep_state,
+                plain_continuation_prefix=plain_continuation_prefix,
             )
         )
     return lines
+
+
+def styled_compact_title_fragment(value: str, color: "ListColor", *, dim_title: bool = False) -> str:
+    for marker in ListColor.PROFILE_MARKER_STYLES:
+        if value == marker:
+            return color.profile_marker(value)
+        prefix = marker + " "
+        if value.startswith(prefix):
+            title = value[len(prefix) :]
+            styled_title = color.dim_text(title) if dim_title else color.title(title)
+            return f"{color.profile_marker(marker)} {styled_title}"
+    return color.dim_text(value) if dim_title else color.title(value)
 
 
 def dependency_state_cell(dep: dict | None, by_id: dict[str, dict], config: Config, color: "ListColor") -> str:
@@ -988,15 +1020,39 @@ def graph_content_lines(
     *,
     continuation_prefix: str | None = None,
     title_style=None,
+    plain_prefix: str | None = None,
+    plain_label: str | None = None,
+    plain_title: str | None = None,
+    plain_continuation_prefix: str | None = None,
 ) -> list[str]:
     style = title_style or (lambda value: value)
-    line = f"{prefix}{label}  {style(title)}"
-    if terminal_width is None or visible_len(line) <= terminal_width:
+    plain_prefix_value = prefix if plain_prefix is None else plain_prefix
+    plain_label_value = label if plain_label is None else plain_label
+    plain_title_value = title if plain_title is None else plain_title
+    line = f"{prefix}{label}  {style(plain_title_value)}"
+    plain_line = f"{plain_prefix_value}{plain_label_value}  {plain_title_value}"
+    if terminal_width is None or visible_len(plain_line) <= terminal_width:
         return [line]
     width = max(1, terminal_width)
     protected = f"{prefix}{label}  "
-    continuation = (continuation_prefix or graph_continuation_prefix(prefix)) + (" " * visible_len(label)) + "  "
-    return wrap_prefixed_value(title, width, protected, continuation, style=style)
+    plain_protected = f"{plain_prefix_value}{plain_label_value}  "
+    continuation_base = continuation_prefix or graph_continuation_prefix(prefix)
+    plain_continuation_base = (
+        graph_continuation_prefix(plain_prefix_value)
+        if plain_continuation_prefix is None
+        else plain_continuation_prefix
+    )
+    continuation = continuation_base + (" " * visible_len(plain_label_value)) + "  "
+    plain_continuation = plain_continuation_base + (" " * visible_len(plain_label_value)) + "  "
+    return wrap_prefixed_plain_value(
+        plain_title_value,
+        width,
+        protected,
+        continuation,
+        plain_first_prefix=plain_protected,
+        plain_continuation_prefix=plain_continuation,
+        style=style,
+    )
 
 
 def graph_continuation_prefix(prefix: str) -> str:
@@ -1026,6 +1082,27 @@ def wrap_prefixed_value(
     apply_style = style or (lambda item: item)
     prefix_width = max(visible_len(first_prefix), visible_len(continuation_prefix))
     wrapped = wrap_visible(value, max(1, width - prefix_width))
+    return [
+        (first_prefix if index == 0 else continuation_prefix) + apply_style(line)
+        for index, line in enumerate(wrapped)
+    ]
+
+
+def wrap_prefixed_plain_value(
+    value: str,
+    width: int,
+    first_prefix: str = "",
+    continuation_prefix: str = "",
+    *,
+    plain_first_prefix: str | None = None,
+    plain_continuation_prefix: str | None = None,
+    style=None,
+) -> list[str]:
+    apply_style = style or (lambda item: item)
+    plain_first = first_prefix if plain_first_prefix is None else plain_first_prefix
+    plain_continuation = continuation_prefix if plain_continuation_prefix is None else plain_continuation_prefix
+    prefix_width = max(visible_len(plain_first), visible_len(plain_continuation))
+    wrapped = wrap_plain_text(value, max(1, width - prefix_width))
     return [
         (first_prefix if index == 0 else continuation_prefix) + apply_style(line)
         for index, line in enumerate(wrapped)

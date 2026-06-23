@@ -2185,6 +2185,17 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 51 for width in visible_line_widths(output)))
             self.assertIn("|       │", text)
+            self.assertIn("* ??awaiting_review  [N] Completed task awaiting\n|                    review", text)
+            self.assertIn(
+                "|       ├─ not_accepted  [N] Worktree dependency\n|       │                awaiting review",
+                text,
+            )
+            self.assertIn(
+                "* ||waiting_subtasks  [N] Parent task waiting for\n"
+                "│                     blocking subtask\n"
+                "└─ * ..runnable  [N] Blocking review fix subtask",
+                text,
+            )
             self.assertNotIn("revie\nw", text)
             self.assertNotIn("revi\n|                    ew", text)
             self.assertNotIn("awaitin\ng", text)
