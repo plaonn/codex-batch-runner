@@ -1857,7 +1857,7 @@ class ListColor:
     BG_GREEN = "\033[102;30m"
     BG_CYAN = "\033[106;30m"
     BG_BLUE = "\033[104;30m"
-    BG_MARKER = "\033[40m"
+    BG_MARKER = "\033[48;5;238m"
     BG_DIM = "\033[100;37m"
     BG_NEUTRAL_CYAN = "\033[100;96m"
     BG_NEUTRAL_YELLOW = "\033[100;93m"
@@ -1920,27 +1920,17 @@ class ListColor:
         "resolved": "--",
         "archived": "--",
     }
-    STATUS_MARKER_COLORS = {
-        "runnable": LIGHT_CYAN,
-        "needs_resume": BLUE,
-        "cooldown": WHITE,
-        "usage_exhausted": WHITE,
-        "blocked_dependency": YELLOW,
-        "waiting_subtasks": YELLOW,
-        "running": CYAN,
-        "awaiting_review": YELLOW,
-        "reviewing": YELLOW,
-        "accepted_unapplied": YELLOW,
-        "completed": GREEN,
-        "accepted": GREEN,
-        "done": GREEN,
-        "failed": RED,
-        "review_failed": RED,
-        "needs_followup": RED,
-        "blocked_user": RED,
-        "subtasks_blocked": RED,
-        "resolved": WHITE,
-        "archived": WHITE,
+    STATUS_MARKER_FOREGROUNDS_BY_STYLE = {
+        BG_RED: RED,
+        BG_YELLOW: YELLOW,
+        BG_GREEN: GREEN,
+        BG_CYAN: CYAN,
+        BG_BLUE: BLUE,
+        BG_DIM: WHITE,
+        BG_NEUTRAL_CYAN: LIGHT_CYAN,
+        BG_NEUTRAL_YELLOW: YELLOW,
+        BG_NEUTRAL_GREEN: GREEN,
+        BG_NEUTRAL_WHITE: WHITE,
     }
 
     def __init__(self, enabled: bool) -> None:
@@ -2016,7 +2006,8 @@ class ListColor:
         marker = self.STATUS_MARKERS.get(status, "--")
         if not self.enabled:
             return marker
-        foreground = self.STATUS_MARKER_COLORS.get(status, self.WHITE)
+        style = self.ACTIVE_STATUS_STYLES.get(status) or self.PASSIVE_STATUS_STYLES.get(status)
+        foreground = self.STATUS_MARKER_FOREGROUNDS_BY_STYLE.get(style, self.WHITE)
         return self.apply(marker, self.BG_MARKER + foreground)
 
 
