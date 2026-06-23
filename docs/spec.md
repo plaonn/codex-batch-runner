@@ -99,12 +99,34 @@ codex-batch-runner/
 .codex-batch-runner/
   tasks/
   logs/
+  index.sqlite3
   rate-limits/
   runner.lock
   state.json
 ```
 
 `.codex-batch-runner/`는 gitignore 대상임.
+
+## Local SQLite read index
+
+SQLite index는 canonical queue migration이 아니라 retained task JSON과 retained event JSONL에서 다시 만들 수 있는 local-only read index/cache입니다. Task JSON 파일과 append-only event JSONL 파일이 계속 source of truth입니다. SQLite DB가 없거나 손상됐거나 schema version이 맞지 않아도 enqueue, run-next, accept, reject, resolve, archive, prune, worktree apply 같은 core mutation command는 SQLite를 요구하지 않아야 하며, read command도 JSON/JSONL fallback을 유지해야 합니다.
+
+DB path는 active runtime root의 `.codex-batch-runner/index.sqlite3`를 기본으로 하며, queue directory가 config로 override된 경우 configured queue directory 옆 local `index.sqlite3`를 사용할 수 있습니다. DB는 git에 포함하지 않는 runtime artifact입니다.
+
+Initial read projection table은 아래 범위를 포함합니다.
+
+- `index_metadata`: schema version, last rebuild timestamp, source/indexed counts.
+- `tasks`: task snapshot의 sanitized scalar projection.
+- `events`: sanitized event projection.
+- `task_dependencies`: `depends_on` edges.
+- `task_review_state`: review/resolution/chain state projection.
+- `task_git_metadata`: branch/head/apply/cleanup status처럼 path와 raw log를 제외한 git metadata projection.
+
+Index에는 prompt, next prompt, transcript, raw Codex JSONL, session id, thread id, stdout, stderr, credentials, environment values, secrets를 저장하지 않습니다. Payload-like values는 event sanitization 기준을 다시 적용합니다. Local task cwd, project root, task source file, event source directory/file, worktree/log path처럼 index query에 필요하지 않은 runtime-private 값도 projection에서 제외합니다.
+
+`cbr index status`는 DB path, expected/found schema version, retained task/event source file counts, indexed task/event counts, last rebuild time, missing/corrupt/schema mismatch/staleness warning을 보고합니다. 이 command는 DB를 고치거나 생성하지 않습니다.
+
+`cbr index rebuild --dry-run`은 retained task/event files를 읽어 rebuild plan과 count를 보고하지만 SQLite 파일을 쓰지 않습니다. `cbr index rebuild --apply`는 retained task JSON과 retained event JSONL에서 deterministic하게 새 SQLite DB를 만든 뒤 atomic replace로 반영합니다. Pruned task/event file은 source of truth에서 사라졌으므로 다음 apply rebuild 뒤 index에서도 사라집니다.
 
 ## Task schema
 

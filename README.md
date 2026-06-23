@@ -221,6 +221,17 @@ PYTHONPATH=src python3 -m codex_batch_runner events --json
 
 `events`는 `.codex-batch-runner/events/YYYY-MM-DD.jsonl`에 append-only로 저장된 sanitized audit events를 최근순으로 보여줍니다. JSON 출력은 event object 배열을 반환하고, 기본 출력은 `occurred_at`, event type, task id, summary만 표시합니다. Event log는 task JSON 파일을 대체하지 않는 감사 stream입니다.
 
+local read index 확인 및 재작성:
+
+```bash
+PYTHONPATH=src python3 -m codex_batch_runner index status
+PYTHONPATH=src python3 -m codex_batch_runner index status --json
+PYTHONPATH=src python3 -m codex_batch_runner index rebuild --dry-run
+PYTHONPATH=src python3 -m codex_batch_runner index rebuild --apply
+```
+
+`index`는 retained task JSON과 retained event JSONL에서 다시 만들 수 있는 local-only SQLite read index입니다. Task JSON과 event JSONL이 계속 source of truth이고, SQLite가 없거나 손상됐거나 schema version이 맞지 않아도 core queue command와 기존 read command는 JSON/JSONL fallback으로 동작합니다. `index rebuild --dry-run`은 예상 task/event/dependency count만 보고 DB를 쓰지 않습니다. `index rebuild --apply`는 retained files에서 `.codex-batch-runner/index.sqlite3` 또는 configured queue directory 옆 `index.sqlite3`를 deterministic하게 재작성합니다. Index에는 prompt, next prompt, transcript, raw Codex JSONL, session/thread id, stdout/stderr, credential, environment value, secret, task cwd, project root, task source file, event source directory, event source file 같은 raw sensitive or runtime-local field를 저장하지 않고 sanitized projection만 저장합니다.
+
 runner state 확인:
 
 ```bash

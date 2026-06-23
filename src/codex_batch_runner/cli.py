@@ -21,6 +21,7 @@ from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write
 from .execution_profiles import config_overrides_value
 from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
+from .index import build_rebuild_report, build_status_report, render_rebuild_report, render_status_report
 from .lock import FileLock
 from .maintenance import (
     build_codex_cli_maintenance_report,
@@ -315,6 +316,18 @@ def build_parser() -> argparse.ArgumentParser:
     events.add_argument("--limit", type=int, default=DEFAULT_EVENT_LIMIT, help=f"maximum events to show (default: {DEFAULT_EVENT_LIMIT})")
     events.add_argument("--json", action="store_true", help="print JSON")
     events.set_defaults(func=cmd_events)
+
+    index = sub.add_parser("index", help="inspect or rebuild the local SQLite read index")
+    index_sub = index.add_subparsers(dest="index_command", required=True)
+    index_rebuild = index_sub.add_parser("rebuild", help="plan or rebuild the derived SQLite read index")
+    index_rebuild_mode = index_rebuild.add_mutually_exclusive_group(required=True)
+    index_rebuild_mode.add_argument("--dry-run", action="store_true", help="report rebuild counts without writing SQLite")
+    index_rebuild_mode.add_argument("--apply", action="store_true", help="rebuild SQLite from retained task and event files")
+    index_rebuild.add_argument("--json", action="store_true", help="print JSON")
+    index_rebuild.set_defaults(func=cmd_index_rebuild)
+    index_status = index_sub.add_parser("status", help="show local SQLite read index status")
+    index_status.add_argument("--json", action="store_true", help="print JSON")
+    index_status.set_defaults(func=cmd_index_status)
 
     doctor = sub.add_parser("doctor", help="check local cbr health and Codex CLI version without running Codex exec")
     doctor.add_argument("--json", action="store_true", help="print JSON")
@@ -2724,6 +2737,24 @@ def cmd_events(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(events, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_events_human(events), end="")
+    return 0
+
+
+def cmd_index_rebuild(config: Config, args: argparse.Namespace) -> int:
+    report = build_rebuild_report(config, apply=args.apply)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_rebuild_report(report), end="")
+    return 0 if report["ok"] else 1
+
+
+def cmd_index_status(config: Config, args: argparse.Namespace) -> int:
+    report = build_status_report(config)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_status_report(report), end="")
     return 0
 
 
