@@ -878,7 +878,12 @@ def render_dependency_graph_node(
 ) -> list[str]:
     status = color.status(status_cell(task, by_id, config))
     branch_key = scalar_cell(task.get("id"))
-    lines = graph_content_lines(color.graph_branch(branch_key, "*") + " ", status, compact_title(task), terminal_width)
+    lines = graph_content_lines(
+        color.graph_branch(branch_key, "*") + " ",
+        status,
+        styled_compact_title(task, color),
+        terminal_width,
+    )
     depends_on = task.get("depends_on")
     raw_dep_ids = [str(dep_id) for dep_id in depends_on if str(dep_id)] if isinstance(depends_on, list) else []
     if not raw_dep_ids:
@@ -887,7 +892,7 @@ def render_dependency_graph_node(
     for index, dep_id in enumerate(raw_dep_ids):
         dep = by_id.get(dep_id)
         dep_state = dependency_state_cell(dep, by_id, config, color)
-        dep_title = "missing dependency" if dep is None else compact_title(dep)
+        dep_title = color.dim_text("missing dependency") if dep is None else styled_compact_title(dep, color, dim_title=True)
         is_last = index == len(raw_dep_ids) - 1
         connector = color.dim_text("└─ " if is_last else "├─ ")
         prefix = rail + "       " + connector
@@ -899,7 +904,6 @@ def render_dependency_graph_node(
                 dep_title,
                 terminal_width,
                 continuation_prefix=continuation_prefix,
-                title_style=color.dim_text,
             )
         )
     return lines
@@ -1051,9 +1055,15 @@ def compact_parent_task_id(task: dict, visible_ids: set[str], by_id: dict[str, d
 def tree_prefix(ancestors: list[bool]) -> str:
     parts = []
     for is_last in ancestors[:-1]:
-        parts.append("    " if is_last else "|   ")
-    parts.append("`-- " if ancestors[-1] else "|-- ")
+        parts.append("    " if is_last else "│   ")
+    parts.append("└─ " if ancestors[-1] else "├─ ")
     return "".join(parts)
+
+
+def compact_group_title(task: dict, color: "ListColor", tree_prefix: str) -> str:
+    if not tree_prefix:
+        return styled_compact_title(task, color)
+    return color.dim_text(tree_prefix) + styled_compact_title(task, color, dim_title=True)
 
 
 def compact_task_group(
@@ -1076,7 +1086,7 @@ def compact_task_group(
         ],
         "deps": dep_ids or ["-"],
         "notes": note_segments or ["-"],
-        "title": color.title(tree_prefix + cells["title"]),
+        "title": compact_group_title(task, color, tree_prefix),
     }
 
 
@@ -1162,7 +1172,7 @@ def render_compact_group(group: dict[str, object], widths: list[int], terminal_w
     ]
     title_cell_width = sum(widths[:4]) + 6
     title_width = max(10, title_cell_width - 2)
-    title_lines = ["  " + line for line in wrap_plain_text(str(group.get("title") or "-"), title_width)]
+    title_lines = ["  " + line for line in wrap_visible(str(group.get("title") or "-"), title_width)]
     lines = [render_compact_row(first, widths)]
     row_count = max(len(title_lines), len(dep_lines) - 1, len(note_lines) - 1)
     detail_widths = [title_cell_width, widths[4], widths[5]]
@@ -1474,7 +1484,15 @@ def execution_backend_note(task: dict) -> str:
 def compact_title(task: dict) -> str:
     marker = execution_profile_marker(task)
     title = task_title(task)
-    return f"{marker} {title}" if marker else title
+    return f"{marker} {title}"
+
+
+def styled_compact_title(task: dict, color: "ListColor", *, dim_title: bool = False) -> str:
+    marker = color.profile_marker(execution_profile_marker(task))
+    title = task_title(task)
+    if dim_title:
+        title = color.dim_text(title)
+    return f"{marker} {title}"
 
 
 def execution_profile_marker(task: dict) -> str:
@@ -1484,12 +1502,12 @@ def execution_profile_marker(task: dict) -> str:
     codex_profile = str(task.get("codex_profile") or "").strip().lower()
     values = " ".join(value for value in [profile, budget, model, codex_profile] if value)
     if not values:
-        return ""
+        return "[N]"
     if any(term in values for term in ("small", "light", "low-cost", "low_cost", "lite")):
         return "[S]"
     if any(term in values for term in ("deep", "high-cost", "high_cost", "large", "max")):
         return "[D]"
-    return ""
+    return "[N]"
 
 
 def chain_note_cell(task: dict) -> str:
@@ -1743,6 +1761,11 @@ class ListColor:
         "not_accepted": BG_YELLOW,
         "not_applied": BG_YELLOW,
     }
+    PROFILE_MARKER_STYLES = {
+        "[S]": CYAN,
+        "[N]": GREEN,
+        "[D]": YELLOW,
+    }
 
     def __init__(self, enabled: bool) -> None:
         self.enabled = enabled
@@ -1763,6 +1786,9 @@ class ListColor:
             return value
         index = zlib.crc32(key.encode("utf-8")) % len(self.ID_COLORS)
         return self.apply(value, self.ID_COLORS[index])
+
+    def profile_marker(self, marker: str) -> str:
+        return self.apply(marker, self.PROFILE_MARKER_STYLES.get(marker, self.GREEN))
 
     def project(self, project_id: str) -> str:
         return self.apply(project_id, self.LIGHT_CYAN)

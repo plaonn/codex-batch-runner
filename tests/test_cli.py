@@ -1785,9 +1785,9 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("done-dep", output)
             self.assertNotIn("review-dep", output)
             self.assertNotIn("missing-dep", output)
-            self.assertIn("* blocked_dependency  Child work", output)
-            self.assertIn("|       ├─ done  Done dependency", output)
-            self.assertIn("|       ├─ not_accepted  Review dependency", output)
+            self.assertIn("* blocked_dependency  [N] Child work", output)
+            self.assertIn("|       ├─ done  [N] Done dependency", output)
+            self.assertIn("|       ├─ not_accepted  [N] Review dependency", output)
             self.assertIn("|       └─ missing  missing dependency", output)
             self.assertNotIn("|\\", output)
             self.assertNotIn("|/", output)
@@ -1819,10 +1819,10 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
-            self.assertIn("* blocked_dependency  Very long", output)
+            self.assertIn("* blocked_dependency  [N] Very", output)
             self.assertIn("                      title that should", output)
-            self.assertIn("|       └─ blocked  Very long", output)
-            self.assertIn("|                   title that should wrap", output)
+            self.assertIn("|       └─ blocked  [N] Very", output)
+            self.assertIn("|                   dependency title that", output)
             self.assertNotIn("|\\", output)
             self.assertNotIn("|/", output)
 
@@ -1863,11 +1863,11 @@ class CliTests(unittest.TestCase):
             self.assertIn("demo-ready", compact_output)
             self.assertIn("demo-blocked", compact_output)
             self.assertIn("demo-parent", compact_output)
-            self.assertIn("`-- Blocking review fix subtask", compact_output)
+            self.assertIn("└─ [N] Blocking review fix subtask", compact_output)
             self.assertIn("LAST_RESULT", verbose_output)
             self.assertIn("[demo]", graph_output)
-            self.assertIn("* blocked_dependency  Runnable task blocked by dependencies", graph_output)
-            self.assertIn("|       ├─ done  Completed accepted dependency", graph_output)
+            self.assertIn("* blocked_dependency  [N] Runnable task blocked by dependencies", graph_output)
+            self.assertIn("|       ├─ done  [N] Completed accepted dependency", graph_output)
             self.assertIn("|       └─ missing  missing dependency", graph_output)
             self.assertNotIn("|\\", graph_output)
             self.assertNotIn("|/", graph_output)
@@ -1879,6 +1879,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("\033[2mdone\033[0m", color_output)
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\*\033\[0m")
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\|\033\[0m       \033\[2m├─ \033\[0m")
+            self.assertIn("\033[32m[N]\033[0m", color_output)
             self.assertIn("\033[2mCompleted accepted dependency\033[0m", color_output)
             self.assertIn("\033[103;30mnot_accepted\033[0m", color_output)
             self.assertIn("\033[2mWorktree dependency awaiting review\033[0m", color_output)
@@ -1932,11 +1933,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual("[project-a]", lines[1])
             self.assertTrue(lines[2].startswith("project-a"))
             self.assertIn("child-task", lines[2])
-            self.assertTrue(lines[3].startswith("  Child task title"))
+            self.assertTrue(lines[3].startswith("  [N] Child task title"))
             self.assertNotIn("title:", output)
             self.assertNotIn("(child-task)", output)
             self.assertEqual("parent-task (done)\nsecond-parent (done)", rows["child-task"]["DEPS"])
-            self.assertEqual("Child task title", rows["child-task"]["TITLE"])
+            self.assertEqual("[N] Child task title", rows["child-task"]["TITLE"])
             self.assertNotIn("Expanded dependency title", rows["child-task"]["DEPS"])
 
     def test_list_compact_splits_note_segments_onto_continuation_rows(self) -> None:
@@ -2134,7 +2135,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual(["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
-            self.assertTrue(any(line.startswith("  Table title") for line in output.splitlines()))
+            self.assertTrue(any(line.startswith("  [N] Table title") for line in output.splitlines()))
 
     def test_list_mid_width_abbreviates_ids_to_preserve_note_width(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2192,10 +2193,10 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertLess(lines.index("[project-a]"), lines.index("[project-b]"))
-            self.assertEqual("Parent work", rows["parent"]["TITLE"])
-            self.assertEqual("|-- Child work", rows["child"]["TITLE"])
-            self.assertEqual("`-- Follow-up work", rows["followup"]["TITLE"])
-            self.assertEqual("Other project", rows["other"]["TITLE"])
+            self.assertEqual("[N] Parent work", rows["parent"]["TITLE"])
+            self.assertEqual("├─ [N] Child work", rows["child"]["TITLE"])
+            self.assertEqual("└─ [N] Follow-up work", rows["followup"]["TITLE"])
+            self.assertEqual("[N] Other project", rows["other"]["TITLE"])
 
     def test_list_default_keeps_hidden_subtasks_when_parent_is_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2220,7 +2221,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual("awaiting_review", rows["parent"]["STATUS"])
-            self.assertEqual("`-- Accepted child", rows["child"]["TITLE"])
+            self.assertEqual("└─ [N] Accepted child", rows["child"]["TITLE"])
             self.assertNotIn("independent", rows)
 
     def test_list_blocking_subtasks_affect_parent_effective_status(self) -> None:
@@ -3299,7 +3300,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"], lines[0].split())
             self.assertNotIn("\t", output)
             self.assertEqual(
-                {"TITLE": "work", "STATUS": "runnable", "PROJECT": "project-a", "ATT": "0", "DEPS": "-", "NOTE": "-"},
+                {"TITLE": "[N] work", "STATUS": "runnable", "PROJECT": "project-a", "ATT": "0", "DEPS": "-", "NOTE": "-"},
                 {key: rows["plain"][key] for key in ("TITLE", "STATUS", "PROJECT", "ATT", "DEPS", "NOTE")},
             )
             self.assertEqual("parent (done)", rows["child"]["DEPS"])
