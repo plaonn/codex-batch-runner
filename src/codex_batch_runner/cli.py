@@ -974,10 +974,8 @@ def graph_content_lines(
         return [line]
     width = max(1, terminal_width)
     protected = f"{prefix}{label}  "
-    title_width = max(1, width - visible_len(protected))
-    title_lines = wrap_visible(title, title_width)
     continuation = (continuation_prefix or graph_continuation_prefix(prefix)) + (" " * visible_len(label)) + "  "
-    return [protected + style(title_lines[0]), *(continuation + style(item) for item in title_lines[1:])]
+    return wrap_prefixed_value(title, width, protected, continuation, style=style)
 
 
 def graph_continuation_prefix(prefix: str) -> str:
@@ -994,6 +992,23 @@ def tree_continuation_prefix(prefix: str) -> str:
     connector = prefix[-3:]
     parts.append("│  " if connector == "├─ " else "   ")
     return "".join(parts)
+
+
+def wrap_prefixed_value(
+    value: str,
+    width: int,
+    first_prefix: str = "",
+    continuation_prefix: str = "",
+    *,
+    style=None,
+) -> list[str]:
+    apply_style = style or (lambda item: item)
+    prefix_width = max(visible_len(first_prefix), visible_len(continuation_prefix))
+    wrapped = wrap_visible(value, max(1, width - prefix_width))
+    return [
+        (first_prefix if index == 0 else continuation_prefix) + apply_style(line)
+        for index, line in enumerate(wrapped)
+    ]
 
 
 def render_compact_list(
@@ -1232,11 +1247,9 @@ def render_compact_group(group: dict[str, object], widths: list[int], terminal_w
     title_prefix = str(group.get("title_prefix") or "")
     title_continuation_prefix = str(group.get("title_continuation_prefix") or "")
     title_value = str(group.get("title_value") or group.get("title") or "-")
-    title_value_width = max(1, title_width - visible_len(title_prefix))
-    wrapped_title = wrap_visible(title_value, title_value_width)
     title_lines = [
-        "  " + (title_prefix if index == 0 else title_continuation_prefix) + line
-        for index, line in enumerate(wrapped_title)
+        "  " + line
+        for line in wrap_prefixed_value(title_value, title_width, title_prefix, title_continuation_prefix)
     ]
     lines = [render_compact_row(first, widths)]
     row_count = max(len(title_lines), len(dep_lines) - 1, len(note_lines) - 1)
@@ -1297,12 +1310,10 @@ def render_block_rows(rows: list[tuple[str, str] | tuple[str, str, str, str]], t
     value_width = max(8, terminal_width - label_width - 2)
     lines = []
     for label, value, first_prefix, continuation_prefix in normalized:
-        prefix_width = max(visible_len(first_prefix), visible_len(continuation_prefix))
-        wrapped = wrap_visible(value, max(1, value_width - prefix_width))
+        wrapped = wrap_prefixed_value(value, value_width, first_prefix, continuation_prefix)
         for index, line in enumerate(wrapped):
             row_prefix = (label + ":").ljust(label_width + 1) + " " if index == 0 else " " * (label_width + 2)
-            value_prefix = first_prefix if index == 0 else continuation_prefix
-            lines.append(row_prefix + value_prefix + line)
+            lines.append(row_prefix + line)
     return lines
 
 

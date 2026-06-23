@@ -1930,6 +1930,34 @@ class CliTests(unittest.TestCase):
             self.assertIn("│  |                   under the dependency edge", output)
             self.assertIn("└─ * ..runnable  [N] Second child source", output)
 
+    def test_list_graph_wraps_subtask_tree_without_dependency_rails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "Parent source task", tmp, task_id="parent", project_id="project-a")
+            first_child = create_task(
+                config,
+                "Very long first child source title that should wrap inside graph mode",
+                tmp,
+                task_id="child1",
+                project_id="project-a",
+            )
+            first_child["parent_task_id"] = "parent"
+            save_task(config, first_child)
+            second_child = create_task(config, "Second child source", tmp, task_id="child2", project_id="project-a")
+            second_child["parent_task_id"] = "parent"
+            save_task(config, second_child)
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=42):
+                code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--graph", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
+            self.assertIn("├─ * ..runnable  [N] Very long first", output)
+            self.assertIn("│                source title that should", output)
+            self.assertIn("│                wrap inside graph mode", output)
+            self.assertIn("└─ * ..runnable  [N] Second child source", output)
+
     def test_list_graph_keeps_json_output_raw(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
