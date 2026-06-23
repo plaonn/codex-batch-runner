@@ -589,7 +589,7 @@ def render_list_output(config: Config, args: argparse.Namespace, terminal_width:
     if args.needs_review:
         tasks = [task for task in tasks if needs_review(task)]
     if not explicit_filter and not args.all:
-        tasks = [task for task in tasks if visible_by_default(task)]
+        tasks = default_visible_tasks_with_subtasks(tasks, by_id)
     tasks.sort(key=list_sort_key)
     if args.json:
         return json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True)
@@ -631,6 +631,36 @@ def list_cooldown_banners(config: Config) -> list[str]:
 
 def list_sort_key(task: dict) -> tuple[str, str]:
     return (str(task.get("created_at") or ""), str(task.get("id") or ""))
+
+
+def default_visible_tasks_with_subtasks(tasks: list[dict], by_id: dict[str, dict]) -> list[dict]:
+    visible_ids = {str(task.get("id")) for task in tasks if task.get("id") and visible_by_default(task)}
+    changed = True
+    while changed:
+        changed = False
+        for task in tasks:
+            task_id = str(task.get("id") or "")
+            if not task_id or task_id in visible_ids or task.get("status") == "archived" or task.get("resolution"):
+                continue
+            if has_visible_parent(task, visible_ids, by_id):
+                visible_ids.add(task_id)
+                changed = True
+    return [task for task in tasks if str(task.get("id") or "") in visible_ids]
+
+
+def has_visible_parent(task: dict, visible_ids: set[str], by_id: dict[str, dict]) -> bool:
+    task_id = str(task.get("id") or "")
+    for key in ("parent_task_id", "subtask_for", "root_task_id"):
+        value = task.get(key)
+        if value is not None and str(value) in visible_ids:
+            return True
+    if not task_id:
+        return False
+    for parent_id in visible_ids:
+        parent = by_id.get(parent_id)
+        if parent and task_id in blocking_subtask_ids(parent):
+            return True
+    return False
 
 
 def render_table(header: list[str], rows: list[list[str]]) -> str:
