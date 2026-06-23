@@ -1792,7 +1792,7 @@ class ListColor:
     BG_GREEN = "\033[102;30m"
     BG_CYAN = "\033[106;30m"
     BG_BLUE = "\033[104;30m"
-    BG_MARKER = "\033[47m"
+    BG_MARKER = "\033[40m"
     BG_DIM = "\033[100;37m"
     BG_NEUTRAL_CYAN = "\033[100;96m"
     BG_NEUTRAL_YELLOW = "\033[100;93m"
@@ -1858,8 +1858,8 @@ class ListColor:
     STATUS_MARKER_COLORS = {
         "runnable": LIGHT_CYAN,
         "needs_resume": BLUE,
-        "cooldown": BLACK,
-        "usage_exhausted": BLACK,
+        "cooldown": WHITE,
+        "usage_exhausted": WHITE,
         "blocked_dependency": YELLOW,
         "waiting_subtasks": YELLOW,
         "running": CYAN,
@@ -1874,8 +1874,8 @@ class ListColor:
         "needs_followup": RED,
         "blocked_user": RED,
         "subtasks_blocked": RED,
-        "resolved": BLACK,
-        "archived": BLACK,
+        "resolved": WHITE,
+        "archived": WHITE,
     }
 
     def __init__(self, enabled: bool) -> None:
@@ -1941,7 +1941,7 @@ class ListColor:
         return self.status_label(state, state)
 
     def status(self, status: str) -> str:
-        return self.status_marker(status) + " " + self.status_label(status, status)
+        return self.status_marker(status) + self.status_label(status, status)
 
     def status_label(self, label: str, status: str) -> str:
         style = self.ACTIVE_STATUS_STYLES.get(status) or self.PASSIVE_STATUS_STYLES.get(status)

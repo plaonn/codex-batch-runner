@@ -188,9 +188,9 @@ def compact_list_rows(output: str) -> list[dict[str, str]]:
 
 
 def strip_status_marker(value: str) -> str:
-    parts = value.split(maxsplit=1)
-    if len(parts) == 2 and parts[0] in {"..", "||", ">>", "??", "==", "!!", "--"}:
-        return parts[1]
+    for marker in ("..", "||", ">>", "??", "==", "!!", "--"):
+        if value.startswith(marker):
+            return value[len(marker) :].lstrip()
     return value
 
 
@@ -1792,7 +1792,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("done-dep", output)
             self.assertNotIn("review-dep", output)
             self.assertNotIn("missing-dep", output)
-            self.assertIn("* || blocked_dependency  [N] Child work", output)
+            self.assertIn("* ||blocked_dependency  [N] Child work", output)
             self.assertIn("|       ├─ done  [N] Done dependency", output)
             self.assertIn("|       ├─ not_accepted  [N] Review dependency", output)
             self.assertIn("|       └─ missing  missing dependency", output)
@@ -1826,8 +1826,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
-            self.assertIn("* || blocked_dependency  [N] Very", output)
-            self.assertIn("                         child title that", output)
+            self.assertIn("* ||blocked_dependency  [N] Very", output)
+            self.assertIn("                        child title that", output)
             self.assertIn("|       └─ blocked  [N] Very", output)
             self.assertIn("|                   dependency title that", output)
             self.assertNotIn("|\\", output)
@@ -1873,9 +1873,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("└─ [N] Blocking review fix subtask", compact_output)
             self.assertIn("LAST_RESULT", verbose_output)
             self.assertIn("[demo]", graph_output)
-            self.assertIn("|| blocked_dependency", compact_output)
-            self.assertIn(">> running", compact_output)
-            self.assertIn("* || blocked_dependency  [N] Runnable task blocked by dependencies", graph_output)
+            self.assertIn("||blocked_dependency", compact_output)
+            self.assertIn(">>running", compact_output)
+            self.assertIn("* ||blocked_dependency  [N] Runnable task blocked by dependencies", graph_output)
             self.assertIn("|       ├─ done  [N] Completed accepted dependency", graph_output)
             self.assertIn("|       └─ missing  missing dependency", graph_output)
             self.assertNotIn("|\\", graph_output)
@@ -1885,8 +1885,8 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("demo-missing", graph_output)
             self.assertIn("not_accepted", graph_output)
             self.assertIn("not_applied", graph_output)
-            self.assertIn("\033[47m\033[33m??\033[0m \033[103;30mawaiting_review\033[0m", color_output)
-            self.assertIn("\033[47m\033[36m>>\033[0m \033[106;30mrunning\033[0m", color_output)
+            self.assertIn("\033[40m\033[33m??\033[0m\033[103;30mawaiting_review\033[0m", color_output)
+            self.assertIn("\033[40m\033[36m>>\033[0m\033[106;30mrunning\033[0m", color_output)
             self.assertIn("\033[100;32mdone\033[0m", color_output)
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\*\033\[0m")
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\|\033\[0m       \033\[2m├─ \033\[0m")
@@ -2039,14 +2039,14 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, json_code)
             self.assertNotIn("\033[", never_output)
             self.assertNotIn("\033[", auto_output)
-            self.assertIn(".. runnable", never_output)
-            self.assertIn("?? awaiting_review", never_output)
-            self.assertIn("== completed", never_output)
-            self.assertIn("!! failed", never_output)
-            self.assertIn("\033[47m\033[96m..\033[0m \033[100;96mrunnable\033[0m", always_output)
-            self.assertIn("\033[47m\033[33m??\033[0m \033[103;30mawaiting_review\033[0m", always_output)
-            self.assertIn("\033[47m\033[32m==\033[0m \033[100;32mcompleted\033[0m", always_output)
-            self.assertIn("\033[47m\033[31m!!\033[0m \033[101;30mfailed\033[0m", always_output)
+            self.assertIn("..runnable", never_output)
+            self.assertIn("??awaiting_review", never_output)
+            self.assertIn("==completed", never_output)
+            self.assertIn("!!failed", never_output)
+            self.assertIn("\033[40m\033[96m..\033[0m\033[100;96mrunnable\033[0m", always_output)
+            self.assertIn("\033[40m\033[33m??\033[0m\033[103;30mawaiting_review\033[0m", always_output)
+            self.assertIn("\033[40m\033[32m==\033[0m\033[100;32mcompleted\033[0m", always_output)
+            self.assertIn("\033[40m\033[31m!!\033[0m\033[101;30mfailed\033[0m", always_output)
             self.assertIn("\033[100;96mrunnable\033[0m", always_output)
             self.assertIn("\033[104;30mneeds_resume\033[0m", always_output)
             self.assertIn("\033[103;30mawaiting_review\033[0m", always_output)
@@ -2186,7 +2186,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual(["PROJECT", "ID", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
-            self.assertRegex(output, r"task-2026\.\.\.[^\s]*3408Z0000")
+            self.assertRegex(output, r"task-2026-\.\.\.[^\s]*3408Z0000")
             self.assertRegex(output, r"task-[^\s]*\.\.\.[^\s]*0Z0000 \(done\)")
             self.assertIn("done 5m ago", output)
             self.assertIn("ran 1h 02m", output)
