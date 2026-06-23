@@ -1334,6 +1334,54 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, profile_decisions[profile_decision_key]["tasks"])
             self.assertEqual(1, profile_experiments["small/downshift_probe"]["first_pass_accepted"])
 
+    def test_routing_report_groups_missing_routing_metadata_under_fallback_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="unrouted",
+                project_id="project-a",
+                category="docs",
+                labels=["docs"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            task["attempts"] = 1
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
+            report = json.loads(output)
+            experiments = {entry["key"]: entry for entry in report["groups"]["routing_experiment"]}
+            sizes = {entry["key"]: entry for entry in report["groups"]["routing_size"]}
+            risks = {entry["key"]: entry for entry in report["groups"]["routing_risk"]}
+            risk_factors = {entry["key"]: entry for entry in report["groups"]["routing_risk_factor"]}
+            scopes = {entry["key"]: entry for entry in report["groups"]["verification_scope"]}
+            decisions = {entry["key"]: entry for entry in report["groups"]["routing_decision"]}
+            profile_decisions = {entry["key"]: entry for entry in report["groups"]["profile_routing_decision"]}
+            row = report["task_rows"][0]
+            decision_key = "size=unspecified risk=unspecified verify=none"
+            profile_decision_key = "profile=default size=unspecified risk=unspecified verify=none"
+
+            self.assertEqual(0, code)
+            self.assertEqual("", row["routing_reason"])
+            self.assertEqual(["none"], row["routing_risk_factors"])
+            self.assertEqual("unspecified", row["routing_experiment"])
+            self.assertEqual("unspecified", row["routing_size"])
+            self.assertEqual("unspecified", row["routing_risk"])
+            self.assertEqual(["none"], row["verification_scope"])
+            self.assertEqual(decision_key, row["routing_decision"])
+            self.assertEqual(profile_decision_key, row["profile_routing_decision"])
+            self.assertEqual(1, experiments["unspecified"]["tasks"])
+            self.assertEqual(1, sizes["unspecified"]["tasks"])
+            self.assertEqual(1, risks["unspecified"]["tasks"])
+            self.assertEqual(1, risk_factors["none"]["tasks"])
+            self.assertEqual(1, scopes["none"]["tasks"])
+            self.assertEqual(1, decisions[decision_key]["first_pass_accepted"])
+            self.assertEqual(1, profile_decisions[profile_decision_key]["tasks"])
+
     def test_routing_report_human_output_and_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(
