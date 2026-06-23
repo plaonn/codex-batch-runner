@@ -34,6 +34,7 @@
   "manual_cooldown_wake_command": [],
   "codex_cli_update_command": [],
   "codex_cli_smoke_command": [],
+  "codex_cli_rollback_command": [],
   "auto_review_mechanical_accept": false,
   "auto_review_codex_enabled": false,
   "auto_review_codex_max_calls_per_run": 0,

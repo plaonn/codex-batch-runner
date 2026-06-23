@@ -549,14 +549,14 @@ Recommended maintenance policy:
 - Do not compare against an app-bundled Codex binary by default. If a system has a bundled CLI inside an installed Codex application, inspect it only as an optional manual investigation.
 - Do not hash large binaries during routine checks. A hash could be added later as an explicit verbose/deep diagnostic, not as default doctor behavior.
 
-If `codex_cli_update_command` and `codex_cli_smoke_command` are configured, `cbr maintenance codex-cli` provides a guarded operator-approved workflow:
+If `codex_cli_update_command` and `codex_cli_smoke_command` are configured, `cbr maintenance codex-cli` provides a guarded operator-approved workflow. An optional `codex_cli_rollback_command` can be configured for failed update or smoke runs.
 
 ```bash
 PYTHONPATH=src python3 -m codex_batch_runner maintenance codex-cli --dry-run
 PYTHONPATH=src python3 -m codex_batch_runner maintenance codex-cli --apply
 ```
 
-`--apply` requires the queue to be idle, sets a runner pause, records doctor snapshots before and after the update, runs the configured update and smoke commands, and clears the pause only if both commands succeed. It does not choose an update source or infer the local installation method.
+`--apply` requires the queue to be idle, sets a runner pause, records doctor snapshots before and after the update, runs the configured update and smoke commands, and clears the pause only if both commands succeed. If update or smoke fails, the optional rollback command runs and the pause remains active for operator inspection. It does not choose an update source or infer the local installation method.
 
 ## Rate-limit 처리
 

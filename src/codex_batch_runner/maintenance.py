@@ -64,6 +64,7 @@ def build_codex_cli_maintenance_report(config: Config) -> dict[str, Any]:
         "configured": {
             "codex_cli_update_command": config.codex_cli_update_command,
             "codex_cli_smoke_command": config.codex_cli_smoke_command,
+            "codex_cli_rollback_command": config.codex_cli_rollback_command,
             "timeout_seconds": config.shell_task_timeout_seconds,
         },
         "log_dir": str(codex_cli_maintenance_log_parent(config)),
@@ -104,15 +105,13 @@ def run_codex_cli_maintenance(config: Config) -> dict[str, Any]:
     after_update_path = write_doctor_snapshot(config, run_dir / "doctor-after-update.json")
 
     if not update_result.ok:
-        result = maintenance_result(
-            "failed",
-            ["update command failed"],
-            applied=True,
-            run_dir=run_dir,
+        result = failed_maintenance_result(
+            config,
+            run_dir,
+            blocker="update command failed",
             before_doctor_path=before_path,
             after_update_doctor_path=after_update_path,
             update_result=update_result,
-            pause_cleared=False,
         )
         write_maintenance_event(config, result)
         return result
@@ -126,17 +125,15 @@ def run_codex_cli_maintenance(config: Config) -> dict[str, Any]:
     after_smoke_path = write_doctor_snapshot(config, run_dir / "doctor-after-smoke.json")
 
     if not smoke_result.ok:
-        result = maintenance_result(
-            "failed",
-            ["smoke command failed"],
-            applied=True,
-            run_dir=run_dir,
+        result = failed_maintenance_result(
+            config,
+            run_dir,
+            blocker="smoke command failed",
             before_doctor_path=before_path,
             after_update_doctor_path=after_update_path,
             after_smoke_doctor_path=after_smoke_path,
             update_result=update_result,
             smoke_result=smoke_result,
-            pause_cleared=False,
         )
         write_maintenance_event(config, result)
         return result
@@ -205,6 +202,46 @@ def clear_maintenance_pause(config: Config) -> bool:
         payload={"action": "clear", "runner_pause": current, "previous_runner_pause": previous},
     )
     return True
+
+
+def failed_maintenance_result(
+    config: Config,
+    run_dir: Path,
+    *,
+    blocker: str,
+    before_doctor_path: str,
+    after_update_doctor_path: str,
+    after_smoke_doctor_path: str | None = None,
+    update_result: MaintenanceCommandResult | None = None,
+    smoke_result: MaintenanceCommandResult | None = None,
+) -> dict[str, Any]:
+    rollback_result: MaintenanceCommandResult | None = None
+    after_rollback_path: str | None = None
+    blockers = [blocker]
+    if config.codex_cli_rollback_command:
+        rollback_result = run_logged_command(
+            config.codex_cli_rollback_command,
+            cwd=config.root,
+            timeout_seconds=config.shell_task_timeout_seconds,
+            log_path=run_dir / "rollback.log",
+        )
+        after_rollback_path = write_doctor_snapshot(config, run_dir / "doctor-after-rollback.json")
+        if not rollback_result.ok:
+            blockers.append("rollback command failed")
+    return maintenance_result(
+        "failed",
+        blockers,
+        applied=True,
+        run_dir=run_dir,
+        before_doctor_path=before_doctor_path,
+        after_update_doctor_path=after_update_doctor_path,
+        after_smoke_doctor_path=after_smoke_doctor_path,
+        after_rollback_doctor_path=after_rollback_path,
+        update_result=update_result,
+        smoke_result=smoke_result,
+        rollback_result=rollback_result,
+        pause_cleared=False,
+    )
 
 
 def run_logged_command(command: list[str], *, cwd: Path, timeout_seconds: int, log_path: Path) -> MaintenanceCommandResult:
@@ -321,6 +358,7 @@ def write_maintenance_event(config: Config, result: dict[str, Any]) -> None:
             "pause_cleared": result.get("pause_cleared"),
             "update": command_event_payload(result.get("update")),
             "smoke": command_event_payload(result.get("smoke")),
+            "rollback": command_event_payload(result.get("rollback")),
         },
     )
 
@@ -346,8 +384,10 @@ def maintenance_result(
     before_doctor_path: str | None = None,
     after_update_doctor_path: str | None = None,
     after_smoke_doctor_path: str | None = None,
+    after_rollback_doctor_path: str | None = None,
     update_result: MaintenanceCommandResult | None = None,
     smoke_result: MaintenanceCommandResult | None = None,
+    rollback_result: MaintenanceCommandResult | None = None,
     pause_cleared: bool | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
@@ -364,10 +404,14 @@ def maintenance_result(
         result["doctor_after_update_path"] = after_update_doctor_path
     if after_smoke_doctor_path:
         result["doctor_after_smoke_path"] = after_smoke_doctor_path
+    if after_rollback_doctor_path:
+        result["doctor_after_rollback_path"] = after_rollback_doctor_path
     if update_result is not None:
         result["update"] = update_result.summary()
     if smoke_result is not None:
         result["smoke"] = smoke_result.summary()
+    if rollback_result is not None:
+        result["rollback"] = rollback_result.summary()
     return result
 
 
@@ -382,12 +426,16 @@ def render_codex_cli_maintenance_report(report: dict[str, Any]) -> str:
             lines.append(f"doctor_after_update: {report.get('doctor_after_update_path')}")
         if report.get("doctor_after_smoke_path"):
             lines.append(f"doctor_after_smoke: {report.get('doctor_after_smoke_path')}")
+        if report.get("doctor_after_rollback_path"):
+            lines.append(f"doctor_after_rollback: {report.get('doctor_after_rollback_path')}")
         append_command_lines(lines, "update", report.get("update"))
         append_command_lines(lines, "smoke", report.get("smoke"))
+        append_command_lines(lines, "rollback", report.get("rollback"))
     else:
         configured = report.get("configured") if isinstance(report.get("configured"), dict) else {}
         lines.append(f"update_configured: {str(bool(configured.get('codex_cli_update_command'))).lower()}")
         lines.append(f"smoke_configured: {str(bool(configured.get('codex_cli_smoke_command'))).lower()}")
+        lines.append(f"rollback_configured: {str(bool(configured.get('codex_cli_rollback_command'))).lower()}")
         lines.append(f"timeout_seconds: {configured.get('timeout_seconds') or '-'}")
         lines.append(f"log_dir: {report.get('log_dir') or '-'}")
     blockers = report.get("blockers") or []

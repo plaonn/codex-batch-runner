@@ -639,6 +639,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("status: blocked", output)
             self.assertIn("codex_cli_update_command is not configured", output)
             self.assertIn("codex_cli_smoke_command is not configured", output)
+            self.assertIn("rollback_configured: false", output)
 
     def test_maintenance_codex_cli_apply_requires_idle_queue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -714,13 +715,25 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "marker.log"
             trigger_marker = Path(tmp) / "trigger.log"
+            append_command = (
+                "from pathlib import Path; import sys; "
+                "Path(sys.argv[1]).open('a', encoding='utf-8').write(sys.argv[2] + '\\n')"
+            )
             update = [
                 sys.executable,
                 "-c",
-                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('update', encoding='utf-8')",
+                append_command,
                 str(marker),
+                "update",
             ]
             smoke = [sys.executable, "-c", "import sys; sys.exit(9)"]
+            rollback = [
+                sys.executable,
+                "-c",
+                append_command,
+                str(marker),
+                "rollback",
+            ]
             trigger = [
                 sys.executable,
                 "-c",
@@ -733,6 +746,7 @@ class CliTests(unittest.TestCase):
                 extra={
                     "codex_cli_update_command": update,
                     "codex_cli_smoke_command": smoke,
+                    "codex_cli_rollback_command": rollback,
                     "shell_task_timeout_seconds": 10,
                 },
             )
@@ -744,10 +758,44 @@ class CliTests(unittest.TestCase):
             self.assertEqual("failed", report["status"])
             self.assertIn("smoke command failed", report["blockers"])
             self.assertFalse(report["pause_cleared"])
+            self.assertEqual(["update", "rollback"], marker.read_text(encoding="utf-8").splitlines())
+            self.assertTrue(Path(report["rollback"]["log_path"]).is_file())
+            self.assertTrue(Path(report["doctor_after_rollback_path"]).is_file())
             state = load_state(Config.load(str(config_path)))
             self.assertTrue(state["runner_pause"]["active"])
             self.assertEqual("Codex CLI maintenance", state["runner_pause"]["reason"])
             self.assertFalse(trigger_marker.exists())
+
+    def test_maintenance_codex_cli_reports_rollback_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "marker.log"
+            update = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('update', encoding='utf-8')",
+                str(marker),
+            ]
+            smoke = [sys.executable, "-c", "import sys; sys.exit(9)"]
+            rollback = [sys.executable, "-c", "import sys; sys.exit(12)"]
+            config_path = write_config(
+                tmp,
+                extra={
+                    "codex_cli_update_command": update,
+                    "codex_cli_smoke_command": smoke,
+                    "codex_cli_rollback_command": rollback,
+                    "shell_task_timeout_seconds": 10,
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "maintenance", "codex-cli", "--apply", "--json"])
+
+            self.assertEqual(1, code)
+            report = json.loads(output)
+            self.assertEqual("failed", report["status"])
+            self.assertIn("smoke command failed", report["blockers"])
+            self.assertIn("rollback command failed", report["blockers"])
+            self.assertEqual(12, report["rollback"]["returncode"])
+            self.assertTrue(Path(report["doctor_after_rollback_path"]).is_file())
 
     def test_post_mutation_trigger_runs_after_enqueue_and_review_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
