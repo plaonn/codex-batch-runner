@@ -1003,12 +1003,19 @@ def note_cell(task: dict, by_id: dict[str, dict], config: Config) -> str:
 
 def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
     notes = []
+    capacity = []
     if task.get("status") in RUNNABLE_STATUSES:
-        blockers = capacity_blockers(config, task)
-        if blockers:
-            notes.append("capacity blocked: " + ",".join(blockers))
+        capacity = capacity_blockers(config, task)
+        if capacity:
+            notes.append("capacity blocked: " + ",".join(capacity))
     if is_in_cooldown(task):
-        notes.append("cooldown until " + scalar_cell(task.get("cooldown_until")))
+        notes.append(cooldown_note(task))
+    elif task.get("status") == "needs_resume" and not capacity and dependency_status(
+        task,
+        by_id,
+        require_accepted_review=config.dependency_requires_accepted_review,
+    )[0]:
+        notes.append("resume ready")
     if startup_stalled(task):
         notes.append(startup_stall_note(task))
     if task.get("status") == "failed" and task.get("last_error"):
@@ -1039,6 +1046,7 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
             notes.append("needs follow-up")
         elif review == "reviewing":
             notes.append("reviewing")
+        notes.extend(completed_timing_notes(task))
         chain_note = chain_note_cell(task)
         if chain_note:
             notes.append(chain_note)
@@ -1046,6 +1054,49 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config) -> list[str]:
         if worktree_note:
             notes.append(worktree_note)
     return notes or ["-"]
+
+
+def cooldown_note(task: dict) -> str:
+    until = parse_time(task.get("cooldown_until"))
+    if not until:
+        return "cooldown until " + scalar_cell(task.get("cooldown_until"))
+    seconds = max(0, int((until - utc_now()).total_seconds()))
+    label = "cooldown"
+    if task.get("status") == "needs_resume":
+        label = "resume"
+    elif task.get("status") == "runnable":
+        label = "retry"
+    return f"{label} in {format_elapsed(seconds)} ({format_clock(until)})"
+
+
+def format_clock(value) -> str:
+    return value.strftime("%H:%M")
+
+
+def completed_timing_notes(task: dict) -> list[str]:
+    notes = []
+    completed = parse_time(task.get("completed_at"))
+    if completed:
+        seconds = max(0, int((utc_now() - completed).total_seconds()))
+        notes.append(f"completed {format_elapsed(seconds)} ago")
+    duration = task_duration_seconds(task)
+    if duration is not None:
+        notes.append(f"duration {format_elapsed(duration)}")
+    return notes
+
+
+def task_duration_seconds(task: dict) -> int | None:
+    last_run = task.get("last_run")
+    if isinstance(last_run, dict) and last_run.get("duration_seconds") is not None:
+        try:
+            return max(0, int(float(last_run.get("duration_seconds"))))
+        except (TypeError, ValueError):
+            pass
+    started = parse_time(task.get("started_at"))
+    completed = parse_time(task.get("completed_at"))
+    if not started or not completed:
+        return None
+    return max(0, int((completed - started).total_seconds()))
 
 
 def scheduling_note_cell(task: dict) -> str:
@@ -1159,7 +1210,47 @@ def blocking_subtask_note_cell(task: dict, by_id: dict[str, dict], config: Confi
         status = blocking_subtask_status(item, by_id, config)
         counts[status] = counts.get(status, 0) + 1
     summary = ", ".join(f"{count} {status}" for status, count in sorted(counts.items())[:2])
-    return f"subtasks {len(active)}/{len(ids)} {summary}"
+    timing = active_subtask_timing_summary(active, by_id, config)
+    note = f"subtasks {len(active)}/{len(ids)} {summary}"
+    return f"{note}, {timing}" if timing else note
+
+
+def active_subtask_timing_summary(active: list[dict | None], by_id: dict[str, dict], config: Config) -> str:
+    status_rows = [(task, blocking_subtask_status(task, by_id, config)) for task in active if task]
+    blocked = [
+        task
+        for task, status in status_rows
+        if status in {"failed", "blocked_user", "review_failed", "needs_followup", "subtasks_blocked"}
+    ]
+    if blocked:
+        return oldest_age_note(blocked, ("completed_at", "updated_at", "started_at"), "blocked")
+    running = [task for task, status in status_rows if status == "running"]
+    if running:
+        return oldest_age_note(running, ("started_at", "updated_at"), "running")
+    review = [task for task, status in status_rows if status in {"awaiting_review", "reviewing"}]
+    if review:
+        return oldest_age_note(review, ("completed_at", "updated_at", "started_at"), "awaiting review")
+    return ""
+
+
+def oldest_age_note(tasks: list[dict], fields: tuple[str, ...], label: str) -> str:
+    ages = []
+    now = utc_now()
+    for task in tasks:
+        timestamp = first_task_time(task, fields)
+        if timestamp:
+            ages.append(max(0, int((now - timestamp).total_seconds())))
+    if not ages:
+        return label
+    return f"{label} {format_elapsed(max(ages))}"
+
+
+def first_task_time(task: dict, fields: tuple[str, ...]):
+    for field in fields:
+        timestamp = parse_time(task.get(field))
+        if timestamp:
+            return timestamp
+    return None
 
 
 def blocking_subtask_status(task: dict | None, by_id: dict[str, dict], config: Config) -> str:

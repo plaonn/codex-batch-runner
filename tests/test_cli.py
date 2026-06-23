@@ -1333,6 +1333,51 @@ class CliTests(unittest.TestCase):
             self.assertIn("awaiting review", rows["reviewable"]["NOTE"])
             self.assertNotIn("mechanical auto-review enabled", rows["reviewable"]["NOTE"])
 
+    def test_list_shows_resume_timing_and_ready_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            resume = create_task(config, "resume", tmp, task_id="resume")
+            resume["status"] = "needs_resume"
+            resume["cooldown_until"] = "2026-06-21T00:22:00+00:00"
+            save_task(config, resume)
+            ready = create_task(config, "ready", tmp, task_id="ready")
+            ready["status"] = "needs_resume"
+            save_task(config, ready)
+            fixed_now = datetime(2026, 6, 21, 0, 10, tzinfo=timezone.utc)
+
+            with patch("codex_batch_runner.cli.utc_now", return_value=fixed_now), patch(
+                "codex_batch_runner.queue.utc_now",
+                return_value=fixed_now,
+            ):
+                code, output = run_cli(["--config", str(config_path), "list"])
+
+            self.assertEqual(0, code)
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+            self.assertIn("resume in 12m (00:22)", rows["resume"]["NOTE"])
+            self.assertEqual("resume ready", rows["ready"]["NOTE"])
+
+    def test_list_completed_tasks_show_elapsed_and_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "completed", tmp, task_id="completed")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["completed_at"] = "2026-06-21T00:05:00+00:00"
+            task["last_run"] = {"duration_seconds": 3723.4}
+            save_task(config, task)
+            fixed_now = datetime(2026, 6, 21, 0, 10, tzinfo=timezone.utc)
+
+            with patch("codex_batch_runner.cli.utc_now", return_value=fixed_now):
+                code, output = run_cli(["--config", str(config_path), "list"])
+
+            self.assertEqual(0, code)
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+            self.assertIn("awaiting review", rows["completed"]["NOTE"])
+            self.assertIn("completed 5m ago", rows["completed"]["NOTE"])
+            self.assertIn("duration 1h 02m", rows["completed"]["NOTE"])
+
     def test_list_all_includes_completed_and_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -1719,6 +1764,7 @@ class CliTests(unittest.TestCase):
             save_task(config, parent)
             running = create_task(config, "running fix", tmp, task_id="fix-running")
             running["status"] = "running"
+            running["started_at"] = "2026-06-21T00:00:00+00:00"
             save_task(config, running)
             failed = create_task(config, "failed fix", tmp, task_id="fix-failed")
             failed["status"] = "failed"
@@ -1739,12 +1785,16 @@ class CliTests(unittest.TestCase):
             failed["status"] = "completed"
             failed["review_status"] = "accepted"
             save_task(config, failed)
-            code, output = run_cli(["--config", str(config_path), "list", "--all", "--color=never"])
+            fixed_now = datetime(2026, 6, 21, 0, 12, tzinfo=timezone.utc)
+            with patch("codex_batch_runner.cli.utc_now", return_value=fixed_now):
+                code, output = run_cli(["--config", str(config_path), "list", "--all", "--color=never"])
             rows = {row["ID"]: row for row in compact_list_rows(output)}
 
             self.assertEqual(0, code)
             self.assertEqual("waiting_subtasks", rows["parent"]["STATUS"])
             self.assertIn("subtasks 1/3", rows["parent"]["NOTE"])
+            self.assertIn("running 12m", rows["parent"]["NOTE"])
+            self.assertIn("running for 12m", rows["fix-running"]["NOTE"])
 
     def test_list_shows_global_and_reviewer_cooldown_banners(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
