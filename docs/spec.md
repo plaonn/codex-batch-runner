@@ -394,6 +394,7 @@ runner는 Codex 최종 응답이 `completed`이면 `review_status=unreviewed`를
 규칙만으로 `completed` task를 자동 accept하는 방식은 충분하지 않습니다. 파일 변경, 테스트 명령, commit/push 상태 같은 기계적 신호는 누락과 모순을 찾는 데 유용하지만, 원래 prompt 의도 충족 여부, 문서/코드 변경의 적절성, 공개 저장소 안전 정책 준수 여부, 후속 작업 필요성은 task마다 문맥 판단이 필요합니다. 따라서 review는 아래 단계로 분리합니다.
 
 - Mechanical gates: task 상태, dependency 상태, final JSON schema, verification 유무, git dirty/unpushed 상태, diff 크기, 금지된 runtime/private 파일 포함 여부 같은 결정적 검사를 수행합니다.
+- Narrow mechanical safe-accept: mechanical auto-accept와 Reviewer Codex가 모두 켜져 있어도, 모든 mechanical gate가 통과하고 tracked/public diff가 없으며 reported changes가 ignored operator-local path(`*.local.md`, `TASKS.local.md`, `ROADMAP.local.md`, `.codex-batch-runner/TODO.local.md` 등)로만 제한되고 clean tracked-state verification이 있는 경우에는 Reviewer Codex 호출 없이 accept할 수 있습니다. 이 shortcut은 semantic tracked/public code/docs diff에는 적용하지 않습니다.
 - Reviewer Codex: 독립적으로 생성한 review bundle만 읽고 작업 결과를 평가합니다. 현재 대화 context나 작업 실행 thread 기억에 의존하지 않습니다.
 - Human fallback: confidence가 낮거나 private/public 안전성, 의도 충족, 큰 diff, 실패한 검증, credential 가능성처럼 사람이 봐야 하는 항목이 있으면 accept하지 않고 확인 대상으로 남깁니다.
 
@@ -433,6 +434,9 @@ Reviewer Codex 호출 허용 조건:
 - Mechanical gates가 reviewer 호출 전 단계까지 치명적 오류 없이 통과해야 합니다. 예를 들어 final result 누락, verification 누락, 공개 금지 파일 의심, dirty/unpushed 상태 모호성, dependency 미충족, 보고 commit이 현재 `HEAD`에서 도달 불가능한 상태는 reviewer 호출 없이 human review로 남길 수 있습니다.
 - Global cooldown 또는 reviewer 전용 cooldown이 활성 상태가 아니어야 합니다.
 - Review bundle 크기와 diff 크기가 configured limit 안에 있어야 합니다. 초과하면 bundle을 임의로 크게 잘라 자동 판단하지 않고 `needs_human`으로 남깁니다.
+- 예외적으로 narrow mechanical safe-accept class는 Reviewer Codex 입력이 필요 없으므로 bundle/diff 크기 제한 때문에 `needs_human`으로 전환하지 않고 mechanical accept를 먼저 적용할 수 있습니다.
+
+TODO: Large semantic diff support should use deterministic diff summary/sliced reviewer input instead of all-or-nothing bundle limits. Any omitted high-risk file or omitted file class that prevents semantic confidence must block reviewer `pass` and keep the task in human/fix review.
 
 Reviewer Codex 호출 금지 조건:
 

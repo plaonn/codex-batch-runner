@@ -54,6 +54,31 @@ HIGH_RISK_TERMS = (
     "public api",
     "breaking",
 )
+LOCAL_OPERATOR_FILENAMES = {"TASKS.local.md", "ROADMAP.local.md"}
+LOCAL_OPERATOR_EXACT_PATHS = {".codex-batch-runner/TODO.local.md"}
+LOCAL_OPERATOR_SUFFIXES = (".local.md", ".local.plist")
+CLEAN_TRACKED_STATE_COMMANDS = ("git status --short", "git status -s", "git diff --stat", "git diff --check")
+CLEAN_TRACKED_STATE_PHRASES = (
+    "clean tracked state",
+    "no tracked changes",
+    "no tracked/public file changes",
+    "no public file changes",
+    "tracked state clean",
+    "working tree clean",
+    "worktree clean",
+    "repo clean",
+    "repository clean",
+)
+CLEAN_TRACKED_STATE_RESULTS = (
+    "clean",
+    "empty",
+    "no output",
+    "no changes",
+    "nothing to commit",
+    "passed",
+    "ok",
+    "no whitespace errors",
+)
 
 
 def build_review_next_report(config: Config, filters: Namespace | None = None) -> dict[str, Any]:
@@ -141,6 +166,27 @@ def build_review_next_apply_report_locked(
         )
         return report
 
+    if mechanical_enabled and reviewer_enabled:
+        applied = apply_mechanical_safe_accept(config, task_id, expected)
+        if applied["decision"] != "needs_human":
+            report["mutated"] = applied["mutated"]
+            report["review_status"] = applied.get("review_status", report.get("review_status"))
+            report["post_accept"] = applied.get("post_accept")
+            task = load_task(config, task_id)
+            report["chain"] = chain_metadata(task)
+            report["auto_fix_planner"] = build_auto_fix_planner_report(config, task, report.get("gates", []))
+            report["auto_review"] = auto_review_summary(
+                decision=applied["decision"],
+                reason=applied["reason"],
+                enabled=True,
+                reviewer_codex_enabled=True,
+                follow_up_enqueued=applied.get("follow_up_enqueued", False),
+                follow_up_task_id=applied.get("follow_up_task_id"),
+            )
+            report["auto_review"]["mechanical_safe_accept"] = True
+            report["auto_review"]["reviewer_codex_skipped_reason"] = "narrow local-only mechanical safe-accept predicate passed"
+            return report
+
     if reviewer_enabled:
         reviewer_report = run_reviewer_phase(config, task_id, expected, mechanical_enabled=mechanical_enabled)
         report["mutated"] = reviewer_report["mutated"]
@@ -194,19 +240,22 @@ def has_actionable_auto_review_candidate(config: Config) -> bool:
         return False
 
     if config.auto_review_codex_enabled:
+        task_id = str(report.get("task_id") or "")
+        if not task_id:
+            return False
+        tasks = list_tasks(config)
+        task = load_task(config, task_id)
+        bundle = build_review_bundle(
+            task,
+            by_id={item.get("id"): item for item in tasks},
+            require_accepted_review=config.dependency_requires_accepted_review,
+        )
+        if config.auto_review_mechanical_accept and mechanical_safe_accept(task, bundle, mechanical_gates(task, bundle)):
+            return True
         if config.auto_review_codex_max_calls_per_run < 1:
             return False
         if in_reviewer_codex_cooldown(config):
             return False
-        task_id = str(report.get("task_id") or "")
-        if not task_id:
-            return False
-        task = load_task(config, task_id)
-        bundle = build_review_bundle(
-            task,
-            by_id={item.get("id"): item for item in list_tasks(config)},
-            require_accepted_review=config.dependency_requires_accepted_review,
-        )
         return bundle_limit_error(config, bundle) is None
 
     return bool(config.auto_review_mechanical_accept)
@@ -440,6 +489,100 @@ def mechanical_gates(task: dict, bundle: dict[str, Any]) -> list[dict[str, Any]]
         gate("commit_ancestry_acceptable", commit_ancestry_ok(commit_info), commit_ancestry_detail(commit_info)),
         gate("safety_metadata_clean", not detectable_safety_violation(task, bundle), safety_detail(task, bundle)),
     ]
+
+
+def mechanical_safe_accept(
+    task: dict[str, Any],
+    bundle: dict[str, Any],
+    gates: list[dict[str, Any]] | None = None,
+) -> bool:
+    gates = gates if gates is not None else mechanical_gates(task, bundle)
+    if not all(gate.get("ok") for gate in gates):
+        return False
+
+    last_result = task.get("last_result") if isinstance(task.get("last_result"), dict) else {}
+    if task.get("status") != "completed" or last_result.get("status") != "completed":
+        return False
+    if task.get("last_error"):
+        return False
+    if not commits_empty(last_result.get("commits")):
+        return False
+
+    dependencies = bundle.get("dependencies") if isinstance(bundle.get("dependencies"), dict) else {}
+    if dependencies.get("ready") is not True:
+        return False
+
+    changed_files = bundle.get("changed_files") if isinstance(bundle.get("changed_files"), dict) else {}
+    git_name_status = changed_files.get("git_name_status") if isinstance(changed_files.get("git_name_status"), list) else None
+    if git_name_status != []:
+        return False
+
+    git_diff = bundle.get("git_diff") if isinstance(bundle.get("git_diff"), dict) else {}
+    if git_diff.get("kind") != "none":
+        return False
+
+    reported = changed_files.get("reported") if isinstance(changed_files.get("reported"), list) else None
+    if reported is None or not reported_paths_are_operator_local(reported):
+        return False
+
+    verification = bundle.get("verification") if isinstance(bundle.get("verification"), list) else []
+    if not verification_has_clean_tracked_state_evidence(verification):
+        return False
+
+    return True
+
+
+def commits_empty(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, list):
+        return len(value) == 0
+    if isinstance(value, str):
+        return not value.strip()
+    return False
+
+
+def reported_paths_are_operator_local(paths: list[Any]) -> bool:
+    for item in paths:
+        path = normalized_reported_path(item)
+        if not path or not operator_local_path(path):
+            return False
+    return True
+
+
+def normalized_reported_path(value: object) -> str:
+    path = str(value or "").strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    if not path or path.startswith("/") or path.startswith("~") or "://" in path:
+        return ""
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return ""
+    return path
+
+
+def operator_local_path(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    if path in LOCAL_OPERATOR_EXACT_PATHS:
+        return True
+    if name in LOCAL_OPERATOR_FILENAMES:
+        return True
+    return any(name.endswith(suffix) for suffix in LOCAL_OPERATOR_SUFFIXES)
+
+
+def verification_has_clean_tracked_state_evidence(items: list[Any]) -> bool:
+    for item in items:
+        text = " ".join(str(item or "").lower().split())
+        if not text:
+            continue
+        if any(phrase in text for phrase in CLEAN_TRACKED_STATE_PHRASES):
+            return True
+        if any(command in text for command in CLEAN_TRACKED_STATE_COMMANDS) and any(
+            result in text for result in CLEAN_TRACKED_STATE_RESULTS
+        ):
+            return True
+    return False
 
 
 def gate(name: str, ok: bool, detail: str) -> dict[str, Any]:
@@ -852,7 +995,48 @@ def required_verification_summary(task: dict[str, Any]) -> str:
     return "Run focused verification covering the reviewer-requested fix and report commands/results."
 
 
-def apply_mechanical_accept(config: Config, task_id: str, expected_fingerprint: dict[str, Any]) -> dict[str, Any]:
+def apply_mechanical_safe_accept(config: Config, task_id: str, expected_fingerprint: dict[str, Any]) -> dict[str, Any]:
+    task = load_task(config, task_id)
+    bundle = build_review_bundle(
+        task,
+        by_id={item.get("id"): item for item in list_tasks(config)},
+        require_accepted_review=config.dependency_requires_accepted_review,
+    )
+    current = review_fingerprint(task, bundle)
+    if current != expected_fingerprint:
+        return {
+            "mutated": False,
+            "decision": "needs_human",
+            "reason": "stale review state; task or git metadata changed after gates were computed",
+            "review_status": review_status(task),
+        }
+    gates = mechanical_gates(task, bundle)
+    if not mechanical_safe_accept(task, bundle, gates):
+        return {
+            "mutated": False,
+            "decision": "needs_human",
+            "reason": "narrow local-only mechanical safe-accept predicate did not pass",
+            "review_status": review_status(task),
+        }
+    return apply_mechanical_accept(
+        config,
+        task_id,
+        expected_fingerprint,
+        review_reason="auto-accepted by narrow local-only mechanical review gates",
+        event_summary=f"mechanically safe-auto-accepted task {task_id}",
+        accepted_reason="narrow local-only mechanical safe-accept predicate passed",
+    )
+
+
+def apply_mechanical_accept(
+    config: Config,
+    task_id: str,
+    expected_fingerprint: dict[str, Any],
+    *,
+    review_reason: str = "auto-accepted by local mechanical review gates",
+    event_summary: str | None = None,
+    accepted_reason: str = "all local mechanical gates passed",
+) -> dict[str, Any]:
     task = load_task(config, task_id)
     bundle = build_review_bundle(
         task,
@@ -877,7 +1061,7 @@ def apply_mechanical_accept(config: Config, task_id: str, expected_fingerprint: 
         }
     task["review_status"] = "accepted"
     task["reviewed_at"] = iso_now()
-    task["review_reason"] = "auto-accepted by local mechanical review gates"
+    task["review_reason"] = review_reason
     task.pop("reviewer_codex_backoff", None)
     if task.get("chain_status"):
         task["chain_status"] = "accepted"
@@ -887,13 +1071,13 @@ def apply_mechanical_accept(config: Config, task_id: str, expected_fingerprint: 
         "task_reviewed",
         task,
         source="review-next",
-        summary=f"mechanically auto-accepted task {task_id}",
+        summary=event_summary or f"mechanically auto-accepted task {task_id}",
         payload=transition_payload(task, review_status="accepted", reviewed_at=task.get("reviewed_at")),
     )
     post_accept = integrate_accepted_worktree(config, task_id, locked=True)
     decision, reason = post_accept_decision(
         post_accept,
-        accepted_reason="all local mechanical gates passed",
+        accepted_reason=accepted_reason,
     )
     return {
         "mutated": True,
@@ -962,6 +1146,7 @@ def run_reviewer_phase(
             reason=limit_error,
             mechanical_enabled=mechanical_enabled,
             reviewer_codex_invoked=False,
+            reviewer_limit_exceeded=True,
         )
 
     outcome = run_reviewer_codex(config, task, bundle, calls_used_this_run=1)
@@ -1520,6 +1705,7 @@ def reviewer_phase_report(
     follow_up_task_id: str | None = None,
     auto_fix_skip_reasons: list[Any] | None = None,
     post_accept: dict[str, Any] | None = None,
+    reviewer_limit_exceeded: bool = False,
 ) -> dict[str, Any]:
     summary = auto_review_summary(
         decision=decision if decision != "pass" else "needs_human",
@@ -1538,6 +1724,9 @@ def reviewer_phase_report(
         summary["follow_up_task_id"] = sanitize(follow_up_task_id)
     if auto_fix_skip_reasons is not None:
         summary["auto_fix_skip_reasons"] = sanitize_value(auto_fix_skip_reasons)
+    if reviewer_limit_exceeded:
+        summary["reviewer_limit_exceeded"] = True
+        summary["reviewer_skip_reason"] = "bundle_limit"
     return {
         "mutated": mutated,
         "review_status": review_status,

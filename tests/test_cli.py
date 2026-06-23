@@ -263,6 +263,26 @@ def reviewer_needs_fix_result(
     }
 
 
+def reviewer_pass_result(task_id: str = "reviewable") -> dict:
+    return {
+        "task_id": task_id,
+        "decision": "pass",
+        "confidence": "high",
+        "reason": "bundle evidence supports accepting the task",
+        "findings": [{"severity": "info", "summary": "verified", "evidence": "verification evidence is present"}],
+        "required_human_checks": [],
+        "auto_fix_allowed": False,
+        "auto_fix_risk": "low",
+        "suggested_fix_prompt": "",
+        "finding_fingerprints": [],
+        "reviewer_limits": {
+            "calls_used_this_run": 1,
+            "fix_loops_used_for_task": 0,
+            "cooldown_recommended_seconds": 0,
+        },
+    }
+
+
 def write_plan(tmp: str, data: dict) -> Path:
     path = Path(tmp) / "queue-plan.json"
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -4260,6 +4280,140 @@ class CliTests(unittest.TestCase):
             self.assertFalse(report["auto_review"]["follow_up_enqueued"])
             self.assertEqual("accepted", task["review_status"])
             self.assertEqual("auto-accepted by local mechanical review gates", task["review_reason"])
+
+    def test_review_next_prefers_mechanical_safe_accept_for_local_only_when_reviewer_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / ".gitignore").write_text("*.local.md\n*.local.plist\n.codex-batch-runner/\n", encoding="utf-8")
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", ".gitignore", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            (repo / "TASKS.local.md").write_text("- local operator task\n", encoding="utf-8")
+            config_path = write_config(
+                tmp,
+                auto_review_mechanical_accept=True,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+            )
+            config = Config.load(str(config_path))
+            task = create_clean_completed_task(config, repo, "local-only")
+            task["last_result"]["changed_files"] = ["TASKS.local.md"]
+            task["last_result"]["commits"] = []
+            task["last_result"]["verification"] = [
+                "git status --short: clean",
+                "git diff --stat: no output",
+                "git diff --check: passed",
+            ]
+            save_task(config, task)
+
+            with patch("codex_batch_runner.review_next.run_reviewer_codex") as reviewer:
+                code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--json"])
+            report = json.loads(output)
+            task = load_task(config, "local-only")
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["mutated"])
+            self.assertEqual("accepted", report["auto_review"]["decision"])
+            self.assertTrue(report["auto_review"]["mechanical_safe_accept"])
+            self.assertFalse(report["auto_review"]["reviewer_codex_invoked"])
+            reviewer.assert_not_called()
+            self.assertEqual("accepted", task["review_status"])
+            self.assertEqual("auto-accepted by narrow local-only mechanical review gates", task["review_reason"])
+            self.assertNotIn("reviewer_codex", task)
+
+    def test_review_next_mechanical_safe_accept_bypasses_reviewer_bundle_limit_for_local_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / ".gitignore").write_text("*.local.md\n.codex-batch-runner/\n", encoding="utf-8")
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", ".gitignore", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            (repo / ".codex-batch-runner").mkdir()
+            (repo / ".codex-batch-runner" / "TODO.local.md").write_text("- private todo\n", encoding="utf-8")
+            config_path = write_config(
+                tmp,
+                auto_review_mechanical_accept=True,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+                extra={"auto_review_codex_max_bundle_chars": 1, "auto_review_codex_max_diff_chars": 1},
+            )
+            config = Config.load(str(config_path))
+            task = create_clean_completed_task(config, repo, "local-limit")
+            task["last_result"]["changed_files"] = [".codex-batch-runner/TODO.local.md"]
+            task["last_result"]["commits"] = []
+            task["last_result"]["verification"] = [
+                "git status --short confirmed no tracked/public file changes",
+                "git diff --check: passed",
+            ]
+            save_task(config, task)
+
+            with patch("codex_batch_runner.review_next.run_reviewer_codex") as reviewer:
+                code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--json"])
+            report = json.loads(output)
+            task = load_task(config, "local-limit")
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["mutated"])
+            self.assertEqual("accepted", report["auto_review"]["decision"])
+            self.assertTrue(report["auto_review"]["mechanical_safe_accept"])
+            self.assertFalse(report["auto_review"]["reviewer_codex_invoked"])
+            self.assertNotIn("reviewer_limit_exceeded", report["auto_review"])
+            reviewer.assert_not_called()
+            self.assertEqual("accepted", task["review_status"])
+            self.assertNotIn("reviewer_codex", task)
+
+    def test_review_next_routes_semantic_tracked_change_to_reviewer_when_both_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "file.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "file.txt")
+            git(repo, "commit", "-m", "initial")
+            (repo / "file.txt").write_text("base\nsemantic change\n", encoding="utf-8")
+            git(repo, "commit", "-am", "semantic change")
+            task_commit = git(repo, "rev-parse", "HEAD")
+            config_path = write_config(
+                tmp,
+                auto_review_mechanical_accept=True,
+                auto_review_codex_enabled=True,
+                auto_review_codex_max_calls_per_run=1,
+            )
+            config = Config.load(str(config_path))
+            task = create_clean_completed_task(config, repo, "semantic-public")
+            task["last_result"]["commits"] = [task_commit]
+            task["last_result"]["verification"] = [
+                "git status --short: clean",
+                "git diff --check: passed",
+                "unit tests passed",
+            ]
+            save_task(config, task)
+
+            with patch(
+                "codex_batch_runner.review_next.run_reviewer_codex",
+                return_value=ReviewerCodexOutcome(
+                    invoked=True,
+                    decision="pass",
+                    reason="pass",
+                    result=reviewer_pass_result("semantic-public"),
+                ),
+            ) as reviewer:
+                code, output = run_cli(["--config", str(config_path), "review-next", "--apply", "--json"])
+            report = json.loads(output)
+            task = load_task(config, "semantic-public")
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["mutated"])
+            self.assertEqual("accepted", report["auto_review"]["decision"])
+            self.assertTrue(report["auto_review"]["reviewer_codex_invoked"])
+            self.assertNotIn("mechanical_safe_accept", report["auto_review"])
+            reviewer.assert_called_once()
+            self.assertEqual("pass", task["reviewer_codex"]["decision"])
+            self.assertIn("reviewer Codex clear pass", task["review_reason"])
 
     def test_review_next_reviewer_codex_pass_accepts_task_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
