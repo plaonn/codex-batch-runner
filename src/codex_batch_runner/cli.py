@@ -134,8 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("--needs-review", action="store_true", help="show tasks that need operator review")
     list_cmd.add_argument("--verbose", action="store_true", help="include compact result and run summary columns")
     list_cmd.add_argument(
-        "--dependency-graph",
+        "--graph",
         action="store_true",
+        dest="graph",
         help="print a human dependency edge list instead of the compact task list",
     )
     list_cmd.add_argument("--json", action="store_true", help="print JSON")
@@ -604,7 +605,7 @@ def render_list_output(config: Config, args: argparse.Namespace, terminal_width:
         return json.dumps(tasks, ensure_ascii=False, indent=2, sort_keys=True)
     color = list_colorizer(args.color)
     banners = list_cooldown_banners(config)
-    if args.dependency_graph:
+    if args.graph:
         output = render_dependency_graph(tasks, by_id, config, color)
         return "\n".join([*banners, output]) if banners else output
     if not args.verbose:

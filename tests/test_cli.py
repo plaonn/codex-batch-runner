@@ -1480,7 +1480,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual("runnable", rows["child"]["status"])
             self.assertNotIn("blocked_dependency", output)
 
-    def test_list_dependency_graph_renders_edges_without_task_tree_connectors(self) -> None:
+    def test_list_graph_renders_dependency_edges_without_task_tree_connectors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp, dependency_requires_accepted_review=True)
             config = Config.load(str(config_path))
@@ -1503,7 +1503,7 @@ class CliTests(unittest.TestCase):
             child["parent_task_id"] = "done-dep"
             save_task(config, child)
 
-            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--dependency-graph"])
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--graph"])
             lines = list_lines(output)
 
             self.assertEqual(0, code)
@@ -1518,14 +1518,14 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("|--", output)
             self.assertNotIn("`--", output)
 
-    def test_list_dependency_graph_keeps_json_output_raw(self) -> None:
+    def test_list_graph_keeps_json_output_raw(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
             create_task(config, "dep", tmp, task_id="dep")
             create_task(config, "child", tmp, task_id="child", depends_on=["dep"], project_id="project-a")
 
-            graph_code, graph_output = run_cli(["--config", str(config_path), "list", "--dependency-graph", "--json"])
+            graph_code, graph_output = run_cli(["--config", str(config_path), "list", "--graph", "--json"])
             plain_code, plain_output = run_cli(["--config", str(config_path), "list", "--json"])
 
             self.assertEqual(0, graph_code)
