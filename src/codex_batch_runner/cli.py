@@ -915,27 +915,39 @@ def render_dependency_graph(
         if lines:
             lines.append("")
         lines.append(project_section_header(project, render_width, color))
-        project_tasks = grouped[project]
-        visible_ids = {str(task.get("id")) for task in project_tasks if task.get("id")}
-        tree_parent_ids = {
-            parent_id
-            for task in project_tasks
-            if (parent_id := compact_parent_task_id(task, visible_ids, by_id))
+        project_tasks = dependency_graph_tasks_with_sources(grouped[project], by_id, project)
+        source_nodes, child_items = dependency_graph_source_nodes(project_tasks, by_id)
+        source_id_to_index = {
+            str(task.get("id")): index for index, task in enumerate(source_nodes) if task.get("id")
         }
-        for item in compact_tree_items(project_tasks, by_id):
-            task = item["task"] if isinstance(item.get("task"), dict) else {}
-            tree_prefix_value = str(item.get("prefix") or "")
+        fanins = dependency_graph_fanins(source_nodes, source_id_to_index)
+        source_prefixes = dependency_graph_source_prefixes(len(source_nodes), fanins)
+        for index, task in enumerate(source_nodes):
+            if index in fanins:
+                lines.append(format_dependency_graph_prefix(fanins[index]["connector"], str(task.get("id") or ""), color))
             lines.extend(
-                render_dependency_graph_node(
+                render_dependency_graph_source_node(
                     task,
                     by_id,
                     config,
                     color,
+                    source_prefixes[index],
                     terminal_width=render_width,
-                    tree_prefix=tree_prefix_value,
-                    has_tree_children=str(task.get("id") or "") in tree_parent_ids,
                 )
             )
+            for child in child_items.get(str(task.get("id") or ""), []):
+                child_task = child["task"] if isinstance(child.get("task"), dict) else {}
+                child_prefix = str(child.get("prefix") or "")
+                lines.extend(
+                    render_dependency_graph_child_row(
+                        child_task,
+                        by_id,
+                        config,
+                        color,
+                        child_prefix,
+                        terminal_width=render_width,
+                    )
+                )
     return "\n".join(lines)
 
 
@@ -945,79 +957,209 @@ def graph_render_width(terminal_width: int | None) -> int | None:
     return max(1, terminal_width - 1)
 
 
-def render_dependency_graph_node(
+def dependency_graph_tasks_with_sources(tasks: list[dict], by_id: dict[str, dict], project: str) -> list[dict]:
+    task_by_id = {str(task.get("id")): task for task in tasks if task.get("id")}
+    changed = True
+    while changed:
+        changed = False
+        for task in list(task_by_id.values()):
+            depends_on = task.get("depends_on")
+            if not isinstance(depends_on, list):
+                continue
+            for dep_id_value in depends_on:
+                dep_id = str(dep_id_value)
+                dep = by_id.get(dep_id)
+                if dep is None or dep_id in task_by_id or task_project_id(dep) != project:
+                    continue
+                task_by_id[dep_id] = dep
+                changed = True
+    return list(task_by_id.values())
+
+
+def dependency_graph_source_nodes(tasks: list[dict], by_id: dict[str, dict]) -> tuple[list[dict], dict[str, list[dict[str, object]]]]:
+    visible_ids = {str(task.get("id")) for task in tasks if task.get("id")}
+    source: list[dict] = []
+    children: dict[str, list[dict]] = {task_id: [] for task_id in visible_ids}
+    for task in tasks:
+        task_id = str(task.get("id") or "")
+        parent_id = compact_parent_task_id(task, visible_ids, by_id)
+        if parent_id and parent_id != task_id:
+            children.setdefault(parent_id, []).append(task)
+        else:
+            source.append(task)
+    source.sort(key=list_sort_key)
+    for task_id in children:
+        children[task_id].sort(key=list_sort_key)
+    source_by_id = {str(task.get("id")): task for task in source if task.get("id")}
+    ordered: list[dict] = []
+    seen: set[str] = set()
+    visiting: set[str] = set()
+
+    def visit(task: dict) -> None:
+        task_id = str(task.get("id") or "")
+        if not task_id:
+            ordered.append(task)
+            return
+        if task_id in seen:
+            return
+        if task_id in visiting:
+            ordered.append(task)
+            seen.add(task_id)
+            return
+        visiting.add(task_id)
+        depends_on = task.get("depends_on")
+        if isinstance(depends_on, list):
+            for dep_id in depends_on:
+                dep = source_by_id.get(str(dep_id))
+                if dep is not None:
+                    visit(dep)
+        visiting.remove(task_id)
+        if task_id not in seen:
+            ordered.append(task)
+            seen.add(task_id)
+
+    for task in source:
+        visit(task)
+
+    child_items: dict[str, list[dict[str, object]]] = {}
+
+    def visit_child(parent_id: str, task: dict, ancestors: list[bool], seen_children: set[str]) -> None:
+        task_id = str(task.get("id") or "")
+        child_items.setdefault(parent_id, []).append({"task": task, "prefix": tree_prefix(ancestors)})
+        if not task_id or task_id in seen_children:
+            return
+        child_tasks = children.get(task_id, [])
+        for index, child in enumerate(child_tasks):
+            visit_child(parent_id, child, [*ancestors, index == len(child_tasks) - 1], {*seen_children, task_id})
+
+    for task in ordered:
+        task_id = str(task.get("id") or "")
+        if not task_id:
+            continue
+        task_children = children.get(task_id, [])
+        for index, child in enumerate(task_children):
+            visit_child(task_id, child, [index == len(task_children) - 1], {task_id})
+    return ordered, child_items
+
+
+def dependency_graph_fanins(source_nodes: list[dict], source_id_to_index: dict[str, int]) -> dict[int, dict[str, object]]:
+    fanins: dict[int, dict[str, object]] = {}
+    for target_index, task in enumerate(source_nodes):
+        depends_on = task.get("depends_on")
+        if not isinstance(depends_on, list):
+            continue
+        dep_indices = sorted(
+            {
+                source_id_to_index[str(dep_id)]
+                for dep_id in depends_on
+                if str(dep_id) in source_id_to_index and source_id_to_index[str(dep_id)] < target_index
+            }
+        )
+        if not dep_indices:
+            continue
+        width = min(7, max(1, target_index - dep_indices[0] + 1))
+        connector_offset = min(width - 1, len(dep_indices))
+        fanins[target_index] = {
+            "dep_indices": dep_indices,
+            "connector": (" " * connector_offset) + "\\|",
+            "target_offset": min(6, connector_offset + 1),
+        }
+    return fanins
+
+
+def dependency_graph_source_prefixes(source_count: int, fanins: dict[int, dict[str, object]]) -> list[str]:
+    width = 8
+    prefixes = [("*" + (" " * (width - 1))) for _ in range(source_count)]
+    for target_index, fanin in fanins.items():
+        dep_indices = fanin.get("dep_indices")
+        if not isinstance(dep_indices, list):
+            continue
+        for offset, dep_index in enumerate(dep_indices):
+            if not isinstance(dep_index, int) or dep_index < 0 or dep_index >= source_count:
+                continue
+            if offset == 0:
+                prefixes[dep_index] = "*" + (" " * (width - 1))
+                continue
+            prefix = (" " * offset) + "\\ " + "*"
+            prefixes[dep_index] = prefix + (" " * max(0, width - visible_len(prefix)))
+        target_offset = fanin.get("target_offset")
+        if isinstance(target_offset, int):
+            prefix = (" " * target_offset) + "*"
+            prefixes[target_index] = prefix + (" " * max(0, width - visible_len(prefix)))
+    return prefixes
+
+
+def format_dependency_graph_prefix(prefix: str, branch_key: str, color: "ListColor") -> str:
+    parts = []
+    for char in prefix:
+        if char == "*":
+            parts.append(color.graph_branch(branch_key, "*"))
+        elif char == "|":
+            parts.append(color.graph_branch(branch_key, "|"))
+        elif char == "\\":
+            parts.append(color.dim_text("\\"))
+        else:
+            parts.append(char)
+    return "".join(parts)
+
+
+def render_dependency_graph_source_node(
     task: dict,
     by_id: dict[str, dict],
     config: Config,
     color: "ListColor",
+    graph_prefix: str,
     terminal_width: int | None = None,
-    tree_prefix: str = "",
-    has_tree_children: bool = False,
 ) -> list[str]:
     plain_color = ListColor(False)
     status_value = status_cell(task, by_id, config)
     status = color.status(status_value)
     plain_status = plain_color.status(status_value)
     branch_key = scalar_cell(task.get("id"))
-    depends_on = task.get("depends_on")
-    raw_dep_ids = [str(dep_id) for dep_id in depends_on if str(dep_id)] if isinstance(depends_on, list) else []
-    marker = color.graph_branch(branch_key, "*")
-    rail = color.graph_branch(branch_key, "|")
-    styled_tree_prefix = color.dim_text(tree_prefix) if tree_prefix else ""
-    tree_continuation = color.dim_text(tree_continuation_prefix(tree_prefix)) if tree_prefix else ""
-    plain_tree_continuation = tree_continuation_prefix(tree_prefix) if tree_prefix else ""
-    if tree_prefix or raw_dep_ids or has_tree_children:
-        source_guide = rail if raw_dep_ids else color.dim_text("│") if has_tree_children else " "
-        plain_source_guide = "|" if raw_dep_ids else "│" if has_tree_children else " "
-        source_continuation_prefix = tree_continuation + source_guide + " "
-        plain_source_continuation_prefix = plain_tree_continuation + plain_source_guide + " "
-        source_continuation_gap_prefix = color.dim_text("      │") if raw_dep_ids else None
-        plain_source_continuation_gap_prefix = "      │" if raw_dep_ids else None
-    else:
-        source_continuation_prefix = None
-        plain_source_continuation_prefix = None
-        source_continuation_gap_prefix = None
-        plain_source_continuation_gap_prefix = None
+    styled_prefix = format_dependency_graph_prefix(graph_prefix, branch_key, color)
+    plain_prefix = graph_prefix
+    continuation_prefix = graph_continuation_prefix(plain_prefix)
     lines = graph_content_lines(
-        styled_tree_prefix + marker + " ",
+        styled_prefix,
         status,
         compact_title(task),
         terminal_width,
-        continuation_prefix=source_continuation_prefix,
+        continuation_prefix=continuation_prefix,
         title_style=lambda value: styled_compact_title_fragment(value, color),
-        plain_prefix=tree_prefix + "* ",
+        plain_prefix=plain_prefix,
         plain_label=plain_status,
-        plain_continuation_prefix=plain_source_continuation_prefix,
-        continuation_gap_prefix=source_continuation_gap_prefix,
-        plain_continuation_gap_prefix=plain_source_continuation_gap_prefix,
+        plain_continuation_prefix=continuation_prefix,
     )
-    if not raw_dep_ids:
-        return lines
-    for index, dep_id in enumerate(raw_dep_ids):
-        dep = by_id.get(dep_id)
-        dep_state = dependency_state_cell(dep, by_id, config, color)
-        plain_dep_state = dependency_state_cell(dep, by_id, config, plain_color)
-        dep_title = "missing dependency" if dep is None else compact_title(dep)
-        title_style = color.dim_text if dep is None else lambda value: styled_compact_title_fragment(value, color, dim_title=True)
-        edge_tail = dependency_graph_edge_tail(index)
-        prefix = tree_continuation + rail + color.dim_text(edge_tail)
-        continuation_prefix = tree_continuation + rail + color.dim_text(" " * visible_len(edge_tail))
-        plain_prefix = plain_tree_continuation + "|" + edge_tail
-        plain_continuation_prefix = plain_tree_continuation + "|" + (" " * visible_len(edge_tail))
-        lines.extend(
-            graph_content_lines(
-                prefix,
-                dep_state,
-                dep_title,
-                terminal_width,
-                continuation_prefix=continuation_prefix,
-                title_style=title_style,
-                plain_prefix=plain_prefix,
-                plain_label=plain_dep_state,
-                plain_continuation_prefix=plain_continuation_prefix,
-            )
-        )
     return lines
+
+
+def render_dependency_graph_child_row(
+    task: dict,
+    by_id: dict[str, dict],
+    config: Config,
+    color: "ListColor",
+    tree_prefix: str,
+    terminal_width: int | None = None,
+) -> list[str]:
+    plain_color = ListColor(False)
+    status_value = status_cell(task, by_id, config)
+    status = color.status(status_value)
+    plain_status = plain_color.status(status_value)
+    graph_gap = " " * 8
+    styled_prefix = graph_gap + color.dim_text(tree_prefix)
+    plain_prefix = graph_gap + tree_prefix
+    tree_continuation = graph_gap + tree_continuation_prefix(tree_prefix)
+    return graph_content_lines(
+        styled_prefix,
+        status,
+        compact_title(task),
+        terminal_width,
+        continuation_prefix=tree_continuation,
+        title_style=lambda value: styled_compact_title_fragment(value, color, dim_title=True),
+        plain_prefix=plain_prefix,
+        plain_label=plain_status,
+        plain_continuation_prefix=tree_continuation,
+    )
 
 
 def dependency_graph_edge_tail(index: int) -> str:

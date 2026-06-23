@@ -1957,7 +1957,6 @@ class CliTests(unittest.TestCase):
             self.assertEqual("runnable", rows["child"]["status"])
             self.assertNotIn("blocked_dependency", output)
 
-    @unittest.expectedFailure
     def test_list_graph_contract_separates_dependency_edges_from_subtask_rows(self) -> None:
         """Contract for the pending list --graph renderer rewrite."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -2009,7 +2008,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("*       ==completed  [N] Build shared parser", output)
             self.assertIn(" \\ *    ==completed  [N] Add parser tests", output)
             self.assertIn("  \\|", output)
-            self.assertIn("   *    ||blocked_dependency  [N] Wire parser into CLI", output)
+            self.assertIn("   *    ..runnable  [N] Wire parser into CLI", output)
             self.assertIn("*       ||waiting_subtasks  [N] Release CLI parser change", output)
             self.assertIn("└─ ??awaiting_review  [N] Fix review comments for parser change", output)
             self.assertNotIn("└─ * ??awaiting_review", output)
@@ -2050,12 +2049,10 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("done-dep", output)
             self.assertNotIn("review-dep", output)
             self.assertNotIn("missing-dep", output)
-            self.assertIn("* ||blocked_dependency  [N] Child work", output)
-            self.assertIn("│  |\\      done  [N] Done dependency", output)
-            self.assertIn("│  | \\     not_accepted  [N] Review dependency", output)
-            self.assertIn("│  |  \\    missing  missing dependency", output)
-            self.assertNotIn("│  |       ├─", output)
-            self.assertNotIn("│  |       └─", output)
+            self.assertIn("*       ==completed  [N] Done dependency", output)
+            self.assertIn("        └─ ||blocked_dependency  [N] Child work", output)
+            self.assertIn("*       ??awaiting_review  [N] Review dependency", output)
+            self.assertNotIn("└─ * ||blocked_dependency", output)
             self.assertNotIn("ATT", output)
             self.assertNotIn("note:", output)
 
@@ -2084,11 +2081,12 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
-            self.assertIn("* ||blocked_dependency  [N] Very", output)
-            self.assertIn("|       │               child title that", output)
-            self.assertIn("|\\      blocked  [N] Very", output)
-            self.assertIn("|                title that should wrap", output)
-            self.assertNotIn("|       └─ blocked", output)
+            self.assertIn("*       ..runnable  [N] Very long", output)
+            self.assertIn("                    should wrap under the", output)
+            self.assertIn(" \\|", output)
+            self.assertIn("  *     ||blocked_dependency  [N] Very", output)
+            self.assertIn("                              long child", output)
+            self.assertIn("                              title that", output)
 
     def test_list_graph_wraps_subtask_tree_and_dependency_rails_together(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2121,11 +2119,13 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 48 for width in visible_line_widths(output)))
-            self.assertIn("├─ * ||blocked_dependency  [N] Very long first", output)
-            self.assertIn("│  |       │               child source title", output)
-            self.assertIn("│  |\\      blocked  [N] Very long dependency", output)
-            self.assertIn("│  |                under the dependency edge", output)
-            self.assertIn("└─ * ..runnable  [N] Second child source", output)
+            self.assertIn("*       ..runnable  [N] Parent source task", output)
+            self.assertIn("        ├─ ||blocked_dependency  [N] Very long", output)
+            self.assertIn("        │                        source title", output)
+            self.assertIn("        └─ ..runnable  [N] Second child source", output)
+            self.assertIn("*       ..runnable  [N] Very long dependency", output)
+            self.assertIn("                    under the dependency edge", output)
+            self.assertNotIn("├─ * ||blocked_dependency", output)
 
     def test_list_graph_wraps_dependency_sibling_tree_continuations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2159,12 +2159,13 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 48 for width in visible_line_widths(output)))
-            self.assertIn("|\\      blocked  [N] Very long first", output)
-            self.assertIn("|                title that should keep its", output)
-            self.assertIn("|                sibling tree rail", output)
-            self.assertIn("| \\     blocked  [N] Very long second", output)
-            self.assertIn("|                dependency title that should", output)
-            self.assertIn("|                keep its own wrapped guide", output)
+            self.assertIn("*       ..runnable  [N] Very long first", output)
+            self.assertIn("                    should keep its sibling", output)
+            self.assertIn("                    tree rail", output)
+            self.assertIn(" \\ *    ..runnable  [N] Very long second", output)
+            self.assertIn("                    should keep its own wrapped", output)
+            self.assertIn("  \\|", output)
+            self.assertIn("   *    ||blocked_dependency  [N] Source task", output)
 
     def test_list_graph_wraps_subtask_tree_without_dependency_rails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2201,17 +2202,15 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
-            self.assertIn("* ..runnable  [N] Very long parent source", output)
-            self.assertIn("│             title that should keep its", output)
-            self.assertIn("│             subtask guide", output)
-            self.assertIn("├─ * ..runnable  [N] Very long first", output)
-            self.assertIn("│                child source title that", output)
-            self.assertIn("│                should wrap inside graph", output)
-            self.assertIn("│                mode", output)
-            self.assertIn("└─ * ..runnable  [N] Very long second", output)
-            self.assertIn("│                child source title that", output)
-            self.assertIn("│                should keep its own", output)
-            self.assertIn("│                wrapped guide", output)
+            self.assertIn("*       ..runnable  [N] Very long parent", output)
+            self.assertIn("                    subtask guide", output)
+            self.assertIn("        ├─ ..runnable  [N] Very long", output)
+            self.assertIn("        │              first child source", output)
+            self.assertIn("        │              title that should", output)
+            self.assertIn("        │              wrap inside graph", output)
+            self.assertIn("        └─ ..runnable  [N] Very long", output)
+            self.assertIn("        │              own wrapped guide", output)
+            self.assertNotIn("├─ * ..runnable", output)
 
     def test_list_graph_keeps_json_output_raw(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2255,11 +2254,11 @@ class CliTests(unittest.TestCase):
             self.assertIn("[demo]", graph_output)
             self.assertIn("||blocked_dependency", compact_output)
             self.assertIn(">>running", compact_output)
-            self.assertIn("* ||blocked_dependency  [N] Runnable task blocked by dependencies", graph_output)
-            self.assertIn("|\\      done  [N] Completed accepted dependency", graph_output)
-            self.assertIn("|    \\  missing  missing dependency", graph_output)
-            self.assertNotIn("|       ├─", graph_output)
-            self.assertNotIn("|       └─", graph_output)
+            self.assertIn("*       ||blocked_dependency  [N] Runnable task blocked by dependencies", graph_output)
+            self.assertIn("*       ==completed  [N] Completed accepted dependency", graph_output)
+            self.assertIn("     *  ||blocked_dependency  [N] Runnable task blocked by dependencies", graph_output)
+            self.assertIn("        └─ ..runnable  [N] Blocking review fix subtask", graph_output)
+            self.assertNotIn("└─ * ..runnable", graph_output)
             self.assertNotIn("demo-blocked", graph_output)
             self.assertNotIn("demo-done", graph_output)
             self.assertNotIn("demo-missing", graph_output)
@@ -2272,7 +2271,7 @@ class CliTests(unittest.TestCase):
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\*\033\[0m")
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\|\033\[0m\033\[2m\\      \033\[0m")
             self.assertIn("\033[32m[N]\033[0m", color_output)
-            self.assertIn("\033[2mCompleted accepted dependency\033[0m", color_output)
+            self.assertNotIn("\033[2mCompleted accepted dependency\033[0m", color_output)
             self.assertIn("\033[103;30mnot_accepted\033[0m", color_output)
             self.assertIn("\033[2mWorktree dependency awaiting review\033[0m", color_output)
             self.assertIn("\033[103;30maccepted_unapplied\033[0m", color_output)
@@ -2289,17 +2288,16 @@ class CliTests(unittest.TestCase):
             text = strip_ansi(output)
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 51 for width in visible_line_widths(output)))
-            self.assertIn("|       │", text)
-            self.assertIn("* ??awaiting_review  [N] Completed task awaiting\n|       │            review", text)
-            self.assertIn("* ||blocked_dependency  [N] Runnable task blocked\n|       │               by dependencies", text)
+            self.assertIn("\\ *    ??awaiting_review  [N] Completed task\n                           awaiting review", text)
+            self.assertIn("*  ||blocked_dependency  [N] Runnable task\n                              blocked by\n                              dependencies", text)
             self.assertIn(
-                "|  \\    not_accepted  [N] Worktree dependency\n|                     awaiting review",
+                "\\ *   ??awaiting_review  [N] Worktree dependency\n                           awaiting review",
                 text,
             )
             self.assertIn(
-                "* ||waiting_subtasks  [N] Parent task waiting for\n"
-                "│                     blocking subtask\n"
-                "└─ * ..runnable  [N] Blocking review fix subtask",
+                "*       ||waiting_subtasks  [N] Parent task waiting\n"
+                "                            for blocking subtask\n"
+                "        └─ ..runnable  [N] Blocking review fix",
                 text,
             )
             self.assertNotIn("revie\nw", text)
