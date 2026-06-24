@@ -20,7 +20,7 @@
 - [Operator installation guide](docs/operator-installation.md): config discovery, macOS launchd setup, doctor, cooldown wake, cross-project usage.
 - [Beta operations guide](docs/beta-operations.md): practical beta operating model and review workflow.
 
-Personal runtime notes should use ignored local files such as `ROADMAP.local.md` or `TASKS.local.md`; templates are in [examples](examples/).
+Private project planning notes should use an ignored `.private/` directory, for example `.private/ROADMAP.md` and `.private/TASKS.md`; templates are in [examples/private](examples/private/).
 
 ## 설치
 
@@ -155,4 +155,4 @@ Task/state writes use atomic replace. Core state-changing commands append saniti
 
 macOS에서는 launchd 운영을 권장합니다. Linux user service에서는 systemd timer/service를 사용할 수 있고, cron은 portable fallback으로만 취급합니다. Installation examples are maintained in [docs/operator-installation.md](docs/operator-installation.md).
 
-Public docs must not include private/operator state, runtime logs, actual Codex prompts, session ids, thread ids, personal paths, credentials, or `.local` files.
+Public docs must not include private/operator state, `.private/` contents, runtime logs, actual Codex prompts, session ids, thread ids, personal paths, credentials, or `.local` files.

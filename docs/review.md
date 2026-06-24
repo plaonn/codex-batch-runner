@@ -7,7 +7,7 @@
 규칙만으로 `completed` task를 자동 accept하는 방식은 충분하지 않습니다. 파일 변경, 테스트 명령, commit/push 상태 같은 기계적 신호는 누락과 모순을 찾는 데 유용하지만, 원래 prompt 의도 충족 여부, 문서/코드 변경의 적절성, 공개 저장소 안전 정책 준수 여부, 후속 작업 필요성은 task마다 문맥 판단이 필요합니다. 따라서 review는 아래 단계로 분리합니다.
 
 - Mechanical gates: task 상태, dependency 상태, final JSON schema, verification 유무, git dirty/unpushed 상태, diff 크기, 금지된 runtime/private 파일 포함 여부 같은 결정적 검사를 수행합니다.
-- Narrow mechanical safe-accept: mechanical auto-accept와 Reviewer Codex가 모두 켜져 있어도, 모든 mechanical gate가 통과하고 tracked/public diff가 없으며 reported changes가 ignored operator-local path(`*.local.md`, `TASKS.local.md`, `ROADMAP.local.md`, `.codex-batch-runner/TODO.local.md` 등)로만 제한되고 clean tracked-state verification이 있는 경우에는 Reviewer Codex 호출 없이 accept할 수 있습니다. 이 shortcut은 semantic tracked/public code/docs diff에는 적용하지 않습니다.
+- Narrow mechanical safe-accept: mechanical auto-accept와 Reviewer Codex가 모두 켜져 있어도, 모든 mechanical gate가 통과하고 tracked/public diff가 없으며 reported changes가 ignored operator-local path(`.private/`, `*.local.md` 등)로만 제한되고 clean tracked-state verification이 있는 경우에는 Reviewer Codex 호출 없이 accept할 수 있습니다. 이 shortcut은 semantic tracked/public code/docs diff에는 적용하지 않습니다.
 - Reviewer Codex: 독립적으로 생성한 review bundle만 읽고 작업 결과를 평가합니다. 현재 대화 context나 작업 실행 thread 기억에 의존하지 않습니다.
 - Human fallback: confidence가 낮거나 private/public 안전성, 의도 충족, 큰 diff, 실패한 검증, credential 가능성처럼 사람이 봐야 하는 항목이 있으면 accept하지 않고 확인 대상으로 남깁니다.
 
@@ -35,7 +35,7 @@ Bundle에 기본 포함하지 않는 정보:
 - 전체 대화 transcript
 - credentials, tokens, chat ids, 개인 계정 식별자
 - session id/thread id 원문. 필요한 경우 존재 여부만 표시하거나 sanitized placeholder 사용
-- `.codex-batch-runner/` runtime state contents, 실제 queue contents, operator-local `*.local.md` 세부 내용
+- `.codex-batch-runner/` runtime state contents, 실제 queue contents, `.private/` contents, operator-local `*.local.md` 세부 내용
 
 Reviewer Codex가 받을 수 있는 context는 review bundle, sanitized prompt/result, commit diff/stat, verification summary로 제한합니다. Raw log, raw transcript, secret, credential, session id, thread id, 개인 절대 경로는 기본 입력에서 제외합니다. Reviewer가 원래 실행 대화의 숨은 의도나 중간 합의를 모르는 위험은 task prompt, `next_prompt` 요약, `last_result`, changed files, verification, git snapshot/current state, commit ancestry, safety policy를 한 묶음으로 제공해 줄입니다. 보고된 task commit이 현재 `HEAD`와 같으면 `equal`, 현재 `HEAD`의 ancestor이면 `ancestor`로 표시합니다. `ancestor`는 후속 commit이 위에 쌓인 정상 상태이므로 단독으로 mismatch로 보지 않습니다. 보고된 commit이 현재 `HEAD`에서 도달 불가능하면 `not_reachable`로 표시하고 human check 대상으로 남깁니다. 그래도 bundle만으로 의도를 재구성할 수 없으면 reviewer는 통과 결정을 내리지 말고 `needs_human`을 반환해야 합니다.
 
