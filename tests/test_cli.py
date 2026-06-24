@@ -353,6 +353,14 @@ def write_plan(tmp: str, data: dict) -> Path:
 
 
 class CliTests(unittest.TestCase):
+    def test_missing_config_reports_error_without_traceback(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            code, output, stderr = run_cli_with_stderr(["list"])
+
+        self.assertEqual(1, code)
+        self.assertEqual("", output)
+        self.assertEqual("error: config required: pass --config /path/to/config.json or set CBR_CONFIG\n", stderr)
+
     def test_cooldown_set_time_only_zero_pads_and_stores_safety_offset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

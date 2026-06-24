@@ -91,8 +91,8 @@ COMPACT_TABLE_MIN_NOTE_WRAP_WIDTH = 20
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = Config.load(args.config)
     try:
+        config = Config.load(args.config)
         return args.func(config, args)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
