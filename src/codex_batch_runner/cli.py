@@ -749,11 +749,52 @@ def demo_list_tasks() -> list[dict]:
     return [
         task("demo-ready", "Prepare parser cleanup notes", created_ago=900, execution_profile="small"),
         task(
-            "demo-done",
-            "Shared parser implementation complete",
+            "demo-build-parser",
+            "Build shared parser",
             status="completed",
             created_ago=840,
             completed_at=ago(420),
+            review_status="accepted",
+            last_run={"duration_seconds": 180},
+        ),
+        task(
+            "demo-parser-tests",
+            "Add parser tests",
+            status="completed",
+            created_ago=810,
+            completed_at=ago(390),
+            review_status="accepted",
+            last_run={"duration_seconds": 120},
+        ),
+        task(
+            "demo-wire-cli",
+            "Wire parser into CLI",
+            depends_on=["demo-build-parser", "demo-parser-tests", "demo-missing-parser"],
+            created_ago=780,
+        ),
+        task(
+            "demo-parent",
+            "Release CLI parser change",
+            status="completed",
+            created_ago=760,
+            completed_at=ago(340),
+            review_status="unreviewed",
+            blocking_subtask_ids=["demo-subtask"],
+        ),
+        task(
+            "demo-subtask",
+            "Fix review comments for parser change",
+            created_ago=750,
+            parent_task_id="demo-parent",
+            subtask_for="demo-parent",
+            subtask_type="auto_review_fix",
+        ),
+        task(
+            "demo-done",
+            "Shared parser implementation complete",
+            status="completed",
+            created_ago=740,
+            completed_at=ago(320),
             review_status="accepted",
             last_run={"duration_seconds": 180},
         ),
@@ -762,8 +803,7 @@ def demo_list_tasks() -> list[dict]:
             "CLI docs draft awaiting review",
             status="completed",
             attempts=1,
-            depends_on=["demo-done"],
-            created_ago=780,
+            created_ago=720,
             completed_at=ago(300),
             review_status="unreviewed",
             last_result={"status": "completed", "summary": "demo result"},
@@ -774,18 +814,12 @@ def demo_list_tasks() -> list[dict]:
             "Release checklist review pending",
             status="completed",
             attempts=1,
-            created_ago=750,
+            created_ago=700,
             completed_at=ago(260),
             review_status="unreviewed",
             execution_mode="git_worktree",
             execution_worktree_status="retained",
             execution_worktree_branch="codex/demo-worktree-review",
-        ),
-        task(
-            "demo-blocked",
-            "Publish CLI parser release notes",
-            depends_on=["demo-done", "demo-review", "demo-worktree-review", "demo-worktree", "demo-missing"],
-            created_ago=720,
         ),
         task(
             "demo-worktree",
@@ -802,21 +836,17 @@ def demo_list_tasks() -> list[dict]:
             last_run={"command_kind": "exec", "returncode": 0, "duration_seconds": 360},
         ),
         task(
-            "demo-parent",
-            "Release checklist approval pending",
-            status="completed",
+            "demo-blocked",
+            "Publish CLI parser release notes",
+            depends_on=[
+                "demo-parent",
+                "demo-done",
+                "demo-review",
+                "demo-worktree-review",
+                "demo-worktree",
+                "demo-missing",
+            ],
             created_ago=600,
-            completed_at=ago(240),
-            review_status="unreviewed",
-            blocking_subtask_ids=["demo-subtask"],
-        ),
-        task(
-            "demo-subtask",
-            "Fix release checklist review comments",
-            created_ago=540,
-            parent_task_id="demo-parent",
-            subtask_for="demo-parent",
-            subtask_type="auto_review_fix",
         ),
         task(
             "demo-running",
@@ -921,19 +951,20 @@ def render_dependency_graph(
             str(task.get("id")): index for index, task in enumerate(source_nodes) if task.get("id")
         }
         fanins = dependency_graph_fanins(source_nodes, source_id_to_index)
-        source_prefixes = dependency_graph_source_prefixes(len(source_nodes), fanins)
+        layout = dependency_graph_layout(source_nodes, fanins)
         for index, task in enumerate(source_nodes):
-            if index in fanins:
-                connector = dependency_graph_connector_prefix(source_prefixes[index])
+            if index in layout["connector_prefixes"]:
+                connector = layout["connector_prefixes"][index]
                 if connector:
-                    lines.append(format_dependency_graph_prefix(connector, str(task.get("id") or ""), color))
+                    lines.append(format_dependency_graph_prefix(connector, layout["connector_branch_keys"][index], color))
             lines.extend(
                 render_dependency_graph_source_node(
                     task,
                     by_id,
                     config,
                     color,
-                    source_prefixes[index],
+                    layout["source_prefixes"][index],
+                    graph_branch_key=layout["source_branch_keys"][index],
                     terminal_width=render_width,
                 )
             )
@@ -947,6 +978,8 @@ def render_dependency_graph(
                         config,
                         color,
                         child_prefix,
+                        graph_prefix=layout["child_graph_prefixes"][index],
+                        graph_branch_key=layout["child_branch_keys"][index],
                         terminal_width=render_width,
                     )
                 )
@@ -1059,53 +1092,64 @@ def dependency_graph_fanins(source_nodes: list[dict], source_id_to_index: dict[s
         )
         if not dep_indices:
             continue
-        width = min(7, max(1, target_index - dep_indices[0] + 1))
-        connector_offset = min(width - 1, len(dep_indices))
         fanins[target_index] = {
             "dep_indices": dep_indices,
-            "target_offset": min(6, connector_offset + 1),
         }
     return fanins
 
 
-def dependency_graph_connector_prefix(source_prefix: str) -> str:
-    star_index = source_prefix.find("*")
-    if star_index <= 0:
-        return ""
-    return (" " * (star_index - 1)) + "\\|"
-
-
-def dependency_graph_source_prefixes(source_count: int, fanins: dict[int, dict[str, object]]) -> list[str]:
+def dependency_graph_layout(source_nodes: list[dict], fanins: dict[int, dict[str, object]]) -> dict[str, object]:
     width = 8
+    source_count = len(source_nodes)
     prefixes = [("*" + (" " * (width - 1))) for _ in range(source_count)]
+    source_branch_keys = [str(task.get("id") or "") for task in source_nodes]
+    connector_prefixes: dict[int, str] = {}
+    connector_branch_keys: dict[int, str] = {}
+    child_graph_prefixes = [(" " * width) for _ in range(source_count)]
+    child_branch_keys = [str(task.get("id") or "") for task in source_nodes]
     for target_index, fanin in fanins.items():
         dep_indices = fanin.get("dep_indices")
         if not isinstance(dep_indices, list):
             continue
-        for offset, dep_index in enumerate(dep_indices):
-            if not isinstance(dep_index, int) or dep_index < 0 or dep_index >= source_count:
-                continue
-            if offset == 0:
-                prefixes[dep_index] = "*" + (" " * (width - 1))
-                continue
-            prefix = (" " * offset) + "\\ " + "*"
-            prefixes[dep_index] = prefix + (" " * max(0, width - visible_len(prefix)))
-        target_offset = fanin.get("target_offset")
-        if isinstance(target_offset, int):
-            prefix = (" " * target_offset) + "*"
-            prefixes[target_index] = prefix + (" " * max(0, width - visible_len(prefix)))
-    return prefixes
+        dep_indices = [
+            dep_index
+            for dep_index in dep_indices
+            if isinstance(dep_index, int) and 0 <= dep_index < source_count and dep_index < target_index
+        ]
+        if not dep_indices:
+            continue
+        first_dep_index = dep_indices[0]
+        edge_key = str(source_nodes[target_index].get("id") or target_index)
+        prefixes[first_dep_index] = "*" + (" " * (width - 1))
+        source_branch_keys[first_dep_index] = edge_key
+        for source_index in range(first_dep_index + 1, target_index):
+            prefix = "| *"
+            prefixes[source_index] = prefix + (" " * max(0, width - visible_len(prefix)))
+            source_branch_keys[source_index] = edge_key
+        connector_prefix = " \\|"
+        connector_prefixes[target_index] = connector_prefix
+        connector_branch_keys[target_index] = edge_key
+        target_prefix = "  *"
+        prefixes[target_index] = target_prefix + (" " * max(0, width - visible_len(target_prefix)))
+        source_branch_keys[target_index] = edge_key
+        for source_index in range(first_dep_index, target_index):
+            child_graph_prefixes[source_index] = "|" + (" " * (width - 1))
+            child_branch_keys[source_index] = edge_key
+    return {
+        "source_prefixes": prefixes,
+        "source_branch_keys": source_branch_keys,
+        "connector_prefixes": connector_prefixes,
+        "connector_branch_keys": connector_branch_keys,
+        "child_graph_prefixes": child_graph_prefixes,
+        "child_branch_keys": child_branch_keys,
+    }
 
 
 def format_dependency_graph_prefix(prefix: str, branch_key: str, color: "ListColor") -> str:
     parts = []
     for char in prefix:
-        if char == "*":
-            parts.append(color.graph_branch(branch_key, "*"))
-        elif char == "|":
-            parts.append(color.graph_branch(branch_key, "|"))
-        elif char == "\\":
-            parts.append(color.dim_text("\\"))
+        if char in {"*", "|", "\\"}:
+            parts.append(color.graph_branch(branch_key, char))
         else:
             parts.append(char)
     return "".join(parts)
@@ -1117,13 +1161,14 @@ def render_dependency_graph_source_node(
     config: Config,
     color: "ListColor",
     graph_prefix: str,
+    graph_branch_key: str | None = None,
     terminal_width: int | None = None,
 ) -> list[str]:
     plain_color = ListColor(False)
     status_value = status_cell(task, by_id, config)
     status = color.status(status_value)
     plain_status = plain_color.status(status_value)
-    branch_key = scalar_cell(task.get("id"))
+    branch_key = graph_branch_key or scalar_cell(task.get("id"))
     styled_prefix = format_dependency_graph_prefix(graph_prefix, branch_key, color)
     plain_prefix = graph_prefix
     continuation_prefix = graph_continuation_prefix(plain_prefix)
@@ -1147,14 +1192,17 @@ def render_dependency_graph_child_row(
     config: Config,
     color: "ListColor",
     tree_prefix: str,
+    graph_prefix: str | None = None,
+    graph_branch_key: str | None = None,
     terminal_width: int | None = None,
 ) -> list[str]:
     plain_color = ListColor(False)
     status_value = status_cell(task, by_id, config)
     status = color.status(status_value)
     plain_status = plain_color.status(status_value)
-    graph_gap = " " * 8
-    styled_prefix = graph_gap + color.dim_text(tree_prefix)
+    graph_gap = " " * 8 if graph_prefix is None else graph_prefix
+    branch_key = graph_branch_key or scalar_cell(task.get("id"))
+    styled_prefix = format_dependency_graph_prefix(graph_gap, branch_key, color) + color.dim_text(tree_prefix)
     plain_prefix = graph_gap + tree_prefix
     tree_continuation = graph_gap + tree_continuation_prefix(tree_prefix)
     return graph_content_lines(

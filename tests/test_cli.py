@@ -2014,9 +2014,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, color_code)
             self.assertIn("[project-a]", output)
             self.assertIn("*       ==completed  [N] Build shared parser", output)
-            self.assertIn(" \\ *    ==completed  [N] Add parser tests", output)
-            self.assertIn("  \\|", output)
-            self.assertIn("   *    ..runnable  [N] Wire parser into CLI", output)
+            self.assertIn("| *     ==completed  [N] Add parser tests", output)
+            self.assertIn(" \\|", output)
+            self.assertIn("  *     ..runnable  [N] Wire parser into CLI", output)
             assert_graph_connector_attaches(self, output, "Wire parser into CLI")
             self.assertIn("*       ||waiting_subtasks  [N] Release CLI parser change", output)
             self.assertIn("└─ ??awaiting_review  [N] Fix review comments for parser change", output)
@@ -2171,10 +2171,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("*       ..runnable  [N] Very long first", output)
             self.assertIn("                    should keep its sibling", output)
             self.assertIn("                    tree rail", output)
-            self.assertIn(" \\ *    ..runnable  [N] Very long second", output)
-            self.assertIn("                    should keep its own wrapped", output)
-            self.assertIn("  \\|", output)
-            self.assertIn("   *    ||blocked_dependency  [N] Source task", output)
+            self.assertIn("| *     ..runnable  [N] Very long second", output)
+            self.assertIn("|                   should keep its own wrapped", output)
+            self.assertIn(" \\|", output)
+            self.assertIn("  *     ||blocked_dependency  [N] Source task", output)
 
     def test_list_graph_wraps_subtask_tree_without_dependency_rails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2257,24 +2257,26 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, json_code)
             self.assertIn("Prepare parser cleanup notes", compact_output)
             self.assertIn("Publish CLI parser release notes", compact_output)
-            self.assertIn("Release checklist approval pending", compact_output)
-            self.assertIn("└─ [N] Fix release checklist review comments", compact_output)
+            self.assertIn("Release CLI parser change", compact_output)
+            self.assertIn("└─ [N] Fix review comments for parser change", compact_output)
             self.assertIn("LAST_RESULT", verbose_output)
             self.assertIn("[demo]", graph_output)
             self.assertIn("||blocked_dependency", compact_output)
             self.assertIn(">>running", compact_output)
-            self.assertIn("*       ==completed  [N] Shared parser implementation complete", graph_output)
-            self.assertIn(" \\ *    ??awaiting_review  [N] CLI docs draft awaiting review", graph_output)
-            self.assertIn("  \\ *   ??awaiting_review  [N] Release checklist review pending", graph_output)
-            self.assertIn("   \\ *  ??accepted_unapplied  [N] Release checklist merge ready, not applied", graph_output)
-            self.assertIn("     *  ||blocked_dependency  [N] Publish CLI parser release notes", graph_output)
-            assert_graph_connector_attaches(self, graph_output, "CLI docs draft awaiting review")
+            self.assertIn("*       ==completed  [N] Build shared parser", graph_output)
+            self.assertIn("| *     ==completed  [N] Add parser tests", graph_output)
+            self.assertIn("  *     ||blocked_dependency  [N] Wire parser into CLI", graph_output)
+            assert_graph_connector_attaches(self, graph_output, "Wire parser into CLI")
+            self.assertIn("*       ||waiting_subtasks  [N] Release CLI parser change", graph_output)
+            self.assertIn("|       └─ ..runnable  [N] Fix review comments for parser change", graph_output)
+            self.assertIn("| *     ==completed  [N] Shared parser implementation complete", graph_output)
+            self.assertIn("| *     ??awaiting_review  [N] CLI docs draft awaiting review", graph_output)
+            self.assertIn("| *     ??awaiting_review  [N] Release checklist review pending", graph_output)
+            self.assertIn("| *     ??accepted_unapplied  [N] Release checklist merge ready, not applied", graph_output)
+            self.assertIn("  *     ||blocked_dependency  [N] Publish CLI parser release notes", graph_output)
             assert_graph_connector_attaches(self, graph_output, "Publish CLI parser release notes")
-            self.assertIn("*       ||waiting_subtasks  [N] Release checklist approval pending", graph_output)
-            self.assertIn("        └─ ..runnable  [N] Fix release checklist review comments", graph_output)
             self.assertNotIn("└─ * ..runnable", graph_output)
             self.assertNotIn("|       ├─", graph_output)
-            self.assertNotIn("|       └─", graph_output)
             self.assertNotIn("demo-blocked", graph_output)
             self.assertNotIn("demo-done", graph_output)
             self.assertNotIn("demo-missing", graph_output)
@@ -2285,13 +2287,13 @@ class CliTests(unittest.TestCase):
             self.assertIn("\033[1;97;43m||\033[0m\033[100;93mblocked_dependency\033[0m", color_output)
             self.assertIn("\033[100;92mcompleted\033[0m", color_output)
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\*\033\[0m")
-            self.assertIn("\033[2m\\", color_output)
+            self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\\\033\[0m")
             self.assertIn("\033[32m[N]\033[0m", color_output)
             self.assertNotIn("\033[2mShared parser implementation complete\033[0m", color_output)
             self.assertNotIn("\033[2mCLI docs draft awaiting review\033[0m", color_output)
             self.assertNotIn("\033[2mRelease checklist review pending\033[0m", color_output)
             self.assertNotIn("\033[2mRelease checklist merge ready, not applied\033[0m", color_output)
-            self.assertIn("\033[2mFix release checklist review comments\033[0m", color_output)
+            self.assertIn("\033[2mFix review comments for parser change\033[0m", color_output)
             self.assertIn("\033[103;30mawaiting_review\033[0m", color_output)
             self.assertIn("\033[103;30maccepted_unapplied\033[0m", color_output)
             rows = json.loads(json_output)
@@ -2307,17 +2309,17 @@ class CliTests(unittest.TestCase):
             text = strip_ansi(output)
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 51 for width in visible_line_widths(output)))
-            self.assertIn("\\ *    ??awaiting_review  [N] CLI docs draft\n                           awaiting review", text)
-            self.assertIn("*  ||blocked_dependency  [N] Publish CLI\n                              parser release notes", text)
+            self.assertIn("| *     ??awaiting_review  [N] CLI docs draft\n|                          awaiting review", text)
+            self.assertIn("  *     ||blocked_dependency  [N] Publish CLI\n                              parser release notes", text)
             self.assertIn(
-                "\\ *   ??awaiting_review  [N] Release checklist\n                           review pending",
+                "| *     ??awaiting_review  [N] Release checklist\n|                          review pending",
                 text,
             )
             self.assertIn(
-                "*       ||waiting_subtasks  [N] Release checklist\n"
-                "                            approval pending\n"
-                "        └─ ..runnable  [N] Fix release checklist\n"
-                "        │              review comments",
+                "*       ||waiting_subtasks  [N] Release CLI parser\n"
+                "                            change\n"
+                "|       └─ ..runnable  [N] Fix review comments for\n"
+                "|       │              parser change",
                 text,
             )
             self.assertNotIn("revie\nw", text)
