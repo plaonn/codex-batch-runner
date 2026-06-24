@@ -950,13 +950,13 @@ def render_dependency_graph(
         source_id_to_index = {
             str(task.get("id")): index for index, task in enumerate(source_nodes) if task.get("id")
         }
-        fanins = dependency_graph_fanins(source_nodes, source_id_to_index)
-        layout = dependency_graph_layout(source_nodes, fanins)
+        dependency_runs = dependency_graph_runs(source_nodes, source_id_to_index)
+        layout = dependency_graph_layout(source_nodes, dependency_runs)
         for index, task in enumerate(source_nodes):
-            if index in layout["connector_prefixes"]:
-                connector = layout["connector_prefixes"][index]
+            if index in layout["transition_prefixes"]:
+                connector = layout["transition_prefixes"][index]
                 if connector:
-                    lines.append(format_dependency_graph_prefix(connector, layout["connector_color_keys"][index], color))
+                    lines.append(format_dependency_graph_prefix(connector, layout["transition_glyph_metadata"][index], color))
             lines.extend(
                 render_dependency_graph_source_node(
                     task,
@@ -964,9 +964,9 @@ def render_dependency_graph(
                     config,
                     color,
                     layout["source_prefixes"][index],
-                    graph_color_keys=layout["source_color_keys"][index],
+                    graph_glyph_metadata=layout["source_glyph_metadata"][index],
                     graph_continuation_prefix=layout["source_continuation_prefixes"][index],
-                    graph_continuation_color_keys=layout["source_continuation_color_keys"][index],
+                    graph_continuation_glyph_metadata=layout["source_continuation_glyph_metadata"][index],
                     tree_gap_prefix=graph_tree_parent_continuation_prefix()
                     if child_items.get(str(task.get("id") or ""))
                     else None,
@@ -984,7 +984,7 @@ def render_dependency_graph(
                         color,
                         child_prefix,
                         graph_prefix=layout["child_graph_prefixes"][index],
-                        graph_color_keys=layout["child_color_keys"][index],
+                        graph_glyph_metadata=layout["child_glyph_metadata"][index],
                         terminal_width=render_width,
                     )
                 )
@@ -1082,8 +1082,8 @@ def dependency_graph_source_nodes(tasks: list[dict], by_id: dict[str, dict]) -> 
     return ordered, child_items
 
 
-def dependency_graph_fanins(source_nodes: list[dict], source_id_to_index: dict[str, int]) -> dict[int, dict[str, object]]:
-    fanins: dict[int, dict[str, object]] = {}
+def dependency_graph_runs(source_nodes: list[dict], source_id_to_index: dict[str, int]) -> dict[int, dict[str, object]]:
+    dependency_runs: dict[int, dict[str, object]] = {}
     for target_index, task in enumerate(source_nodes):
         depends_on = task.get("depends_on")
         if not isinstance(depends_on, list):
@@ -1097,26 +1097,30 @@ def dependency_graph_fanins(source_nodes: list[dict], source_id_to_index: dict[s
         )
         if not dep_indices:
             continue
-        fanins[target_index] = {
+        dependency_runs[target_index] = {
             "dep_indices": dep_indices,
         }
-    return fanins
+    return dependency_runs
 
 
-def dependency_graph_layout(source_nodes: list[dict], fanins: dict[int, dict[str, object]]) -> dict[str, object]:
+def dependency_graph_layout(source_nodes: list[dict], dependency_runs: dict[int, dict[str, object]]) -> dict[str, object]:
     width = 8
     source_count = len(source_nodes)
-    node_color_indices = dependency_graph_node_color_indices(source_nodes, fanins)
+    node_color_indices = dependency_graph_node_color_indices(source_nodes, dependency_runs)
     prefixes = [("*" + (" " * (width - 1))) for _ in range(source_count)]
-    source_color_keys = [graph_prefix_color_keys(prefixes[index], node_color_indices[index]) for index in range(source_count)]
+    source_glyph_metadata = [
+        graph_prefix_glyph_metadata(prefixes[index], node_color_indices[index]) for index in range(source_count)
+    ]
     source_continuation_prefixes = [(" " * width) for _ in range(source_count)]
-    source_continuation_color_keys = [graph_prefix_color_keys(source_continuation_prefixes[index]) for index in range(source_count)]
-    connector_prefixes: dict[int, str] = {}
-    connector_color_keys: dict[int, list[int | None]] = {}
+    source_continuation_glyph_metadata = [
+        graph_prefix_glyph_metadata(source_continuation_prefixes[index]) for index in range(source_count)
+    ]
+    transition_prefixes: dict[int, str] = {}
+    transition_glyph_metadata: dict[int, list[int | None]] = {}
     child_graph_prefixes = [(" " * width) for _ in range(source_count)]
-    child_color_keys = [graph_prefix_color_keys(child_graph_prefixes[index]) for index in range(source_count)]
-    for target_index, fanin in fanins.items():
-        dep_indices = fanin.get("dep_indices")
+    child_glyph_metadata = [graph_prefix_glyph_metadata(child_graph_prefixes[index]) for index in range(source_count)]
+    for target_index, dependency_run in dependency_runs.items():
+        dep_indices = dependency_run.get("dep_indices")
         if not isinstance(dep_indices, list):
             continue
         dep_indices = [
@@ -1127,54 +1131,61 @@ def dependency_graph_layout(source_nodes: list[dict], fanins: dict[int, dict[str
         if not dep_indices:
             continue
         first_dep_index = dep_indices[0]
-        first_edge_color = node_color_indices[first_dep_index]
+        first_lane_color = node_color_indices[first_dep_index]
         prefixes[first_dep_index] = "*" + (" " * (width - 1))
-        source_color_keys[first_dep_index] = graph_prefix_color_keys(prefixes[first_dep_index], node_color_indices[first_dep_index])
+        source_glyph_metadata[first_dep_index] = graph_prefix_glyph_metadata(
+            prefixes[first_dep_index], node_color_indices[first_dep_index]
+        )
         for source_index in range(first_dep_index + 1, target_index):
             prefix = "| *"
             prefixes[source_index] = prefix + (" " * max(0, width - visible_len(prefix)))
-            source_color_keys[source_index] = graph_prefix_color_keys(
+            source_glyph_metadata[source_index] = graph_prefix_glyph_metadata(
                 prefixes[source_index],
                 None,
-                {0: first_edge_color, 2: node_color_indices[source_index]},
+                {0: first_lane_color, 2: node_color_indices[source_index]},
             )
-        connector_prefix = " \\|"
-        connector_prefixes[target_index] = connector_prefix
-        connector_color = node_color_indices[dep_indices[-1]]
-        connector_color_keys[target_index] = graph_prefix_color_keys(connector_prefix, connector_color)
+        transition_prefix = " \\|"
+        transition_prefixes[target_index] = transition_prefix
+        transition_glyph_metadata[target_index] = graph_prefix_glyph_metadata(
+            transition_prefix,
+            None,
+            {1: first_lane_color, 2: node_color_indices[dep_indices[-1]]},
+        )
         target_prefix = "  *"
         prefixes[target_index] = target_prefix + (" " * max(0, width - visible_len(target_prefix)))
-        source_color_keys[target_index] = graph_prefix_color_keys(target_prefix, node_color_indices[target_index])
+        source_glyph_metadata[target_index] = graph_prefix_glyph_metadata(target_prefix, node_color_indices[target_index])
         for source_index in range(first_dep_index, target_index):
             source_continuation_prefixes[source_index] = graph_source_continuation_prefix(prefixes[source_index])
-            source_continuation_color_keys[source_index] = graph_source_continuation_color_keys(
+            source_continuation_glyph_metadata[source_index] = graph_source_continuation_glyph_metadata(
                 source_continuation_prefixes[source_index],
-                first_edge_color,
+                first_lane_color,
                 node_color_indices[source_index],
             )
             child_graph_prefixes[source_index] = "|" + (" " * (width - 1))
-            child_color_keys[source_index] = graph_prefix_color_keys(child_graph_prefixes[source_index], first_edge_color)
+            child_glyph_metadata[source_index] = graph_prefix_glyph_metadata(
+                child_graph_prefixes[source_index], first_lane_color
+            )
     return {
         "source_prefixes": prefixes,
-        "source_color_keys": source_color_keys,
+        "source_glyph_metadata": source_glyph_metadata,
         "source_continuation_prefixes": source_continuation_prefixes,
-        "source_continuation_color_keys": source_continuation_color_keys,
-        "connector_prefixes": connector_prefixes,
-        "connector_color_keys": connector_color_keys,
+        "source_continuation_glyph_metadata": source_continuation_glyph_metadata,
+        "transition_prefixes": transition_prefixes,
+        "transition_glyph_metadata": transition_glyph_metadata,
         "child_graph_prefixes": child_graph_prefixes,
-        "child_color_keys": child_color_keys,
+        "child_glyph_metadata": child_glyph_metadata,
     }
 
 
-def dependency_graph_node_color_indices(source_nodes: list[dict], fanins: dict[int, dict[str, object]]) -> list[int]:
+def dependency_graph_node_color_indices(source_nodes: list[dict], dependency_runs: dict[int, dict[str, object]]) -> list[int]:
     palette_size = len(ListColor.ID_COLORS)
     colors: list[int] = []
     for index, task in enumerate(source_nodes):
         forbidden: set[int] = set()
         if colors:
             forbidden.add(colors[-1])
-        for target_index, fanin in fanins.items():
-            dep_indices = fanin.get("dep_indices")
+        for target_index, dependency_run in dependency_runs.items():
+            dep_indices = dependency_run.get("dep_indices")
             if not isinstance(dep_indices, list):
                 continue
             dep_indices = [
@@ -1206,42 +1217,50 @@ def dependency_graph_node_color_indices(source_nodes: list[dict], fanins: dict[i
     return colors
 
 
-def graph_prefix_color_keys(
+GRAPH_LINE_GLYPHS = {"|", "\\", "/"}
+
+
+def graph_prefix_glyph_metadata(
     prefix: str,
     default_color: int | None = None,
     overrides: dict[int, int] | None = None,
 ) -> list[int | None]:
+    # Metadata is attached per glyph cell: "*" uses node identity, line glyphs use lane identity.
     overrides = overrides or {}
     keys: list[int | None] = []
     for index, char in enumerate(prefix):
-        if char in {"*", "|", "\\"}:
+        if char == "*" or char in GRAPH_LINE_GLYPHS:
             keys.append(overrides.get(index, default_color))
         else:
             keys.append(None)
     return keys
 
 
-def graph_source_continuation_color_keys(
+def graph_source_continuation_glyph_metadata(
     prefix: str,
-    passing_edge_color: int,
-    source_edge_color: int,
+    passing_lane_color: int,
+    source_lane_color: int,
 ) -> list[int | None]:
     keys: list[int | None] = []
     rail_index = 0
     for char in prefix:
         if char == "|":
-            keys.append(passing_edge_color if rail_index == 0 else source_edge_color)
+            keys.append(passing_lane_color if rail_index == 0 else source_lane_color)
             rail_index += 1
         else:
             keys.append(None)
     return keys
 
 
-def format_dependency_graph_prefix(prefix: str, color_keys: list[int | None] | int | str | None, color: "ListColor") -> str:
+def format_dependency_graph_prefix(
+    prefix: str,
+    glyph_metadata: list[int | None] | int | str | None,
+    color: "ListColor",
+) -> str:
     parts = []
     for index, char in enumerate(prefix):
-        if char in {"*", "|", "\\"}:
-            color_key = color_keys[index] if isinstance(color_keys, list) and index < len(color_keys) else color_keys
+        if char == "*" or char in GRAPH_LINE_GLYPHS:
+            color_key = glyph_metadata[index] if isinstance(glyph_metadata, list) and index < len(glyph_metadata) else glyph_metadata
             parts.append(color.graph_branch_color(color_key, char))
         else:
             parts.append(char)
@@ -1276,9 +1295,9 @@ def render_dependency_graph_source_node(
     config: Config,
     color: "ListColor",
     graph_prefix: str,
-    graph_color_keys: list[int | None] | None = None,
+    graph_glyph_metadata: list[int | None] | None = None,
     graph_continuation_prefix: str | None = None,
-    graph_continuation_color_keys: list[int | None] | None = None,
+    graph_continuation_glyph_metadata: list[int | None] | None = None,
     tree_gap_prefix: str | None = None,
     terminal_width: int | None = None,
 ) -> list[str]:
@@ -1287,12 +1306,12 @@ def render_dependency_graph_source_node(
     status = color.status(status_value)
     plain_status = plain_color.status(status_value)
     branch_key = scalar_cell(task.get("id"))
-    styled_prefix = format_dependency_graph_prefix(graph_prefix, graph_color_keys or branch_key, color)
+    styled_prefix = format_dependency_graph_prefix(graph_prefix, graph_glyph_metadata or branch_key, color)
     plain_prefix = graph_prefix
     plain_continuation_prefix = graph_continuation_prefix or graph_continuation_prefix_for(plain_prefix)
     continuation_prefix = format_dependency_graph_prefix(
         plain_continuation_prefix,
-        graph_continuation_color_keys or graph_color_keys or branch_key,
+        graph_continuation_glyph_metadata or graph_glyph_metadata or branch_key,
         color,
     )
     continuation_gap_prefix = color.dim_text(tree_gap_prefix) if tree_gap_prefix else None
@@ -1319,7 +1338,7 @@ def render_dependency_graph_child_row(
     color: "ListColor",
     tree_prefix: str,
     graph_prefix: str | None = None,
-    graph_color_keys: list[int | None] | None = None,
+    graph_glyph_metadata: list[int | None] | None = None,
     terminal_width: int | None = None,
 ) -> list[str]:
     plain_color = ListColor(False)
@@ -1329,7 +1348,7 @@ def render_dependency_graph_child_row(
     graph_gap = " " * 8 if graph_prefix is None else graph_prefix
     branch_key = scalar_cell(task.get("id"))
     graph_child_tree_prefix = graph_tree_prefix(tree_prefix)
-    styled_prefix = format_dependency_graph_prefix(graph_gap, graph_color_keys or branch_key, color) + color.dim_text(graph_child_tree_prefix)
+    styled_prefix = format_dependency_graph_prefix(graph_gap, graph_glyph_metadata or branch_key, color) + color.dim_text(graph_child_tree_prefix)
     plain_prefix = graph_gap + graph_child_tree_prefix
     tree_continuation_suffix = graph_tree_continuation_prefix(tree_prefix)
     tree_continuation = graph_gap + tree_continuation_suffix
@@ -1337,7 +1356,7 @@ def render_dependency_graph_child_row(
         color.dim_text(tree_continuation_suffix) if tree_continuation_suffix.strip() else tree_continuation_suffix
     )
     styled_tree_continuation = (
-        format_dependency_graph_prefix(graph_gap, graph_color_keys or branch_key, color) + styled_tree_continuation_suffix
+        format_dependency_graph_prefix(graph_gap, graph_glyph_metadata or branch_key, color) + styled_tree_continuation_suffix
     )
     return graph_content_lines(
         styled_prefix,

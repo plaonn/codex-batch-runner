@@ -253,6 +253,24 @@ def assert_graph_connector_attaches(test_case: unittest.TestCase, output: str, t
     test_case.assertEqual(connector_line.index("|"), lines[target_index].index("*"))
 
 
+def ansi_code_for_visible_char(line: str, visible_index: int) -> str | None:
+    position = 0
+    visible_position = 0
+    active_code: str | None = None
+    while position < len(line):
+        match = ANSI_RE.match(line, position)
+        if match:
+            code = match.group(0)
+            active_code = None if code == "\033[0m" else code
+            position = match.end()
+            continue
+        if visible_position == visible_index:
+            return active_code
+        position += 1
+        visible_position += 1
+    return None
+
+
 def git(cwd: Path, *args: str) -> str:
     result = subprocess.run(["git", "-C", str(cwd), *args], check=True, stdout=subprocess.PIPE, text=True)
     return result.stdout.strip()
@@ -2184,6 +2202,69 @@ class CliTests(unittest.TestCase):
             self.assertIn(" \\|", output)
             self.assertIn("  *     ||blocked_dependency  [N] Source task", output)
 
+    def test_list_graph_colors_nodes_and_dependency_lanes_from_glyph_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(
+                config,
+                "Very long first dependency title that should keep its sibling tree rail",
+                tmp,
+                task_id="dep1",
+                project_id="project-a",
+            )
+            create_task(
+                config,
+                "Very long second dependency title that should keep its own wrapped guide",
+                tmp,
+                task_id="dep2",
+                project_id="project-a",
+            )
+            create_task(
+                config,
+                "Source task with multiple dependencies",
+                tmp,
+                task_id="child",
+                project_id="project-a",
+                depends_on=["dep1", "dep2"],
+            )
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=48):
+                code, output = run_cli(
+                    ["--config", str(config_path), "list", "--project", "project-a", "--graph", "--color=always"]
+                )
+
+            self.assertEqual(0, code)
+            lines = output.splitlines()
+            plain_lines = [strip_ansi(line) for line in lines]
+            dep1_line = next(line for line in lines if "Very long first" in strip_ansi(line))
+            dep2_line = next(line for line in lines if "Very long second" in strip_ansi(line))
+            dep2_wrap_line = next(line for line in lines if "should keep its own wrapped" in strip_ansi(line))
+            target_line = next(line for line in lines if "Source task" in strip_ansi(line))
+            target_index = plain_lines.index(strip_ansi(target_line))
+            transition_line = lines[target_index - 1]
+
+            dep1_node_color = ansi_code_for_visible_char(dep1_line, 0)
+            passing_lane_color = ansi_code_for_visible_char(dep2_line, 0)
+            dep2_node_color = ansi_code_for_visible_char(dep2_line, 2)
+            self.assertIsNotNone(dep1_node_color)
+            self.assertEqual(dep1_node_color, passing_lane_color)
+            self.assertNotEqual(passing_lane_color, dep2_node_color)
+
+            wrap_first_lane_color = ansi_code_for_visible_char(dep2_wrap_line, 0)
+            wrap_second_lane_color = ansi_code_for_visible_char(dep2_wrap_line, 2)
+            self.assertEqual(passing_lane_color, wrap_first_lane_color)
+            self.assertEqual(dep2_node_color, wrap_second_lane_color)
+            self.assertNotEqual(wrap_first_lane_color, wrap_second_lane_color)
+
+            merging_lane_color = ansi_code_for_visible_char(transition_line, 1)
+            incoming_lane_color = ansi_code_for_visible_char(transition_line, 2)
+            target_node_color = ansi_code_for_visible_char(target_line, 2)
+            self.assertEqual(passing_lane_color, merging_lane_color)
+            self.assertEqual(dep2_node_color, incoming_lane_color)
+            self.assertNotEqual(merging_lane_color, incoming_lane_color)
+            self.assertNotEqual(incoming_lane_color, target_node_color)
+
     def test_list_graph_wraps_subtask_tree_without_dependency_rails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -2290,6 +2371,29 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("demo-missing", graph_output)
             self.assertIn("awaiting_review", graph_output)
             self.assertIn("accepted_unapplied", graph_output)
+            self.assertEqual(
+                "\n".join(
+                    [
+                        "[demo]",
+                        "*       ..runnable  [S] Prepare parser cleanup notes",
+                        "*       ==completed  [N] Build shared parser",
+                        "| *     ==completed  [N] Add parser tests",
+                        " \\|",
+                        "  *     ||blocked_dependency  [N] Wire parser into CLI",
+                        "*       ||waiting_subtasks  [N] Release CLI parser change",
+                        "|          └─ ..runnable  [N] Fix review comments for parser change",
+                        "| *     ==completed  [N] Shared parser implementation complete",
+                        "| *     ??awaiting_review  [N] CLI docs draft awaiting review",
+                        "| *     ??awaiting_review  [N] Release checklist review pending",
+                        "| *     ??accepted_unapplied  [N] Release checklist merge ready, not applied",
+                        " \\|",
+                        "  *     ||blocked_dependency  [N] Publish CLI parser release notes",
+                        "*       >>running  [D] Run full regression suite",
+                    ]
+                )
+                + "\n",
+                graph_output,
+            )
             self.assertIn("\033[1;97;43m??\033[0m\033[103;30mawaiting_review\033[0m", color_output)
             self.assertIn("\033[1;97;46m>>\033[0m\033[106;30mrunning\033[0m", color_output)
             self.assertIn("\033[1;97;43m||\033[0m\033[100;93mblocked_dependency\033[0m", color_output)
