@@ -82,10 +82,8 @@ config 탐색 순서:
 
 1. `--config` 명시값
 2. `CBR_CONFIG` 환경 변수
-3. `~/.config/codex-batch-runner/config.json`
-4. 현재 작업 디렉터리 기준 기본값
 
-자동화와 launchd에서는 명시적 config 또는 절대 경로 기반 호출을 권장함. 운영자가 직접 viewer/review 용도로 사용할 때는 `cbr` console script를 설치하고 사용자 config 자동 탐색을 활용할 수 있음.
+둘 다 없으면 `cbr`는 실패합니다. 자동화와 launchd에서는 명시적 config 또는 절대 경로 기반 호출을 사용하고, 운영자가 직접 viewer/review 용도로 사용할 때는 `CBR_CONFIG`를 설정한 shell에서 `cbr` console script를 사용합니다.
 
 `cbr list` 기본 출력은 운영자가 신경 써야 할 task 중심으로 유지합니다. `archived`, completed accepted and applied worktree task, non-worktree `completed + accepted`, resolution이 기록된 task는 기본 출력에서 숨기고, `completed + unreviewed/rejected/needs_followup`과 accepted-but-unapplied worktree task는 표시합니다. 전체 조회가 필요하면 `--all`을 사용합니다. `failed` task는 한 줄짜리 `last_error` 요약을 함께 표시합니다.
 

@@ -60,7 +60,9 @@ class Config:
 
     @classmethod
     def load(cls, config_path: str | None = None, root: Path | None = None) -> "Config":
-        resolved_config_path = resolve_config_path(config_path, include_user_config=root is None)
+        resolved_config_path = resolve_config_path(config_path)
+        if root is None and resolved_config_path is None:
+            raise ValueError("config required: pass --config /path/to/config.json or set CBR_CONFIG")
         data: dict[str, Any] = {}
         if resolved_config_path:
             data = read_json(resolved_config_path, {}) or {}
@@ -330,15 +332,10 @@ def normalize_project_priority_key(value: str) -> str:
     return text
 
 
-def resolve_config_path(config_path: str | None = None, include_user_config: bool = True) -> Path | None:
+def resolve_config_path(config_path: str | None = None) -> Path | None:
     if config_path:
         return Path(config_path).expanduser().resolve()
     env_path = os.environ.get("CBR_CONFIG")
     if env_path:
         return Path(env_path).expanduser().resolve()
-    if not include_user_config:
-        return None
-    user_config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "codex-batch-runner" / "config.json"
-    if user_config.exists():
-        return user_config.resolve()
     return None

@@ -134,10 +134,8 @@ Config discovery order:
 
 1. `--config path/to/config.json`
 2. `CBR_CONFIG` environment variable
-3. `~/.config/codex-batch-runner/config.json`
-4. Current working directory defaults
 
-If config is omitted, the default runtime directory is `.codex-batch-runner/` under the current working directory. This directory is gitignored. Example configs are available in [examples/config.example.json](examples/config.example.json) and [examples/config.automation.example.json](examples/config.automation.example.json).
+If neither is provided, `cbr` exits with an error instead of creating a runtime directory under the current working directory. Example configs are available in [examples/config.example.json](examples/config.example.json) and [examples/config.automation.example.json](examples/config.automation.example.json).
 
 Optional `root` makes relative runtime paths independent of the process current working directory. `worktree_mode=task` enables task-specific git worktrees. `execution_profiles`, task-level `--profile`, `--model`, `--codex-profile`, and allowlisted `--config-override` values provide cost and routing hints without changing the correctness contract.
 

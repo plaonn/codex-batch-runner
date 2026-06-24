@@ -46,25 +46,20 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(queue_dir, config.queue_dir)
 
-    def test_user_config_is_used_when_present(self) -> None:
+    def test_missing_config_requires_explicit_path_or_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            xdg_config_home = Path(tmp) / "xdg-config"
-            config_path = xdg_config_home / "codex-batch-runner" / "config.json"
-            queue_dir = Path(tmp) / "user-queue"
-            write_config(config_path, queue_dir)
-
-            with patch.dict("os.environ", {"XDG_CONFIG_HOME": str(xdg_config_home)}, clear=True):
-                config = Config.load()
-
-            self.assertEqual(queue_dir.resolve(), config.queue_dir.resolve())
+            with (
+                patch.dict("os.environ", {"HOME": str(Path(tmp) / "home")}, clear=True),
+                self.assertRaisesRegex(ValueError, "config required"),
+            ):
+                Config.load()
 
     def test_config_root_makes_relative_runtime_paths_independent_of_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            xdg_config_home = Path(tmp) / "xdg-config"
             runtime_root = Path(tmp) / "runtime-root"
             other_cwd = Path(tmp) / "other-cwd"
             other_cwd.mkdir()
-            config_path = xdg_config_home / "codex-batch-runner" / "config.json"
+            config_path = Path(tmp) / "config.json"
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(
                 json.dumps(
@@ -81,11 +76,8 @@ class ConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with (
-                patch.dict("os.environ", {"XDG_CONFIG_HOME": str(xdg_config_home)}, clear=True),
-                patch("codex_batch_runner.config.Path.cwd", return_value=other_cwd),
-            ):
-                config = Config.load()
+            with patch("codex_batch_runner.config.Path.cwd", return_value=other_cwd):
+                config = Config.load(str(config_path))
 
             self.assertEqual(runtime_root.resolve(), config.root)
             self.assertEqual(runtime_root.resolve() / ".cbr" / "tasks", config.queue_dir)
@@ -134,7 +126,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(1800, config.auto_review_codex_cooldown_seconds)
             self.assertEqual(120000, config.auto_review_codex_max_bundle_chars)
             self.assertEqual(60000, config.auto_review_codex_max_diff_chars)
-            self.assertIsNone(resolve_config_path(include_user_config=False))
+            self.assertIsNone(resolve_config_path())
             self.assertEqual("disabled", config.manual_cooldown_wake_scheduler)
             self.assertEqual([], config.manual_cooldown_wake_command)
             self.assertEqual(1, config.max_total_running)

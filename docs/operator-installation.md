@@ -73,17 +73,11 @@ package manager로 설치한 CLI에서 흔한 상황입니다.
 
 1. `--config /path/to/config.json`
 2. `CBR_CONFIG=/path/to/config.json`
-3. `$XDG_CONFIG_HOME/codex-batch-runner/config.json`, 또는 `XDG_CONFIG_HOME`이
-   없을 때 `~/.config/codex-batch-runner/config.json`
-4. Current working directory 기준 built-in defaults
 
-User config discovery는 운영자 개인의 interactive shell과 Codex skill에서
-`--config` 없이 같은 기본 queue를 쓰는 용도에 적합합니다. 여러 working
-directory에서 실행할 수 있으면 user config에 `root`를 설정합니다. 특정 실험
-queue나 다른 운영 config를 명시적으로 쓰고 싶을 때는 `--config`를 사용합니다.
-Built-in fallback은 process working directory의 `.codex-batch-runner/` 아래에
-runtime state를 만들므로 빠른 local 실험에는 충분하지만 shared beta queue에는
-적합하지 않습니다.
+둘 다 없으면 `cbr`는 실패합니다. 운영 queue는 현재 working directory에 묵시적으로
+생성하지 않습니다. Interactive shell에서 기본 queue를 반복해서 쓰고 싶으면
+`CBR_CONFIG`를 shell profile에 설정하고, launchd/systemd 같은 자동화에서는
+`--config`에 absolute path를 넘깁니다.
 
 ## macOS launchd 설정
 
