@@ -1171,7 +1171,8 @@ def render_dependency_graph_source_node(
     branch_key = graph_branch_key or scalar_cell(task.get("id"))
     styled_prefix = format_dependency_graph_prefix(graph_prefix, branch_key, color)
     plain_prefix = graph_prefix
-    continuation_prefix = graph_continuation_prefix(plain_prefix)
+    plain_continuation_prefix = graph_continuation_prefix(plain_prefix)
+    continuation_prefix = format_dependency_graph_prefix(plain_continuation_prefix, branch_key, color)
     lines = graph_content_lines(
         styled_prefix,
         status,
@@ -1181,7 +1182,7 @@ def render_dependency_graph_source_node(
         title_style=lambda value: styled_compact_title_fragment(value, color),
         plain_prefix=plain_prefix,
         plain_label=plain_status,
-        plain_continuation_prefix=continuation_prefix,
+        plain_continuation_prefix=plain_continuation_prefix,
     )
     return lines
 
@@ -1204,13 +1205,20 @@ def render_dependency_graph_child_row(
     branch_key = graph_branch_key or scalar_cell(task.get("id"))
     styled_prefix = format_dependency_graph_prefix(graph_gap, branch_key, color) + color.dim_text(tree_prefix)
     plain_prefix = graph_gap + tree_prefix
-    tree_continuation = graph_gap + tree_continuation_prefix(tree_prefix)
+    tree_continuation_suffix = tree_continuation_prefix(tree_prefix)
+    tree_continuation = graph_gap + tree_continuation_suffix
+    styled_tree_continuation_suffix = (
+        color.dim_text(tree_continuation_suffix) if tree_continuation_suffix.strip() else tree_continuation_suffix
+    )
+    styled_tree_continuation = (
+        format_dependency_graph_prefix(graph_gap, branch_key, color) + styled_tree_continuation_suffix
+    )
     return graph_content_lines(
         styled_prefix,
         status,
         compact_title(task),
         terminal_width,
-        continuation_prefix=tree_continuation,
+        continuation_prefix=styled_tree_continuation,
         title_style=lambda value: styled_compact_title_fragment(value, color, dim_title=True),
         plain_prefix=plain_prefix,
         plain_label=plain_status,
@@ -1314,7 +1322,7 @@ def tree_continuation_prefix(prefix: str) -> str:
         return ""
     parts = [prefix[index : index + 4] for index in range(0, max(0, len(prefix) - 3), 4)]
     connector = prefix[-3:]
-    parts.append("│  " if connector in {"├─ ", "└─ "} else "   ")
+    parts.append("│  " if connector == "├─ " else "   ")
     return "".join(parts)
 
 

@@ -2218,7 +2218,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("        │              title that should", output)
             self.assertIn("        │              wrap inside graph", output)
             self.assertIn("        └─ ..runnable  [N] Very long", output)
-            self.assertIn("        │              own wrapped guide", output)
+            self.assertIn("                       own wrapped guide", output)
             self.assertNotIn("├─ * ..runnable", output)
 
     def test_list_graph_keeps_json_output_raw(self) -> None:
@@ -2319,9 +2319,11 @@ class CliTests(unittest.TestCase):
                 "*       ||waiting_subtasks  [N] Release CLI parser\n"
                 "                            change\n"
                 "|       └─ ..runnable  [N] Fix review comments for\n"
-                "|       │              parser change",
+                "|                      parser change",
                 text,
             )
+            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                          awaiting review")
+            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                      \x1b\[2mparser change\x1b\[0m")
             self.assertNotIn("revie\nw", text)
             self.assertNotIn("revi\n|       │            ew", text)
             self.assertNotIn("awaitin\ng", text)
@@ -2717,7 +2719,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("        │  should wrap while keeping tree rails", output)
             self.assertIn("        │  visible", output)
             self.assertIn("TITLE:  └─ [N] Very long second child title", output)
-            self.assertIn("        │  should keep its own wrapped guide", output)
+            self.assertIn("           should keep its own wrapped guide", output)
 
     def test_list_default_keeps_hidden_subtasks_when_parent_is_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
