@@ -2325,6 +2325,30 @@ class CliTests(unittest.TestCase):
             self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m       \x1b\[2m   │")
             self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m \x1b\[[0-9;]*m\|\x1b\[0m                        awaiting review")
             self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                         \x1b\[2mfor parser change\x1b\[0m")
+            shared_line = next(line for line in output.splitlines() if "Shared parser" in line)
+            docs_line = next(line for line in output.splitlines() if "CLI docs draft" in line)
+            checklist_line = next(line for line in output.splitlines() if "Release checklist" in line and "??" in strip_ansi(line))
+            shared_colors = re.match(r"\x1b\[([0-9;]+)m\|\x1b\[0m \x1b\[([0-9;]+)m\*\x1b\[0m", shared_line)
+            docs_colors = re.match(r"\x1b\[([0-9;]+)m\|\x1b\[0m \x1b\[([0-9;]+)m\*\x1b\[0m", docs_line)
+            checklist_colors = re.match(r"\x1b\[([0-9;]+)m\|\x1b\[0m \x1b\[([0-9;]+)m\*\x1b\[0m", checklist_line)
+            self.assertIsNotNone(shared_colors)
+            self.assertIsNotNone(docs_colors)
+            self.assertIsNotNone(checklist_colors)
+            assert shared_colors is not None
+            assert docs_colors is not None
+            assert checklist_colors is not None
+            self.assertNotEqual(shared_colors.group(1), shared_colors.group(2))
+            node_colors = {shared_colors.group(2), docs_colors.group(2), checklist_colors.group(2)}
+            self.assertEqual(3, len(node_colors))
+            shared_continuation = next(line for line in output.splitlines() if "implementation complete" in line)
+            continuation_colors = re.match(
+                r"\x1b\[([0-9;]+)m\|\x1b\[0m \x1b\[([0-9;]+)m\|\x1b\[0m",
+                shared_continuation,
+            )
+            self.assertIsNotNone(continuation_colors)
+            assert continuation_colors is not None
+            self.assertEqual(shared_colors.group(1), continuation_colors.group(1))
+            self.assertEqual(shared_colors.group(2), continuation_colors.group(2))
             self.assertNotIn("revie\nw", text)
             self.assertNotIn("revi\n|       │            ew", text)
             self.assertNotIn("awaitin\ng", text)
