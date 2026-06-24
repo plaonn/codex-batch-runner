@@ -2129,9 +2129,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 48 for width in visible_line_widths(output)))
             self.assertIn("*       ..runnable  [N] Parent source task", output)
-            self.assertIn("        ├─ ||blocked_dependency  [N] Very long", output)
-            self.assertIn("        │                        source title", output)
-            self.assertIn("        └─ ..runnable  [N] Second child source", output)
+            self.assertIn("           ├─ ||blocked_dependency  [N] Very", output)
+            self.assertIn("           │                        child", output)
+            self.assertIn("           └─ ..runnable  [N] Second child", output)
             self.assertIn("*       ..runnable  [N] Very long dependency", output)
             self.assertIn("                    under the dependency edge", output)
             self.assertNotIn("├─ * ||blocked_dependency", output)
@@ -2172,7 +2172,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("|                   should keep its sibling", output)
             self.assertIn("|                   tree rail", output)
             self.assertIn("| *     ..runnable  [N] Very long second", output)
-            self.assertIn("|                   should keep its own wrapped", output)
+            self.assertIn("| |                 should keep its own wrapped", output)
             self.assertIn(" \\|", output)
             self.assertIn("  *     ||blocked_dependency  [N] Source task", output)
 
@@ -2212,13 +2212,13 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
             self.assertIn("*       ..runnable  [N] Very long parent", output)
-            self.assertIn("                    subtask guide", output)
-            self.assertIn("        ├─ ..runnable  [N] Very long", output)
-            self.assertIn("        │              first child source", output)
-            self.assertIn("        │              title that should", output)
-            self.assertIn("        │              wrap inside graph", output)
-            self.assertIn("        └─ ..runnable  [N] Very long", output)
-            self.assertIn("                       own wrapped guide", output)
+            self.assertIn("           │        subtask guide", output)
+            self.assertIn("           ├─ ..runnable  [N] Very long", output)
+            self.assertIn("           │              first child", output)
+            self.assertIn("           │              that should", output)
+            self.assertIn("           │              wrap inside", output)
+            self.assertIn("           └─ ..runnable  [N] Very long", output)
+            self.assertIn("                          wrapped guide", output)
             self.assertNotIn("├─ * ..runnable", output)
 
     def test_list_graph_keeps_json_output_raw(self) -> None:
@@ -2268,7 +2268,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("  *     ||blocked_dependency  [N] Wire parser into CLI", graph_output)
             assert_graph_connector_attaches(self, graph_output, "Wire parser into CLI")
             self.assertIn("*       ||waiting_subtasks  [N] Release CLI parser change", graph_output)
-            self.assertIn("|       └─ ..runnable  [N] Fix review comments for parser change", graph_output)
+            self.assertIn("|          └─ ..runnable  [N] Fix review comments for parser change", graph_output)
             self.assertIn("| *     ==completed  [N] Shared parser implementation complete", graph_output)
             self.assertIn("| *     ??awaiting_review  [N] CLI docs draft awaiting review", graph_output)
             self.assertIn("| *     ??awaiting_review  [N] Release checklist review pending", graph_output)
@@ -2309,22 +2309,22 @@ class CliTests(unittest.TestCase):
             text = strip_ansi(output)
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 51 for width in visible_line_widths(output)))
-            self.assertIn("| *     ??awaiting_review  [N] CLI docs draft\n|                          awaiting review", text)
+            self.assertIn("| *     ??awaiting_review  [N] CLI docs draft\n| |                        awaiting review", text)
             self.assertIn("  *     ||blocked_dependency  [N] Publish CLI\n                              parser release notes", text)
             self.assertIn(
-                "| *     ??awaiting_review  [N] Release checklist\n|                          review pending",
+                "| *     ??awaiting_review  [N] Release checklist\n| |                        review pending",
                 text,
             )
             self.assertIn(
                 "*       ||waiting_subtasks  [N] Release CLI parser\n"
-                "|                           change\n"
-                "|       └─ ..runnable  [N] Fix review comments for\n"
-                "|                      parser change",
+                "|          │                change\n"
+                "|          └─ ..runnable  [N] Fix review comments\n"
+                "|                         for parser change",
                 text,
             )
-            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                           change")
-            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                          awaiting review")
-            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                      \x1b\[2mparser change\x1b\[0m")
+            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m       \x1b\[2m   │")
+            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m \x1b\[[0-9;]*m\|\x1b\[0m                        awaiting review")
+            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                         \x1b\[2mfor parser change\x1b\[0m")
             self.assertNotIn("revie\nw", text)
             self.assertNotIn("revi\n|       │            ew", text)
             self.assertNotIn("awaitin\ng", text)

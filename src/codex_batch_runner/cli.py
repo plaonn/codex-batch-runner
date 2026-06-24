@@ -966,6 +966,9 @@ def render_dependency_graph(
                     layout["source_prefixes"][index],
                     graph_branch_key=layout["source_branch_keys"][index],
                     graph_continuation_prefix=layout["source_continuation_prefixes"][index],
+                    tree_gap_prefix=graph_tree_parent_continuation_prefix()
+                    if child_items.get(str(task.get("id") or ""))
+                    else None,
                     terminal_width=render_width,
                 )
             )
@@ -1135,7 +1138,7 @@ def dependency_graph_layout(source_nodes: list[dict], fanins: dict[int, dict[str
         prefixes[target_index] = target_prefix + (" " * max(0, width - visible_len(target_prefix)))
         source_branch_keys[target_index] = edge_key
         for source_index in range(first_dep_index, target_index):
-            source_continuation_prefixes[source_index] = "|" + (" " * (width - 1))
+            source_continuation_prefixes[source_index] = graph_source_continuation_prefix(prefixes[source_index])
             child_graph_prefixes[source_index] = "|" + (" " * (width - 1))
             child_branch_keys[source_index] = edge_key
     return {
@@ -1159,6 +1162,28 @@ def format_dependency_graph_prefix(prefix: str, branch_key: str, color: "ListCol
     return "".join(parts)
 
 
+def graph_source_continuation_prefix(prefix: str) -> str:
+    parts = []
+    for char in prefix:
+        parts.append("|" if char == "*" else char)
+    return "".join(parts)
+
+
+GRAPH_TREE_INDENT = "   "
+
+
+def graph_tree_prefix(tree_prefix: str) -> str:
+    return GRAPH_TREE_INDENT + tree_prefix
+
+
+def graph_tree_continuation_prefix(tree_prefix: str) -> str:
+    return GRAPH_TREE_INDENT + tree_continuation_prefix(tree_prefix)
+
+
+def graph_tree_parent_continuation_prefix() -> str:
+    return GRAPH_TREE_INDENT + "│"
+
+
 def render_dependency_graph_source_node(
     task: dict,
     by_id: dict[str, dict],
@@ -1167,6 +1192,7 @@ def render_dependency_graph_source_node(
     graph_prefix: str,
     graph_branch_key: str | None = None,
     graph_continuation_prefix: str | None = None,
+    tree_gap_prefix: str | None = None,
     terminal_width: int | None = None,
 ) -> list[str]:
     plain_color = ListColor(False)
@@ -1178,16 +1204,19 @@ def render_dependency_graph_source_node(
     plain_prefix = graph_prefix
     plain_continuation_prefix = graph_continuation_prefix or graph_continuation_prefix_for(plain_prefix)
     continuation_prefix = format_dependency_graph_prefix(plain_continuation_prefix, branch_key, color)
+    continuation_gap_prefix = color.dim_text(tree_gap_prefix) if tree_gap_prefix else None
     lines = graph_content_lines(
         styled_prefix,
         status,
         compact_title(task),
         terminal_width,
         continuation_prefix=continuation_prefix,
+        continuation_gap_prefix=continuation_gap_prefix,
         title_style=lambda value: styled_compact_title_fragment(value, color),
         plain_prefix=plain_prefix,
         plain_label=plain_status,
         plain_continuation_prefix=plain_continuation_prefix,
+        plain_continuation_gap_prefix=tree_gap_prefix,
     )
     return lines
 
@@ -1208,9 +1237,10 @@ def render_dependency_graph_child_row(
     plain_status = plain_color.status(status_value)
     graph_gap = " " * 8 if graph_prefix is None else graph_prefix
     branch_key = graph_branch_key or scalar_cell(task.get("id"))
-    styled_prefix = format_dependency_graph_prefix(graph_gap, branch_key, color) + color.dim_text(tree_prefix)
-    plain_prefix = graph_gap + tree_prefix
-    tree_continuation_suffix = tree_continuation_prefix(tree_prefix)
+    graph_child_tree_prefix = graph_tree_prefix(tree_prefix)
+    styled_prefix = format_dependency_graph_prefix(graph_gap, branch_key, color) + color.dim_text(graph_child_tree_prefix)
+    plain_prefix = graph_gap + graph_child_tree_prefix
+    tree_continuation_suffix = graph_tree_continuation_prefix(tree_prefix)
     tree_continuation = graph_gap + tree_continuation_suffix
     styled_tree_continuation_suffix = (
         color.dim_text(tree_continuation_suffix) if tree_continuation_suffix.strip() else tree_continuation_suffix
