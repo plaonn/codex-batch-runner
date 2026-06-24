@@ -2091,7 +2091,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
             self.assertIn("*       ..runnable  [N] Very long", output)
-            self.assertIn("                    should wrap under the", output)
+            self.assertIn("|                   should wrap under the", output)
             self.assertIn(" \\|", output)
             self.assertIn("  *     ||blocked_dependency  [N] Very", output)
             self.assertIn("                              long child", output)
@@ -2169,8 +2169,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 48 for width in visible_line_widths(output)))
             self.assertIn("*       ..runnable  [N] Very long first", output)
-            self.assertIn("                    should keep its sibling", output)
-            self.assertIn("                    tree rail", output)
+            self.assertIn("|                   should keep its sibling", output)
+            self.assertIn("|                   tree rail", output)
             self.assertIn("| *     ..runnable  [N] Very long second", output)
             self.assertIn("|                   should keep its own wrapped", output)
             self.assertIn(" \\|", output)
@@ -2317,11 +2317,12 @@ class CliTests(unittest.TestCase):
             )
             self.assertIn(
                 "*       ||waiting_subtasks  [N] Release CLI parser\n"
-                "                            change\n"
+                "|                           change\n"
                 "|       └─ ..runnable  [N] Fix review comments for\n"
                 "|                      parser change",
                 text,
             )
+            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                           change")
             self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                          awaiting review")
             self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                      \x1b\[2mparser change\x1b\[0m")
             self.assertNotIn("revie\nw", text)

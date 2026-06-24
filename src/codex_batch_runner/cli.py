@@ -965,6 +965,7 @@ def render_dependency_graph(
                     color,
                     layout["source_prefixes"][index],
                     graph_branch_key=layout["source_branch_keys"][index],
+                    graph_continuation_prefix=layout["source_continuation_prefixes"][index],
                     terminal_width=render_width,
                 )
             )
@@ -1102,6 +1103,7 @@ def dependency_graph_layout(source_nodes: list[dict], fanins: dict[int, dict[str
     width = 8
     source_count = len(source_nodes)
     prefixes = [("*" + (" " * (width - 1))) for _ in range(source_count)]
+    source_continuation_prefixes = [(" " * width) for _ in range(source_count)]
     source_branch_keys = [str(task.get("id") or "") for task in source_nodes]
     connector_prefixes: dict[int, str] = {}
     connector_branch_keys: dict[int, str] = {}
@@ -1133,10 +1135,12 @@ def dependency_graph_layout(source_nodes: list[dict], fanins: dict[int, dict[str
         prefixes[target_index] = target_prefix + (" " * max(0, width - visible_len(target_prefix)))
         source_branch_keys[target_index] = edge_key
         for source_index in range(first_dep_index, target_index):
+            source_continuation_prefixes[source_index] = "|" + (" " * (width - 1))
             child_graph_prefixes[source_index] = "|" + (" " * (width - 1))
             child_branch_keys[source_index] = edge_key
     return {
         "source_prefixes": prefixes,
+        "source_continuation_prefixes": source_continuation_prefixes,
         "source_branch_keys": source_branch_keys,
         "connector_prefixes": connector_prefixes,
         "connector_branch_keys": connector_branch_keys,
@@ -1162,6 +1166,7 @@ def render_dependency_graph_source_node(
     color: "ListColor",
     graph_prefix: str,
     graph_branch_key: str | None = None,
+    graph_continuation_prefix: str | None = None,
     terminal_width: int | None = None,
 ) -> list[str]:
     plain_color = ListColor(False)
@@ -1171,7 +1176,7 @@ def render_dependency_graph_source_node(
     branch_key = graph_branch_key or scalar_cell(task.get("id"))
     styled_prefix = format_dependency_graph_prefix(graph_prefix, branch_key, color)
     plain_prefix = graph_prefix
-    plain_continuation_prefix = graph_continuation_prefix(plain_prefix)
+    plain_continuation_prefix = graph_continuation_prefix or graph_continuation_prefix_for(plain_prefix)
     continuation_prefix = format_dependency_graph_prefix(plain_continuation_prefix, branch_key, color)
     lines = graph_content_lines(
         styled_prefix,
@@ -1275,9 +1280,9 @@ def graph_content_lines(
     width = max(1, terminal_width)
     protected = f"{prefix}{label}  "
     plain_protected = f"{plain_prefix_value}{plain_label_value}  "
-    continuation_base = continuation_prefix or graph_continuation_prefix(prefix)
+    continuation_base = continuation_prefix or graph_continuation_prefix_for(prefix)
     plain_continuation_base = (
-        graph_continuation_prefix(plain_prefix_value)
+        graph_continuation_prefix_for(plain_prefix_value)
         if plain_continuation_prefix is None
         else plain_continuation_prefix
     )
@@ -1310,7 +1315,7 @@ def graph_continuation_gap(width: int, prefix: str | None = None) -> str:
     return visible_prefix_value + (" " * max(0, width - visible_len(visible_prefix_value)))
 
 
-def graph_continuation_prefix(prefix: str) -> str:
+def graph_continuation_prefix_for(prefix: str) -> str:
     width = visible_len(prefix)
     if prefix.startswith("|") and width > 0:
         return "|" + (" " * (width - 1))
