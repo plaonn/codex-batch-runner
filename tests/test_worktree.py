@@ -247,7 +247,8 @@ class WorktreeTests(unittest.TestCase):
             self.assertNotIn("execution_cleaned_at", load_task(config, "cleanup"))
             list_code, list_output = run_cli_text(["--config", str(config_path), "list", "--color=never"])
             self.assertEqual(0, list_code)
-            self.assertIn("accepted_unapplied", list_output)
+            self.assertIn("++apply", list_output)
+            self.assertIn("accepted; not applied", list_output)
             self.assertIn("not applied", list_output)
 
     def test_cleanup_refuses_needs_followup_without_terminal_resolution(self) -> None:
