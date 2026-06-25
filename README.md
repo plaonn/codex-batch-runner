@@ -147,7 +147,7 @@ For launchd/systemd installation, config discovery, and `doctor`, use [docs/oper
 
 Task/state writes use atomic replace. Core state-changing commands append sanitized audit events. Event payloads are intentionally small and redact prompt text, raw transcripts, session/thread ids, secrets, credentials, and token-like fields.
 
-`review-next` is report-only by default. Mechanical accept, reviewer Codex, bounded auto-fix enqueue, worktree apply, cleanup, branch pruning, pruning retained files, and Codex CLI maintenance all require explicit command/config opt-in. `worktree branch-prune --apply` only deletes eligible cleaned applied local `cbr/*` branches with `git branch -d`; it does not delete remote branches, task JSON, runtime logs, event logs, worktree directories, or force-delete branches.
+`review-next` is report-only by default. Mechanical accept, reviewer Codex, bounded auto-fix enqueue, worktree apply, cleanup, branch pruning, direct worktree cleanup, pruning retained files, and Codex CLI maintenance all require explicit command/config opt-in. `worktree branch-prune --apply` only deletes eligible cleaned applied local `cbr/*` branches with `git branch -d`; it does not delete remote branches, task JSON, runtime logs, event logs, worktree directories, or force-delete branches.
 
 ## 운영 메모
 
