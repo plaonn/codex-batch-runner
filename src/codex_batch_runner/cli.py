@@ -32,7 +32,12 @@ from .maintenance import (
 )
 from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
 from .post_accept import accept_task_and_integrate
-from .presentation import task_list_status, task_list_status_without_subtasks
+from .presentation import (
+    TaskListPresentation,
+    task_list_presentation,
+    task_list_status,
+    task_list_status_without_subtasks,
+)
 from .queue import (
     DEFAULT_HIDDEN_LIST_STATUSES,
     RESOLUTIONS,
@@ -89,11 +94,9 @@ WATCH_RESTART_MESSAGE = "cbr source changed since this watch started; restart wa
 COMPACT_TABLE_BLOCK_LAYOUT_WIDTH = 80
 COMPACT_TABLE_COMFORT_WIDTH = 93
 COMPACT_TABLE_MIN_TITLE_WIDTH = 30
-COMPACT_TABLE_MIN_DEP_TITLE_WIDTH = 26
-COMPACT_TABLE_MIN_NOTE_WRAP_WIDTH = 20
+COMPACT_TABLE_MIN_DETAIL_WIDTH = 24
 COMPACT_TABLE_FLOOR_TITLE_WIDTH = 12
-COMPACT_TABLE_FLOOR_DEP_TITLE_WIDTH = 10
-COMPACT_TABLE_FLOOR_NOTE_WRAP_WIDTH = 8
+COMPACT_TABLE_FLOOR_DETAIL_WIDTH = 10
 COMPACT_TABLE_NARROW_STATUS_LABELS = {
     "accepted_unapplied": "accepted*",
     "awaiting_review": "review",
@@ -1549,7 +1552,7 @@ def render_compact_list(
     terminal_width: int | None = None,
     include_capacity: bool = True,
 ) -> str:
-    header = ["[P]", "TITLE", "STATUS", "ATT", "DEPS", "NOTE"]
+    header = ["[P]", "TITLE", "STATUS", "DETAIL"]
     if terminal_width is not None and terminal_width < COMPACT_TABLE_BLOCK_LAYOUT_WIDTH:
         project_groups = compact_project_groups(tasks, by_id, config, color, include_capacity=include_capacity)
         return render_compact_block_list(project_groups, terminal_width, color)
@@ -1686,13 +1689,11 @@ def compact_task_group(
     narrow_table: bool = False,
 ) -> dict[str, object]:
     cells = task_display_cells(task, by_id, config, color, narrow_table=narrow_table)
-    deps = dependency_title_cells(task.get("depends_on"), by_id, config, color)
-    note_segments = note_cells(task, by_id, config, include_capacity=include_capacity)
+    detail_segments = detail_cells(task, by_id, config, include_capacity=include_capacity)
     return {
         "profile": cells["profile"],
-        "summary": [cells["status"], cells["attempts"]],
-        "deps": deps or ["-"],
-        "notes": note_segments or ["-"],
+        "summary": [cells["status"]],
+        "details": detail_segments or ["-"],
         "title": compact_group_title(task, color, tree_prefix),
         "title_prefix": color.dim_text(tree_prefix) if tree_prefix else "",
         "title_continuation_prefix": color.dim_text(tree_continuation_prefix(tree_prefix)) if tree_prefix else "",
@@ -1707,20 +1708,21 @@ def task_display_cells(
     color: "ListColor",
     narrow_table: bool = False,
 ) -> dict[str, str]:
-    status = status_cell(task, by_id, config)
+    projection = task_list_presentation(task, by_id, config)
     return {
         "profile": color.profile_marker(execution_profile_marker(task)),
-        "status": compact_table_status(status, color, narrow_table=narrow_table),
-        "attempts": scalar_cell(task.get("attempts", 0)),
+        "status": compact_table_status(projection, color, narrow_table=narrow_table),
         "title": task_title(task),
     }
 
 
-def compact_table_status(status: str, color: "ListColor", narrow_table: bool = False) -> str:
+def compact_table_status(projection: TaskListPresentation, color: "ListColor", narrow_table: bool = False) -> str:
     if not narrow_table:
-        return color.status(status)
-    label = COMPACT_TABLE_NARROW_STATUS_LABELS.get(status, status)
-    return color.status_marker(status) + color.status_label(label, status)
+        return color.projection_status(projection)
+    label = COMPACT_TABLE_NARROW_STATUS_LABELS.get(projection.legacy_status, projection.status_label)
+    if label == projection.status_label:
+        return color.projection_status(projection)
+    return color.projection_marker(projection) + color.status_label(label, projection.legacy_status)
 
 
 def project_section_header(project: str, terminal_width: int | None, color: "ListColor | None" = None) -> str:
@@ -1740,32 +1742,27 @@ def compact_widths(header: list[str], row_groups: list[dict[str, object]], termi
         [visible_len(header[0]), *(visible_len(str(group.get("profile") or "")) for group in row_groups)]
         or [visible_len(header[0])]
     )
-    deps = [cell for group in row_groups for cell in group["deps"]]  # type: ignore[index]
-    notes = [cell for group in row_groups for cell in group["notes"]]  # type: ignore[index]
+    details = [cell for group in row_groups for cell in group["details"]]  # type: ignore[index]
     titles = [
         str(group.get("title_prefix") or "") + str(group.get("title_value") or group.get("title") or "-")
         for group in row_groups
     ]
     title_min = max(visible_len(header[1]), COMPACT_TABLE_MIN_TITLE_WIDTH)
-    dep_min = max(visible_len(header[4]), COMPACT_TABLE_MIN_DEP_TITLE_WIDTH)
-    note_min = max(visible_len(header[5]), COMPACT_TABLE_MIN_NOTE_WRAP_WIDTH)
+    detail_min = max(visible_len(header[3]), COMPACT_TABLE_MIN_DETAIL_WIDTH)
     title_width = max([title_min, *(visible_len(str(title)) for title in titles)] or [title_min])
     status = compact_status_width(header, row_groups)
-    attempts = compact_attempt_width(header, row_groups)
-    dep_width = max([dep_min, *(visible_len(str(dep)) for dep in deps)] or [dep_min])
-    note_width = max([note_min, *(visible_len(str(note)) for note in notes)] or [note_min])
-    widths = [profile_width, title_width, status, attempts, dep_width, note_width]
+    detail_width = max([detail_min, *(visible_len(str(detail)) for detail in details)] or [detail_min])
+    widths = [profile_width, title_width, status, detail_width]
     if terminal_width is None:
         return widths
-    fixed = profile_width + status + attempts + (len(widths) - 1) * 2
+    fixed = profile_width + status + (len(widths) - 1) * 2
     available = max(3, terminal_width - fixed)
-    minimums = [title_min, dep_min, note_min]
+    minimums = [title_min, detail_min]
     minimums = compact_table_minimums_for_available(available, minimums)
-    desired = [title_width, dep_width, note_width]
-    title_share, deps_share, note_share = distribute_compact_widths(available, minimums, desired)
+    desired = [title_width, detail_width]
+    title_share, detail_share = distribute_compact_widths(available, minimums, desired)
     widths[1] = title_share
-    widths[4] = deps_share
-    widths[5] = note_share
+    widths[3] = detail_share
     return widths
 
 
@@ -1773,11 +1770,10 @@ def compact_table_minimums_for_available(available: int, preferred: list[int]) -
     widths = preferred.copy()
     floors = [
         min(widths[0], COMPACT_TABLE_FLOOR_TITLE_WIDTH),
-        min(widths[1], COMPACT_TABLE_FLOOR_DEP_TITLE_WIDTH),
-        min(widths[2], COMPACT_TABLE_FLOOR_NOTE_WRAP_WIDTH),
+        min(widths[1], COMPACT_TABLE_FLOOR_DETAIL_WIDTH),
     ]
     target = max(3, available)
-    for index in (2, 1, 0):
+    for index in (1, 0):
         if sum(widths) <= target:
             break
         widths[index] -= min(widths[index] - floors[index], sum(widths) - target)
@@ -1794,14 +1790,10 @@ def compact_status_width(header: list[str], row_groups: list[dict[str, object]])
     return column_width(header[2], [group["summary"] for group in row_groups], 0)
 
 
-def compact_attempt_width(header: list[str], row_groups: list[dict[str, object]]) -> int:
-    return column_width(header[3], [group["summary"] for group in row_groups], 1)
-
-
 def distribute_compact_widths(available: int, minimums: list[int], desired: list[int]) -> list[int]:
     widths = minimums.copy()
     extra = max(0, available - sum(widths))
-    weights = [2, 2, 1]
+    weights = [2, 2]
     while extra > 0:
         progressed = False
         for index in sorted(range(len(widths)), key=lambda item: -weights[item]):
@@ -1830,12 +1822,10 @@ def column_width(header: str, rows: list[object], index: int, cap: int | None = 
 
 
 def render_compact_group(group: dict[str, object], widths: list[int], terminal_width: int | None) -> list[str]:
-    deps = group["deps"] if isinstance(group["deps"], list) else ["-"]
-    notes = group["notes"] if isinstance(group["notes"], list) else ["-"]
-    dep_lines = [fit_dependency_title(str(dep), widths[4]) for dep in deps] or ["-"]
-    note_lines = wrap_cell_list([str(note) for note in notes], widths[5])
-    row_count = max(1, len(dep_lines), len(note_lines))
-    summary = group["summary"] if isinstance(group["summary"], list) else ["", ""]
+    details = group["details"] if isinstance(group["details"], list) else ["-"]
+    detail_lines = wrap_cell_list([str(detail) for detail in details], widths[3])
+    row_count = max(1, len(detail_lines))
+    summary = group["summary"] if isinstance(group["summary"], list) else [""]
     profile = str(group.get("profile") or "")
     title_prefix = str(group.get("title_prefix") or "")
     title_continuation_prefix = str(group.get("title_continuation_prefix") or "")
@@ -1849,9 +1839,7 @@ def render_compact_group(group: dict[str, object], widths: list[int], terminal_w
                     fit_visible(profile, widths[0]) if index == 0 else "",
                     title_lines[index] if index < len(title_lines) else "",
                     fit_visible(str(summary[0]), widths[2]) if index == 0 else "",
-                    fit_visible(str(summary[1]), widths[3]) if index == 0 else "",
-                    dep_lines[index] if index < len(dep_lines) else "",
-                    note_lines[index] if index < len(note_lines) else "",
+                    detail_lines[index] if index < len(detail_lines) else "",
                 ],
                 widths,
             )
@@ -1891,7 +1879,6 @@ def render_compact_block_list(
             block_rows = [
                 ("[P]", str(group.get("profile") or "-")),
                 ("STATUS", str(summary[0])),
-                ("ATT", str(summary[1])),
                 (
                     "TITLE",
                     str(group.get("title_value") or group.get("title") or "-"),
@@ -1899,10 +1886,8 @@ def render_compact_block_list(
                     str(group.get("title_continuation_prefix") or ""),
                 ),
             ]
-            deps = group["deps"] if isinstance(group["deps"], list) else ["-"]
-            notes = group["notes"] if isinstance(group["notes"], list) else ["-"]
-            block_rows.extend(("DEPS", str(dep)) for dep in deps)
-            block_rows.extend(("NOTE", str(note)) for note in notes)
+            details = group["details"] if isinstance(group["details"], list) else ["-"]
+            block_rows.extend(("DETAIL", str(detail)) for detail in details)
             lines.extend(render_block_rows(block_rows, terminal_width))
     return "\n".join(lines)
 
@@ -1971,18 +1956,6 @@ def deps_cell(
     return ",".join(dependency_id_cell(str(dep_id), by_id, config, color) for dep_id in depends_on)
 
 
-def dependency_id_cells(depends_on: object, by_id: dict[str, dict], config: Config, color: "ListColor") -> list[str]:
-    if not isinstance(depends_on, list):
-        return []
-    return [dependency_id_cell(str(dep_id), by_id, config, color) for dep_id in depends_on]
-
-
-def dependency_title_cells(depends_on: object, by_id: dict[str, dict], config: Config, color: "ListColor") -> list[str]:
-    if not isinstance(depends_on, list):
-        return []
-    return [dependency_title_cell(str(dep_id), by_id, config, color) for dep_id in depends_on]
-
-
 def dependency_id_cell(dep_id: str, by_id: dict[str, dict], config: Config, color: "ListColor") -> str:
     dep = by_id.get(dep_id)
     state, style_status = dependency_display_state(dep, by_id, config)
@@ -2020,6 +1993,70 @@ def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config
 def note_cell(task: dict, by_id: dict[str, dict], config: Config, include_capacity: bool = True) -> str:
     notes = note_cells(task, by_id, config, include_capacity=include_capacity)
     return "; ".join(notes) if notes else "-"
+
+
+def detail_cells(task: dict, by_id: dict[str, dict], config: Config, include_capacity: bool = True) -> list[str]:
+    projection = task_list_presentation(task, by_id, config)
+    details: list[str] = []
+    append_unique_detail(details, projection.detail)
+    blocker_summary = projection_blocker_summary(projection, by_id)
+    if blocker_summary:
+        append_unique_detail(details, blocker_summary)
+    for note in note_cells(task, by_id, config, include_capacity=include_capacity):
+        if projection.kind == "capacity" and note.startswith("waiting for capacity:"):
+            continue
+        append_unique_detail(details, note)
+    return details or ["-"]
+
+
+def append_unique_detail(details: list[str], value: str) -> None:
+    normalized = str(value or "").strip()
+    if not normalized or normalized == "-":
+        return
+    if normalized not in details:
+        details.append(normalized)
+
+
+def projection_blocker_summary(projection: TaskListPresentation, by_id: dict[str, dict]) -> str:
+    blockers = projection.blockers
+    if not blockers:
+        return ""
+    if projection.kind == "dep":
+        return dependency_projection_blocker_summary(blockers, by_id)
+    if projection.kind == "capacity":
+        reasons = [str(blocker.get("reason") or "").strip() for blocker in blockers if blocker.get("reason")]
+        return "blocked by " + ", ".join(reasons) if reasons else ""
+    if len(blockers) == 1:
+        return generic_projection_blocker_label(blockers[0], by_id)
+    return f"{len(blockers)} blockers: {generic_projection_blocker_label(blockers[0], by_id)}"
+
+
+def dependency_projection_blocker_summary(blockers: list[dict[str, str]], by_id: dict[str, dict]) -> str:
+    if not blockers:
+        return ""
+    first = dependency_projection_blocker_label(blockers[0], by_id)
+    if len(blockers) == 1:
+        return "blocked by " + first
+    return f"{len(blockers)} dependency blockers: {first}"
+
+
+def dependency_projection_blocker_label(blocker: dict[str, str], by_id: dict[str, dict]) -> str:
+    dep_id = str(blocker.get("id") or "")
+    title = dependency_label(dep_id, by_id) if dep_id else "dependency"
+    reason = str(blocker.get("reason") or "blocked")
+    return f"{title} ({reason})"
+
+
+def generic_projection_blocker_label(blocker: dict[str, str], by_id: dict[str, dict]) -> str:
+    blocker_type = str(blocker.get("type") or "blocker")
+    blocker_id = str(blocker.get("id") or "")
+    reason = str(blocker.get("reason") or blocker.get("status") or "").strip()
+    if blocker_type == "dependency":
+        return dependency_projection_blocker_label(blocker, by_id)
+    if blocker_id:
+        label = dependency_label(blocker_id, by_id)
+        return f"{label} ({reason})" if reason else label
+    return reason or blocker_type
 
 
 def note_cells(task: dict, by_id: dict[str, dict], config: Config, include_capacity: bool = True) -> list[str]:
@@ -2693,6 +2730,15 @@ class ListColor:
     def status(self, status: str) -> str:
         return self.status_marker(status) + self.status_label(status, status)
 
+    def projection_status(self, projection: TaskListPresentation) -> str:
+        return self.projection_marker(projection) + self.status_label(projection.kind, projection.legacy_status)
+
+    def projection_marker(self, projection: TaskListPresentation) -> str:
+        marker = projection.status_label[:2]
+        if not self.enabled:
+            return marker
+        return self.apply(marker, self.STATUS_MARKER_STYLES.get(projection.legacy_status, self.STATUS_MARKER_NEUTRAL))
+
     def status_label(self, label: str, status: str) -> str:
         style = self.ACTIVE_STATUS_STYLES.get(status) or self.PASSIVE_STATUS_STYLES.get(status) or self.BG_PASSIVE_WHITE
         return self.apply(label, style)
@@ -2770,21 +2816,6 @@ def fit_dependency_identifier(value: str, width: int) -> str:
             if base_width >= 4:
                 return fit_middle_visible(base, base_width) + suffix
     return fit_middle_visible(value, width)
-
-
-def fit_dependency_title(value: str, width: int) -> str:
-    if visible_len(value) <= width:
-        return value
-    if "\033[" in value:
-        return fit_visible(value, width)
-    for separator in (" (",):
-        if separator in value:
-            base, suffix = value.rsplit(separator, 1)
-            suffix = separator + suffix
-            base_width = max(1, width - visible_len(suffix))
-            if base_width >= 4:
-                return fit_visible(base, base_width) + suffix
-    return fit_visible(value, width)
 
 
 def truncate_visible(value: str, width: int) -> str:
