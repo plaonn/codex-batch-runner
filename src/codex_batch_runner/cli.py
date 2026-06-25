@@ -1535,7 +1535,7 @@ def render_compact_list(
     terminal_width: int | None = None,
     include_capacity: bool = True,
 ) -> str:
-    header = ["TITLE", "STATUS", "ATT", "DEPS", "NOTE"]
+    header = ["[P]", "TITLE", "STATUS", "ATT", "DEPS", "NOTE"]
     if terminal_width is not None and terminal_width < COMPACT_TABLE_BLOCK_LAYOUT_WIDTH:
         project_groups = compact_project_groups(tasks, by_id, config, color, include_capacity=include_capacity)
         return render_compact_block_list(project_groups, terminal_width, color)
@@ -1658,8 +1658,8 @@ def tree_prefix(ancestors: list[bool]) -> str:
 
 def compact_group_title(task: dict, color: "ListColor", tree_prefix: str) -> str:
     if not tree_prefix:
-        return styled_compact_title(task, color)
-    return color.dim_text(tree_prefix) + styled_compact_title(task, color, dim_title=True)
+        return styled_task_title(task, color)
+    return color.dim_text(tree_prefix) + styled_task_title(task, color, dim_title=True)
 
 
 def compact_task_group(
@@ -1675,16 +1675,14 @@ def compact_task_group(
     deps = dependency_title_cells(task.get("depends_on"), by_id, config, color)
     note_segments = note_cells(task, by_id, config, include_capacity=include_capacity)
     return {
-        "summary": [
-            cells["status"],
-            cells["attempts"],
-        ],
+        "profile": cells["profile"],
+        "summary": [cells["status"], cells["attempts"]],
         "deps": deps or ["-"],
         "notes": note_segments or ["-"],
         "title": compact_group_title(task, color, tree_prefix),
         "title_prefix": color.dim_text(tree_prefix) if tree_prefix else "",
         "title_continuation_prefix": color.dim_text(tree_continuation_prefix(tree_prefix)) if tree_prefix else "",
-        "title_value": styled_compact_title(task, color, dim_title=bool(tree_prefix)),
+        "title_value": styled_task_title(task, color, dim_title=bool(tree_prefix)),
     }
 
 
@@ -1697,9 +1695,10 @@ def task_display_cells(
 ) -> dict[str, str]:
     status = status_cell(task, by_id, config)
     return {
+        "profile": color.profile_marker(execution_profile_marker(task)),
         "status": compact_table_status(status, color, narrow_table=narrow_table),
         "attempts": scalar_cell(task.get("attempts", 0)),
-        "title": compact_title(task),
+        "title": task_title(task),
     }
 
 
@@ -1723,33 +1722,36 @@ def project_section_header(project: str, terminal_width: int | None, color: "Lis
 
 
 def compact_widths(header: list[str], row_groups: list[dict[str, object]], terminal_width: int | None) -> list[int]:
-    summary_rows = [group["summary"] for group in row_groups]
+    profile_width = max(
+        [visible_len(header[0]), *(visible_len(str(group.get("profile") or "")) for group in row_groups)]
+        or [visible_len(header[0])]
+    )
     deps = [cell for group in row_groups for cell in group["deps"]]  # type: ignore[index]
     notes = [cell for group in row_groups for cell in group["notes"]]  # type: ignore[index]
     titles = [
         str(group.get("title_prefix") or "") + str(group.get("title_value") or group.get("title") or "-")
         for group in row_groups
     ]
-    title_min = max(visible_len(header[0]), COMPACT_TABLE_MIN_TITLE_WIDTH)
-    dep_min = max(visible_len(header[3]), COMPACT_TABLE_MIN_DEP_TITLE_WIDTH)
-    note_min = max(visible_len(header[4]), COMPACT_TABLE_MIN_NOTE_WRAP_WIDTH)
+    title_min = max(visible_len(header[1]), COMPACT_TABLE_MIN_TITLE_WIDTH)
+    dep_min = max(visible_len(header[4]), COMPACT_TABLE_MIN_DEP_TITLE_WIDTH)
+    note_min = max(visible_len(header[5]), COMPACT_TABLE_MIN_NOTE_WRAP_WIDTH)
     title_width = max([title_min, *(visible_len(str(title)) for title in titles)] or [title_min])
     status = compact_status_width(header, row_groups)
     attempts = compact_attempt_width(header, row_groups)
     dep_width = max([dep_min, *(visible_len(str(dep)) for dep in deps)] or [dep_min])
     note_width = max([note_min, *(visible_len(str(note)) for note in notes)] or [note_min])
-    widths = [title_width, status, attempts, dep_width, note_width]
+    widths = [profile_width, title_width, status, attempts, dep_width, note_width]
     if terminal_width is None:
         return widths
-    fixed = status + attempts + (len(widths) - 1) * 2
+    fixed = profile_width + status + attempts + (len(widths) - 1) * 2
     available = max(3, terminal_width - fixed)
     minimums = [title_min, dep_min, note_min]
     minimums = compact_table_minimums_for_available(available, minimums)
     desired = [title_width, dep_width, note_width]
     title_share, deps_share, note_share = distribute_compact_widths(available, minimums, desired)
-    widths[0] = title_share
-    widths[3] = deps_share
-    widths[4] = note_share
+    widths[1] = title_share
+    widths[4] = deps_share
+    widths[5] = note_share
     return widths
 
 
@@ -1775,11 +1777,11 @@ def compact_table_minimums_for_available(available: int, preferred: list[int]) -
 
 
 def compact_status_width(header: list[str], row_groups: list[dict[str, object]]) -> int:
-    return column_width(header[1], [group["summary"] for group in row_groups], 0)
+    return column_width(header[2], [group["summary"] for group in row_groups], 0)
 
 
 def compact_attempt_width(header: list[str], row_groups: list[dict[str, object]]) -> int:
-    return column_width(header[2], [group["summary"] for group in row_groups], 1)
+    return column_width(header[3], [group["summary"] for group in row_groups], 1)
 
 
 def distribute_compact_widths(available: int, minimums: list[int], desired: list[int]) -> list[int]:
@@ -1816,22 +1818,24 @@ def column_width(header: str, rows: list[object], index: int, cap: int | None = 
 def render_compact_group(group: dict[str, object], widths: list[int], terminal_width: int | None) -> list[str]:
     deps = group["deps"] if isinstance(group["deps"], list) else ["-"]
     notes = group["notes"] if isinstance(group["notes"], list) else ["-"]
-    dep_lines = [fit_dependency_title(str(dep), widths[3]) for dep in deps] or ["-"]
-    note_lines = wrap_cell_list([str(note) for note in notes], widths[4])
+    dep_lines = [fit_dependency_title(str(dep), widths[4]) for dep in deps] or ["-"]
+    note_lines = wrap_cell_list([str(note) for note in notes], widths[5])
     row_count = max(1, len(dep_lines), len(note_lines))
     summary = group["summary"] if isinstance(group["summary"], list) else ["", ""]
+    profile = str(group.get("profile") or "")
     title_prefix = str(group.get("title_prefix") or "")
     title_continuation_prefix = str(group.get("title_continuation_prefix") or "")
     title_value = str(group.get("title_value") or group.get("title") or "-")
-    title_lines = fit_title_lines(title_value, widths[0], row_count, title_prefix, title_continuation_prefix)
+    title_lines = fit_title_lines(title_value, widths[1], row_count, title_prefix, title_continuation_prefix)
     lines = []
     for index in range(row_count):
         lines.append(
             render_compact_row(
                 [
+                    fit_visible(profile, widths[0]) if index == 0 else "",
                     title_lines[index] if index < len(title_lines) else "",
-                    fit_visible(str(summary[0]), widths[1]) if index == 0 else "",
-                    fit_visible(str(summary[1]), widths[2]) if index == 0 else "",
+                    fit_visible(str(summary[0]), widths[2]) if index == 0 else "",
+                    fit_visible(str(summary[1]), widths[3]) if index == 0 else "",
                     dep_lines[index] if index < len(dep_lines) else "",
                     note_lines[index] if index < len(note_lines) else "",
                 ],
@@ -1871,6 +1875,7 @@ def render_compact_block_list(
                 lines.append("")
             summary = group["summary"] if isinstance(group["summary"], list) else ["-", "-"]
             block_rows = [
+                ("[P]", str(group.get("profile") or "-")),
                 ("STATUS", str(summary[0])),
                 ("ATT", str(summary[1])),
                 (
@@ -2197,6 +2202,11 @@ def styled_compact_title(task: dict, color: "ListColor", *, dim_title: bool = Fa
     if dim_title:
         title = color.dim_text(title)
     return f"{marker} {title}"
+
+
+def styled_task_title(task: dict, color: "ListColor", *, dim_title: bool = False) -> str:
+    title = task_title(task)
+    return color.dim_text(title) if dim_title else color.title(title)
 
 
 def execution_profile_marker(task: dict) -> str:

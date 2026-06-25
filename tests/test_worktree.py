@@ -687,7 +687,7 @@ class WorktreeTests(unittest.TestCase):
             self.assertFalse(bundle["task_worktree"]["path_exists"])
             self.assertEqual("discard", bundle["task_worktree"]["metadata"]["cleanup_kind"])
             self.assertEqual(0, list_code)
-            self.assertIn("[N] work", list_output)
+            self.assertIn("[N]  work", list_output)
             self.assertIn("resolved", list_output)
             self.assertIn("resolved: superseded", list_output)
             self.assertEqual(0, doctor_code)
