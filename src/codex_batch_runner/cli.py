@@ -65,6 +65,11 @@ from .queue import (
 from .review_bundle import build_review_bundle, render_review_bundle
 from .review_followup import review_follow_up_note
 from .review_next import build_review_next_apply_report, build_review_next_report, render_review_next_report
+from .routing_evaluation_report import (
+    DEFAULT_ROUTING_EVAL_REPORT_LIMIT,
+    build_routing_evaluation_report,
+    render_routing_evaluation_report,
+)
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, build_routing_report, render_routing_report
 from .runner import run_next
 from .state import (
@@ -254,6 +259,24 @@ def build_parser() -> argparse.ArgumentParser:
     routing_report.add_argument("--include-archived", action="store_true", help="include archived tasks")
     routing_report.add_argument("--json", action="store_true", help="print JSON")
     routing_report.set_defaults(func=cmd_routing_report)
+
+    routing_eval_report = sub.add_parser(
+        "routing-eval-report",
+        help="show bounded derived routing evaluation rows without mutating tasks",
+    )
+    routing_eval_report.add_argument("--project", dest="project_id", help="filter by project id")
+    routing_eval_report.add_argument("--project-root", help="filter by project root")
+    routing_eval_report.add_argument("--category", help="filter by category")
+    routing_eval_report.add_argument("--label", help="filter by label")
+    routing_eval_report.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_ROUTING_EVAL_REPORT_LIMIT,
+        help=f"maximum recent tasks to include after filtering; 0 means no limit (default: {DEFAULT_ROUTING_EVAL_REPORT_LIMIT})",
+    )
+    routing_eval_report.add_argument("--include-archived", action="store_true", help="include archived tasks")
+    routing_eval_report.add_argument("--json", action="store_true", help="print JSON")
+    routing_eval_report.set_defaults(func=cmd_routing_eval_report)
 
     logs = sub.add_parser("logs", help="show task log paths or log contents")
     logs.add_argument("task_id")
@@ -3234,6 +3257,26 @@ def cmd_routing_report(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_routing_report(report), end="")
+    return 0
+
+
+def cmd_routing_eval_report(config: Config, args: argparse.Namespace) -> int:
+    if args.limit < 0:
+        print("error: --limit must be non-negative", file=sys.stderr)
+        return 1
+    report = build_routing_evaluation_report(
+        config,
+        project_id=args.project_id,
+        project_root=normalized_path(args.project_root) if args.project_root else None,
+        category=args.category,
+        label=args.label,
+        limit=args.limit,
+        include_archived=args.include_archived,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_routing_evaluation_report(report), end="")
     return 0
 
 

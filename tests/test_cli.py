@@ -1660,6 +1660,125 @@ class CliTests(unittest.TestCase):
             self.assertEqual("", output)
             self.assertIn("--limit must be non-negative", stderr)
 
+    def test_routing_eval_report_json_returns_bounded_public_safe_rows_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            private_path = f"{tmp}/private/session-transcript.jsonl"
+            task = create_task(
+                config,
+                f"raw private prompt mentions {private_path}",
+                tmp,
+                task_id="eval-public-safe",
+                project_id="project-a",
+                category="implementation",
+                labels=["routing", "eval"],
+                routing_size="small",
+                routing_risk="low",
+                verification_scope=["unit"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            task["session_id"] = "session_abcdefghijklmnopqrstuvwxyz"
+            task["thread_id"] = "thread_abcdefghijklmnopqrstuvwxyz"
+            task["execution_worktree_path"] = private_path
+            task["last_result"] = {
+                "task_id": "eval-public-safe",
+                "status": "completed",
+                "summary": f"raw summary mentions {private_path}",
+                "changed_files": [private_path],
+                "verification": [f"python -m unittest {private_path}"],
+            }
+            task["reviewer_codex"] = {"decision": "pass", "confidence": "high"}
+            save_task(config, task)
+            task_path = config.queue_dir / "eval-public-safe.json"
+            before = task_path.read_text(encoding="utf-8")
+
+            code, output = run_cli(["--config", str(config_path), "routing-eval-report", "--json"])
+            after = task_path.read_text(encoding="utf-8")
+            report = json.loads(output)
+            serialized = json.dumps(report, sort_keys=True)
+            row = report["evaluation_rows"][0]
+
+            self.assertEqual(0, code)
+            self.assertEqual(before, after)
+            self.assertEqual(1, report["row_count"])
+            self.assertIn("request_fingerprint", row)
+            self.assertIn("task_vector", row)
+            self.assertIn("worker", row)
+            self.assertIn("reviewer", row)
+            self.assertIn("objective_checks", row)
+            self.assertIn("policy_usage", row)
+            self.assertNotIn("raw private prompt", serialized)
+            self.assertNotIn("raw summary mentions", serialized)
+            self.assertNotIn("session_abcdefghijklmnopqrstuvwxyz", serialized)
+            self.assertNotIn("thread_abcdefghijklmnopqrstuvwxyz", serialized)
+            self.assertNotIn(private_path, serialized)
+            self.assertFalse(report["privacy"]["raw_paths_included"])
+            self.assertFalse(row["privacy"]["raw_prompt_included"])
+
+    def test_routing_eval_report_filters_limit_and_hashes_project_root_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            for index, project_id, category, labels in (
+                (0, "project-a", "implementation", ["eval"]),
+                (1, "project-a", "docs", ["eval"]),
+                (2, "project-b", "implementation", ["other"]),
+            ):
+                task = create_task(
+                    config,
+                    "work",
+                    tmp,
+                    task_id=f"eval-filter-{index}",
+                    project_id=project_id,
+                    category=category,
+                    labels=labels,
+                )
+                task["status"] = "completed"
+                task["review_status"] = "accepted"
+                save_task(config, task)
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "routing-eval-report",
+                    "--project",
+                    "project-a",
+                    "--project-root",
+                    tmp,
+                    "--label",
+                    "eval",
+                    "--limit",
+                    "1",
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+            serialized = json.dumps(report, sort_keys=True)
+
+            self.assertEqual(0, code)
+            self.assertEqual(2, report["filtered_count"])
+            self.assertEqual(1, report["row_count"])
+            self.assertEqual("project-a", report["filters"]["project"])
+            self.assertTrue(report["filters"]["project_root_filter_applied"])
+            self.assertTrue(report["filters"]["project_root_hash"].startswith("sha256:"))
+            self.assertNotIn(tmp, serialized)
+            self.assertEqual("project-a", report["evaluation_rows"][0]["task_vector"]["project"]["project_id"])
+
+    def test_routing_eval_report_rejects_negative_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output, stderr = run_cli_with_stderr(
+                ["--config", str(config_path), "routing-eval-report", "--limit", "-1"]
+            )
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("--limit must be non-negative", stderr)
+
     def test_list_filters_by_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
