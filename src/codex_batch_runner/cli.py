@@ -83,13 +83,27 @@ from .worktree import (
 )
 
 WATCH_RESTART_MESSAGE = "cbr source changed since this watch started; restart watch to use updated code"
-COMPACT_TABLE_BLOCK_LAYOUT_WIDTH = 93
+COMPACT_TABLE_BLOCK_LAYOUT_WIDTH = 80
+COMPACT_TABLE_COMFORT_WIDTH = 93
 COMPACT_TABLE_MIN_TITLE_WIDTH = 30
 COMPACT_TABLE_MIN_DEP_TITLE_WIDTH = 26
 COMPACT_TABLE_MIN_NOTE_WRAP_WIDTH = 20
 COMPACT_TABLE_FLOOR_TITLE_WIDTH = 12
 COMPACT_TABLE_FLOOR_DEP_TITLE_WIDTH = 10
 COMPACT_TABLE_FLOOR_NOTE_WRAP_WIDTH = 8
+COMPACT_TABLE_NARROW_STATUS_LABELS = {
+    "accepted_unapplied": "accepted*",
+    "awaiting_review": "review",
+    "blocked_dependency": "dep_block",
+    "blocked_user": "blocked",
+    "needs_followup": "followup",
+    "needs_resume": "resume",
+    "review_needs_fix": "needs_fix",
+    "review_pass_pending": "review_pass",
+    "subtasks_blocked": "subs_block",
+    "usage_exhausted": "usage_out",
+    "waiting_subtasks": "wait_subs",
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1522,10 +1536,19 @@ def render_compact_list(
     include_capacity: bool = True,
 ) -> str:
     header = ["TITLE", "STATUS", "ATT", "DEPS", "NOTE"]
-    project_groups = compact_project_groups(tasks, by_id, config, color, include_capacity=include_capacity)
-    row_groups = [group for _, groups in project_groups for group in groups]
     if terminal_width is not None and terminal_width < COMPACT_TABLE_BLOCK_LAYOUT_WIDTH:
+        project_groups = compact_project_groups(tasks, by_id, config, color, include_capacity=include_capacity)
         return render_compact_block_list(project_groups, terminal_width, color)
+    narrow_table = terminal_width is not None and terminal_width < COMPACT_TABLE_COMFORT_WIDTH
+    project_groups = compact_project_groups(
+        tasks,
+        by_id,
+        config,
+        color,
+        include_capacity=include_capacity,
+        narrow_table=narrow_table,
+    )
+    row_groups = [group for _, groups in project_groups for group in groups]
     widths = compact_widths(header, row_groups, terminal_width)
     lines = [render_compact_row(header, widths)]
     for project, groups in project_groups:
@@ -1541,6 +1564,7 @@ def compact_project_groups(
     config: Config,
     color: "ListColor",
     include_capacity: bool = True,
+    narrow_table: bool = False,
 ) -> list[tuple[str, list[dict[str, object]]]]:
     grouped: dict[str, list[dict]] = {}
     project_order: list[str] = []
@@ -1561,6 +1585,7 @@ def compact_project_groups(
                     color,
                     tree_prefix=item["prefix"],
                     include_capacity=include_capacity,
+                    narrow_table=narrow_table,
                 )
                 for item in compact_tree_items(grouped[project], by_id)
             ],
@@ -1644,8 +1669,9 @@ def compact_task_group(
     color: "ListColor",
     tree_prefix: str = "",
     include_capacity: bool = True,
+    narrow_table: bool = False,
 ) -> dict[str, object]:
-    cells = task_display_cells(task, by_id, config, color)
+    cells = task_display_cells(task, by_id, config, color, narrow_table=narrow_table)
     deps = dependency_title_cells(task.get("depends_on"), by_id, config, color)
     note_segments = note_cells(task, by_id, config, include_capacity=include_capacity)
     return {
@@ -1662,12 +1688,26 @@ def compact_task_group(
     }
 
 
-def task_display_cells(task: dict, by_id: dict[str, dict], config: Config, color: "ListColor") -> dict[str, str]:
+def task_display_cells(
+    task: dict,
+    by_id: dict[str, dict],
+    config: Config,
+    color: "ListColor",
+    narrow_table: bool = False,
+) -> dict[str, str]:
+    status = status_cell(task, by_id, config)
     return {
-        "status": color.status(status_cell(task, by_id, config)),
+        "status": compact_table_status(status, color, narrow_table=narrow_table),
         "attempts": scalar_cell(task.get("attempts", 0)),
         "title": compact_title(task),
     }
+
+
+def compact_table_status(status: str, color: "ListColor", narrow_table: bool = False) -> str:
+    if not narrow_table:
+        return color.status(status)
+    label = COMPACT_TABLE_NARROW_STATUS_LABELS.get(status, status)
+    return color.status_marker(status) + color.status_label(label, status)
 
 
 def project_section_header(project: str, terminal_width: int | None, color: "ListColor | None" = None) -> str:
@@ -1721,11 +1761,9 @@ def compact_table_minimums_for_available(available: int, preferred: list[int]) -
         min(widths[2], COMPACT_TABLE_FLOOR_NOTE_WRAP_WIDTH),
     ]
     target = max(3, available)
-    while sum(widths) > target:
-        candidates = [index for index, width in enumerate(widths) if width > floors[index]]
-        if not candidates:
+    for index in (2, 1, 0):
+        if sum(widths) <= target:
             break
-        index = max(candidates, key=lambda item: widths[item] - floors[item])
         widths[index] -= min(widths[index] - floors[index], sum(widths) - target)
     while sum(widths) > target:
         candidates = [index for index, width in enumerate(widths) if width > 1]

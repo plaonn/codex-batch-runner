@@ -2725,7 +2725,7 @@ class CliTests(unittest.TestCase):
                 depends_on=["dependency-with-a-long-readable-id"],
             )
 
-            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=92):
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=79):
                 code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
 
             self.assertEqual(0, code)
@@ -2737,7 +2737,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("TITLE:", output)
             self.assertIn("DEPS:", output)
             self.assertIn("NOTE:", output)
-            self.assertTrue(all(width <= 92 for width in visible_line_widths(output)))
+            self.assertTrue(all(width <= 79 for width in visible_line_widths(output)))
 
     def test_list_uses_table_layout_at_fixed_width_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2745,14 +2745,14 @@ class CliTests(unittest.TestCase):
             config = Config.load(str(config_path))
             create_task(config, "Table title", tmp, task_id="task", project_id="project-a")
 
-            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=93):
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=80):
                 code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
 
             self.assertEqual(0, code)
             self.assertEqual(["TITLE", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
             self.assertIn("[project-a]", output)
             self.assertIn("[N] Table title", output)
-            self.assertTrue(all(width <= 93 for width in visible_line_widths(output)))
+            self.assertTrue(all(width <= 80 for width in visible_line_widths(output)))
 
     def test_list_table_layout_threshold_is_independent_of_row_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2768,13 +2768,14 @@ class CliTests(unittest.TestCase):
                 depends_on=["blocked-dep"],
             )
 
-            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=93):
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=80):
                 code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
 
             self.assertEqual(0, code)
             self.assertEqual(["TITLE", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
-            self.assertIn("blocked_dependency", output)
-            self.assertTrue(all(width <= 93 for width in visible_line_widths(output)))
+            self.assertIn("dep_block", output)
+            self.assertNotIn("STATUS:", output)
+            self.assertTrue(all(width <= 80 for width in visible_line_widths(output)))
 
     def test_list_mid_width_uses_dependency_titles_and_wraps_notes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2862,14 +2863,15 @@ class CliTests(unittest.TestCase):
             second_child["parent_task_id"] = "parent"
             save_task(config, second_child)
 
-            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=86):
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=79):
                 code, output = run_cli(["--config", str(config_path), "list", "--all", "--color=never"])
 
             self.assertEqual(0, code)
-            self.assertTrue(all(width <= 86 for width in visible_line_widths(output)))
-            self.assertIn("TITLE:  ├─ [N] Very long first child title that should wrap while keeping tree rails", output)
-            self.assertIn("        │  visible", output)
-            self.assertIn("TITLE:  └─ [N] Very long second child title that should keep its own wrapped guide", output)
+            self.assertTrue(all(width <= 79 for width in visible_line_widths(output)))
+            self.assertIn("TITLE:  ├─ [N] Very long first child title that should wrap while keeping tree", output)
+            self.assertIn("        │  rails visible", output)
+            self.assertIn("TITLE:  └─ [N] Very long second child title that should keep its own wrapped", output)
+            self.assertIn("           guide", output)
 
             with patch("codex_batch_runner.cli.compact_terminal_width", return_value=50):
                 code, output = run_cli(["--config", str(config_path), "list", "--all", "--color=never"])
