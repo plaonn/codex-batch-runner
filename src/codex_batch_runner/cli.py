@@ -57,6 +57,7 @@ from .queue import (
     task_title,
 )
 from .review_bundle import build_review_bundle, render_review_bundle
+from .review_followup import review_follow_up_note
 from .review_next import build_review_next_apply_report, build_review_next_report, render_review_next_report
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, build_routing_report, render_routing_report
 from .runner import run_next
@@ -2100,8 +2101,11 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config, include_capac
         if reviewer_note:
             notes.append(reviewer_note)
         notes.extend(completed_timing_notes(task))
+        follow_up_note = review_follow_up_note(task, by_id)
+        if follow_up_note:
+            notes.append(follow_up_note)
         chain_note = chain_note_cell(task)
-        if chain_note and not (reviewer_note and chain_note in reviewer_note):
+        if chain_note and not (reviewer_note and chain_note in reviewer_note) and not follow_up_note:
             notes.append(chain_note)
         worktree_note = worktree_apply_note(task)
         if worktree_note:

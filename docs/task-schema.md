@@ -122,7 +122,7 @@
 
 runner는 Codex 최종 응답이 `completed`이면 `review_status=unreviewed`를 설정함. 운영자나 관련 프로젝트의 Codex thread는 `cbr transcript`, `cbr show`, 필요한 테스트 결과를 확인한 뒤 `cbr accept` 또는 `cbr reject`로 진짜 완료 여부를 기록함.
 
-운영 모델상 `completed + unreviewed`, cleanup되지 않은 `completed + rejected`, `completed + needs_followup`, accepted-but-unapplied worktree task는 아직 처리해야 할 task로 봄. 기본 `cbr list`는 `archived`, applied worktree task, non-worktree `completed + accepted`, discard cleanup이 완료된 rejected worktree task를 숨기고, 검토가 끝나지 않았거나 integration target에 아직 반영되지 않은 completed task는 기본 출력에 표시함. Discard cleanup된 rejected worktree task도 내부 `review_status=rejected`는 유지하므로 routing-report와 모델 평가에서는 rejected outcome으로 집계됨.
+운영 모델상 `completed + unreviewed`, cleanup되지 않은 `completed + rejected`, `completed + needs_followup`, accepted-but-unapplied worktree task는 아직 처리해야 할 task로 봄. 기본 `cbr list`는 `archived`, applied worktree task, non-worktree `completed + accepted`, discard cleanup이 완료된 rejected worktree task를 숨기고, 검토가 끝나지 않았거나 integration target에 아직 반영되지 않은 completed task는 기본 출력에 표시함. `completed + needs_followup`은 후속 task가 연결되지 않았으면 create/link follow-up 또는 explicit `resolve`가 다음 action으로 표시되고, 연결된 follow-up task가 있으면 active/review-needed/accepted/blocked 상태를 기준으로 다음 action이 표시됨. Discard cleanup된 rejected worktree task도 내부 `review_status=rejected`는 유지하므로 routing-report와 모델 평가에서는 rejected outcome으로 집계됨.
 
 
 ## Project routing metadata

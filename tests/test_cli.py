@@ -1747,9 +1747,47 @@ class CliTests(unittest.TestCase):
             self.assertEqual("discarded", all_rows["discarded"]["STATUS"])
             self.assertEqual("rejected; discarded; not applied", all_rows["discarded"]["NOTE"])
             self.assertEqual("needs_followup", rows["needs-followup"]["STATUS"])
-            self.assertEqual("-", rows["needs-followup"]["NOTE"])
+            self.assertIn("needs follow-up: create/link fix or resolve", rows["needs-followup"]["NOTE"])
             self.assertNotIn("accepted", rows)
             self.assertNotIn("archived", rows)
+
+    def test_needs_followup_reports_next_action_for_unlinked_and_accepted_followup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            parent = create_task(config, "parent work", tmp, task_id="parent")
+            parent["status"] = "completed"
+            parent["review_status"] = "needs_followup"
+            parent["chain_status"] = "needs_fix"
+            save_task(config, parent)
+            fix = create_task(config, "fix work", tmp, task_id="fix")
+            fix["status"] = "completed"
+            fix["review_status"] = "accepted"
+            fix["parent_task_id"] = "parent"
+            fix["subtask_for"] = "parent"
+            save_task(config, fix)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--color=never"])
+            summary_code, summary_output = run_cli(["--config", str(config_path), "summary", "parent"])
+            review_code, review_output = run_cli(["--config", str(config_path), "review-next", "--dry-run", "--json"])
+            review_report = json.loads(review_output)
+            text_code, text_output = run_cli(["--config", str(config_path), "review-next", "--dry-run"])
+
+            self.assertEqual(0, code)
+            rows = {row["ID"]: row for row in compact_list_rows(output)}
+            self.assertEqual("needs_followup", rows["parent-work"]["STATUS"])
+            self.assertIn("follow-up fix accepted; resolve original", rows["parent-work"]["NOTE"])
+            self.assertEqual(0, summary_code)
+            self.assertIn("follow_up_state: accepted", summary_output)
+            self.assertIn("follow_up_next_action: verify the accepted follow-up covers", summary_output)
+            self.assertIn('cbr resolve parent --resolution superseded --reason "handled by follow-up task"', summary_output)
+            self.assertIn("- fix state=accepted status=completed review_status=accepted", summary_output)
+            self.assertEqual(0, review_code)
+            self.assertEqual("accepted", review_report["follow_up_action"]["state"])
+            self.assertEqual(["fix"], review_report["follow_up_action"]["linked_task_ids"])
+            self.assertEqual(0, text_code)
+            self.assertIn("follow_up_action: accepted", text_output)
+            self.assertIn('resolve: cbr resolve parent --resolution superseded --reason "handled by follow-up task"', text_output)
 
     def test_list_review_filters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

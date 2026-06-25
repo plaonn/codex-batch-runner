@@ -11,6 +11,7 @@ from .queue import (
     task_project_root,
     task_title,
 )
+from .review_followup import build_review_follow_up_action
 from .transcript import sanitize
 from .worktree import task_worktree_metadata
 
@@ -43,6 +44,7 @@ def render_task_summary(
     append_routing_summary(lines, task)
     append_counters(lines, task)
     append_chain_summary(lines, task)
+    append_review_follow_up_summary(lines, task, by_id)
     if task.get("cooldown_until") or is_in_cooldown(task):
         lines.append(f"cooldown_until: {task.get('cooldown_until')}")
     if task.get("resolution"):
@@ -153,6 +155,27 @@ def append_chain_summary(lines: list[str], task: dict) -> None:
             fields.append(f"{key}={sanitize(value)}")
     if fields:
         lines.append("chain: " + ", ".join(fields))
+
+
+def append_review_follow_up_summary(lines: list[str], task: dict, by_id: dict[str, dict] | None) -> None:
+    action = build_review_follow_up_action(task, by_id)
+    if not action:
+        return
+    lines.append(f"follow_up_state: {sanitize(action.get('state'))}")
+    lines.append(f"follow_up_next_action: {sanitize(action.get('next_action'))}")
+    if action.get("resolution_command"):
+        lines.append(f"follow_up_resolution_command: {sanitize(action.get('resolution_command'))}")
+    linked_tasks = action.get("linked_tasks") if isinstance(action.get("linked_tasks"), list) else []
+    if linked_tasks:
+        lines.append("follow_up_linked_tasks:")
+        for item in linked_tasks:
+            lines.append(
+                "- "
+                + sanitize(
+                    f"{item.get('id')} state={item.get('state')} "
+                    f"status={item.get('status') or '-'} review_status={item.get('review_status') or '-'}"
+                )
+            )
 
 
 def append_execution_profile_summary(lines: list[str], task: dict) -> None:

@@ -24,6 +24,7 @@ from .queue import (
     truncate_text,
 )
 from .review_bundle import build_review_bundle, sanitize_value
+from .review_followup import build_review_follow_up_action
 from .reviewer_codex import reviewer_clear_pass, run_reviewer_codex
 from .state import in_global_cooldown, in_reviewer_codex_cooldown, is_runner_paused, mark_reviewer_codex_rate_limit
 from .summary import review_status
@@ -358,6 +359,7 @@ def review_report_for_task(
         },
         "worktree_report": bundle.get("task_worktree"),
         "review_status": review_status(task),
+        "follow_up_action": build_review_follow_up_action(task, by_id),
         "chain": chain_metadata(task),
         "auto_fix_planner": build_auto_fix_planner_report(config, task, gates),
         "bundle": concise_bundle(bundle),
@@ -387,6 +389,7 @@ def no_selection_report(
         "gates": [],
         "dependencies": None,
         "review_status": None,
+        "follow_up_action": None,
         "chain": None,
         "bundle": None,
         "mutated": False,
@@ -1801,6 +1804,16 @@ def render_review_next_report(report: dict[str, Any]) -> str:
     skipped = report.get("skipped_review_candidates") if isinstance(report.get("skipped_review_candidates"), list) else []
     if skipped:
         lines.append(f"skipped_review_candidates: {len(skipped)}")
+    follow_up_action = report.get("follow_up_action") if isinstance(report.get("follow_up_action"), dict) else {}
+    if follow_up_action:
+        lines.extend(
+            [
+                f"follow_up_action: {follow_up_action.get('state')}",
+                f"- next: {follow_up_action.get('next_action')}",
+            ]
+        )
+        if follow_up_action.get("resolution_command"):
+            lines.append(f"- resolve: {follow_up_action.get('resolution_command')}")
     chain = report.get("chain") if isinstance(report.get("chain"), dict) else {}
     if chain:
         parts = [
