@@ -17,6 +17,7 @@ from .apply_plan import apply_queue_mutation_plan, build_apply_plan_report, rend
 from .config import Config
 from .cooldown import MANUAL_COOLDOWN_SAFETY_OFFSET_SECONDS, cooldown_status, format_duration, parse_manual_cooldown
 from .doctor import build_doctor_report, render_doctor_report
+from .direct_worktrees import build_direct_worktrees_report, render_direct_worktrees_report
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write_event_nonfatal
 from .execution_profiles import config_overrides_value
 from .evidence import list_rate_limit_evidence
@@ -359,6 +360,12 @@ def build_parser() -> argparse.ArgumentParser:
     codex_cli_mode.add_argument("--apply", action="store_true", help="pause admissions, run update and smoke, then clear pause")
     codex_cli.add_argument("--json", action="store_true", help="print JSON")
     codex_cli.set_defaults(func=cmd_maintenance_codex_cli)
+    direct_worktrees = maintenance_sub.add_parser("direct-worktrees", help="audit or cleanup eligible direct operator worktrees")
+    direct_worktrees_mode = direct_worktrees.add_mutually_exclusive_group()
+    direct_worktrees_mode.add_argument("--dry-run", action="store_true", help="report eligible and blocked direct worktrees; this is the default")
+    direct_worktrees_mode.add_argument("--apply", action="store_true", help="remove eligible direct worktrees and delete merged local branches")
+    direct_worktrees.add_argument("--json", action="store_true", help="print JSON")
+    direct_worktrees.set_defaults(func=cmd_maintenance_direct_worktrees)
 
     prune = sub.add_parser("prune", help="report or remove old archived and accepted tasks")
     prune.add_argument(
@@ -3560,6 +3567,19 @@ def cmd_maintenance_codex_cli(config: Config, args: argparse.Namespace) -> int:
     else:
         print(render_codex_cli_maintenance_report(report), end="")
     return 0 if report.get("status") in {"ready", "succeeded"} else 1
+
+
+def cmd_maintenance_direct_worktrees(config: Config, args: argparse.Namespace) -> int:
+    report = build_direct_worktrees_report(config, apply=args.apply)
+    if args.json:
+        print(dump_json(report), end="")
+    else:
+        print(render_direct_worktrees_report(report), end="")
+    if report.get("errors"):
+        return 1
+    if args.apply and report.get("status") in {"failed", "partial"}:
+        return 1
+    return 0
 
 
 def cmd_prune(config: Config, args: argparse.Namespace) -> int:

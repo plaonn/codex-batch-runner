@@ -119,6 +119,23 @@ Cleanup and retention:
 - Branch pruning guard는 branch name이 Git ref validation을 통과하고 local `cbr/*` task branch namespace 안에 있으며 task id에서 산출한 sanitized branch와 일치하는지 확인합니다. `main`, `master`, `develop`, `release/*`, `origin/*`, configured apply/base target과 일치하는 branch, current checked-out branch, non-cbr branch는 거부합니다. Git worktree registry에서 해당 branch가 checkout된 곳이 있으면 거부합니다. Local branch가 이미 없으면 no-op report state로 처리하고 destructive path로 보지 않습니다.
 - Branch pruning은 가능한 경우 branch `HEAD`를 expected head metadata(`execution_applied_head`, fallback `execution_branch_head` 또는 `execution_rebased_head`)와 비교합니다. Reliable expected head가 없거나 현재 local branch `HEAD`가 expected head와 다르면 거부합니다. 성공 시 `execution_branch_prune_status=pruned`, `execution_branch_pruned_at`, `execution_branch_prune_reason`, `execution_branch_pruned_head`, `execution_cleanup_branch_retained=false`를 task metadata에 기록하고 sanitized `task_worktree_branch_pruned` event를 남깁니다.
 
+## Direct operator worktree maintenance
+
+Direct operator worktree는 cbr task JSON으로 생성/소유되지 않은 local git worktree입니다. 이 lifecycle은 task worktree lifecycle과 분리됩니다. Direct worktree cleanup은 task metadata를 만들거나 수정하지 않고, `.codex-batch-runner/` runtime state를 roadmap/dashboard처럼 사용하지 않습니다.
+
+`cbr maintenance direct-worktrees --dry-run|--apply|--json`는 current configured root repository의 git registry만 읽습니다.
+
+- Discovery는 `git worktree list --porcelain`에 등록된 worktree만 대상으로 하며 arbitrary filesystem glob를 scan하지 않습니다.
+- Main worktree와 configured `worktree_root` 아래 cbr task worktree는 제외합니다.
+- Initial allowlist는 local branch `codex/*`와 current repo sibling path 중 basename이 `<repo-name>-`로 시작하는 worktree입니다.
+- Allowlist 밖 branch/path는 cleanup 대상이 아니며 refused/blocked candidate로 보고합니다.
+- Allowlisted candidate는 target branch 기준 merged 여부와 dirty status로 `merged+clean`, `merged+dirty`, `unmerged+clean`, `unmerged+dirty` 중 하나로 분류합니다.
+- Cleanup eligibility는 `merged+clean`에만 부여됩니다.
+
+`--dry-run`은 eligible과 blocked/refused candidate를 보고만 합니다. `--apply`는 runner lock을 잡고 같은 discovery/classification을 다시 수행한 뒤, 여전히 eligible인 candidate만 `git worktree remove <path>`로 제거하고 local branch를 `git branch -d <branch>`로 삭제합니다. Dirty 또는 unmerged worktree는 삭제하지 않습니다. Force remove, `git branch -D`, fetch, pull, push, rebase, merge, cherry-pick은 이 command에서 실행하지 않습니다.
+
+Worktree removal이 성공했지만 branch deletion이 실패하면 result는 partial로 남고 branch는 수동 확인 대상으로 보고됩니다. Apply는 candidate별 sanitized event를 남기며 prompt text, raw logs, transcripts, session id, thread id, credentials, private operator notes를 event payload에 저장하지 않습니다.
+
 Stale worktree recovery and failure handling:
 
 - Worktree path가 존재하지만 Git registry에 없거나, registry에는 있으나 path가 없으면 `recovery_required`로 표시하고 raw execution을 중단합니다.
