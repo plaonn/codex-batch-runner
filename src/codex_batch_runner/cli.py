@@ -1174,24 +1174,47 @@ def dependency_graph_layout(source_nodes: list[dict], dependency_runs: dict[int,
         source_glyph_metadata[first_dep_index] = graph_prefix_glyph_metadata(
             prefixes[first_dep_index], node_color_indices[first_dep_index]
         )
-        for source_index in range(first_dep_index + 1, target_index):
-            prefix = "| *"
-            prefixes[source_index] = prefix + (" " * max(0, width - visible_len(prefix)))
-            source_glyph_metadata[source_index] = graph_prefix_glyph_metadata(
-                prefixes[source_index],
-                None,
-                {0: first_lane_color, 2: node_color_indices[source_index]},
+        if len(dep_indices) == 1:
+            for source_index in range(first_dep_index + 1, target_index):
+                prefix = "| *"
+                prefixes[source_index] = prefix + (" " * max(0, width - visible_len(prefix)))
+                source_glyph_metadata[source_index] = graph_prefix_glyph_metadata(
+                    prefixes[source_index],
+                    None,
+                    {0: first_lane_color, 2: node_color_indices[source_index]},
+                )
+            transition_prefix = "|"
+            transition_prefixes[target_index] = transition_prefix
+            transition_glyph_metadata[target_index] = graph_prefix_glyph_metadata(
+                transition_prefix,
+                first_lane_color,
             )
-        transition_prefix = " \\|"
-        transition_prefixes[target_index] = transition_prefix
-        transition_glyph_metadata[target_index] = graph_prefix_glyph_metadata(
-            transition_prefix,
-            None,
-            {1: first_lane_color, 2: node_color_indices[dep_indices[-1]]},
-        )
-        target_prefix = "  *"
-        prefixes[target_index] = target_prefix + (" " * max(0, width - visible_len(target_prefix)))
-        source_glyph_metadata[target_index] = graph_prefix_glyph_metadata(target_prefix, node_color_indices[target_index])
+            target_prefix = "*"
+            prefixes[target_index] = target_prefix + (" " * max(0, width - visible_len(target_prefix)))
+            source_glyph_metadata[target_index] = graph_prefix_glyph_metadata(
+                prefixes[target_index], node_color_indices[target_index]
+            )
+        else:
+            for source_index in range(first_dep_index + 1, target_index):
+                prefix = "| *"
+                prefixes[source_index] = prefix + (" " * max(0, width - visible_len(prefix)))
+                source_glyph_metadata[source_index] = graph_prefix_glyph_metadata(
+                    prefixes[source_index],
+                    None,
+                    {0: first_lane_color, 2: node_color_indices[source_index]},
+                )
+            transition_prefix = " \\|"
+            transition_prefixes[target_index] = transition_prefix
+            transition_glyph_metadata[target_index] = graph_prefix_glyph_metadata(
+                transition_prefix,
+                None,
+                {1: first_lane_color, 2: node_color_indices[dep_indices[-1]]},
+            )
+            target_prefix = "  *"
+            prefixes[target_index] = target_prefix + (" " * max(0, width - visible_len(target_prefix)))
+            source_glyph_metadata[target_index] = graph_prefix_glyph_metadata(
+                target_prefix, node_color_indices[target_index]
+            )
         for source_index in range(first_dep_index, target_index):
             source_continuation_prefixes[source_index] = graph_source_continuation_prefix(prefixes[source_index])
             source_continuation_glyph_metadata[source_index] = graph_source_continuation_glyph_metadata(

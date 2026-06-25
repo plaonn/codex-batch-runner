@@ -2206,7 +2206,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertIn("*       ..new  [N] Dependency source", output)
-            self.assertIn("  *     ##dep  [N] Dependent source", output)
+            self.assertIn("*       ##dep  [N] Dependent source", output)
             self.assertIn("*       ??review  [N] Review checkpoint", output)
             self.assertNotIn("runnable", output)
             self.assertNotIn("blocked_dependency", output)
@@ -2281,10 +2281,57 @@ class CliTests(unittest.TestCase):
             self.assertIn("*       ..new  [N] Very long", output)
             self.assertIn("|              title that should wrap", output)
             self.assertIn("|              under the dependency edge", output)
-            self.assertIn(" \\|", output)
-            self.assertIn("  *     ##dep  [N] Very", output)
+            self.assertIn("|", output)
+            self.assertIn("*       ##dep  [N] Very", output)
             self.assertIn("               that should wrap under the", output)
             self.assertIn("               source node", output)
+
+    def test_list_graph_renders_linear_dependency_chain_without_join_connectors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "Task A", tmp, task_id="task-a", project_id="project-a")
+            create_task(
+                config,
+                "Task B",
+                tmp,
+                task_id="task-b",
+                project_id="project-a",
+                depends_on=["task-a"],
+            )
+            create_task(
+                config,
+                "Task C",
+                tmp,
+                task_id="task-c",
+                project_id="project-a",
+                depends_on=["task-b"],
+            )
+            create_task(
+                config,
+                "Task D",
+                tmp,
+                task_id="task-d",
+                project_id="project-a",
+                depends_on=["task-c"],
+            )
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--graph"])
+
+            self.assertEqual(0, code)
+            self.assertNotIn(" \\|", output)
+            self.assertIn("*       ..new  [N] Task A", output)
+            self.assertIn("*       ##dep  [N] Task B", output)
+            self.assertIn("*       ##dep  [N] Task C", output)
+            self.assertIn("*       ##dep  [N] Task D", output)
+            self.assertNotIn("  *     [N]", output)
+            lines = [strip_ansi(line) for line in output.splitlines() if line.strip()]
+            node_lines = [line for line in lines if "[N] Task" in line]
+            self.assertEqual(4, len(node_lines))
+            star_positions = {line.index("*") for line in node_lines}
+            self.assertEqual(1, len(star_positions))
+            transitions = [line for line in lines if line.strip() == "|"]
+            self.assertGreaterEqual(len(transitions), 3)
 
     def test_list_graph_wraps_subtask_tree_and_dependency_rails_together(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
