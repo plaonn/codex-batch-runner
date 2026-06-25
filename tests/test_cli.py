@@ -2587,6 +2587,10 @@ class CliTests(unittest.TestCase):
             save_task(config, completed)
             create_task(config, "failed", tmp, task_id="failed")
             set_status(config, "failed", "failed")
+            create_task(config, "unknown", tmp, task_id="unknown")
+            unknown = load_task(config, "unknown")
+            unknown["status"] = "external_unknown"
+            save_task(config, unknown)
 
             code, never_output = run_cli(["--config", str(config_path), "list", "--color=never", "--all"])
             auto_code, auto_output = run_cli(["--config", str(config_path), "list", "--color=auto", "--all"])
@@ -2618,12 +2622,13 @@ class CliTests(unittest.TestCase):
             self.assertIn("\033[106;30mrunning\033[0m", always_output)
             self.assertIn("\033[100;92mcompleted\033[0m", always_output)
             self.assertIn("\033[101;97mfailed\033[0m", always_output)
+            self.assertIn("\033[100;97mexternal_unknown\033[0m", always_output)
             self.assertIn("\033[32m[N]\033[0m", always_output)
             self.assertIn("\033[101;97mfailed\033[0m", no_color_output)
             self.assertNotIn("\033[", auto_no_color_output)
             self.assertNotIn("\033[", json_output)
             self.assertEqual(
-                ["completed", "failed", "resume", "review", "runnable", "running"],
+                ["completed", "failed", "resume", "review", "runnable", "running", "unknown"],
                 sorted(task["id"] for task in json.loads(json_output)),
             )
 
