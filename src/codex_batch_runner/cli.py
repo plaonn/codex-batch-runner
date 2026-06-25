@@ -1337,9 +1337,9 @@ def render_dependency_graph_source_node(
     terminal_width: int | None = None,
 ) -> list[str]:
     plain_color = ListColor(False)
-    status_value = status_cell(task, by_id, config)
-    status = color.status(status_value)
-    plain_status = plain_color.status(status_value)
+    projection = task_list_presentation(task, by_id, config)
+    status = color.projection_status(projection)
+    plain_status = plain_color.projection_status(projection)
     branch_key = scalar_cell(task.get("id"))
     styled_prefix = format_dependency_graph_prefix(graph_prefix, graph_glyph_metadata or branch_key, color)
     plain_prefix = graph_prefix
@@ -1377,9 +1377,9 @@ def render_dependency_graph_child_row(
     terminal_width: int | None = None,
 ) -> list[str]:
     plain_color = ListColor(False)
-    status_value = status_cell(task, by_id, config)
-    status = color.status(status_value)
-    plain_status = plain_color.status(status_value)
+    projection = task_list_presentation(task, by_id, config)
+    status = color.projection_status(projection)
+    plain_status = plain_color.projection_status(projection)
     graph_gap = " " * 8 if graph_prefix is None else graph_prefix
     branch_key = scalar_cell(task.get("id"))
     graph_child_tree_prefix = graph_tree_prefix(tree_prefix)

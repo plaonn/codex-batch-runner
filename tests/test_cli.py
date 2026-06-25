@@ -1930,9 +1930,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual("unreviewed", json_tasks["needs-fix"]["review_status"])
             self.assertNotIn("review_needs_fix", json_output)
             self.assertNotIn("review_pass_pending", json_output)
-            self.assertIn("*       !!review_needs_fix  [N] needs-fix", graph_output)
-            self.assertIn("*       ??review_pass_pending  [N] pass", graph_output)
-            self.assertIn("*       !!review_failed  [N] failed-review", graph_output)
+            self.assertIn("*       ??fix  [N] needs-fix", graph_output)
+            self.assertIn("*       ??review  [N] pass", graph_output)
+            self.assertIn("*       ??error  [N] failed-review", graph_output)
             self.assertIn("\033[101;97mfix\033[0m", color_output)
             self.assertIn("\033[102;30mreview\033[0m", color_output)
             self.assertIn("\033[101;97merror\033[0m", color_output)
@@ -2171,18 +2171,48 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual(0, color_code)
             self.assertIn("[project-a]", output)
-            self.assertIn("*       ==completed  [N] Build shared parser", output)
-            self.assertIn("| *     ==completed  [N] Add parser tests", output)
+            self.assertIn("*       --success  [N] Build shared parser", output)
+            self.assertIn("| *     --success  [N] Add parser tests", output)
             self.assertIn(" \\|", output)
-            self.assertIn("  *     ..runnable  [N] Wire parser into CLI", output)
+            self.assertIn("  *     ..new  [N] Wire parser into CLI", output)
             assert_graph_connector_attaches(self, output, "Wire parser into CLI")
-            self.assertIn("*       ||waiting_subtasks  [N] Release CLI parser change", output)
-            self.assertIn("└─ ??awaiting_review  [N] Fix review comments for parser change", output)
-            self.assertNotIn("└─ * ??awaiting_review", output)
+            self.assertIn("*       ++followup  [N] Release CLI parser change", output)
+            self.assertIn("└─ ??review  [N] Fix review comments for parser change", output)
+            self.assertNotIn("└─ * ??review", output)
             self.assertNotIn("Build shared parser", strip_ansi(color_output).split("Wire parser into CLI", maxsplit=1)[1])
             self.assertIn("\033[2mFix review comments for parser change\033[0m", color_output)
             self.assertNotIn("\033[2mBuild shared parser\033[0m", color_output)
             self.assertNotIn("\033[2mAdd parser tests\033[0m", color_output)
+
+    def test_list_graph_uses_compact_projection_labels_without_inline_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "Dependency source", tmp, task_id="dep", project_id="project-a")
+            create_task(
+                config,
+                "Dependent source",
+                tmp,
+                task_id="child",
+                project_id="project-a",
+                depends_on=["dep"],
+            )
+            review = create_task(config, "Review checkpoint", tmp, task_id="review", project_id="project-a")
+            review["status"] = "completed"
+            review["review_status"] = "unreviewed"
+            save_task(config, review)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--graph", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertIn("*       ..new  [N] Dependency source", output)
+            self.assertIn("  *     ##dep  [N] Dependent source", output)
+            self.assertIn("*       ??review  [N] Review checkpoint", output)
+            self.assertNotIn("runnable", output)
+            self.assertNotIn("blocked_dependency", output)
+            self.assertNotIn("dependency blocked", output)
+            self.assertNotIn("awaiting review", output)
+            self.assertNotIn("DETAIL", output)
 
     def test_list_graph_renders_dependencies_as_git_style_edges(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2216,10 +2246,10 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("done-dep", output)
             self.assertNotIn("review-dep", output)
             self.assertNotIn("missing-dep", output)
-            self.assertIn("*       ==completed  [N] Done dependency", output)
-            self.assertIn("        └─ ||blocked_dependency  [N] Child work", output)
-            self.assertIn("*       ??awaiting_review  [N] Review dependency", output)
-            self.assertNotIn("└─ * ||blocked_dependency", output)
+            self.assertIn("*       --success  [N] Done dependency", output)
+            self.assertIn("        └─ ##dep  [N] Child work", output)
+            self.assertIn("*       ??review  [N] Review dependency", output)
+            self.assertNotIn("└─ * ##dep", output)
             self.assertNotIn("ATT", output)
             self.assertNotIn("note:", output)
 
@@ -2248,12 +2278,13 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
-            self.assertIn("*       ..runnable  [N] Very long", output)
-            self.assertIn("|                   should wrap under the", output)
+            self.assertIn("*       ..new  [N] Very long", output)
+            self.assertIn("|              title that should wrap", output)
+            self.assertIn("|              under the dependency edge", output)
             self.assertIn(" \\|", output)
-            self.assertIn("  *     ||blocked_dependency  [N] Very", output)
-            self.assertIn("                              long child", output)
-            self.assertIn("                              title that", output)
+            self.assertIn("  *     ##dep  [N] Very", output)
+            self.assertIn("               that should wrap under the", output)
+            self.assertIn("               source node", output)
 
     def test_list_graph_wraps_subtask_tree_and_dependency_rails_together(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2286,13 +2317,14 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 48 for width in visible_line_widths(output)))
-            self.assertIn("*       ..runnable  [N] Parent source task", output)
-            self.assertIn("           ├─ ||blocked_dependency  [N] Very", output)
-            self.assertIn("           │                        child", output)
-            self.assertIn("           └─ ..runnable  [N] Second child", output)
-            self.assertIn("*       ..runnable  [N] Very long dependency", output)
-            self.assertIn("                    under the dependency edge", output)
-            self.assertNotIn("├─ * ||blocked_dependency", output)
+            self.assertIn("*       ..new  [N] Parent source task", output)
+            self.assertIn("           ├─ ##dep  [N] Very", output)
+            self.assertIn("           │         source title that should", output)
+            self.assertIn("           │         wrap inside graph mode", output)
+            self.assertIn("           └─ ..new  [N] Second child", output)
+            self.assertIn("*       ..new  [N] Very long dependency", output)
+            self.assertIn("               dependency edge", output)
+            self.assertNotIn("├─ * ##dep", output)
 
     def test_list_graph_wraps_dependency_sibling_tree_continuations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2326,13 +2358,14 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 48 for width in visible_line_widths(output)))
-            self.assertIn("*       ..runnable  [N] Very long first", output)
-            self.assertIn("|                   should keep its sibling", output)
-            self.assertIn("|                   tree rail", output)
-            self.assertIn("| *     ..runnable  [N] Very long second", output)
-            self.assertIn("| |                 should keep its own wrapped", output)
+            self.assertIn("*       ..new  [N] Very long first", output)
+            self.assertIn("|              title that should keep its", output)
+            self.assertIn("|              sibling tree rail", output)
+            self.assertIn("| *     ..new  [N] Very long second", output)
+            self.assertIn("| |            title that should keep its own", output)
+            self.assertIn("| |            wrapped guide", output)
             self.assertIn(" \\|", output)
-            self.assertIn("  *     ||blocked_dependency  [N] Source task", output)
+            self.assertIn("  *     ##dep  [N] Source task", output)
 
     def test_list_graph_colors_nodes_and_dependency_lanes_from_glyph_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2371,7 +2404,7 @@ class CliTests(unittest.TestCase):
             plain_lines = [strip_ansi(line) for line in lines]
             dep1_line = next(line for line in lines if "Very long first" in strip_ansi(line))
             dep2_line = next(line for line in lines if "Very long second" in strip_ansi(line))
-            dep2_wrap_line = next(line for line in lines if "should keep its own wrapped" in strip_ansi(line))
+            dep2_wrap_line = next(line for line in lines if "title that should keep its own" in strip_ansi(line))
             target_line = next(line for line in lines if "Source task" in strip_ansi(line))
             target_index = plain_lines.index(strip_ansi(target_line))
             transition_line = lines[target_index - 1]
@@ -2432,15 +2465,15 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 42 for width in visible_line_widths(output)))
-            self.assertIn("*       ..runnable  [N] Very long parent", output)
-            self.assertIn("           │        subtask guide", output)
-            self.assertIn("           ├─ ..runnable  [N] Very long", output)
-            self.assertIn("           │              first child", output)
-            self.assertIn("           │              that should", output)
-            self.assertIn("           │              wrap inside", output)
-            self.assertIn("           └─ ..runnable  [N] Very long", output)
-            self.assertIn("                          wrapped guide", output)
-            self.assertNotIn("├─ * ..runnable", output)
+            self.assertIn("*       ..new  [N] Very long parent", output)
+            self.assertIn("           │   keep its subtask guide", output)
+            self.assertIn("           ├─ ..new  [N] Very long", output)
+            self.assertIn("           │         child source title", output)
+            self.assertIn("           │         that should wrap", output)
+            self.assertIn("           │         inside graph mode", output)
+            self.assertIn("           └─ ..new  [N] Very long", output)
+            self.assertIn("                     own wrapped guide", output)
+            self.assertNotIn("├─ * ..new", output)
 
     def test_list_graph_keeps_json_output_raw(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2484,52 +2517,53 @@ class CliTests(unittest.TestCase):
             self.assertIn("[demo]", graph_output)
             self.assertIn("##dep", compact_output)
             self.assertIn(">>exec", compact_output)
-            self.assertIn("*       ==completed  [N] Build shared parser", graph_output)
-            self.assertIn("| *     ==completed  [N] Add parser tests", graph_output)
-            self.assertIn("  *     ||blocked_dependency  [N] Wire parser into CLI", graph_output)
+            self.assertIn("*       --success  [N] Build shared parser", graph_output)
+            self.assertIn("| *     --success  [N] Add parser tests", graph_output)
+            self.assertIn("  *     ##dep  [N] Wire parser into CLI", graph_output)
             assert_graph_connector_attaches(self, graph_output, "Wire parser into CLI")
-            self.assertIn("*       ||waiting_subtasks  [N] Release CLI parser change", graph_output)
-            self.assertIn("|          └─ ..runnable  [N] Fix review comments for parser change", graph_output)
-            self.assertIn("| *     ==completed  [N] Shared parser implementation complete", graph_output)
-            self.assertIn("| *     ??awaiting_review  [N] CLI docs draft awaiting review", graph_output)
-            self.assertIn("| *     ??awaiting_review  [N] Release checklist review pending", graph_output)
-            self.assertIn("| *     ??accepted_unapplied  [N] Release checklist merge ready, not applied", graph_output)
-            self.assertIn("  *     ||blocked_dependency  [N] Publish CLI parser release notes", graph_output)
+            self.assertIn("*       ++followup  [N] Release CLI parser change", graph_output)
+            self.assertIn("|          └─ ..new  [N] Fix review comments for parser change", graph_output)
+            self.assertIn("| *     --success  [N] Shared parser implementation complete", graph_output)
+            self.assertIn("| *     ??review  [N] CLI docs draft awaiting review", graph_output)
+            self.assertIn("| *     ??review  [N] Release checklist review pending", graph_output)
+            self.assertIn("| *     ++apply  [N] Release checklist merge ready, not applied", graph_output)
+            self.assertIn("  *     ##dep  [N] Publish CLI parser release notes", graph_output)
             assert_graph_connector_attaches(self, graph_output, "Publish CLI parser release notes")
-            self.assertNotIn("└─ * ..runnable", graph_output)
+            self.assertNotIn("└─ * ..new", graph_output)
             self.assertNotIn("|       ├─", graph_output)
             self.assertNotIn("demo-blocked", graph_output)
             self.assertNotIn("demo-done", graph_output)
             self.assertNotIn("demo-missing", graph_output)
-            self.assertIn("awaiting_review", graph_output)
-            self.assertIn("accepted_unapplied", graph_output)
+            self.assertNotIn("awaiting_review", graph_output)
+            self.assertNotIn("accepted_unapplied", graph_output)
+            self.assertNotIn("blocked_dependency", graph_output)
             self.assertEqual(
                 "\n".join(
                     [
                         "[demo]",
-                        "*       ..runnable  [S] Prepare parser cleanup notes",
-                        "*       ==completed  [N] Build shared parser",
-                        "| *     ==completed  [N] Add parser tests",
+                        "*       ..new  [S] Prepare parser cleanup notes",
+                        "*       --success  [N] Build shared parser",
+                        "| *     --success  [N] Add parser tests",
                         " \\|",
-                        "  *     ||blocked_dependency  [N] Wire parser into CLI",
-                        "*       ||waiting_subtasks  [N] Release CLI parser change",
-                        "|          └─ ..runnable  [N] Fix review comments for parser change",
-                        "| *     ==completed  [N] Shared parser implementation complete",
-                        "| *     ??awaiting_review  [N] CLI docs draft awaiting review",
-                        "| *     ??awaiting_review  [N] Release checklist review pending",
-                        "| *     ??accepted_unapplied  [N] Release checklist merge ready, not applied",
+                        "  *     ##dep  [N] Wire parser into CLI",
+                        "*       ++followup  [N] Release CLI parser change",
+                        "|          └─ ..new  [N] Fix review comments for parser change",
+                        "| *     --success  [N] Shared parser implementation complete",
+                        "| *     ??review  [N] CLI docs draft awaiting review",
+                        "| *     ??review  [N] Release checklist review pending",
+                        "| *     ++apply  [N] Release checklist merge ready, not applied",
                         " \\|",
-                        "  *     ||blocked_dependency  [N] Publish CLI parser release notes",
-                        "*       >>running  [D] Run full regression suite",
+                        "  *     ##dep  [N] Publish CLI parser release notes",
+                        "*       >>exec  [D] Run full regression suite",
                     ]
                 )
                 + "\n",
                 graph_output,
             )
-            self.assertIn("\033[1;97;43m??\033[0m\033[103;30mawaiting_review\033[0m", color_output)
-            self.assertIn("\033[1;97;46m>>\033[0m\033[106;30mrunning\033[0m", color_output)
-            self.assertIn("\033[1;97;43m||\033[0m\033[100;93mblocked_dependency\033[0m", color_output)
-            self.assertIn("\033[100;92mcompleted\033[0m", color_output)
+            self.assertIn("\033[1;97;43m??\033[0m\033[103;30mreview\033[0m", color_output)
+            self.assertIn("\033[1;97;46m>>\033[0m\033[106;30mexec\033[0m", color_output)
+            self.assertIn("\033[1;97;43m##\033[0m\033[100;93mdep\033[0m", color_output)
+            self.assertIn("\033[100;92msuccess\033[0m", color_output)
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\*\033\[0m")
             self.assertRegex(color_output, r"\033\[(35|36|34|32|33|91)m\\\033\[0m")
             self.assertIn("\033[32m[N]\033[0m", color_output)
@@ -2538,8 +2572,8 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("\033[2mRelease checklist review pending\033[0m", color_output)
             self.assertNotIn("\033[2mRelease checklist merge ready, not applied\033[0m", color_output)
             self.assertIn("\033[2mFix review comments for parser change\033[0m", color_output)
-            self.assertIn("\033[103;30mawaiting_review\033[0m", color_output)
-            self.assertIn("\033[103;30maccepted_unapplied\033[0m", color_output)
+            self.assertIn("\033[103;30mreview\033[0m", color_output)
+            self.assertIn("\033[103;30mapply\033[0m", color_output)
             rows = json.loads(json_output)
             self.assertTrue(rows)
             self.assertTrue(all(task.get("demo") is True for task in rows))
@@ -2553,22 +2587,21 @@ class CliTests(unittest.TestCase):
             text = strip_ansi(output)
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 51 for width in visible_line_widths(output)))
-            self.assertIn("| *     ??awaiting_review  [N] CLI docs draft\n| |                        awaiting review", text)
-            self.assertIn("  *     ||blocked_dependency  [N] Publish CLI\n                              parser release notes", text)
+            self.assertIn("| *     ??review  [N] CLI docs draft awaiting\n| |               review", text)
+            self.assertIn("  *     ##dep  [N] Publish CLI parser release notes", text)
             self.assertIn(
-                "| *     ??awaiting_review  [N] Release checklist\n| |                        review pending",
+                "| *     ??review  [N] Release checklist review\n| |               pending",
                 text,
             )
             self.assertIn(
-                "*       ||waiting_subtasks  [N] Release CLI parser\n"
-                "|          │                change\n"
-                "|          └─ ..runnable  [N] Fix review comments\n"
-                "|                         for parser change",
+                "*       ++followup  [N] Release CLI parser change\n"
+                "|          └─ ..new  [N] Fix review comments for\n"
+                "|                    parser change",
                 text,
             )
-            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m       \x1b\[2m   │")
-            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m \x1b\[[0-9;]*m\|\x1b\[0m                        awaiting review")
-            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                         \x1b\[2mfor parser change\x1b\[0m")
+            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m       \x1b\[2m   └─")
+            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m \x1b\[[0-9;]*m\|\x1b\[0m               review")
+            self.assertRegex(output, r"\x1b\[[0-9;]*m\|\x1b\[0m                    \x1b\[2mparser change\x1b\[0m")
             shared_line = next(line for line in output.splitlines() if "Shared parser" in line)
             docs_line = next(line for line in output.splitlines() if "CLI docs draft" in line)
             checklist_line = next(line for line in output.splitlines() if "Release checklist" in line and "??" in strip_ansi(line))
@@ -2584,7 +2617,7 @@ class CliTests(unittest.TestCase):
             self.assertNotEqual(shared_colors.group(1), shared_colors.group(2))
             node_colors = {shared_colors.group(2), docs_colors.group(2), checklist_colors.group(2)}
             self.assertEqual(3, len(node_colors))
-            shared_continuation = next(line for line in output.splitlines() if "implementation complete" in line)
+            shared_continuation = next(line for line in output.splitlines() if "complete" in line)
             continuation_colors = re.match(
                 r"\x1b\[([0-9;]+)m\|\x1b\[0m \x1b\[([0-9;]+)m\|\x1b\[0m",
                 shared_continuation,
