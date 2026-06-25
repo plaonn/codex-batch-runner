@@ -16,6 +16,7 @@ from codex_batch_runner.queue import (
     select_next_task,
     set_resolution,
     set_review_status,
+    task_title,
 )
 
 
@@ -211,6 +212,28 @@ class QueueTests(unittest.TestCase):
 
             self.assertEqual("spark", task["capacity_pool"])
             self.assertEqual("high", task["task_priority"])
+
+    def test_create_task_normalizes_explicit_title_for_list_display(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            title = "  Tighten   title handling for list presentation with extra background words beyond display budget  "
+
+            task = create_task(config, "prompt", tmp, task_id="title", title=title)
+
+            self.assertEqual("Tighten title handling for list presentation with extra background words beyo...", task["title"])
+            self.assertLessEqual(len(task["title"]), 80)
+
+    def test_task_title_clamps_legacy_long_title(self) -> None:
+        task = {
+            "id": "legacy-long-title",
+            "title": "Legacy task title that contains a long prompt-like first sentence with implementation background details",
+            "prompt": "",
+        }
+
+        self.assertEqual(
+            "Legacy task title that contains a long prompt-like first sentence with implem...",
+            task_title(task),
+        )
 
     def test_create_task_rejects_invalid_task_priority_and_capacity_pool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

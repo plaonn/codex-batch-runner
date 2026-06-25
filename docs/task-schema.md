@@ -137,10 +137,10 @@ runner는 Codex 최종 응답이 `completed`이면 `review_status=unreviewed`를
 - `category`: `implementation`, `review`, `smoke`, `maintenance`, `docs` 같은 운영 분류
 - `labels`: 사람이 지정하거나 skill이 추론한 짧은 태그 목록
 - `created_by`: `enqueue-codex-batch`, `operator`, `test` 같은 등록 주체
-- `title`: 사람이 목록에서 구분하기 쉬운 짧은 제목. 없으면 prompt 첫 줄, 그것도 없으면 id로 fallback합니다.
+- `title`: 사람이 목록에서 구분하기 쉬운 짧은 제목. 보통 4-8 words 정도의 `action + object + short qualifier` 형태를 쓰되, 글자 수 목표를 맞추려고 늘리지 않습니다. 전역 고유성은 필요하지 않으며 task id가 canonical identifier입니다. Full prompt 첫 문장, 긴 배경 설명, private detail, raw path, session/thread id, runtime/log 내용은 넣지 않습니다. 저장 및 표시 title은 whitespace를 한 칸으로 접고 80자에서 deterministic ellipsis 처리합니다. 없으면 prompt 첫 non-empty line, 그것도 없으면 id로 fallback합니다.
 - `description`: 사람이 읽는 선택 설명. 실행 prompt를 대체하지 않습니다.
 
-기존 task와 호환되어야 합니다. metadata가 없는 task는 `cwd`를 `project_root` fallback으로 사용하고, `project_id`는 fallback root의 basename으로 계산하며, `category`와 `labels`는 비워 둡니다. `title`이 없는 task는 list 표시에서 prompt 첫 줄 또는 id를 fallback으로 사용합니다.
+기존 task와 호환되어야 합니다. metadata가 없는 task는 `cwd`를 `project_root` fallback으로 사용하고, `project_id`는 fallback root의 basename으로 계산하며, `category`와 `labels`는 비워 둡니다. `title`이 없는 task는 list 표시에서 prompt 첫 줄 또는 id를 fallback으로 사용합니다. 기존 task에 긴 `title`이 있으면 list display에서 같은 80자 ellipsis 처리만 적용하고 task id는 그대로 유지합니다.
 
 관련 CLI:
 

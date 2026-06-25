@@ -144,7 +144,10 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument("--category", help="task category")
     enqueue.add_argument("--label", action="append", default=[], help="task label, repeatable")
     enqueue.add_argument("--created-by", help="task creator")
-    enqueue.add_argument("--title", help="human-readable task title")
+    enqueue.add_argument(
+        "--title",
+        help="concise list title, usually 4-8 words: action + object + short qualifier",
+    )
     enqueue.add_argument("--description", help="optional human-readable task description")
     enqueue.add_argument("--profile", dest="execution_profile", help="cbr execution profile name")
     enqueue.add_argument("--model", help="Codex model override")

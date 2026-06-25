@@ -52,7 +52,7 @@ PYTHONPATH=src python3 -m unittest discover -v
 ```bash
 PYTHONPATH=src python3 -m codex_batch_runner enqueue \
   --cwd /path/to/repo \
-  --title "README 개선" \
+  --title "Improve README quickstart" \
   --prompt "README를 개선하고 테스트를 실행해"
 ```
 

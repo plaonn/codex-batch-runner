@@ -51,6 +51,7 @@ CHAIN_METADATA_FIELDS = (
     "finding_fingerprints",
 )
 SCHEMA_VERSION = 1
+TASK_TITLE_DISPLAY_LIMIT = 80
 
 
 def slugify(value: str) -> str:
@@ -246,7 +247,7 @@ def create_task(
     task = {
         "schema_version": SCHEMA_VERSION,
         "id": task_id,
-        "title": clean_optional_text(title) or title_from_prompt(prompt) or task_id,
+        "title": normalize_task_title(title) or title_from_prompt(prompt) or task_id,
         "description": clean_optional_text(description),
         "status": "runnable",
         "review_status": None,
@@ -347,6 +348,13 @@ def clean_optional_text(value: object | None) -> str | None:
     return cleaned or None
 
 
+def normalize_task_title(value: object | None) -> str | None:
+    cleaned = clean_optional_text(value)
+    if not cleaned:
+        return None
+    return truncate_text(cleaned, TASK_TITLE_DISPLAY_LIMIT)
+
+
 def validate_execution_backend(value: object) -> str:
     backend = str(value or "codex").strip()
     if backend not in EXECUTION_BACKENDS:
@@ -436,7 +444,7 @@ def title_from_prompt(prompt: str) -> str | None:
     for line in str(prompt or "").splitlines():
         cleaned = " ".join(line.split())
         if cleaned:
-            return truncate_text(cleaned, 80)
+            return truncate_text(cleaned, TASK_TITLE_DISPLAY_LIMIT)
     return None
 
 
@@ -447,7 +455,7 @@ def truncate_text(value: str, limit: int) -> str:
 
 
 def task_title(task: dict) -> str:
-    title = clean_optional_text(task.get("title"))
+    title = normalize_task_title(task.get("title"))
     if title:
         return title
     prompt_title = title_from_prompt(str(task.get("prompt") or ""))
