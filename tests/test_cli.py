@@ -2725,7 +2725,7 @@ class CliTests(unittest.TestCase):
                 depends_on=["dependency-with-a-long-readable-id"],
             )
 
-            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=79):
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=92):
                 code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
 
             self.assertEqual(0, code)
@@ -2737,20 +2737,44 @@ class CliTests(unittest.TestCase):
             self.assertIn("TITLE:", output)
             self.assertIn("DEPS:", output)
             self.assertIn("NOTE:", output)
-            self.assertTrue(all(width <= 79 for width in visible_line_widths(output)))
+            self.assertTrue(all(width <= 92 for width in visible_line_widths(output)))
 
-    def test_list_uses_block_layout_when_terminal_is_narrower_than_minimum_table_width(self) -> None:
+    def test_list_uses_table_layout_at_fixed_width_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
             create_task(config, "Table title", tmp, task_id="task", project_id="project-a")
 
-            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=80):
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=93):
                 code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
 
             self.assertEqual(0, code)
-            self.assertEqual("[project-a]", list_lines(output)[0])
-            self.assertIn("TITLE:  [N] Table title", output)
+            self.assertEqual(["TITLE", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+            self.assertIn("[project-a]", output)
+            self.assertIn("[N] Table title", output)
+            self.assertTrue(all(width <= 93 for width in visible_line_widths(output)))
+
+    def test_list_table_layout_threshold_is_independent_of_row_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "blocked dependency", tmp, task_id="blocked-dep")
+            create_task(
+                config,
+                "Child task with dependency blocker",
+                tmp,
+                task_id="child",
+                project_id="project-a",
+                depends_on=["blocked-dep"],
+            )
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=93):
+                code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertEqual(["TITLE", "STATUS", "ATT", "DEPS", "NOTE"], list_lines(output)[0].split())
+            self.assertIn("blocked_dependency", output)
+            self.assertTrue(all(width <= 93 for width in visible_line_widths(output)))
 
     def test_list_mid_width_uses_dependency_titles_and_wraps_notes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

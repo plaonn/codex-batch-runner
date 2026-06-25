@@ -83,9 +83,13 @@ from .worktree import (
 )
 
 WATCH_RESTART_MESSAGE = "cbr source changed since this watch started; restart watch to use updated code"
+COMPACT_TABLE_BLOCK_LAYOUT_WIDTH = 93
 COMPACT_TABLE_MIN_TITLE_WIDTH = 30
 COMPACT_TABLE_MIN_DEP_TITLE_WIDTH = 26
 COMPACT_TABLE_MIN_NOTE_WRAP_WIDTH = 20
+COMPACT_TABLE_FLOOR_TITLE_WIDTH = 12
+COMPACT_TABLE_FLOOR_DEP_TITLE_WIDTH = 10
+COMPACT_TABLE_FLOOR_NOTE_WRAP_WIDTH = 8
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1520,7 +1524,7 @@ def render_compact_list(
     header = ["TITLE", "STATUS", "ATT", "DEPS", "NOTE"]
     project_groups = compact_project_groups(tasks, by_id, config, color, include_capacity=include_capacity)
     row_groups = [group for _, groups in project_groups for group in groups]
-    if terminal_width is not None and terminal_width < compact_min_table_width(header, row_groups):
+    if terminal_width is not None and terminal_width < COMPACT_TABLE_BLOCK_LAYOUT_WIDTH:
         return render_compact_block_list(project_groups, terminal_width, color)
     widths = compact_widths(header, row_groups, terminal_width)
     lines = [render_compact_row(header, widths)]
@@ -1678,19 +1682,6 @@ def project_section_header(project: str, terminal_width: int | None, color: "Lis
     return color.project_section(label)
 
 
-def compact_min_table_width(header: list[str], row_groups: list[dict[str, object]]) -> int:
-    status = compact_status_width(header, row_groups)
-    attempts = compact_attempt_width(header, row_groups)
-    return (
-        max(visible_len(header[0]), COMPACT_TABLE_MIN_TITLE_WIDTH)
-        + status
-        + attempts
-        + max(visible_len(header[3]), COMPACT_TABLE_MIN_DEP_TITLE_WIDTH)
-        + max(visible_len(header[4]), COMPACT_TABLE_MIN_NOTE_WRAP_WIDTH)
-        + (len(header) - 1) * 2
-    )
-
-
 def compact_widths(header: list[str], row_groups: list[dict[str, object]], terminal_width: int | None) -> list[int]:
     summary_rows = [group["summary"] for group in row_groups]
     deps = [cell for group in row_groups for cell in group["deps"]]  # type: ignore[index]
@@ -1711,13 +1702,37 @@ def compact_widths(header: list[str], row_groups: list[dict[str, object]], termi
     if terminal_width is None:
         return widths
     fixed = status + attempts + (len(widths) - 1) * 2
-    available = max(10, terminal_width - fixed)
+    available = max(3, terminal_width - fixed)
     minimums = [title_min, dep_min, note_min]
+    minimums = compact_table_minimums_for_available(available, minimums)
     desired = [title_width, dep_width, note_width]
     title_share, deps_share, note_share = distribute_compact_widths(available, minimums, desired)
     widths[0] = title_share
     widths[3] = deps_share
     widths[4] = note_share
+    return widths
+
+
+def compact_table_minimums_for_available(available: int, preferred: list[int]) -> list[int]:
+    widths = preferred.copy()
+    floors = [
+        min(widths[0], COMPACT_TABLE_FLOOR_TITLE_WIDTH),
+        min(widths[1], COMPACT_TABLE_FLOOR_DEP_TITLE_WIDTH),
+        min(widths[2], COMPACT_TABLE_FLOOR_NOTE_WRAP_WIDTH),
+    ]
+    target = max(3, available)
+    while sum(widths) > target:
+        candidates = [index for index, width in enumerate(widths) if width > floors[index]]
+        if not candidates:
+            break
+        index = max(candidates, key=lambda item: widths[item] - floors[item])
+        widths[index] -= min(widths[index] - floors[index], sum(widths) - target)
+    while sum(widths) > target:
+        candidates = [index for index, width in enumerate(widths) if width > 1]
+        if not candidates:
+            break
+        index = max(candidates, key=lambda item: widths[item])
+        widths[index] -= min(widths[index] - 1, sum(widths) - target)
     return widths
 
 
