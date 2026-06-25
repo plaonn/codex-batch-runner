@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_batch_runner.config import Config
 from codex_batch_runner.codex import (
@@ -19,6 +20,11 @@ from codex_batch_runner.execution_profiles import resolve_execution_settings
 
 
 class CodexParserTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._cbr_config_patcher = patch.dict("os.environ", {"CBR_CONFIG": ""}, clear=False)
+        self._cbr_config_patcher.start()
+        self.addCleanup(self._cbr_config_patcher.stop)
+
     def test_extracts_final_response_from_item_text(self) -> None:
         events = [
             {
