@@ -2209,7 +2209,7 @@ def worktree_apply_note(task: dict) -> str:
     if task.get("execution_apply_status") == "applied":
         target = one_line(task.get("execution_apply_target") or "main")
         return f"applied to {target}"
-    return "not applied"
+    return "accepted_unapplied; not applied"
 
 
 def execution_profile_note(task: dict) -> str:
