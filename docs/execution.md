@@ -103,7 +103,7 @@ Practical enqueue/profile selection loop:
 
 ## Capacity, concurrency, and priority config
 
-Capacity config는 여러 worker 또는 여러 Codex profile/provider를 동시에 운영하기 위한 implementation task admission 정책입니다. `run-next`는 한 번 호출될 때 implementation task 하나만 claim하고 실행하지만, queue lock은 selection/claim/start metadata 및 finalize metadata 적용에만 짧게 보유합니다. Codex 또는 shell subprocess 실행 중에는 queue lock을 보유하지 않으므로, capacity를 2 이상으로 올리고 scheduler가 `run-next`를 겹쳐 호출하면 다른 admissible task를 동시에 claim할 수 있습니다. cbr 자체는 이 버전에서 in-process dispatcher를 만들지 않습니다.
+Capacity config는 여러 worker 또는 여러 Codex profile/provider를 동시에 운영하기 위한 implementation task admission 정책입니다. `run-next`는 한 번 호출될 때 implementation task 하나만 claim하고 실행하지만, queue lock은 selection/claim/start metadata 및 finalize metadata 적용에만 짧게 보유합니다. `run-loop`도 각 iteration에서 같은 claim rule을 사용합니다. Codex 또는 shell subprocess 실행 중에는 queue lock을 보유하지 않으므로, capacity를 2 이상으로 올리고 scheduler가 여러 worker를 겹쳐 실행하면 다른 admissible task를 동시에 claim할 수 있습니다. cbr 자체는 이 버전에서 병렬 in-process dispatcher를 만들지 않습니다.
 
 기본값은 현재 동작과 같은 완전 순차 실행입니다.
 
@@ -253,7 +253,7 @@ Audit 요구사항:
 
 ## Runner execution policy
 
-`run-next`는 1회 실행당 runnable task 하나만 처리함.
+`run-next`는 1회 실행당 runnable task 하나, auto-review action 하나, 또는 guarded maintenance action 하나만 처리함.
 
 흐름:
 
@@ -274,6 +274,8 @@ Audit 요구사항:
 15. task 상태 갱신
 16. lock 해제
 17. 다른 eligible task가 있고 global cooldown이 없으면 configured scheduler wake-up hook을 warning-only로 실행
+
+`run-loop`는 launchd/operator single-worker용 반복 command임. 각 iteration은 config를 다시 로드하고 같은 `run-next` path를 1회 호출함. 따라서 pause, cooldown, lock, capacity, dependency, task cooldown, worktree, auto-review gate는 매번 새로 평가되고 기존 단일 worker capacity semantics를 우회하지 않음. Loop 내부에서는 one-shot `run-next`의 post-run wake hook을 suppress함. 같은 process가 다음 iteration에서 follow-up work를 직접 claim하므로 scheduler worker를 중복으로 깨우지 않음. `run-loop --json`은 iteration마다 기존 `run-next` outcome shape의 compact JSON object를 한 줄씩 출력하는 JSONL임. Loop는 `empty`, `paused`, `cooldown`, `locked`, `review_needed`, `stale_finalization`처럼 다음 작업을 계속하면 안 되거나 진행이 없는 outcome에서 멈춤. `--max-iterations`는 runaway 방지용 safety fuse이며 기본값은 100임. 이 값은 correctness mechanism이 아니라 운영 guard임.
 
 
 ## Codex progress watchdog
@@ -417,7 +419,7 @@ Automation mode는 approval prompt 대기와 sandbox 권한 부족으로 인한 
 
 launchd 같은 scheduler는 사용자 shell `PATH`를 그대로 상속하지 않을 수 있음. 운영 config에서는 `codex` 실행 파일을 절대 경로로 지정할 수 있어야 함.
 
-`post_mutation_trigger_command`는 queue mutation 이후, 그리고 `run-next`가 task 하나를 처리한 뒤 eligible follow-up work가 있을 때 외부 scheduler/runner를 즉시 깨우기 위한 optional hook임. 값은 shell string이 아니라 argv string list이며 기본값은 빈 list로 disabled임. 구현은 shell expansion을 하지 않고 짧은 timeout으로 실행함. 실패, non-zero exit, timeout은 stderr warning으로만 표시하고 원래 mutation 또는 처리된 task 결과를 되돌리지 않음.
+`post_mutation_trigger_command`는 queue mutation 이후, 그리고 `run-next`가 task 하나를 처리한 뒤 eligible follow-up work가 있을 때 외부 scheduler/runner를 즉시 깨우기 위한 optional hook임. `run-loop` iteration은 follow-up work를 같은 process가 계속 처리하므로 이 per-iteration post-run wake hook을 suppress함. 값은 shell string이 아니라 argv string list이며 기본값은 빈 list로 disabled임. 구현은 shell expansion을 하지 않고 짧은 timeout으로 실행함. 실패, non-zero exit, timeout은 stderr warning으로만 표시하고 원래 mutation 또는 처리된 task 결과를 되돌리지 않음.
 
 hook은 durable task JSON/state write와 event emission이 끝난 뒤 실행함. `enqueue`, `accept`, `reject`, `resolve`, `archive`, `cooldown clear`, 성공한 `apply-plan --apply` 같은 queue 또는 runnable-state mutation command에서 호출함. `run-next`는 task 하나를 terminal/resumable state로 갱신하거나 completed task 하나를 mechanically accepted로 변경하고 lock을 해제한 뒤, global cooldown이 없고 후속 작업이 즉시 actionable일 때만 hook을 호출함. 구현 task를 처리한 직후의 actionable follow-up은 `select_next_task` 기준 eligible `runnable` 또는 `needs_resume` task이거나 `has_actionable_auto_review_candidate(config)`가 참인 다음 auto-review 후보임. Empty queue, active global cooldown, dependency-blocked-only queue, task cooldown뿐인 queue, 방금 처리한 task가 아직 cooldown 중인 경우, paused work만 남은 경우, mutation 없는 auto-review 시도에는 호출하지 않음. `list`, `show`, `summary`, `review-bundle`, `logs`, `transcript`, `doctor`, `events`, `rate-limits`, `cooldown show`, `cooldown set`, `prune`, `apply-plan` dry-run 같은 read-only, cooldown-setting, 또는 cleanup command에서는 호출하지 않음. 목적은 polling interval로 인한 latency를 줄이는 것이며, polling은 fallback으로 계속 유지함. duplicate wake-up은 안전해야 함. `run-next`가 lock, cooldown, empty queue, dependency, single-task execution 규칙을 계속 강제하기 때문임.
 

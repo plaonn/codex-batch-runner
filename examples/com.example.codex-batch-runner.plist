@@ -13,7 +13,8 @@
     <string>codex_batch_runner</string>
     <string>--config</string>
     <string>/path/to/codex-batch-runner/examples/config.example.json</string>
-    <string>run-next</string>
+    <string>run-loop</string>
+    <string>--json</string>
   </array>
 
   <key>EnvironmentVariables</key>

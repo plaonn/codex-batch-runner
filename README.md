@@ -62,6 +62,12 @@ PYTHONPATH=src python3 -m codex_batch_runner enqueue \
 PYTHONPATH=src python3 -m codex_batch_runner run-next
 ```
 
+Scheduler용 single-worker loop:
+
+```bash
+PYTHONPATH=src python3 -m codex_batch_runner run-loop --json
+```
+
 상태 확인:
 
 ```bash
@@ -83,14 +89,14 @@ PYTHONPATH=src python3 -m codex_batch_runner resolve task-id --resolution manual
 ## Core workflow
 
 1. `enqueue`가 task JSON을 local queue에 저장합니다.
-2. Scheduler가 `run-next`를 반복 호출합니다.
+2. Scheduler가 `run-loop`를 주기적으로 호출합니다.
 3. Runner가 lock, pause, cooldown, dependency, capacity gate를 확인합니다.
-4. 실행 가능한 task 하나를 Codex 또는 shell backend로 실행합니다.
+4. 실행 가능한 task 또는 auto-review action을 한 번 처리한 뒤 즉시 다음 iteration에서 config와 queue state를 다시 확인합니다.
 5. 결과와 sanitized event를 저장합니다.
 6. 운영자 또는 opt-in review automation이 `summary`, `review-bundle`, `review-next`를 기준으로 `accept`/`reject`/`needs_followup`을 기록합니다.
 7. Worktree-backed accepted result는 `worktree apply` 또는 post-accept apply path로 integration target에 반영된 뒤 dependency-ready가 됩니다.
 
-기본 운영에서는 다른 Codex thread나 사람이 작업을 queue에 등록하고, launchd/systemd 같은 외부 scheduler가 `run-next`를 호출합니다. 자동화 경로에서는 `PATH`에 의존하지 않고 config와 절대 경로를 사용하는 것이 안전합니다.
+기본 운영에서는 다른 Codex thread나 사람이 작업을 queue에 등록하고, launchd/systemd 같은 외부 scheduler가 single worker로 `run-loop --json`을 호출합니다. `run-next`는 수동 점검과 기존 one-shot automation을 위한 단일 outcome command로 유지됩니다. 자동화 경로에서는 `PATH`에 의존하지 않고 config와 절대 경로를 사용하는 것이 안전합니다.
 
 ## Common commands
 
@@ -143,7 +149,7 @@ For launchd/systemd installation, config discovery, and `doctor`, use [docs/oper
 
 ## Safety model
 
-`run-next` handles one unit of work per invocation and avoids Codex calls when the queue is empty, another runner holds the lock, global cooldown is active, dependencies are not ready, task cooldown is active, capacity is full, or runner pause is active.
+`run-next` handles one unit of work per invocation and emits one JSON object with `--json`. `run-loop` repeats the same one-shot path for launchd/operator use, reloading config and queue state before each iteration, and emits JSONL with `--json`. It suppresses redundant external post-run wake hooks between progress iterations because the same process claims follow-up work directly. It stops when the next iteration is empty, paused, cooling down, locked, review-blocked, or otherwise non-actionable.
 
 Task/state writes use atomic replace. Core state-changing commands append sanitized audit events. Event payloads are intentionally small and redact prompt text, raw transcripts, session/thread ids, secrets, credentials, and token-like fields.
 

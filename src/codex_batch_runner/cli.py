@@ -71,7 +71,7 @@ from .routing_evaluation_report import (
     render_routing_evaluation_report,
 )
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, build_routing_report, render_routing_report
-from .runner import run_next
+from .runner import RunOutcome, run_next
 from .state import (
     clear_global_cooldown,
     clear_reviewer_codex_cooldown,
@@ -208,6 +208,16 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd = sub.add_parser("run-next", help="run one eligible task")
     run_cmd.add_argument("--json", action="store_true", help="print JSON")
     run_cmd.set_defaults(func=cmd_run_next)
+
+    run_loop = sub.add_parser("run-loop", help="run eligible work until the queue is not immediately actionable")
+    run_loop.add_argument("--json", action="store_true", help="print one JSON object per iteration as JSONL")
+    run_loop.add_argument(
+        "--max-iterations",
+        type=int,
+        default=100,
+        help="safety fuse for repeated run-next iterations; set higher for large queues (default: 100)",
+    )
+    run_loop.set_defaults(func=cmd_run_loop)
 
     show = sub.add_parser("show", help="show a task")
     show.add_argument("task_id")
@@ -3161,17 +3171,51 @@ def rejected_discarded_result(task: dict) -> bool:
     )
 
 
+RUN_LOOP_STOP_STATUSES = {"empty", "paused", "cooldown", "locked", "review_needed", "stale_finalization"}
+
+
+def outcome_dict(outcome: RunOutcome) -> dict:
+    return outcome.__dict__
+
+
 def cmd_run_next(config: Config, args: argparse.Namespace) -> int:
     outcome = run_next(config)
     if args.json:
-        print(json.dumps(outcome.__dict__, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(outcome_dict(outcome), ensure_ascii=False, indent=2, sort_keys=True))
     else:
-        task_part = f" task={outcome.task_id}" if outcome.task_id else ""
-        maintenance_part = ""
-        if outcome.maintenance:
-            maintenance_part = f" maintenance={outcome.maintenance.get('status') or 'unknown'}"
-        print(f"{outcome.status}: {outcome.message}{task_part}{maintenance_part}")
+        print(render_run_outcome(outcome))
     return 0
+
+
+def cmd_run_loop(config: Config, args: argparse.Namespace) -> int:
+    del config
+    if args.max_iterations < 1:
+        raise ValueError("--max-iterations must be a positive integer")
+
+    for _ in range(args.max_iterations):
+        iteration_config = Config.load(args.config)
+        outcome = run_next(iteration_config, suppress_wake_hooks=True)
+        if args.json:
+            print(json.dumps(outcome_dict(outcome), ensure_ascii=False, sort_keys=True), flush=True)
+        else:
+            print(render_run_outcome(outcome), flush=True)
+        if not run_loop_should_continue(outcome):
+            break
+    return 0
+
+
+def render_run_outcome(outcome: RunOutcome) -> str:
+    task_part = f" task={outcome.task_id}" if outcome.task_id else ""
+    maintenance_part = ""
+    if outcome.maintenance:
+        maintenance_part = f" maintenance={outcome.maintenance.get('status') or 'unknown'}"
+    return f"{outcome.status}: {outcome.message}{task_part}{maintenance_part}"
+
+
+def run_loop_should_continue(outcome: RunOutcome) -> bool:
+    if outcome.status in RUN_LOOP_STOP_STATUSES:
+        return False
+    return outcome.task_id is not None
 
 
 def cmd_show(config: Config, args: argparse.Namespace) -> int:

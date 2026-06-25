@@ -17,7 +17,8 @@
 
 - Runtime state, actual queue files, logs, prompts, transcript data, session ids, thread ids, credentials, and `.local` operator notes are not public documentation artifacts.
 - JSON task files and append-only event JSONL files remain the canonical mutation source. SQLite is a rebuildable local read index only.
-- `run-next` processes at most one implementation task, auto-review action, or guarded maintenance action per invocation and respects lock, cooldown, dependency, capacity, and pause gates.
+- `run-next` processes at most one implementation task, auto-review action, or guarded maintenance action per invocation and emits one JSON object with `--json`.
+- `run-loop` is the single-worker scheduler command; it repeats the `run-next` path with fresh config/queue checks per iteration, emits JSONL with `--json`, and stops on non-actionable outcomes such as empty queue, pause, cooldown, lock contention, or review-needed state.
 - Worktree-backed tasks become dependency-ready only after accepted results are applied to the integration target.
 - Review automation is explicit opt-in. Default `review-next` behavior is report-only, and reviewer Codex is disabled unless config and command guards allow it.
 - Destructive cleanup and branch pruning commands are dry-run by default and require explicit `--apply`.
@@ -155,7 +156,8 @@ macOS 기본 운영 방식은 launchd임.
 권장 모델:
 
 - `StartInterval = 600`
-- optional `post_mutation_trigger_command`로 queue mutation 직후 또는 eligible follow-up work가 남은 task 처리 직후 `launchctl kickstart` 호출 가능
+- single-worker LaunchAgent는 `run-loop --json`을 실행해 한 tick 안에서 즉시 eligible follow-up work를 drain함
+- optional `post_mutation_trigger_command`로 queue mutation 직후 또는 one-shot `run-next`에서 eligible follow-up work가 남은 task 처리 직후 `launchctl kickstart` 호출 가능
 - runner 내부에서 lock, dependency, cooldown, empty queue를 판단
 - 실행할 작업이 없으면 즉시 종료
 - rate-limit 발생 시 launchd interval을 바꾸지 않고 runner 내부 global cooldown으로 Codex 호출을 막음

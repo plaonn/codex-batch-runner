@@ -58,7 +58,7 @@ class ClaimedRun:
     execution_settings: ExecutionSettings | None
 
 
-def run_next(config: Config) -> RunOutcome:
+def run_next(config: Config, *, suppress_wake_hooks: bool = False) -> RunOutcome:
     ensure_dir(config.queue_dir)
     ensure_dir(config.log_dir)
     if in_global_cooldown(config):
@@ -124,14 +124,19 @@ def run_next(config: Config) -> RunOutcome:
         lock.release()
 
     if not claimed:
-        if outcome and outcome.status in {"review_accepted", "review_fix_enqueued"} and should_trigger_post_review_wake(config):
+        should_wake = bool(
+            outcome
+            and outcome.status in {"review_accepted", "review_fix_enqueued"}
+            and should_trigger_post_review_wake(config)
+        )
+        if should_wake and not suppress_wake_hooks:
             run_post_run_trigger(config)
-        elif outcome and outcome.status == "review_accepted":
+        elif not should_wake and outcome and outcome.status == "review_accepted":
             outcome.maintenance = maybe_run_empty_codex_cli_maintenance(config)
         return outcome or RunOutcome(status="empty", message="no runnable task")
 
     task = claimed.task
-    if should_trigger_post_claim_wake(config, task):
+    if not suppress_wake_hooks and should_trigger_post_claim_wake(config, task):
         run_post_run_trigger(config)
 
     if claimed.execution_backend == "shell":
@@ -141,9 +146,10 @@ def run_next(config: Config) -> RunOutcome:
         result = run_codex(config, claimed.run_task, claimed.prompt, claimed.attempt)
         outcome = finalize_codex_run(config, claimed, result)
 
-    if outcome and outcome.task_id and should_trigger_post_run_wake(config, task):
+    should_wake = bool(outcome and outcome.task_id and should_trigger_post_run_wake(config, task))
+    if should_wake and not suppress_wake_hooks:
         run_post_run_trigger(config)
-    elif outcome and outcome.task_id and outcome.status != "stale_finalization":
+    elif not should_wake and outcome and outcome.task_id and outcome.status != "stale_finalization":
         outcome.maintenance = maybe_run_empty_codex_cli_maintenance(config)
     return outcome
 

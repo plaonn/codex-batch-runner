@@ -99,6 +99,10 @@ def list_lines(output: str) -> list[str]:
     return output.strip().splitlines()
 
 
+def json_lines(output: str) -> list[dict]:
+    return [json.loads(line) for line in output.splitlines() if line.strip()]
+
+
 def fixed_table_rows(output: str) -> list[dict[str, str]]:
     lines = list_lines(output)
     if not lines:
@@ -6158,6 +6162,147 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual("empty", report["status"])
             self.assertEqual("runnable", load_task(config, "child")["status"])
+
+    def test_run_next_json_emits_single_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output = run_cli(["--config", str(config_path), "run-next", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual("empty", report["status"])
+            self.assertEqual(1, output.count('"status"'))
+
+    def test_run_loop_json_continues_after_auto_accept_unblocks_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('trigger\\n', encoding='utf-8')",
+                str(marker),
+            ]
+            config_path = write_config(
+                tmp,
+                trigger,
+                dependency_requires_accepted_review=True,
+                auto_review_mechanical_accept=True,
+                codex_command=[sys.executable, str(FAKE_CODEX), "success"],
+            )
+            config = Config.load(str(config_path))
+            repo = Path(tmp) / "repo"
+            create_pushed_repo(repo)
+            create_clean_completed_task(config, repo, "dep")
+            create_task(config, "child", tmp, task_id="child", depends_on=["dep"])
+
+            code, output = run_cli(["--config", str(config_path), "run-loop", "--json"])
+            reports = json_lines(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(["review_accepted", "completed", "review_needed"], [item["status"] for item in reports])
+            self.assertEqual("dep", reports[0]["task_id"])
+            self.assertEqual("child", reports[1]["task_id"])
+            self.assertEqual("accepted", load_task(config, "dep")["review_status"])
+            self.assertEqual("completed", load_task(config, "child")["status"])
+            self.assertFalse(marker.exists())
+
+    def test_run_loop_json_stops_on_empty_pause_and_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as empty_tmp:
+            empty_config_path = write_config(empty_tmp)
+
+            empty_code, empty_output = run_cli(["--config", str(empty_config_path), "run-loop", "--json"])
+
+            self.assertEqual(0, empty_code)
+            self.assertEqual(["empty"], [item["status"] for item in json_lines(empty_output)])
+
+        with tempfile.TemporaryDirectory() as pause_tmp:
+            pause_config_path = write_config(pause_tmp)
+            pause_config = Config.load(str(pause_config_path))
+            create_task(pause_config, "ready", pause_tmp, task_id="ready")
+            pause_config.state_file.write_text(
+                json.dumps(
+                    {
+                        "runner_pause": {
+                            "active": True,
+                            "reason": "operator maintenance window",
+                            "paused_at": "2026-06-22T00:00:00+00:00",
+                            "paused_by": "operator",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            pause_code, pause_output = run_cli(["--config", str(pause_config_path), "run-loop", "--json"])
+
+            self.assertEqual(0, pause_code)
+            self.assertEqual(["paused"], [item["status"] for item in json_lines(pause_output)])
+            self.assertEqual("runnable", load_task(pause_config, "ready")["status"])
+
+        with tempfile.TemporaryDirectory() as cooldown_tmp:
+            cooldown_config_path = write_config(cooldown_tmp)
+            cooldown_config = Config.load(str(cooldown_config_path))
+            create_task(cooldown_config, "ready", cooldown_tmp, task_id="ready")
+            cooldown_config.state_file.write_text(
+                json.dumps({"global_cooldown_until": "2999-01-01T00:00:00+00:00"}),
+                encoding="utf-8",
+            )
+
+            cooldown_code, cooldown_output = run_cli(["--config", str(cooldown_config_path), "run-loop", "--json"])
+
+            self.assertEqual(0, cooldown_code)
+            self.assertEqual(["cooldown"], [item["status"] for item in json_lines(cooldown_output)])
+            self.assertEqual("runnable", load_task(cooldown_config, "ready")["status"])
+
+    def test_run_loop_suppresses_between_iteration_wake_hook_but_run_next_keeps_it(self) -> None:
+        with tempfile.TemporaryDirectory() as loop_tmp:
+            loop_marker = Path(loop_tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('trigger\\n', encoding='utf-8')",
+                str(loop_marker),
+            ]
+            loop_config_path = write_config(
+                loop_tmp,
+                trigger,
+                codex_command=[sys.executable, str(FAKE_CODEX), "success"],
+            )
+            loop_config = Config.load(str(loop_config_path))
+            create_task(loop_config, "first", loop_tmp, task_id="task-1")
+            create_task(loop_config, "second", loop_tmp, task_id="task-2")
+
+            loop_code, loop_output = run_cli(["--config", str(loop_config_path), "run-loop", "--json"])
+
+            self.assertEqual(0, loop_code)
+            self.assertEqual(["completed", "completed", "empty"], [item["status"] for item in json_lines(loop_output)])
+            self.assertFalse(loop_marker.exists())
+
+        with tempfile.TemporaryDirectory() as next_tmp:
+            next_marker = Path(next_tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('trigger\\n', encoding='utf-8')",
+                str(next_marker),
+            ]
+            next_config_path = write_config(
+                next_tmp,
+                trigger,
+                codex_command=[sys.executable, str(FAKE_CODEX), "success"],
+            )
+            next_config = Config.load(str(next_config_path))
+            create_task(next_config, "first", next_tmp, task_id="task-1")
+            create_task(next_config, "second", next_tmp, task_id="task-2")
+
+            next_code, next_output = run_cli(["--config", str(next_config_path), "run-next", "--json"])
+            next_report = json.loads(next_output)
+
+            self.assertEqual(0, next_code)
+            self.assertEqual("completed", next_report["status"])
+            self.assertEqual("task-1", next_report["task_id"])
+            self.assertEqual("trigger\n", next_marker.read_text(encoding="utf-8"))
 
     def test_transcript_includes_codex_session_log_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
