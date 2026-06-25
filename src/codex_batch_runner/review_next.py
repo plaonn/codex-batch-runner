@@ -972,6 +972,7 @@ def build_fix_task_draft(
         "depends_on": [],
         "subtask_type": "auto_review_fix",
         "subtask_for": parent_task_id,
+        "review_followup_for": parent_task_id,
         "blocks_root_completion": True,
         "required_verification_summary": required_verification_summary(task),
     }
@@ -1449,12 +1450,14 @@ def enqueue_auto_fix_task(
         token_budget_hint=parent_task.get("token_budget_hint"),
         subtask_type="auto_review_fix",
         subtask_for=parent_task_id,
+        review_followup_for=parent_task_id,
         blocks_root_completion=True,
     )
     reviewer = compact_reviewer_result(reviewer_result)
     fix_task["blocks_root_completion"] = True
     fix_task["root_task_id"] = root_task_id
     fix_task["parent_task_id"] = parent_task_id
+    fix_task["review_followup_for"] = parent_task_id
     fix_task["review_cycle"] = review_cycle
     fix_task["fix_attempts"] = fix_attempts
     fix_task["chain_status"] = "fixing"

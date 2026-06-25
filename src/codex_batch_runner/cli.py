@@ -63,7 +63,7 @@ from .queue import (
     task_title,
 )
 from .review_bundle import build_review_bundle, render_review_bundle
-from .review_followup import review_follow_up_note
+from .review_followup import REVIEW_FOLLOWUP_FOR_FIELD, review_follow_up_note
 from .review_next import build_review_next_apply_report, build_review_next_report, render_review_next_report
 from .routing_evaluation_report import (
     DEFAULT_ROUTING_EVAL_REPORT_LIMIT,
@@ -1047,6 +1047,7 @@ def render_dependency_graph(
             for child in child_items.get(str(task.get("id") or ""), []):
                 child_task = child["task"] if isinstance(child.get("task"), dict) else {}
                 child_prefix = str(child.get("prefix") or "")
+                child_relationship = str(child.get("relationship") or "")
                 lines.extend(
                     render_dependency_graph_child_row(
                         child_task,
@@ -1056,6 +1057,7 @@ def render_dependency_graph(
                         child_prefix,
                         graph_prefix=layout["child_graph_prefixes"][index],
                         graph_glyph_metadata=layout["child_glyph_metadata"][index],
+                        dim_child=child_relationship != "review_followup",
                         terminal_width=render_width,
                     )
                 )
@@ -1093,14 +1095,14 @@ def dependency_graph_source_nodes(tasks: list[dict], by_id: dict[str, dict]) -> 
     children: dict[str, list[dict]] = {task_id: [] for task_id in visible_ids}
     for task in tasks:
         task_id = str(task.get("id") or "")
-        parent_id = compact_parent_task_id(task, visible_ids, by_id)
+        parent_id, relationship = compact_parent_relationship(task, visible_ids, by_id)
         if parent_id and parent_id != task_id:
-            children.setdefault(parent_id, []).append(task)
+            children.setdefault(parent_id, []).append({"task": task, "relationship": relationship})
         else:
             source.append(task)
     source.sort(key=list_sort_key)
     for task_id in children:
-        children[task_id].sort(key=list_sort_key)
+        children[task_id].sort(key=lambda item: list_sort_key(item["task"] if isinstance(item.get("task"), dict) else {}))
     source_by_id = {str(task.get("id")): task for task in source if task.get("id")}
     ordered: list[dict] = []
     seen: set[str] = set()
@@ -1134,14 +1136,29 @@ def dependency_graph_source_nodes(tasks: list[dict], by_id: dict[str, dict]) -> 
 
     child_items: dict[str, list[dict[str, object]]] = {}
 
-    def visit_child(parent_id: str, task: dict, ancestors: list[bool], seen_children: set[str]) -> None:
+    def visit_child(
+        parent_id: str,
+        task: dict,
+        relationship: str,
+        ancestors: list[bool],
+        seen_children: set[str],
+    ) -> None:
         task_id = str(task.get("id") or "")
-        child_items.setdefault(parent_id, []).append({"task": task, "prefix": tree_prefix(ancestors)})
+        child_items.setdefault(parent_id, []).append(
+            {"task": task, "prefix": tree_prefix(ancestors), "relationship": relationship}
+        )
         if not task_id or task_id in seen_children:
             return
         child_tasks = children.get(task_id, [])
         for index, child in enumerate(child_tasks):
-            visit_child(parent_id, child, [*ancestors, index == len(child_tasks) - 1], {*seen_children, task_id})
+            child_task = child["task"] if isinstance(child.get("task"), dict) else {}
+            visit_child(
+                parent_id,
+                child_task,
+                str(child.get("relationship") or ""),
+                [*ancestors, index == len(child_tasks) - 1],
+                {*seen_children, task_id},
+            )
 
     for task in ordered:
         task_id = str(task.get("id") or "")
@@ -1149,7 +1166,14 @@ def dependency_graph_source_nodes(tasks: list[dict], by_id: dict[str, dict]) -> 
             continue
         task_children = children.get(task_id, [])
         for index, child in enumerate(task_children):
-            visit_child(task_id, child, [index == len(task_children) - 1], {task_id})
+            child_task = child["task"] if isinstance(child.get("task"), dict) else {}
+            visit_child(
+                task_id,
+                child_task,
+                str(child.get("relationship") or ""),
+                [index == len(task_children) - 1],
+                {task_id},
+            )
     return ordered, child_items
 
 
@@ -1433,6 +1457,7 @@ def render_dependency_graph_child_row(
     tree_prefix: str,
     graph_prefix: str | None = None,
     graph_glyph_metadata: list[int | None] | None = None,
+    dim_child: bool = True,
     terminal_width: int | None = None,
 ) -> list[str]:
     plain_color = ListColor(False)
@@ -1442,12 +1467,13 @@ def render_dependency_graph_child_row(
     graph_gap = " " * 8 if graph_prefix is None else graph_prefix
     branch_key = scalar_cell(task.get("id"))
     graph_child_tree_prefix = graph_tree_prefix(tree_prefix)
-    styled_prefix = format_dependency_graph_prefix(graph_gap, graph_glyph_metadata or branch_key, color) + color.dim_text(graph_child_tree_prefix)
+    styled_tree_prefix = color.dim_text(graph_child_tree_prefix) if dim_child else graph_child_tree_prefix
+    styled_prefix = format_dependency_graph_prefix(graph_gap, graph_glyph_metadata or branch_key, color) + styled_tree_prefix
     plain_prefix = graph_gap + graph_child_tree_prefix
     tree_continuation_suffix = graph_tree_continuation_prefix(tree_prefix)
     tree_continuation = graph_gap + tree_continuation_suffix
     styled_tree_continuation_suffix = (
-        color.dim_text(tree_continuation_suffix) if tree_continuation_suffix.strip() else tree_continuation_suffix
+        color.dim_text(tree_continuation_suffix) if dim_child and tree_continuation_suffix.strip() else tree_continuation_suffix
     )
     styled_tree_continuation = (
         format_dependency_graph_prefix(graph_gap, graph_glyph_metadata or branch_key, color) + styled_tree_continuation_suffix
@@ -1458,7 +1484,7 @@ def render_dependency_graph_child_row(
         compact_title(task),
         terminal_width,
         continuation_prefix=styled_tree_continuation,
-        title_style=lambda value: styled_compact_title_fragment(value, color, dim_title=True),
+        title_style=lambda value: styled_compact_title_fragment(value, color, dim_title=dim_child),
         plain_prefix=plain_prefix,
         plain_label=plain_status,
         plain_continuation_prefix=tree_continuation,
@@ -1660,6 +1686,7 @@ def compact_project_groups(
                     config,
                     color,
                     tree_prefix=item["prefix"],
+                    relationship=str(item.get("relationship") or ""),
                     include_capacity=include_capacity,
                     narrow_table=narrow_table,
                 )
@@ -1676,9 +1703,9 @@ def compact_tree_items(tasks: list[dict], by_id: dict[str, dict]) -> list[dict[s
     roots: list[dict] = []
     for task in tasks:
         task_id = str(task.get("id") or "")
-        parent_id = compact_parent_task_id(task, visible_ids, by_id)
+        parent_id, relationship = compact_parent_relationship(task, visible_ids, by_id)
         if parent_id and parent_id != task_id:
-            children.setdefault(parent_id, []).append(task)
+            children.setdefault(parent_id, []).append({"task": task, "relationship": relationship})
         else:
             roots.append(task)
 
@@ -1686,20 +1713,26 @@ def compact_tree_items(tasks: list[dict], by_id: dict[str, dict]) -> list[dict[s
         return list_sort_key(task)
 
     for task_id in children:
-        children[task_id].sort(key=sort_key)
+        children[task_id].sort(key=lambda item: sort_key(item["task"] if isinstance(item.get("task"), dict) else {}))
     roots.sort(key=sort_key)
 
     items: list[dict[str, object]] = []
 
-    def visit(task: dict, ancestors: list[bool], seen: set[str]) -> None:
+    def visit(task: dict, ancestors: list[bool], seen: set[str], relationship: str = "") -> None:
         task_id = str(task.get("id") or "")
         prefix = tree_prefix(ancestors) if ancestors else ""
-        items.append({"task": task, "prefix": prefix})
+        items.append({"task": task, "prefix": prefix, "relationship": relationship})
         if not task_id or task_id in seen:
             return
-        child_tasks = children.get(task_id, [])
-        for index, child in enumerate(child_tasks):
-            visit(child, [*ancestors, index == len(child_tasks) - 1], {*seen, task_id})
+        child_items = children.get(task_id, [])
+        for index, child in enumerate(child_items):
+            child_task = child["task"] if isinstance(child.get("task"), dict) else {}
+            visit(
+                child_task,
+                [*ancestors, index == len(child_items) - 1],
+                {*seen, task_id},
+                str(child.get("relationship") or ""),
+            )
 
     for root in roots:
         visit(root, [], set())
@@ -1712,16 +1745,58 @@ def compact_tree_items(tasks: list[dict], by_id: dict[str, dict]) -> list[dict[s
 
 
 def compact_parent_task_id(task: dict, visible_ids: set[str], by_id: dict[str, dict]) -> str:
+    return compact_parent_relationship(task, visible_ids, by_id)[0]
+
+
+def compact_parent_relationship(task: dict, visible_ids: set[str], by_id: dict[str, dict]) -> tuple[str, str]:
+    followup_parent = compact_review_followup_parent_id(task, visible_ids, by_id)
+    if followup_parent:
+        return followup_parent, "review_followup"
     for key in ("parent_task_id", "subtask_for", "root_task_id"):
         value = task.get(key)
         if value is not None and str(value) in visible_ids:
-            return str(value)
+            return str(value), "subtask"
     task_id = str(task.get("id") or "")
     for parent_id in visible_ids:
         parent = by_id.get(parent_id)
         if parent and task_id in blocking_subtask_ids(parent):
+            return parent_id, "subtask"
+    return "", ""
+
+
+def compact_review_followup_parent_id(task: dict, visible_ids: set[str], by_id: dict[str, dict]) -> str:
+    explicit_parent_id = str(task.get(REVIEW_FOLLOWUP_FOR_FIELD) or "")
+    if explicit_parent_id in visible_ids:
+        return explicit_parent_id
+    for parent_id in visible_ids:
+        parent = by_id.get(parent_id)
+        if parent and is_review_followup_child(parent, task):
             return parent_id
     return ""
+
+
+def is_review_followup_child(parent: dict, task: dict) -> bool:
+    if parent.get("resolution"):
+        return False
+    parent_id = str(parent.get("id") or "")
+    task_id = str(task.get("id") or "")
+    if not parent_id or not task_id or parent_id == task_id:
+        return False
+    if str(task.get(REVIEW_FOLLOWUP_FOR_FIELD) or "") == parent_id:
+        return True
+    if str(task.get("subtask_type") or "") == "auto_review_fix" and parent_id in {
+        str(task.get("subtask_for") or ""),
+        str(task.get("parent_task_id") or ""),
+        str(task.get("root_task_id") or ""),
+    }:
+        return review_status(parent) == "needs_followup" or str(parent.get("chain_status") or "") in {"needs_fix", "fixing"}
+    if str(parent.get("last_auto_fix_task_id") or "") == task_id:
+        return True
+    follow_up = parent.get("review_follow_up") if isinstance(parent.get("review_follow_up"), dict) else {}
+    for key in ("task_id", "follow_up_task_id", "generated_task_id", "linked_task_id"):
+        if str(follow_up.get(key) or "") == task_id:
+            return True
+    return False
 
 
 def tree_prefix(ancestors: list[bool]) -> str:
@@ -1732,10 +1807,12 @@ def tree_prefix(ancestors: list[bool]) -> str:
     return "".join(parts)
 
 
-def compact_group_title(task: dict, color: "ListColor", tree_prefix: str) -> str:
+def compact_group_title(task: dict, color: "ListColor", tree_prefix: str, relationship: str = "") -> str:
     if not tree_prefix:
         return styled_task_title(task, color)
-    return color.dim_text(tree_prefix) + styled_task_title(task, color, dim_title=True)
+    dim_child = relationship != "review_followup"
+    styled_prefix = color.dim_text(tree_prefix) if dim_child else tree_prefix
+    return styled_prefix + styled_task_title(task, color, dim_title=dim_child)
 
 
 def compact_task_group(
@@ -1744,19 +1821,25 @@ def compact_task_group(
     config: Config,
     color: "ListColor",
     tree_prefix: str = "",
+    relationship: str = "",
     include_capacity: bool = True,
     narrow_table: bool = False,
 ) -> dict[str, object]:
     cells = task_display_cells(task, by_id, config, color, narrow_table=narrow_table)
     detail_segments = detail_cells(task, by_id, config, include_capacity=include_capacity)
+    dim_child = bool(tree_prefix) and relationship != "review_followup"
+    title_prefix = color.dim_text(tree_prefix) if dim_child else tree_prefix
+    title_continuation_prefix = (
+        color.dim_text(tree_continuation_prefix(tree_prefix)) if dim_child else tree_continuation_prefix(tree_prefix)
+    )
     return {
         "profile": cells["profile"],
         "summary": [cells["status"]],
         "details": detail_segments or ["-"],
-        "title": compact_group_title(task, color, tree_prefix),
-        "title_prefix": color.dim_text(tree_prefix) if tree_prefix else "",
-        "title_continuation_prefix": color.dim_text(tree_continuation_prefix(tree_prefix)) if tree_prefix else "",
-        "title_value": styled_task_title(task, color, dim_title=bool(tree_prefix)),
+        "title": compact_group_title(task, color, tree_prefix, relationship),
+        "title_prefix": title_prefix if tree_prefix else "",
+        "title_continuation_prefix": title_continuation_prefix if tree_prefix else "",
+        "title_value": styled_task_title(task, color, dim_title=dim_child),
     }
 
 

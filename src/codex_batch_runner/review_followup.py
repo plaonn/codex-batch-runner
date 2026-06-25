@@ -4,6 +4,10 @@ from typing import Any
 
 from .queue import task_title
 
+# Mirrors the existing review_follow_up metadata name while keeping the child-to-source
+# relationship separate from depends_on and subtask_for.
+REVIEW_FOLLOWUP_FOR_FIELD = "review_followup_for"
+
 
 def build_review_follow_up_action(task: dict[str, Any], by_id: dict[str, dict] | None = None) -> dict[str, Any]:
     if task.get("status") != "completed" or (task.get("review_status") or "unreviewed") != "needs_followup":
@@ -139,6 +143,8 @@ def review_follow_up_task_ids(task: dict[str, Any], by_id: dict[str, dict] | Non
             candidate_id = str(candidate.get("id") or "")
             if not candidate_id or candidate_id == task_id:
                 continue
+            if str(candidate.get(REVIEW_FOLLOWUP_FOR_FIELD) or "") == task_id:
+                append_unique(ids, candidate_id)
             if str(candidate.get("subtask_for") or "") == task_id or str(candidate.get("parent_task_id") or "") == task_id:
                 append_unique(ids, candidate_id)
 

@@ -34,6 +34,7 @@ CHAIN_STATUSES = {
 CHAIN_METADATA_FIELDS = (
     "subtask_type",
     "subtask_for",
+    "review_followup_for",
     "blocks_root_completion",
     "root_task_id",
     "parent_task_id",
@@ -219,6 +220,7 @@ def create_task(
     task_priority: str = "normal",
     subtask_type: str | None = None,
     subtask_for: str | None = None,
+    review_followup_for: str | None = None,
     blocks_root_completion: bool = False,
 ) -> dict:
     ensure_dir(config.queue_dir)
@@ -255,6 +257,7 @@ def create_task(
         "review_reason": None,
         "subtask_type": clean_optional_text(subtask_type),
         "subtask_for": clean_optional_text(subtask_for),
+        "review_followup_for": clean_optional_text(review_followup_for),
         "blocks_root_completion": bool(blocks_root_completion),
         "root_task_id": None,
         "parent_task_id": None,
@@ -335,6 +338,7 @@ def create_task(
             verification_scope_count=len(task.get("verification_scope") or []),
             subtask_type=task.get("subtask_type"),
             subtask_for=task.get("subtask_for"),
+            review_followup_for=task.get("review_followup_for"),
             blocks_root_completion=task.get("blocks_root_completion"),
         ),
     )

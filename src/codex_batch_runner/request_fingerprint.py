@@ -29,6 +29,8 @@ LINEAGE_FIELDS = (
     "parent_task_id",
     "source_task_id",
     "subtask_type",
+    "subtask_for",
+    "review_followup_for",
     "review_cycle",
 )
 

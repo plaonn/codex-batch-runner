@@ -2307,6 +2307,72 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("\033[2mBuild shared parser\033[0m", color_output)
             self.assertNotIn("\033[2mAdd parser tests\033[0m", color_output)
 
+    def test_list_attaches_review_followup_children_without_repeating_top_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            source = create_task(config, "Source task", tmp, task_id="source", project_id="project-a")
+            source["status"] = "completed"
+            source["review_status"] = "needs_followup"
+            source["chain_status"] = "fixing"
+            source["last_auto_fix_task_id"] = "fix"
+            source["blocking_subtask_ids"] = ["fix"]
+            save_task(config, source)
+            fix = create_task(
+                config,
+                "Follow-up fix",
+                tmp,
+                task_id="fix",
+                project_id="project-a",
+            )
+            fix["execution_profile"] = "deep"
+            fix["review_followup_for"] = "source"
+            fix["subtask_type"] = "auto_review_fix"
+            fix["subtask_for"] = "source"
+            fix["parent_task_id"] = "source"
+            save_task(config, fix)
+            separate = create_task(config, "Separate work", tmp, task_id="separate", project_id="project-a")
+            save_task(config, separate)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--color=never"])
+            rows = compact_list_rows(output)
+            titles = [row["TITLE"] for row in rows]
+
+            self.assertEqual(0, code)
+            self.assertEqual(["Source task", "└─ Follow-up fix", "Separate work"], titles)
+            self.assertEqual("[D]", rows[1]["PROFILE"])
+            self.assertEqual("..new", rows[1]["STATUS"])
+            self.assertIn("review fix for source", rows[1]["DETAIL"])
+
+    def test_list_graph_renders_review_followups_as_non_dim_attached_children(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            source = create_task(config, "Source task", tmp, task_id="source", project_id="project-a")
+            source["status"] = "completed"
+            source["review_status"] = "needs_followup"
+            source["chain_status"] = "fixing"
+            source["last_auto_fix_task_id"] = "fix"
+            save_task(config, source)
+            fix = create_task(config, "Follow-up fix", tmp, task_id="fix", project_id="project-a")
+            fix["review_followup_for"] = "source"
+            fix["subtask_type"] = "auto_review_fix"
+            fix["subtask_for"] = "source"
+            save_task(config, fix)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--graph", "--color=never"])
+            color_code, color_output = run_cli(
+                ["--config", str(config_path), "list", "--project", "project-a", "--graph", "--color=always"]
+            )
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, color_code)
+            self.assertIn("*       ++followup  [N] Source task", output)
+            self.assertIn("        └─ ..new  [N] Follow-up fix", output)
+            self.assertNotIn("└─ * ..new", output)
+            self.assertNotIn("\033[2mFollow-up fix\033[0m", color_output)
+            self.assertNotIn("\033[2m        └─ \033[0m", color_output)
+
     def test_list_graph_uses_compact_projection_labels_without_inline_detail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -5598,6 +5664,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual([], fix_task["depends_on"])
             self.assertEqual("auto_review_fix", fix_task["subtask_type"])
             self.assertEqual("reviewer-fix-enqueue", fix_task["subtask_for"])
+            self.assertEqual("reviewer-fix-enqueue", fix_task["review_followup_for"])
             self.assertTrue(fix_task["blocks_root_completion"])
             self.assertEqual(1, fix_task["review_cycle"])
             self.assertEqual(1, fix_task["fix_attempts"])

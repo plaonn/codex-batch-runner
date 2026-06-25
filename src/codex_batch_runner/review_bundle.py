@@ -99,6 +99,7 @@ def task_metadata(task: dict) -> dict[str, Any]:
         "verification_scope",
         "subtask_type",
         "subtask_for",
+        "review_followup_for",
         "blocks_root_completion",
         "root_task_id",
         "parent_task_id",
@@ -118,6 +119,7 @@ def task_metadata(task: dict) -> dict[str, Any]:
     chain_fields = {
         "subtask_type",
         "subtask_for",
+        "review_followup_for",
         "blocks_root_completion",
         "root_task_id",
         "parent_task_id",
@@ -151,6 +153,7 @@ def chain_summary(task: dict) -> dict[str, Any] | None:
     fields = (
         "subtask_type",
         "subtask_for",
+        "review_followup_for",
         "blocks_root_completion",
         "root_task_id",
         "parent_task_id",

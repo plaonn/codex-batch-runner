@@ -137,6 +137,7 @@ def append_chain_summary(lines: list[str], task: dict) -> None:
     for key in (
         "subtask_type",
         "subtask_for",
+        "review_followup_for",
         "blocks_root_completion",
         "root_task_id",
         "parent_task_id",
