@@ -32,6 +32,7 @@ from .maintenance import (
 )
 from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
 from .post_accept import accept_task_and_integrate
+from .presentation import task_list_status, task_list_status_without_subtasks
 from .queue import (
     DEFAULT_HIDDEN_LIST_STATUSES,
     RESOLUTIONS,
@@ -2013,48 +2014,7 @@ def dependency_display_state(dep: dict | None, by_id: dict[str, dict], config: C
 
 
 def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config | None = None) -> str:
-    status = str(task.get("status") or "-")
-    if (
-        by_id is not None
-        and config is not None
-        and status in RUNNABLE_STATUSES
-        and not dependency_status(
-            task,
-            by_id,
-            require_accepted_review=config.dependency_requires_accepted_review,
-        )[0]
-    ):
-        return "blocked_dependency"
-    if task.get("resolution") and status in {"failed", "blocked_user", "completed"}:
-        return "resolved"
-    if by_id is not None and config is not None:
-        subtask_status = blocking_subtask_effective_status(task, by_id, config)
-        if subtask_status:
-            return subtask_status
-    if rejected_discarded_result(task):
-        return "discarded"
-    if status == "completed":
-        review = review_status(task)
-        if review == "unreviewed":
-            reviewer_decision = pending_reviewer_decision(task)
-            if reviewer_decision == "needs_fix":
-                return "review_needs_fix"
-            if reviewer_decision == "pass":
-                return "review_pass_pending"
-            if reviewer_decision == "failed_review":
-                return "review_failed"
-            return "awaiting_review"
-        if review == "rejected":
-            if rejected_discarded_result(task):
-                return "discarded"
-            return "review_rejected"
-        if review == "needs_followup":
-            return "needs_followup"
-        if review == "reviewing":
-            return "reviewing"
-        if review == "accepted" and accepted_worktree_not_applied(task):
-            return "accepted_unapplied"
-    return status
+    return task_list_status(task, by_id, config)
 
 
 def note_cell(task: dict, by_id: dict[str, dict], config: Config, include_capacity: bool = True) -> str:
@@ -2439,40 +2399,7 @@ def blocking_subtask_status(task: dict | None, by_id: dict[str, dict], config: C
 
 
 def status_cell_without_subtasks(task: dict, by_id: dict[str, dict], config: Config) -> str:
-    status = str(task.get("status") or "-")
-    if (
-        status in RUNNABLE_STATUSES
-        and not dependency_status(
-            task,
-            by_id,
-            require_accepted_review=config.dependency_requires_accepted_review,
-        )[0]
-    ):
-        return "blocked_dependency"
-    if task.get("resolution") and status in {"failed", "blocked_user", "completed"}:
-        return "resolved"
-    if rejected_discarded_result(task):
-        return "discarded"
-    if status == "completed":
-        review = review_status(task)
-        if review == "unreviewed":
-            reviewer_decision = pending_reviewer_decision(task)
-            if reviewer_decision == "needs_fix":
-                return "review_needs_fix"
-            if reviewer_decision == "pass":
-                return "review_pass_pending"
-            if reviewer_decision == "failed_review":
-                return "review_failed"
-            return "awaiting_review"
-        if review == "rejected":
-            if rejected_discarded_result(task):
-                return "discarded"
-            return "review_rejected"
-        if review == "needs_followup":
-            return "needs_followup"
-        if review == "reviewing":
-            return "reviewing"
-    return status
+    return task_list_status_without_subtasks(task, by_id, config)
 
 
 def active_blocking_subtasks(task: dict, by_id: dict[str, dict]) -> list[dict | None]:
