@@ -1500,6 +1500,38 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, resolved_profile_decisions["profile=normal size=small risk=low verify=docs"]["tasks"])
             self.assertEqual(1, small_candidates["candidate"]["tasks"])
 
+    def test_routing_report_keeps_discarded_rejected_internal_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "discarded result",
+                tmp,
+                task_id="discarded-result",
+                project_id="project-a",
+                routing_size="small",
+                routing_risk="low",
+                verification_scope=["docs"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "rejected"
+            task["execution_mode"] = "git_worktree"
+            task["execution_worktree_status"] = "cleaned"
+            task["execution_cleanup_kind"] = "discard"
+            task["execution_cleanup_result_applied"] = False
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
+            report = json.loads(output)
+            rows = {row["id"]: row for row in report["task_rows"]}
+            decisions = {entry["key"]: entry for entry in report["groups"]["routing_decision"]}
+
+            self.assertEqual(0, code)
+            self.assertEqual("rejected", rows["discarded-result"]["review_status"])
+            self.assertEqual(1, decisions["size=small risk=low verify=docs"]["rejected"])
+            self.assertEqual(1, decisions["size=small risk=low verify=docs"]["needs_fix_or_rejected"])
+
     def test_routing_report_groups_missing_routing_metadata_under_fallback_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -1672,6 +1704,7 @@ class CliTests(unittest.TestCase):
                 ("completed", "completed"),
                 ("accepted", "completed"),
                 ("rejected", "completed"),
+                ("discarded", "completed"),
                 ("needs-followup", "completed"),
                 ("archived", "archived"),
             ):
@@ -1683,14 +1716,24 @@ class CliTests(unittest.TestCase):
             rejected = load_task(config, "rejected")
             rejected["review_status"] = "rejected"
             save_task(config, rejected)
+            discarded = load_task(config, "discarded")
+            discarded["review_status"] = "rejected"
+            discarded["execution_mode"] = "git_worktree"
+            discarded["execution_worktree_status"] = "cleaned"
+            discarded["execution_cleanup_kind"] = "discard"
+            discarded["execution_cleanup_result_applied"] = False
+            save_task(config, discarded)
             needs_followup = load_task(config, "needs-followup")
             needs_followup["review_status"] = "needs_followup"
             save_task(config, needs_followup)
 
             code, output = run_cli(["--config", str(config_path), "list"])
+            all_code, all_output = run_cli(["--config", str(config_path), "list", "--all", "--color=never"])
 
             self.assertEqual(0, code)
+            self.assertEqual(0, all_code)
             rows = {row["ID"]: row for row in compact_list_rows(output)}
+            all_rows = {row["ID"]: row for row in compact_list_rows(all_output)}
             self.assertEqual("runnable", rows["runnable"]["STATUS"])
             self.assertEqual("needs_resume", rows["resume"]["STATUS"])
             self.assertEqual("running", rows["running"]["STATUS"])
@@ -1698,8 +1741,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual("failed", rows["failed"]["STATUS"])
             self.assertEqual("awaiting_review", rows["completed"]["STATUS"])
             self.assertEqual("-", rows["completed"]["NOTE"])
-            self.assertEqual("review_failed", rows["rejected"]["STATUS"])
-            self.assertEqual("-", rows["rejected"]["NOTE"])
+            self.assertEqual("review_rejected", rows["rejected"]["STATUS"])
+            self.assertEqual("rejected", rows["rejected"]["NOTE"])
+            self.assertNotIn("discarded", rows)
+            self.assertEqual("discarded", all_rows["discarded"]["STATUS"])
+            self.assertEqual("rejected; discarded; not applied", all_rows["discarded"]["NOTE"])
             self.assertEqual("needs_followup", rows["needs-followup"]["STATUS"])
             self.assertEqual("-", rows["needs-followup"]["NOTE"])
             self.assertNotIn("accepted", rows)
@@ -1713,6 +1759,7 @@ class CliTests(unittest.TestCase):
                 ("unreviewed", None),
                 ("accepted", "accepted"),
                 ("rejected", "rejected"),
+                ("discarded", "rejected"),
                 ("followup", "needs_followup"),
             ):
                 create_task(config, task_id, tmp, task_id=task_id)
@@ -1721,6 +1768,12 @@ class CliTests(unittest.TestCase):
                     task = load_task(config, task_id)
                     task["review_status"] = review
                     save_task(config, task)
+            discarded = load_task(config, "discarded")
+            discarded["execution_mode"] = "git_worktree"
+            discarded["execution_worktree_status"] = "cleaned"
+            discarded["execution_cleanup_kind"] = "discard"
+            discarded["execution_cleanup_result_applied"] = False
+            save_task(config, discarded)
 
             code, output = run_cli(["--config", str(config_path), "list", "--unreviewed"])
 
@@ -1729,6 +1782,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual("awaiting_review", rows["unreviewed"]["STATUS"])
             self.assertNotIn("accepted", rows)
             self.assertNotIn("rejected", rows)
+            self.assertNotIn("discarded", rows)
             self.assertNotIn("followup", rows)
 
             code, output = run_cli(["--config", str(config_path), "list", "--needs-review"])
@@ -1736,7 +1790,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("awaiting_review", rows["unreviewed"]["STATUS"])
-            self.assertEqual("review_failed", rows["rejected"]["STATUS"])
+            self.assertEqual("review_rejected", rows["rejected"]["STATUS"])
+            self.assertNotIn("discarded", rows)
             self.assertEqual("needs_followup", rows["followup"]["STATUS"])
             self.assertNotIn("accepted", rows)
 
@@ -1744,7 +1799,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
-            for task_id in ("plain", "needs-fix", "chain-fix", "pass", "chain-pass"):
+            for task_id in ("plain", "needs-fix", "chain-fix", "pass", "chain-pass", "failed-review"):
                 task = create_task(config, task_id, tmp, task_id=task_id, project_id="project-a")
                 task["status"] = "completed"
                 task["review_status"] = "unreviewed"
@@ -1762,6 +1817,9 @@ class CliTests(unittest.TestCase):
             chain_pass["chain_status"] = "awaiting_review"
             chain_pass["last_review_decision"] = "pass"
             save_task(config, chain_pass)
+            failed_review = load_task(config, "failed-review")
+            failed_review["reviewer_codex"] = {"decision": "failed_review"}
+            save_task(config, failed_review)
 
             code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
             needs_review_code, needs_review_output = run_cli(
@@ -1786,14 +1844,17 @@ class CliTests(unittest.TestCase):
             self.assertEqual("review_needs_fix", rows["chain-fix"]["STATUS"])
             self.assertEqual("review_pass_pending", rows["pass"]["STATUS"])
             self.assertEqual("review_pass_pending", rows["chain-pass"]["STATUS"])
+            self.assertEqual("review_failed", rows["failed-review"]["STATUS"])
             self.assertIn("reviewer needs fix; run reject --follow-up", rows["needs-fix"]["NOTE"])
             self.assertIn("reviewer needs fix; run reject --follow-up", rows["chain-fix"]["NOTE"])
             self.assertIn("reviewer passed; run accept", rows["pass"]["NOTE"])
             self.assertIn("reviewer passed; run accept", rows["chain-pass"]["NOTE"])
+            self.assertIn("review process failed; rerun review-next", rows["failed-review"]["NOTE"])
             needs_review_rows = {row["ID"]: row for row in compact_list_rows(needs_review_output)}
             self.assertEqual(set(rows), set(needs_review_rows))
             self.assertEqual("review_needs_fix", needs_review_rows["needs-fix"]["STATUS"])
             self.assertEqual("review_pass_pending", needs_review_rows["pass"]["STATUS"])
+            self.assertEqual("review_failed", needs_review_rows["failed-review"]["STATUS"])
             json_tasks = {task["id"]: task for task in json.loads(json_output)}
             self.assertEqual("completed", json_tasks["needs-fix"]["status"])
             self.assertEqual("unreviewed", json_tasks["needs-fix"]["review_status"])
@@ -1801,8 +1862,10 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("review_pass_pending", json_output)
             self.assertIn("*       !!review_needs_fix  [N] needs-fix", graph_output)
             self.assertIn("*       ??review_pass_pending  [N] pass", graph_output)
+            self.assertIn("*       !!review_failed  [N] failed-review", graph_output)
             self.assertIn("\033[101;97mreview_needs_fix\033[0m", color_output)
             self.assertIn("\033[102;30mreview_pass_pending\033[0m", color_output)
+            self.assertIn("\033[101;97mreview_failed\033[0m", color_output)
 
     def test_list_narrow_wraps_pending_reviewer_notes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

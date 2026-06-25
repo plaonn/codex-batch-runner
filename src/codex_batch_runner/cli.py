@@ -2013,6 +2013,8 @@ def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config
         subtask_status = blocking_subtask_effective_status(task, by_id, config)
         if subtask_status:
             return subtask_status
+    if rejected_discarded_result(task):
+        return "discarded"
     if status == "completed":
         review = review_status(task)
         if review == "unreviewed":
@@ -2021,9 +2023,13 @@ def status_cell(task: dict, by_id: dict[str, dict] | None = None, config: Config
                 return "review_needs_fix"
             if reviewer_decision == "pass":
                 return "review_pass_pending"
+            if reviewer_decision == "failed_review":
+                return "review_failed"
             return "awaiting_review"
         if review == "rejected":
-            return "review_failed"
+            if rejected_discarded_result(task):
+                return "discarded"
+            return "review_rejected"
         if review == "needs_followup":
             return "needs_followup"
         if review == "reviewing":
@@ -2073,13 +2079,17 @@ def note_cells(task: dict, by_id: dict[str, dict], config: Config, include_capac
         notes.append(scheduling_note)
     if task.get("resolution"):
         notes.append("resolved: " + str(task.get("resolution")))
+    if not task.get("resolution") and rejected_discarded_result(task):
+        notes.append("rejected; discarded; not applied")
     if task.get("status") == "completed" and not task.get("resolution"):
+        if review_status(task) == "rejected" and not rejected_discarded_result(task):
+            notes.append("rejected")
         reviewer_note = pending_reviewer_note(task)
         if reviewer_note:
             notes.append(reviewer_note)
         notes.extend(completed_timing_notes(task))
         chain_note = chain_note_cell(task)
-        if chain_note:
+        if chain_note and not (reviewer_note and chain_note in reviewer_note):
             notes.append(chain_note)
         worktree_note = worktree_apply_note(task)
         if worktree_note:
@@ -2212,7 +2222,7 @@ def chain_note_cell(task: dict) -> str:
     if decision == "needs_human":
         return "human review needed"
     if decision == "failed_review":
-        return "review failed"
+        return "review process failed"
     if chain_status and decision:
         return f"{chain_status_note_label(chain_status)} after {review_decision_note_label(decision)}"
     if chain_status:
@@ -2228,6 +2238,8 @@ def pending_reviewer_note(task: dict) -> str:
         return "reviewer needs fix; run reject --follow-up"
     if decision == "pass":
         return "reviewer passed; run accept"
+    if decision == "failed_review":
+        return "review process failed; rerun review-next"
     return ""
 
 
@@ -2241,6 +2253,8 @@ def pending_reviewer_decision(task: dict) -> str:
         return "needs_fix"
     if decision == "pass":
         return "pass"
+    if decision == "failed_review":
+        return "failed_review"
     return ""
 
 
@@ -2261,7 +2275,7 @@ def review_decision_note_label(value: object) -> str:
     labels = {
         "needs_fix": "fix requested",
         "needs_human": "human review needed",
-        "failed_review": "review failed",
+        "failed_review": "review process failed",
         "pass": "review passed",
     }
     decision = str(value or "")
@@ -2299,7 +2313,9 @@ def blocking_subtask_effective_status(task: dict, by_id: dict[str, dict], config
         "missing",
         "failed",
         "blocked_user",
+        "discarded",
         "review_failed",
+        "review_rejected",
         "needs_followup",
         "review_needs_fix",
         "subtasks_blocked",
@@ -2334,6 +2350,8 @@ def subtask_status_note_label(status: str) -> str:
         "needs_followup": "fix needed",
         "review_needs_fix": "review fix needed",
         "review_pass_pending": "accept pending",
+        "discarded": "discarded",
+        "review_rejected": "review rejected",
         "review_failed": "review failed",
         "reviewing": "reviewing",
         "running": "running",
@@ -2346,11 +2364,17 @@ def subtask_status_note_label(status: str) -> str:
 
 def active_subtask_timing_summary(active: list[dict | None], by_id: dict[str, dict], config: Config) -> str:
     status_rows = [(task, blocking_subtask_status(task, by_id, config)) for task in active if task]
-    blocked = [
-        task
-        for task, status in status_rows
-        if status in {"failed", "blocked_user", "review_failed", "needs_followup", "review_needs_fix", "subtasks_blocked"}
-    ]
+    blocked_statuses = {
+        "failed",
+        "blocked_user",
+        "discarded",
+        "review_failed",
+        "review_rejected",
+        "needs_followup",
+        "review_needs_fix",
+        "subtasks_blocked",
+    }
+    blocked = [task for task, status in status_rows if status in blocked_statuses]
     if blocked:
         return oldest_age_note(blocked, ("completed_at", "updated_at", "started_at"), "oldest blocked")
     running = [task for task, status in status_rows if status == "running"]
@@ -2401,6 +2425,8 @@ def status_cell_without_subtasks(task: dict, by_id: dict[str, dict], config: Con
         return "blocked_dependency"
     if task.get("resolution") and status in {"failed", "blocked_user", "completed"}:
         return "resolved"
+    if rejected_discarded_result(task):
+        return "discarded"
     if status == "completed":
         review = review_status(task)
         if review == "unreviewed":
@@ -2409,9 +2435,13 @@ def status_cell_without_subtasks(task: dict, by_id: dict[str, dict], config: Con
                 return "review_needs_fix"
             if reviewer_decision == "pass":
                 return "review_pass_pending"
+            if reviewer_decision == "failed_review":
+                return "review_failed"
             return "awaiting_review"
         if review == "rejected":
-            return "review_failed"
+            if rejected_discarded_result(task):
+                return "discarded"
+            return "review_rejected"
         if review == "needs_followup":
             return "needs_followup"
         if review == "reviewing":
@@ -2545,6 +2575,7 @@ class ListColor:
         "usage_exhausted": BG_DIM,
         "failed": BG_ACTIVE_NON_GREEN_RED,
         "review_failed": BG_ACTIVE_NON_GREEN_RED,
+        "review_rejected": BG_ACTIVE_NON_GREEN_RED,
         "needs_followup": BG_ACTIVE_NON_GREEN_RED,
         "review_needs_fix": BG_ACTIVE_NON_GREEN_RED,
         "blocked_user": BG_ACTIVE_NON_GREEN_RED,
@@ -2557,6 +2588,7 @@ class ListColor:
         "completed": BG_PASSIVE_GREEN_BEARING_GREEN,
         "accepted": BG_PASSIVE_GREEN_BEARING_GREEN,
         "done": BG_PASSIVE_GREEN_BEARING_GREEN,
+        "discarded": BG_PASSIVE_WHITE,
         "resolved": BG_PASSIVE_WHITE,
         "archived": BG_PASSIVE_WHITE,
     }
@@ -2587,10 +2619,12 @@ class ListColor:
         "done": "==",
         "failed": "!!",
         "review_failed": "!!",
+        "review_rejected": "!!",
         "needs_followup": "!!",
         "review_needs_fix": "!!",
         "blocked_user": "!!",
         "subtasks_blocked": "!!",
+        "discarded": "--",
         "resolved": "--",
         "archived": "--",
     }
@@ -2611,10 +2645,12 @@ class ListColor:
         "done": STATUS_MARKER_GREEN,
         "failed": STATUS_MARKER_RED,
         "review_failed": STATUS_MARKER_RED,
+        "review_rejected": STATUS_MARKER_RED,
         "needs_followup": STATUS_MARKER_RED,
         "review_needs_fix": STATUS_MARKER_RED,
         "blocked_user": STATUS_MARKER_RED,
         "subtasks_blocked": STATUS_MARKER_RED,
+        "discarded": STATUS_MARKER_NEUTRAL,
         "resolved": STATUS_MARKER_NEUTRAL,
         "archived": STATUS_MARKER_NEUTRAL,
     }
@@ -3054,6 +3090,7 @@ def needs_review(task: dict) -> bool:
     return (
         task.get("status") == "completed"
         and not task.get("resolution")
+        and not rejected_discarded_result(task)
         and review_status(task) in {"unreviewed", "rejected", "needs_followup"}
     )
 
@@ -3077,6 +3114,17 @@ def accepted_worktree_not_applied(task: dict) -> bool:
         task.get("execution_mode") == "git_worktree"
         and review_status(task) == "accepted"
         and task.get("execution_apply_status") != "applied"
+    )
+
+
+def rejected_discarded_result(task: dict) -> bool:
+    return (
+        task.get("status") in {"completed", "archived"}
+        and task.get("review_status") == "rejected"
+        and task.get("execution_mode") == "git_worktree"
+        and task.get("execution_worktree_status") == "cleaned"
+        and task.get("execution_cleanup_kind") == "discard"
+        and task.get("execution_cleanup_result_applied") is False
     )
 
 
