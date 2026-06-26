@@ -4,12 +4,14 @@ from collections import defaultdict
 from typing import Any
 
 from .config import Config
+from .evaluation import derive_evaluation_row
 from .execution_profiles import small_profile_routing_candidate
 from .queue import list_tasks, task_labels, task_project_id, task_project_root
 from .timeutil import iso_now
 from .transcript import sanitize
 
 DEFAULT_ROUTING_REPORT_LIMIT = 50
+POLICY_REVIEW_CLEAN_SAMPLE_THRESHOLD = 3
 
 
 def build_routing_report(
@@ -37,6 +39,7 @@ def build_routing_report(
     if limit > 0:
         tasks = tasks[:limit]
     rows = [task_routing_row(task) for task in tasks]
+    evaluation_rows = [derive_evaluation_row(task) for task in tasks]
     return {
         "generated_at": iso_now(),
         "filters": {
@@ -70,6 +73,7 @@ def build_routing_report(
             "small_profile_candidate": summarize_groups(group_rows(rows, "small_profile_candidate")),
             "profile_experiment": summarize_groups(group_rows(rows, "profile_experiment")),
         },
+        "evaluation_diagnostics": summarize_evaluation_diagnostics(evaluation_rows),
     }
 
 
@@ -282,6 +286,193 @@ def summarize_group(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def summarize_evaluation_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "row_count": len(rows),
+        "policy_usage": summarize_policy_usage(rows),
+        "worker_cells": summarize_evaluation_groups(group_evaluation_rows(rows, worker_cell_key), summarize_worker_cell),
+        "reviewer_cells": summarize_evaluation_groups(group_evaluation_rows(rows, reviewer_cell_key), summarize_reviewer_cell),
+        "policy_exclusions": summarize_exclusion_reasons(rows),
+        "task_buckets": summarize_evaluation_groups(group_evaluation_rows(rows, task_bucket_key), summarize_task_bucket),
+        "advisory": {
+            "policy_review_clean_sample_threshold": POLICY_REVIEW_CLEAN_SAMPLE_THRESHOLD,
+            "read_only": True,
+        },
+    }
+
+
+def summarize_policy_usage(rows: list[dict[str, Any]]) -> dict[str, int]:
+    keys = (
+        "usable_for_worker_policy",
+        "usable_for_reviewer_calibration",
+        "usable_for_task_vector_evaluation",
+        "usable_for_quota_debugging",
+    )
+    return {key: count(rows, lambda row, key=key: bool(policy_usage(row).get(key))) for key in keys}
+
+
+def group_evaluation_rows(
+    rows: list[dict[str, Any]],
+    key_fn: Any,
+) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[key_fn(row)].append(row)
+    return groups
+
+
+def summarize_evaluation_groups(groups: dict[str, list[dict[str, Any]]], summary_fn: Any) -> list[dict[str, Any]]:
+    return [summary_fn(key, rows) for key, rows in sorted(groups.items())]
+
+
+def summarize_worker_cell(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    accepted_pass = count(rows, is_accepted_pass_sample)
+    usable_accepted_pass = count(rows, lambda row: is_accepted_pass_sample(row) and usable_for_worker_policy(row))
+    return {
+        "key": key,
+        "tasks": len(rows),
+        "completed": count(rows, lambda row: outcomes(row).get("worker_terminal_status") == "completed"),
+        "failed": count(rows, lambda row: outcomes(row).get("worker_terminal_status") == "failed"),
+        "needs_resume": count(rows, lambda row: outcomes(row).get("worker_terminal_status") == "needs_resume"),
+        "blocked_user": count(rows, lambda row: outcomes(row).get("worker_terminal_status") == "blocked_user"),
+        "accepted": count(rows, lambda row: bool(outcomes(row).get("accepted"))),
+        "reviewer_pass": count(rows, lambda row: reviewer(row).get("reviewer_decision") == "pass"),
+        "accepted_pass": accepted_pass,
+        "usable_for_worker_policy": count(rows, usable_for_worker_policy),
+        "usable_accepted_pass": usable_accepted_pass,
+        "required_checks_passed": count(rows, required_checks_passed),
+        "policy_clean_sample_rate": ratio(usable_accepted_pass, len(rows)),
+    }
+
+
+def summarize_reviewer_cell(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "key": key,
+        "tasks": len(rows),
+        "reviewer_present": count(rows, lambda row: bool(reviewer(row).get("reviewer_codex_present"))),
+        "reviewer_pass": count(rows, lambda row: reviewer(row).get("reviewer_decision") == "pass"),
+        "reviewer_needs_fix": count(rows, lambda row: reviewer(row).get("reviewer_decision") == "needs_fix"),
+        "reviewer_needs_human": count(rows, lambda row: reviewer(row).get("reviewer_decision") == "needs_human"),
+        "reviewer_failed_review": count(rows, lambda row: reviewer(row).get("reviewer_decision") == "failed_review"),
+        "accepted": count(rows, lambda row: bool(outcomes(row).get("accepted"))),
+        "rejected": count(rows, lambda row: bool(outcomes(row).get("rejected"))),
+        "needs_followup": count(rows, lambda row: bool(outcomes(row).get("needs_followup"))),
+        "error_findings": sum(int(reviewer(row).get("error_finding_count") or 0) for row in rows),
+        "required_human_checks": sum(int(reviewer(row).get("required_human_check_count") or 0) for row in rows),
+        "usable_for_reviewer_calibration": count(
+            rows,
+            lambda row: bool(policy_usage(row).get("usable_for_reviewer_calibration")),
+        ),
+    }
+
+
+def summarize_exclusion_reasons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        for reason in policy_exclusion_reasons(row):
+            groups[str(reason or "unknown")].append(row)
+    return [
+        {
+            "key": key,
+            "rows": len(group_rows),
+            "worker_policy_excluded": count(group_rows, lambda row: not usable_for_worker_policy(row)),
+            "reviewer_calibration_excluded": count(
+                group_rows,
+                lambda row: not bool(policy_usage(row).get("usable_for_reviewer_calibration")),
+            ),
+            "task_vector_evaluation_excluded": count(
+                group_rows,
+                lambda row: not bool(policy_usage(row).get("usable_for_task_vector_evaluation")),
+            ),
+        }
+        for key, group_rows in sorted(groups.items())
+    ]
+
+
+def policy_exclusion_reasons(row: dict[str, Any]) -> list[str]:
+    reasons = row.get("exclusion_reasons") if isinstance(row.get("exclusion_reasons"), list) else []
+    cleaned = [str(reason) for reason in reasons if str(reason or "").strip()]
+    if usable_for_worker_policy(row):
+        return cleaned or ["none"]
+    derived = list(cleaned)
+    if not bool(policy_usage(row).get("usable_for_reviewer_calibration")):
+        derived.append("reviewer_unusable")
+    if not bool(objective_checks(row).get("final_json_available")):
+        derived.append("objective_unavailable")
+    if not derived:
+        derived.append("worker_policy_unusable")
+    return sorted(set(derived))
+
+
+def summarize_task_bucket(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    clean_samples = count(rows, clean_worker_policy_sample)
+    usable_samples = count(rows, usable_for_worker_policy)
+    return {
+        "key": key,
+        "tasks": len(rows),
+        "usable_for_worker_policy": usable_samples,
+        "clean_samples": clean_samples,
+        "accepted_pass_clean_samples": count(rows, lambda row: clean_worker_policy_sample(row) and is_accepted_pass_sample(row)),
+        "worker_cells": sorted({worker_cell_key(row) for row in rows}),
+        "reviewer_cells": sorted({reviewer_cell_key(row) for row in rows}),
+        "policy_review_candidate": clean_samples >= POLICY_REVIEW_CLEAN_SAMPLE_THRESHOLD,
+        "policy_review_note": "advisory_read_only" if clean_samples >= POLICY_REVIEW_CLEAN_SAMPLE_THRESHOLD else "",
+    }
+
+
+def worker_cell_key(row: dict[str, Any]) -> str:
+    return str(worker(row).get("worker_cell_key") or "unknown")
+
+
+def reviewer_cell_key(row: dict[str, Any]) -> str:
+    return str(reviewer(row).get("reviewer_cell_key") or "unknown")
+
+
+def task_bucket_key(row: dict[str, Any]) -> str:
+    return str(row.get("task_bucket_key") or "unknown")
+
+
+def worker(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("worker")
+    return value if isinstance(value, dict) else {}
+
+
+def reviewer(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("reviewer")
+    return value if isinstance(value, dict) else {}
+
+
+def outcomes(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("outcomes")
+    return value if isinstance(value, dict) else {}
+
+
+def objective_checks(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("objective_checks")
+    return value if isinstance(value, dict) else {}
+
+
+def policy_usage(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("policy_usage")
+    return value if isinstance(value, dict) else {}
+
+
+def usable_for_worker_policy(row: dict[str, Any]) -> bool:
+    return bool(policy_usage(row).get("usable_for_worker_policy"))
+
+
+def required_checks_passed(row: dict[str, Any]) -> bool:
+    return bool(objective_checks(row).get("required_checks_passed"))
+
+
+def is_accepted_pass_sample(row: dict[str, Any]) -> bool:
+    return bool(outcomes(row).get("accepted")) and reviewer(row).get("reviewer_decision") == "pass"
+
+
+def clean_worker_policy_sample(row: dict[str, Any]) -> bool:
+    return usable_for_worker_policy(row) and is_accepted_pass_sample(row) and required_checks_passed(row)
+
+
 def count(rows: list[dict[str, Any]], predicate: Any) -> int:
     return sum(1 for row in rows if predicate(row))
 
@@ -327,6 +518,11 @@ def render_routing_report(report: dict[str, Any]) -> str:
         lines.append("")
         lines.append(f"## by_{group_name}")
         lines.append(render_group_table(entries))
+    diagnostics = report.get("evaluation_diagnostics") if isinstance(report.get("evaluation_diagnostics"), dict) else {}
+    if diagnostics:
+        lines.append("")
+        lines.append("## evaluation_diagnostics")
+        lines.append(render_evaluation_diagnostics(diagnostics))
     return "\n".join(lines) + "\n"
 
 
@@ -347,6 +543,103 @@ def render_group_table(entries: list[dict[str, Any]]) -> str:
         for entry in entries
     ]
     return render_table(header, rows)
+
+
+def render_evaluation_diagnostics(diagnostics: dict[str, Any]) -> str:
+    lines: list[str] = []
+    policy_usage = diagnostics.get("policy_usage") if isinstance(diagnostics.get("policy_usage"), dict) else {}
+    lines.append(
+        "policy_usage: "
+        + " ".join(
+            f"{key}={policy_usage.get(key, 0)}"
+            for key in (
+                "usable_for_worker_policy",
+                "usable_for_reviewer_calibration",
+                "usable_for_task_vector_evaluation",
+            )
+        )
+    )
+    lines.append("")
+    lines.append("worker_cells")
+    lines.append(render_worker_cell_table(list_value(diagnostics.get("worker_cells"))[:10]))
+    lines.append("")
+    lines.append("reviewer_cells")
+    lines.append(render_reviewer_cell_table(list_value(diagnostics.get("reviewer_cells"))[:10]))
+    lines.append("")
+    lines.append("policy_exclusions")
+    lines.append(render_policy_exclusion_table(list_value(diagnostics.get("policy_exclusions"))[:10]))
+    lines.append("")
+    lines.append("task_buckets")
+    lines.append(render_task_bucket_table(list_value(diagnostics.get("task_buckets"))[:10]))
+    return "\n".join(lines)
+
+
+def render_worker_cell_table(entries: list[dict[str, Any]]) -> str:
+    header = ["WORKER_CELL", "TASKS", "ACCEPT/PASS", "USABLE", "CLEAN", "FAILED", "RESUME"]
+    rows = [
+        [
+            str(entry.get("key") or "-"),
+            str(entry.get("tasks") or 0),
+            str(entry.get("accepted_pass") or 0),
+            str(entry.get("usable_for_worker_policy") or 0),
+            str(entry.get("usable_accepted_pass") or 0),
+            str(entry.get("failed") or 0),
+            str(entry.get("needs_resume") or 0),
+        ]
+        for entry in entries
+    ]
+    return render_table(header, rows)
+
+
+def render_reviewer_cell_table(entries: list[dict[str, Any]]) -> str:
+    header = ["REVIEWER_CELL", "TASKS", "PASS", "FIX", "HUMAN", "FAILED", "FOLLOWUP"]
+    rows = [
+        [
+            str(entry.get("key") or "-"),
+            str(entry.get("tasks") or 0),
+            str(entry.get("reviewer_pass") or 0),
+            str(entry.get("reviewer_needs_fix") or 0),
+            str(entry.get("reviewer_needs_human") or 0),
+            str(entry.get("reviewer_failed_review") or 0),
+            str(entry.get("needs_followup") or 0),
+        ]
+        for entry in entries
+    ]
+    return render_table(header, rows)
+
+
+def render_policy_exclusion_table(entries: list[dict[str, Any]]) -> str:
+    header = ["REASON", "ROWS", "WORKER_EXCL", "REVIEW_EXCL", "VECTOR_EXCL"]
+    rows = [
+        [
+            str(entry.get("key") or "-"),
+            str(entry.get("rows") or 0),
+            str(entry.get("worker_policy_excluded") or 0),
+            str(entry.get("reviewer_calibration_excluded") or 0),
+            str(entry.get("task_vector_evaluation_excluded") or 0),
+        ]
+        for entry in entries
+    ]
+    return render_table(header, rows)
+
+
+def render_task_bucket_table(entries: list[dict[str, Any]]) -> str:
+    header = ["TASK_BUCKET", "TASKS", "USABLE", "CLEAN", "CANDIDATE"]
+    rows = [
+        [
+            str(entry.get("key") or "-"),
+            str(entry.get("tasks") or 0),
+            str(entry.get("usable_for_worker_policy") or 0),
+            str(entry.get("clean_samples") or 0),
+            "yes" if entry.get("policy_review_candidate") else "no",
+        ]
+        for entry in entries
+    ]
+    return render_table(header, rows)
+
+
+def list_value(value: object) -> list[dict[str, Any]]:
+    return value if isinstance(value, list) else []
 
 
 def percent_cell(value: object) -> str:

@@ -1654,6 +1654,151 @@ class CliTests(unittest.TestCase):
             self.assertIn("## by_small_profile_candidate", output)
             self.assertIn("small", output)
 
+    def test_routing_report_evaluation_diagnostics_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}},
+            )
+            config = Config.load(str(config_path))
+            for index in range(3):
+                task = create_task(
+                    config,
+                    "work",
+                    tmp,
+                    task_id=f"clean-{index}",
+                    project_id="project-a",
+                    category="implementation",
+                    labels=["routing"],
+                    execution_profile="small",
+                    routing_size="small",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+                task["status"] = "completed"
+                task["review_status"] = "accepted"
+                task["attempts"] = 1
+                task["last_run"] = {"execution_backend": "codex", "execution_profile": "small"}
+                task["last_result"] = {
+                    "task_id": f"clean-{index}",
+                    "status": "completed",
+                    "verification": ["PYTHONPATH=src python3 -m unittest tests.test_cli"],
+                }
+                task["reviewer_codex"] = {"decision": "pass", "confidence": "high"}
+                save_task(config, task)
+            needs_fix = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="needs-fix",
+                project_id="project-a",
+                category="implementation",
+                labels=["routing"],
+                execution_profile="small",
+                routing_size="small",
+                routing_risk="low",
+                verification_scope=["unit"],
+            )
+            needs_fix["status"] = "completed"
+            needs_fix["review_status"] = "needs_followup"
+            needs_fix["last_result"] = {"task_id": "needs-fix", "status": "completed", "verification": ["unit"]}
+            needs_fix["reviewer_codex"] = {
+                "decision": "needs_fix",
+                "confidence": "high",
+                "findings": [{"severity": "error", "summary": "synthetic"}],
+            }
+            save_task(config, needs_fix)
+            failed_review = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="failed-review",
+                project_id="project-a",
+                category="implementation",
+                labels=["routing"],
+                execution_profile="small",
+                routing_size="medium",
+                routing_risk="high",
+                verification_scope=["manual"],
+            )
+            failed_review["status"] = "completed"
+            failed_review["review_status"] = "needs_followup"
+            failed_review["last_result"] = {"task_id": "failed-review", "status": "completed", "verification": ["manual"]}
+            failed_review["reviewer_codex"] = {"decision": "failed_review", "confidence": "low"}
+            save_task(config, failed_review)
+            legacy = create_task(
+                config,
+                "legacy work",
+                tmp,
+                task_id="legacy-minimal",
+                project_id="project-a",
+                category="docs",
+                labels=["legacy"],
+            )
+            legacy["status"] = "completed"
+            legacy["review_status"] = "accepted"
+            save_task(config, legacy)
+
+            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
+            report = json.loads(output)
+            diagnostics = report["evaluation_diagnostics"]
+            worker_cells = {entry["key"]: entry for entry in diagnostics["worker_cells"]}
+            reviewer_cells = {entry["key"]: entry for entry in diagnostics["reviewer_cells"]}
+            exclusions = {entry["key"]: entry for entry in diagnostics["policy_exclusions"]}
+            buckets = {entry["key"]: entry for entry in diagnostics["task_buckets"]}
+            small_bucket = buckets["size=small risk=low verify=unit"]
+
+            self.assertEqual(0, code)
+            self.assertEqual(6, diagnostics["row_count"])
+            self.assertEqual(4, diagnostics["policy_usage"]["usable_for_worker_policy"])
+            self.assertEqual(5, diagnostics["policy_usage"]["usable_for_reviewer_calibration"])
+            self.assertTrue(diagnostics["advisory"]["read_only"])
+            self.assertEqual(3, small_bucket["clean_samples"])
+            self.assertTrue(small_bucket["policy_review_candidate"])
+            self.assertEqual("advisory_read_only", small_bucket["policy_review_note"])
+            self.assertEqual(3, worker_cells["worker:backend=codex codex_profile_present=false model_present=false profile=small"]["usable_accepted_pass"])
+            self.assertEqual(1, reviewer_cells["reviewer:anchor=unknown policy=legacy present=true profile=unknown"]["reviewer_needs_fix"])
+            self.assertEqual(1, reviewer_cells["reviewer:anchor=unknown policy=legacy present=true profile=unknown"]["reviewer_failed_review"])
+            self.assertEqual(1, exclusions["review_process_failed"]["rows"])
+            self.assertEqual(1, exclusions["reviewer_unusable"]["rows"])
+            self.assertIn("objective_unavailable", exclusions)
+
+    def test_routing_report_evaluation_diagnostics_human_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="needs-human",
+                project_id="project-a",
+                routing_size="small",
+                routing_risk="medium",
+                verification_scope=["manual"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "needs_followup"
+            task["last_result"] = {"task_id": "needs-human", "status": "completed", "verification": ["manual"]}
+            task["reviewer_codex"] = {
+                "decision": "needs_human",
+                "confidence": "medium",
+                "required_human_checks": ["manual verification"],
+            }
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a"])
+
+            self.assertEqual(0, code)
+            self.assertIn("## evaluation_diagnostics", output)
+            self.assertIn("policy_usage: usable_for_worker_policy=1", output)
+            self.assertIn("worker_cells", output)
+            self.assertIn("reviewer_cells", output)
+            self.assertIn("policy_exclusions", output)
+            self.assertIn("task_buckets", output)
+            self.assertIn("HUMAN", output)
+            self.assertIn("size=small risk=medium verify=manual", output)
+
     def test_routing_report_rejects_negative_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
