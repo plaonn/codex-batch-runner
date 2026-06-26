@@ -7,6 +7,7 @@ from .config import Config
 from .evaluation import derive_evaluation_row
 from .execution_profiles import small_profile_routing_candidate
 from .queue import list_tasks, task_labels, task_project_id, task_project_root
+from .request_fingerprint import find_request_fingerprint_candidates
 from .timeutil import iso_now
 from .transcript import sanitize
 
@@ -74,6 +75,7 @@ def build_routing_report(
             "profile_experiment": summarize_groups(group_rows(rows, "profile_experiment")),
         },
         "evaluation_diagnostics": summarize_evaluation_diagnostics(evaluation_rows),
+        "request_fingerprint_candidates": find_request_fingerprint_candidates(tasks),
     }
 
 
@@ -523,6 +525,15 @@ def render_routing_report(report: dict[str, Any]) -> str:
         lines.append("")
         lines.append("## evaluation_diagnostics")
         lines.append(render_evaluation_diagnostics(diagnostics))
+    candidates = (
+        report.get("request_fingerprint_candidates")
+        if isinstance(report.get("request_fingerprint_candidates"), dict)
+        else {}
+    )
+    if candidates:
+        lines.append("")
+        lines.append("## request_fingerprint_candidates")
+        lines.append(render_request_fingerprint_candidates(candidates))
     return "\n".join(lines) + "\n"
 
 
@@ -632,6 +643,40 @@ def render_task_bucket_table(entries: list[dict[str, Any]]) -> str:
             str(entry.get("usable_for_worker_policy") or 0),
             str(entry.get("clean_samples") or 0),
             "yes" if entry.get("policy_review_candidate") else "no",
+        ]
+        for entry in entries
+    ]
+    return render_table(header, rows)
+
+
+def render_request_fingerprint_candidates(report: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append(f"candidates: {report.get('candidate_count', 0)}")
+    candidate_types = report.get("candidate_types") if isinstance(report.get("candidate_types"), dict) else {}
+    if candidate_types:
+        lines.append("types: " + " ".join(f"{key}={value}" for key, value in sorted(candidate_types.items())))
+    lines.append("")
+    lines.append(render_request_candidate_table(list_value(report.get("candidates"))[:10]))
+    return "\n".join(lines)
+
+
+def render_request_candidate_table(entries: list[dict[str, Any]]) -> str:
+    header = ["TYPE", "TASKS", "ID", "TASK_IDS", "BUCKETS"]
+    rows = [
+        [
+            str(entry.get("candidate_type") or "-"),
+            str(entry.get("task_count") or 0),
+            str(entry.get("candidate_id") or "-"),
+            ",".join(str(item) for item in entry.get("task_ids", [])[:4]) if isinstance(entry.get("task_ids"), list) else "-",
+            ",".join(
+                str(item)
+                for item in (
+                    entry.get("evidence", {}).get("task_bucket_keys", [])
+                    if isinstance(entry.get("evidence"), dict)
+                    else []
+                )[:3]
+            )
+            or "-",
         ]
         for entry in entries
     ]

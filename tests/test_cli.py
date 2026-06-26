@@ -1763,6 +1763,50 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, exclusions["reviewer_unusable"]["rows"])
             self.assertIn("objective_unavailable", exclusions)
 
+    def test_routing_report_includes_request_fingerprint_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            private_path = "/Users/example/.codex-batch-runner/worktrees/private/task.md"
+            for task_id in ("duplicate-a", "duplicate-b"):
+                task = create_task(
+                    config,
+                    f"Implement parser validation using {private_path}.",
+                    tmp,
+                    task_id=task_id,
+                    title="Parser validation",
+                    project_id="project-a",
+                    category="implementation",
+                    routing_size="small",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+                task["status"] = "completed"
+                task["review_status"] = "accepted"
+                save_task(config, task)
+            create_task(
+                config,
+                "Summarize queue state.",
+                tmp,
+                task_id="unrelated",
+                title="Queue summary",
+                project_id="project-a",
+                category="docs",
+            )
+
+            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
+            report = json.loads(output)
+            candidates = report["request_fingerprint_candidates"]
+
+            self.assertEqual(0, code)
+            self.assertEqual(1, candidates["candidate_count"])
+            self.assertTrue(candidates["advisory"]["read_only"])
+            self.assertFalse(candidates["advisory"]["mutation_allowed"])
+            self.assertEqual({"exact_duplicate": 1}, candidates["candidate_types"])
+            self.assertEqual(["duplicate-a", "duplicate-b"], candidates["candidates"][0]["task_ids"])
+            self.assertNotIn(private_path, output)
+            self.assertNotIn("Implement parser validation", output)
+
     def test_routing_report_evaluation_diagnostics_human_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -1796,6 +1840,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("reviewer_cells", output)
             self.assertIn("policy_exclusions", output)
             self.assertIn("task_buckets", output)
+            self.assertIn("## request_fingerprint_candidates", output)
             self.assertIn("HUMAN", output)
             self.assertIn("size=small risk=medium verify=manual", output)
 

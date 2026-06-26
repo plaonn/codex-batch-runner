@@ -10,6 +10,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 PREPROCESSING_VERSION = "request-fingerprint-v1"
+DEFAULT_CANDIDATE_LIMIT = 20
 
 TEXT_FIELDS = ("title", "description", "prompt")
 METADATA_FIELDS = (
@@ -97,6 +98,124 @@ def derive_request_fingerprint(task: dict[str, Any]) -> dict[str, Any]:
             "prompt_hash_only": True,
         },
     }
+
+
+def find_request_fingerprint_candidates(
+    tasks: list[dict[str, Any]],
+    *,
+    limit: int = DEFAULT_CANDIDATE_LIMIT,
+) -> dict[str, Any]:
+    """Find read-only local candidate groups from safe deterministic fingerprints."""
+    fingerprinted = [(task, derive_request_fingerprint(task)) for task in tasks]
+    groups: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for task, fingerprint in fingerprinted:
+        hashes = fingerprint.get("hashes") if isinstance(fingerprint.get("hashes"), dict) else {}
+        normalized_text_hash = str(hashes.get("normalized_text_hash") or "")
+        if normalized_text_hash:
+            groups.setdefault(normalized_text_hash, []).append((task, fingerprint))
+
+    candidates = [
+        _exact_duplicate_candidate(normalized_text_hash, group)
+        for normalized_text_hash, group in groups.items()
+        if len(group) > 1
+    ]
+    candidates.sort(
+        key=lambda candidate: (
+            -int(candidate["task_count"]),
+            str(candidate["candidate_type"]),
+            str(candidate["candidate_id"]),
+        )
+    )
+    if limit > 0:
+        candidates = candidates[:limit]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "preprocessing_version": PREPROCESSING_VERSION,
+        "candidate_count": len(candidates),
+        "candidate_types": _candidate_type_counts(candidates),
+        "candidates": candidates,
+        "advisory": {
+            "read_only": True,
+            "mutation_allowed": False,
+            "candidate_limit": limit,
+            "implemented_candidate_types": ["exact_duplicate"],
+        },
+        "privacy": {
+            "raw_text_included": False,
+            "raw_normalized_text_included": False,
+            "raw_paths_included": False,
+            "session_or_thread_ids_included": False,
+        },
+    }
+
+
+def _exact_duplicate_candidate(
+    normalized_text_hash: str,
+    group: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> dict[str, Any]:
+    summaries = [_candidate_task_summary(task, fingerprint) for task, fingerprint in group]
+    summaries.sort(key=lambda summary: str(summary.get("task_id") or ""))
+    candidate_id = "rfpc-" + _sha256(f"exact_duplicate\n{normalized_text_hash}").split(":", 1)[1][:16]
+    return {
+        "candidate_type": "exact_duplicate",
+        "candidate_id": candidate_id,
+        "task_count": len(summaries),
+        "task_ids": [summary["task_id"] for summary in summaries],
+        "task_id_hashes": [summary["task_id_hash"] for summary in summaries if summary.get("task_id_hash")],
+        "task_summaries": summaries,
+        "evidence": {
+            "basis": "normalized_text_hash",
+            "normalized_text_hash_match": True,
+            "distinct_fingerprint_ids": sorted({str(summary.get("fingerprint_id")) for summary in summaries}),
+            "task_bucket_keys": sorted({str(summary.get("task_bucket_key")) for summary in summaries}),
+            "project_root_hashes": sorted(
+                {str(summary.get("project_root_hash")) for summary in summaries if summary.get("project_root_hash")}
+            ),
+            "cwd_classes": sorted({str(summary.get("cwd_class")) for summary in summaries}),
+            "path_classes": sorted(
+                {
+                    str(path_class)
+                    for summary in summaries
+                    for path_class in summary.get("path_classes", [])
+                    if path_class
+                }
+            ),
+        },
+        "privacy": {
+            "raw_text_included": False,
+            "raw_normalized_text_included": False,
+            "raw_paths_included": False,
+        },
+    }
+
+
+def _candidate_task_summary(task: dict[str, Any], fingerprint: dict[str, Any]) -> dict[str, Any]:
+    metadata_hints = fingerprint.get("metadata_hints") if isinstance(fingerprint.get("metadata_hints"), dict) else {}
+    text_stats = fingerprint.get("text_stats") if isinstance(fingerprint.get("text_stats"), dict) else {}
+    lineage_hints = fingerprint.get("lineage_hints") if isinstance(fingerprint.get("lineage_hints"), dict) else {}
+    return {
+        "task_id": _safe_metadata_value(task.get("id") or task.get("task_id")),
+        "task_id_hash": fingerprint.get("task_id_hash"),
+        "fingerprint_id": fingerprint.get("fingerprint_id"),
+        "status": _safe_metadata_value(task.get("status")),
+        "review_status": _safe_metadata_value(task.get("review_status")),
+        "task_bucket_key": _safe_metadata_value(metadata_hints.get("task_bucket_key")),
+        "project_id": _safe_metadata_value(metadata_hints.get("project_id")),
+        "category": _safe_metadata_value(metadata_hints.get("category")),
+        "cwd_class": _safe_metadata_value(metadata_hints.get("cwd_class")),
+        "project_root_hash": metadata_hints.get("project_root_hash"),
+        "path_classes": list(metadata_hints.get("path_classes") or []),
+        "token_count_bucket": _safe_metadata_value(text_stats.get("token_count_bucket")),
+        "lineage_present": any(_has_value(value) for value in lineage_hints.values()),
+    }
+
+
+def _candidate_type_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        candidate_type = str(candidate.get("candidate_type") or "unknown")
+        counts[candidate_type] = counts.get(candidate_type, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _source_fields(task: dict[str, Any]) -> list[str]:

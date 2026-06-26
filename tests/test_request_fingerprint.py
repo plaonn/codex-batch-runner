@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from codex_batch_runner.request_fingerprint import derive_request_fingerprint
+from codex_batch_runner.request_fingerprint import derive_request_fingerprint, find_request_fingerprint_candidates
 
 
 class RequestFingerprintTests(unittest.TestCase):
@@ -111,6 +111,66 @@ class RequestFingerprintTests(unittest.TestCase):
                 }
             )["hashes"]["simhash64"],
         )
+
+    def test_exact_duplicate_candidate_report_is_public_safe(self) -> None:
+        private_path = "/Users/example/.codex-batch-runner/worktrees/task-demo/.private/plan.md"
+        report = find_request_fingerprint_candidates(
+            [
+                {
+                    "id": "duplicate-a",
+                    "title": "Parser validation",
+                    "prompt": f"Update parser validation using {private_path}.",
+                    "project_id": "project-a",
+                    "routing_size": "small",
+                    "routing_risk": "low",
+                    "verification_scope": ["unit"],
+                    "cwd": private_path,
+                    "project_root": "/Users/example/project",
+                },
+                {
+                    "id": "duplicate-b",
+                    "title": "  Parser   validation ",
+                    "prompt": f"Update parser validation using {private_path}.",
+                    "project_id": "project-a",
+                    "routing_size": "small",
+                    "routing_risk": "low",
+                    "verification_scope": ["unit"],
+                    "cwd": private_path,
+                    "project_root": "/Users/example/project",
+                },
+                {
+                    "id": "unrelated",
+                    "title": "Queue summary",
+                    "prompt": "Summarize queue state.",
+                    "project_id": "project-a",
+                },
+            ]
+        )
+
+        serialized = json.dumps(report, sort_keys=True)
+        self.assertEqual(1, report["candidate_count"])
+        self.assertEqual({"exact_duplicate": 1}, report["candidate_types"])
+        candidate = report["candidates"][0]
+        self.assertEqual("exact_duplicate", candidate["candidate_type"])
+        self.assertEqual(["duplicate-a", "duplicate-b"], candidate["task_ids"])
+        self.assertTrue(candidate["evidence"]["normalized_text_hash_match"])
+        self.assertIn("private_docs", candidate["evidence"]["path_classes"])
+        self.assertNotIn(private_path, serialized)
+        self.assertNotIn("Update parser validation", serialized)
+        self.assertFalse(report["privacy"]["raw_text_included"])
+        self.assertFalse(candidate["privacy"]["raw_normalized_text_included"])
+
+    def test_candidate_report_ignores_distinct_requests(self) -> None:
+        report = find_request_fingerprint_candidates(
+            [
+                {"id": "task-a", "title": "Parser validation", "prompt": "Update parser validation."},
+                {"id": "task-b", "title": "Parser validation", "prompt": "Update queue validation."},
+            ]
+        )
+
+        self.assertEqual(0, report["candidate_count"])
+        self.assertEqual({}, report["candidate_types"])
+        self.assertEqual([], report["candidates"])
 
 
 if __name__ == "__main__":
