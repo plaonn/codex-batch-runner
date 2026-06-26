@@ -78,7 +78,7 @@ cbr list
 기본 `cbr list`는 compact human 표기로 `[P]`, `TITLE`, `STATUS`, `DETAIL`
 열을 보여 줍니다. `FLAGS`, `DEPS`, `NOTE` 같은 고정 열은 기본 compact 출력에 없고,
 의사결정에 필요한 상태는 `STATUS`와 `DETAIL`에 합쳐져 표시됩니다. 의존성 구조를
-별도 그래프 형태로 보고 싶으면 `--graph`를 사용합니다.
+별도 그래프 형태의 non-interactive 스냅샷으로 보고 싶으면 `--graph`를 사용합니다.
 
 여러 프로젝트가 하나의 queue를 공유하면 detail을 열기 전에 필터링합니다.
 
