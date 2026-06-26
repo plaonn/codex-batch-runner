@@ -25,6 +25,7 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
     reviewer = _reviewer_section(task)
     objective_checks = _objective_checks(task, reviewer)
     outcomes = _outcomes(task, reviewer)
+    task_vector_evaluation = _task_vector_evaluation(task, task_vector, worker, objective_checks, outcomes)
     exclusion_reasons = _exclusion_reasons(task, task_vector, reviewer, objective_checks, outcomes)
     policy_usage = _policy_usage(task, task_vector, reviewer, objective_checks, outcomes, exclusion_reasons)
 
@@ -42,6 +43,7 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
         "worker": worker,
         "reviewer": reviewer,
         "objective_checks": objective_checks,
+        "task_vector_evaluation": task_vector_evaluation,
         "outcomes": outcomes,
         "policy_usage": policy_usage,
         "exclusion_reasons": exclusion_reasons,
@@ -217,6 +219,297 @@ def _objective_checks(task: dict[str, Any], reviewer: dict[str, Any]) -> dict[st
         "required_check_failed": required_check_failed or safety_flag,
         "git_state_unsafe_or_ambiguous": stale_marker or conflict_marker or recovery_marker,
     }
+
+
+def _task_vector_evaluation(
+    task: dict[str, Any],
+    task_vector: dict[str, Any],
+    worker: dict[str, Any],
+    objective_checks: dict[str, Any],
+    outcomes: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare the derived vector with safe post-run metadata.
+
+    This is an audit-only quality slice. It uses buckets, classes, and already
+    structured outcome fields; it does not surface raw changed paths,
+    verification commands, summaries, prompts, logs, or volatile ids.
+    """
+    dimensions = task_vector.get("dimensions") if isinstance(task_vector.get("dimensions"), dict) else {}
+    observed = _observed_task_metadata(task, worker, objective_checks, outcomes)
+    evaluations = {
+        "routing_size": _evaluate_scalar_dimension(
+            dimensions.get("routing_size"),
+            observed.get("inferred_routing_size"),
+            observed_signal="changed_file_count_bucket+verification_count_bucket",
+        ),
+        "routing_risk": _evaluate_scalar_dimension(
+            dimensions.get("routing_risk"),
+            observed.get("inferred_routing_risk"),
+            observed_signal="path_classes+outcome_flags",
+        ),
+        "category": _evaluate_scalar_dimension(
+            dimensions.get("category"),
+            observed.get("inferred_category"),
+            observed_signal="changed_file_classes",
+        ),
+        "execution_backend": _evaluate_scalar_dimension(
+            dimensions.get("execution_backend"),
+            observed.get("execution_backend"),
+            observed_signal="worker_execution_backend",
+        ),
+        "verification_scope": _evaluate_list_dimension(
+            dimensions.get("verification_scope"),
+            observed.get("observed_verification_scope"),
+            observed_signal="verification_command_classes",
+        ),
+        "routing_risk_factors": _evaluate_list_dimension(
+            dimensions.get("routing_risk_factors"),
+            observed.get("observed_risk_factors"),
+            observed_signal="path_classes+outcome_flags",
+        ),
+        "labels": _evaluate_list_dimension(
+            dimensions.get("labels"),
+            [],
+            observed_signal="not_observed_post_run",
+        ),
+    }
+    uncertainty_reasons = sorted(
+        {
+            reason
+            for evaluation in evaluations.values()
+            for reason in evaluation.get("uncertainty_reasons", [])
+            if str(reason).strip()
+        }
+    )
+    mismatches = sorted(
+        dimension
+        for dimension, evaluation in evaluations.items()
+        if evaluation.get("comparison") == "mismatch"
+    )
+    excluded_dimensions = sorted(
+        dimension
+        for dimension, evaluation in evaluations.items()
+        if evaluation.get("comparison") in {"not_observed", "declared_missing", "observed_missing"}
+    )
+    return {
+        "schema_version": 1,
+        "derivation_version": "task-vector-evaluation-v1",
+        "read_only": True,
+        "vector_confidence": task_vector.get("confidence"),
+        "observed": observed,
+        "dimensions": evaluations,
+        "summary": {
+            "matched_dimensions": sum(1 for item in evaluations.values() if item.get("comparison") == "match"),
+            "mismatched_dimensions": len(mismatches),
+            "excluded_dimensions": excluded_dimensions,
+            "mismatched_dimension_names": mismatches,
+            "uncertainty_reasons": uncertainty_reasons,
+        },
+        "privacy": {
+            "raw_changed_files_included": False,
+            "raw_verification_included": False,
+            "raw_prompts_included": False,
+            "raw_logs_included": False,
+            "raw_paths_included": False,
+        },
+    }
+
+
+def _observed_task_metadata(
+    task: dict[str, Any],
+    worker: dict[str, Any],
+    objective_checks: dict[str, Any],
+    outcomes: dict[str, Any],
+) -> dict[str, Any]:
+    last_result = _dict_value(task.get("last_result"))
+    changed_files = _list_value(last_result.get("changed_files"))
+    verification = _list_value(last_result.get("verification"))
+    changed_file_classes = _changed_file_classes(changed_files)
+    verification_scope = _verification_scope_from_observed(verification)
+    risk_factors = _observed_risk_factors(changed_file_classes, objective_checks, outcomes)
+    changed_count = len(changed_files)
+    verification_count = len(verification)
+    return {
+        "terminal_status": outcomes.get("worker_terminal_status"),
+        "review_status": outcomes.get("review_status"),
+        "review_decision": outcomes.get("review_decision"),
+        "execution_backend": worker.get("execution_backend"),
+        "changed_file_count_bucket": _count_bucket(changed_count),
+        "verification_count_bucket": _count_bucket(verification_count),
+        "changed_file_classes": changed_file_classes,
+        "observed_verification_scope": verification_scope,
+        "observed_risk_factors": risk_factors,
+        "inferred_routing_size": _infer_routing_size(changed_count, verification_count),
+        "inferred_routing_risk": _infer_routing_risk(changed_file_classes, objective_checks, outcomes),
+        "inferred_category": _infer_category(changed_file_classes),
+    }
+
+
+def _changed_file_classes(changed_files: list[Any]) -> list[str]:
+    classes = set()
+    for item in changed_files:
+        value = _safe_metadata_value(item)
+        if not value or value == "unknown":
+            continue
+        if value.startswith("hash:"):
+            classes.add("path_like")
+            continue
+        if value.startswith("<path:") and value.endswith(">"):
+            classes.add(value.removeprefix("<path:").removesuffix(">"))
+            continue
+        if _path_contains(value, ".private"):
+            classes.add("private_docs")
+        elif _path_contains(value, "test") or _path_contains(value, "tests"):
+            classes.add("tests")
+        elif _path_contains(value, "doc") or value.endswith(".md") or _path_contains(value, "readme"):
+            classes.add("public_docs")
+        elif _path_contains(value, "src") or _path_contains(value, "lib"):
+            classes.add("source")
+        elif value.endswith((".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".plist")):
+            classes.add("config")
+        else:
+            classes.add("other")
+    return sorted(classes)
+
+
+def _verification_scope_from_observed(verification: list[Any]) -> list[str]:
+    scopes = set()
+    for item in verification:
+        value = _safe_metadata_value(item)
+        if not value or value == "unknown":
+            continue
+        if any(token in value for token in ("unittest", "pytest", "test", "tests")):
+            scopes.add("unit")
+        if any(token in value for token in ("compileall", "python -m compileall", "tsc", "typecheck")):
+            scopes.add("compile")
+        if any(token in value for token in ("lint", "ruff", "eslint", "flake8")):
+            scopes.add("lint")
+        if "manual" in value:
+            scopes.add("manual")
+        if any(token in value for token in ("smoke", "start server", "curl", "healthcheck")):
+            scopes.add("smoke")
+    return sorted(scopes)
+
+
+def _observed_risk_factors(
+    changed_file_classes: list[str],
+    objective_checks: dict[str, Any],
+    outcomes: dict[str, Any],
+) -> list[str]:
+    factors = set()
+    if "private_docs" in changed_file_classes:
+        factors.add("private-docs")
+    if "config" in changed_file_classes:
+        factors.add("config")
+    if "source" in changed_file_classes:
+        factors.add("source")
+    if objective_checks.get("public_private_safety_flag"):
+        factors.add("safety-flag")
+    if objective_checks.get("git_state_unsafe_or_ambiguous"):
+        factors.add("git-state")
+    if outcomes.get("needs_resume"):
+        factors.add("needs-resume")
+    if outcomes.get("blocked_user"):
+        factors.add("blocked-user")
+    if outcomes.get("failed"):
+        factors.add("failed")
+    return sorted(factors)
+
+
+def _infer_routing_size(changed_file_count: int, verification_count: int) -> str:
+    if changed_file_count == 0 and verification_count == 0:
+        return "unknown"
+    if changed_file_count <= 2 and verification_count <= 2:
+        return "small"
+    if changed_file_count <= 10 and verification_count <= 5:
+        return "medium"
+    return "large"
+
+
+def _infer_routing_risk(
+    changed_file_classes: list[str],
+    objective_checks: dict[str, Any],
+    outcomes: dict[str, Any],
+) -> str:
+    if not changed_file_classes and not any(outcomes.get(key) for key in ("failed", "needs_resume", "blocked_user")):
+        return "unknown"
+    if objective_checks.get("public_private_safety_flag") or objective_checks.get("git_state_unsafe_or_ambiguous"):
+        return "high"
+    if outcomes.get("failed") or outcomes.get("needs_resume") or outcomes.get("blocked_user"):
+        return "medium"
+    if "config" in changed_file_classes or "source" in changed_file_classes:
+        return "medium"
+    return "low"
+
+
+def _infer_category(changed_file_classes: list[str]) -> str:
+    if not changed_file_classes:
+        return "unknown"
+    if changed_file_classes == ["public_docs"]:
+        return "docs"
+    if set(changed_file_classes).issubset({"tests"}):
+        return "tests"
+    if "source" in changed_file_classes:
+        return "implementation"
+    if "config" in changed_file_classes:
+        return "configuration"
+    return "unknown"
+
+
+def _evaluate_scalar_dimension(declared: Any, observed: Any, *, observed_signal: str) -> dict[str, Any]:
+    declared_value = _safe_metadata_value(declared)
+    observed_value = _safe_metadata_value(observed)
+    reasons: list[str] = []
+    if declared_value == "unknown" and observed_value == "unknown":
+        comparison = "not_observed"
+        reasons.append("declared_and_observed_missing")
+    elif declared_value == "unknown":
+        comparison = "declared_missing"
+        reasons.append("declared_missing")
+    elif observed_value == "unknown":
+        comparison = "observed_missing"
+        reasons.append("safe_observed_signal_missing")
+    elif declared_value == observed_value:
+        comparison = "match"
+    else:
+        comparison = "mismatch"
+    return {
+        "declared": declared_value,
+        "observed": observed_value,
+        "observed_signal": observed_signal,
+        "comparison": comparison,
+        "uncertainty_reasons": reasons,
+    }
+
+
+def _evaluate_list_dimension(declared: Any, observed: Any, *, observed_signal: str) -> dict[str, Any]:
+    declared_values = _normalized_list(declared)
+    observed_values = _normalized_list(observed)
+    reasons: list[str] = []
+    if not declared_values and not observed_values:
+        comparison = "not_observed"
+        reasons.append("declared_and_observed_missing")
+    elif not declared_values:
+        comparison = "declared_missing"
+        reasons.append("declared_missing")
+    elif not observed_values:
+        comparison = "observed_missing"
+        reasons.append("safe_observed_signal_missing")
+    elif set(declared_values) & set(observed_values):
+        comparison = "match"
+    else:
+        comparison = "mismatch"
+    return {
+        "declared": declared_values,
+        "observed": observed_values,
+        "observed_signal": observed_signal,
+        "comparison": comparison,
+        "uncertainty_reasons": reasons,
+    }
+
+
+def _path_contains(value: str, part: str) -> bool:
+    return f"/{part}/" in f"/{value.strip('/')}/" or value.endswith(f"/{part}") or value.startswith(f"{part}/")
 
 
 def _outcomes(task: dict[str, Any], reviewer: dict[str, Any]) -> dict[str, Any]:

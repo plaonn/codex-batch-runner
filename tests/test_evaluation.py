@@ -68,6 +68,7 @@ class EvaluationRowTests(unittest.TestCase):
         self.assertIn("worker", row)
         self.assertIn("reviewer", row)
         self.assertIn("objective_checks", row)
+        self.assertIn("task_vector_evaluation", row)
         self.assertEqual("accepted", row["outcomes"]["review_status"])
         self.assertTrue(row["outcomes"]["applied"])
         self.assertTrue(row["objective_checks"]["required_checks_passed"])
@@ -197,6 +198,73 @@ class EvaluationRowTests(unittest.TestCase):
         self.assertNotIn(private_path, serialized)
         self.assertFalse(row["privacy"]["raw_prompt_included"])
         self.assertFalse(row["privacy"]["raw_paths_included"])
+        self.assertFalse(row["task_vector_evaluation"]["privacy"]["raw_changed_files_included"])
+        self.assertFalse(row["task_vector_evaluation"]["privacy"]["raw_verification_included"])
+
+    def test_task_vector_evaluation_compares_declared_vector_to_safe_observed_metadata(self) -> None:
+        row = derive_evaluation_row(
+            base_task(
+                status="completed",
+                review_status="accepted",
+                routing_size="small",
+                routing_risk="medium",
+                category="implementation",
+                execution_backend="codex",
+                routing_risk_factors=["source"],
+                last_run={"execution_backend": "codex", "execution_profile": "normal"},
+                last_result={
+                    "task_id": "task-2026-06-25T170111-447743Z0000",
+                    "status": "completed",
+                    "changed_files": ["src/example.py", "tests/test_example.py"],
+                    "verification": ["PYTHONPATH=src python3 -m unittest tests.test_example"],
+                },
+            )
+        )
+        vector_evaluation = row["task_vector_evaluation"]
+
+        self.assertTrue(vector_evaluation["read_only"])
+        self.assertEqual("task-vector-evaluation-v1", vector_evaluation["derivation_version"])
+        self.assertEqual("small", vector_evaluation["dimensions"]["routing_size"]["observed"])
+        self.assertEqual("match", vector_evaluation["dimensions"]["routing_size"]["comparison"])
+        self.assertEqual("medium", vector_evaluation["dimensions"]["routing_risk"]["observed"])
+        self.assertEqual("match", vector_evaluation["dimensions"]["routing_risk"]["comparison"])
+        self.assertEqual("implementation", vector_evaluation["dimensions"]["category"]["observed"])
+        self.assertEqual("match", vector_evaluation["dimensions"]["category"]["comparison"])
+        self.assertEqual("codex", vector_evaluation["dimensions"]["execution_backend"]["observed"])
+        self.assertEqual("match", vector_evaluation["dimensions"]["execution_backend"]["comparison"])
+        self.assertEqual(["unit"], vector_evaluation["dimensions"]["verification_scope"]["observed"])
+        self.assertEqual("match", vector_evaluation["dimensions"]["verification_scope"]["comparison"])
+        self.assertEqual(["source", "tests"], vector_evaluation["observed"]["changed_file_classes"])
+        self.assertEqual(0, vector_evaluation["summary"]["mismatched_dimensions"])
+
+    def test_task_vector_evaluation_records_mismatches_and_uncertainty_without_raw_paths(self) -> None:
+        private_path = "/Users/example/private/project/src/secret.py"
+        row = derive_evaluation_row(
+            base_task(
+                status="completed",
+                review_status="accepted",
+                routing_size="small",
+                routing_risk="low",
+                category="docs",
+                execution_backend="codex",
+                labels=["implementation"],
+                last_run={"execution_backend": "codex", "execution_profile": "normal"},
+                last_result={
+                    "task_id": "task-2026-06-25T170111-447743Z0000",
+                    "status": "completed",
+                    "changed_files": [private_path],
+                    "verification": [],
+                },
+            )
+        )
+        vector_evaluation = row["task_vector_evaluation"]
+        serialized = json.dumps(vector_evaluation, sort_keys=True)
+
+        self.assertNotIn(private_path, serialized)
+        self.assertEqual(["private_docs"], vector_evaluation["observed"]["changed_file_classes"])
+        self.assertEqual("observed_missing", vector_evaluation["dimensions"]["labels"]["comparison"])
+        self.assertIn("safe_observed_signal_missing", vector_evaluation["summary"]["uncertainty_reasons"])
+        self.assertIn("labels", vector_evaluation["summary"]["excluded_dimensions"])
 
     def test_missing_fields_are_unknown_or_empty_without_exceptions(self) -> None:
         row = derive_evaluation_row({})
@@ -207,6 +275,7 @@ class EvaluationRowTests(unittest.TestCase):
         self.assertEqual("unknown", row["reviewer"]["review_status"])
         self.assertEqual("unknown", row["objective_checks"]["final_result_status"])
         self.assertEqual([], row["task_vector"]["dimensions"]["labels"])
+        self.assertEqual("not_observed", row["task_vector_evaluation"]["dimensions"]["routing_size"]["comparison"])
         self.assertIn("task_vector_uncertain", row["exclusion_reasons"])
 
 

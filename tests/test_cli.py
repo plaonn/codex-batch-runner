@@ -1857,6 +1857,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("worker", row)
             self.assertIn("reviewer", row)
             self.assertIn("objective_checks", row)
+            self.assertIn("task_vector_evaluation", row)
             self.assertIn("policy_usage", row)
             self.assertNotIn("raw private prompt", serialized)
             self.assertNotIn("raw summary mentions", serialized)
@@ -1865,6 +1866,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn(private_path, serialized)
             self.assertFalse(report["privacy"]["raw_paths_included"])
             self.assertFalse(row["privacy"]["raw_prompt_included"])
+            self.assertFalse(row["task_vector_evaluation"]["privacy"]["raw_changed_files_included"])
 
     def test_routing_eval_report_filters_limit_and_hashes_project_root_filter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
