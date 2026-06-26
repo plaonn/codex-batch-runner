@@ -16,7 +16,7 @@ from .queue import RUNNABLE_STATUSES, capacity_blockers, dependency_status, is_i
 from .state import load_state
 from .timeutil import parse_time, utc_now
 from .transcript import sanitize
-from .worktree import worktree_task_counts
+from .worktree import WORKTREE_RETAINED_STATUSES, sanitize_report_value, task_worktree_report, worktree_task_counts
 
 CODEX_VERSION_TIMEOUT_SECONDS = 2.0
 
@@ -418,7 +418,73 @@ def worktree_summary(config: Config, tasks: list[dict[str, Any]]) -> dict[str, A
         "mode": config.worktree_mode,
         "root": sanitize(config.worktree_root) if config.worktree_root is not None else None,
         "tasks": worktree_task_counts(tasks),
+        "task_branches": task_branch_lifecycle_summary(tasks),
     }
+
+
+def task_branch_lifecycle_summary(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items = []
+    for task in tasks:
+        if task.get("execution_mode") != "git_worktree":
+            continue
+        branch = str(task.get("execution_branch") or "").strip()
+        worktree_report = task_worktree_report(task)
+        item: dict[str, Any] = {
+            "task_id": sanitize_report_value(task.get("id")),
+            "status": task.get("status"),
+            "review_status": task.get("review_status"),
+            "branch": sanitize_report_value(branch) if branch else None,
+            "worktree_status": task.get("execution_worktree_status"),
+            "retained_metadata": str(task.get("execution_worktree_status") or "") in WORKTREE_RETAINED_STATUSES,
+            "path_exists": worktree_report.get("path_exists"),
+            "local_branch_exists": worktree_report.get("branch_exists"),
+            "local_branch_head": worktree_report.get("branch_head"),
+            "apply_status": task.get("execution_apply_status"),
+            "applied_head": sanitize_report_value(task.get("execution_applied_head")),
+            "cleanup_kind": task.get("execution_cleanup_kind"),
+            "cleanup_result_applied": task.get("execution_cleanup_result_applied"),
+            "cleanup_branch_retained": task.get("execution_cleanup_branch_retained"),
+            "branch_prune_status": task.get("execution_branch_prune_status"),
+            "branch_pruned_head": sanitize_report_value(task.get("execution_branch_pruned_head")),
+            "branch_pruned_at": task.get("execution_branch_pruned_at"),
+            "recovery_required": worktree_report.get("recovery_required"),
+            "remote_task_branch": remote_task_branch_summary(task, branch),
+        }
+        items.append({key: value for key, value in item.items() if value not in (None, "", [])})
+    return items
+
+
+def remote_task_branch_summary(task: dict[str, Any], branch: str) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "configured_upstream": None,
+        "known_remote_refs": [],
+        "known": False,
+        "warnings": [],
+    }
+    if not branch:
+        return summary
+    repo_value = task.get("execution_repo_root") or task.get("project_root") or task.get("cwd")
+    if not repo_value:
+        summary["warnings"].append("missing repository metadata")
+        return summary
+    try:
+        repo_root = Path(str(repo_value)).expanduser()
+        upstream = run_git(repo_root, ["for-each-ref", "--format=%(upstream:short)", f"refs/heads/{branch}"])
+        if upstream.returncode == 0 and upstream.stdout.strip():
+            summary["configured_upstream"] = sanitize(upstream.stdout.strip())
+        elif upstream.returncode != 0:
+            summary["warnings"].append(f"cannot inspect branch upstream: {clean_git_error(upstream)}")
+        remotes = run_git(repo_root, ["for-each-ref", "--format=%(refname:short)", "refs/remotes"])
+        if remotes.returncode == 0:
+            suffix = f"/{branch}"
+            refs = sorted(ref for ref in remotes.stdout.splitlines() if ref.strip().endswith(suffix))
+            summary["known_remote_refs"] = [sanitize(ref) for ref in refs]
+        else:
+            summary["warnings"].append(f"cannot inspect remote refs: {clean_git_error(remotes)}")
+    except OSError as exc:
+        summary["warnings"].append("cannot inspect remote refs: " + sanitize(str(exc)))
+    summary["known"] = bool(summary["configured_upstream"] or summary["known_remote_refs"])
+    return summary
 
 
 def capacity_summary(config: Config, tasks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -602,6 +668,28 @@ def render_doctor_report(report: dict[str, Any]) -> str:
         lines.append("  by_status:")
         for status, count in by_status.items():
             lines.append(f"    {status}: {count}")
+    task_branches = worktree.get("task_branches") or []
+    if task_branches:
+        lines.append("  task_branches:")
+        for item in task_branches:
+            remote = item.get("remote_task_branch") if isinstance(item.get("remote_task_branch"), dict) else {}
+            remote_known = str(bool(remote.get("known"))).lower()
+            upstream = remote.get("configured_upstream") or "-"
+            remote_refs = ",".join(remote.get("known_remote_refs") or []) or "-"
+            lines.append(
+                "    - "
+                f"{item.get('task_id')} "
+                f"branch={item.get('branch') or '-'} "
+                f"worktree_status={item.get('worktree_status') or '-'} "
+                f"retained_metadata={str(bool(item.get('retained_metadata'))).lower()} "
+                f"local_branch_exists={format_optional_bool(item.get('local_branch_exists'))} "
+                f"apply_status={item.get('apply_status') or '-'} "
+                f"cleanup_kind={item.get('cleanup_kind') or '-'} "
+                f"branch_prune_status={item.get('branch_prune_status') or '-'} "
+                f"remote_known={remote_known} "
+                f"upstream={upstream} "
+                f"remote_refs={remote_refs}"
+            )
     capacity = report["capacity"]
     lines.extend(
         [

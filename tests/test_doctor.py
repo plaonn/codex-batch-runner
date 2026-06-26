@@ -65,6 +65,26 @@ def run_git(cwd: Path, args: list[str]) -> None:
     subprocess.run(["git", "-C", str(cwd), *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
+def git_output(cwd: Path, args: list[str]) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def init_repo(path: Path) -> None:
+    subprocess.run(["git", "init", "-b", "main", str(path)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    run_git(path, ["config", "user.email", "test@example.invalid"])
+    run_git(path, ["config", "user.name", "Test User"])
+    (path / "file.txt").write_text("base\n", encoding="utf-8")
+    run_git(path, ["add", "file.txt"])
+    run_git(path, ["commit", "-m", "initial"])
+
+
 class DoctorTests(unittest.TestCase):
     def test_doctor_reports_healthy_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -437,6 +457,87 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual({"retained": 1}, report["worktree"]["tasks"]["by_status"])
             self.assertEqual(1, report["worktree"]["tasks"]["retained"])
             self.assertEqual(1, report["worktree"]["tasks"]["recovery_required"])
+
+    def test_doctor_reports_task_branch_lifecycle_visibility(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = root / "codex"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(tmp, [str(executable)], worktree_mode="task")
+            config = Config.load(str(config_path))
+            head = git_output(repo, ["rev-parse", "HEAD"])
+            run_git(repo, ["branch", "cbr/lifecycle", head])
+            run_git(repo, ["remote", "add", "origin", str(root / "origin.git")])
+            run_git(repo, ["update-ref", "refs/remotes/origin/cbr/lifecycle", head])
+            run_git(repo, ["config", "branch.cbr/lifecycle.remote", "origin"])
+            run_git(repo, ["config", "branch.cbr/lifecycle.merge", "refs/heads/cbr/lifecycle"])
+
+            retained = create_task(config, "work", str(repo), task_id="lifecycle")
+            retained.update(
+                {
+                    "status": "completed",
+                    "review_status": "accepted",
+                    "execution_mode": "git_worktree",
+                    "execution_branch": "cbr/lifecycle",
+                    "execution_repo_root": str(repo),
+                    "execution_base_ref": "HEAD",
+                    "execution_base_head": head,
+                    "execution_worktree_status": "retained",
+                    "execution_worktree_path": str(root / "worktrees" / "lifecycle"),
+                    "execution_apply_status": "applied",
+                    "execution_applied_head": head,
+                }
+            )
+            save_task(config, retained)
+            pruned = create_task(config, "work", str(repo), task_id="pruned")
+            pruned.update(
+                {
+                    "status": "completed",
+                    "review_status": "accepted",
+                    "execution_mode": "git_worktree",
+                    "execution_branch": "cbr/pruned",
+                    "execution_repo_root": str(repo),
+                    "execution_base_ref": "HEAD",
+                    "execution_base_head": head,
+                    "execution_worktree_status": "cleaned",
+                    "execution_apply_status": "applied",
+                    "execution_applied_head": head,
+                    "execution_cleanup_kind": "applied",
+                    "execution_cleanup_result_applied": True,
+                    "execution_cleanup_branch_retained": False,
+                    "execution_branch_prune_status": "pruned",
+                    "execution_branch_pruned_head": head,
+                    "execution_branch_pruned_at": "2026-06-26T00:00:00+00:00",
+                }
+            )
+            save_task(config, pruned)
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            branches = {item["task_id"]: item for item in report["worktree"]["task_branches"]}
+            self.assertEqual({"lifecycle", "pruned"}, set(branches))
+            self.assertTrue(branches["lifecycle"]["retained_metadata"])
+            self.assertTrue(branches["lifecycle"]["local_branch_exists"])
+            self.assertEqual(head, branches["lifecycle"]["local_branch_head"])
+            self.assertEqual("origin/cbr/lifecycle", branches["lifecycle"]["remote_task_branch"]["configured_upstream"])
+            self.assertEqual(["origin/cbr/lifecycle"], branches["lifecycle"]["remote_task_branch"]["known_remote_refs"])
+            self.assertTrue(branches["lifecycle"]["remote_task_branch"]["known"])
+            self.assertFalse(branches["pruned"].get("retained_metadata", True))
+            self.assertFalse(branches["pruned"]["local_branch_exists"])
+            self.assertEqual("pruned", branches["pruned"]["branch_prune_status"])
+            self.assertFalse(branches["pruned"]["remote_task_branch"]["known"])
+            self.assertEqual(0, human_code)
+            self.assertIn("task_branches:", human_output)
+            self.assertIn("lifecycle branch=cbr/lifecycle", human_output)
+            self.assertIn("remote_known=true", human_output)
+            self.assertIn("pruned branch=cbr/pruned", human_output)
 
     def test_doctor_reports_startup_stall_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
