@@ -114,9 +114,10 @@ cbr pause clear
 ```
 
 Pause는 global cooldown과 별개입니다. 활성 중인 Codex 작업은 그대로 두고, 이후
-`run-next` 호출은 stale `running` recovery만 수행한 뒤 `paused`로 종료합니다.
-`pause set`은 wake hook을 실행하지 않고, `pause clear`는 다시 runnable work가
-있을 수 있으므로 configured post-mutation trigger를 실행합니다.
+`enqueue`는 task를 쓰지 않고 거부되며 `run-next` 호출은 stale `running`
+recovery만 수행한 뒤 `paused`로 종료합니다. `pause set`은 wake hook을 실행하지
+않고, `pause clear`는 다시 runnable work가 있을 수 있으므로 configured
+post-mutation trigger를 실행합니다.
 
 ## Review workflow
 

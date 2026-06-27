@@ -973,6 +973,43 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(["x", "x", "x", "x"], marker.read_text(encoding="utf-8").splitlines())
 
+    def test_enqueue_refuses_when_runner_pause_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "trigger.log"
+            trigger = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).open('a', encoding='utf-8').write('x\\n')",
+                str(marker),
+            ]
+            config_path = write_config(tmp, trigger)
+            (Path(tmp) / "state.json").write_text(
+                json.dumps(
+                    {
+                        "runner_pause": {
+                            "active": True,
+                            "reason": "control-plane migration",
+                            "paused_at": "2026-06-27T00:00:00+09:00",
+                            "paused_by": "operator",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, output, stderr = run_cli_with_stderr(
+                ["--config", str(config_path), "enqueue", "--cwd", tmp, "--id", "task", "--prompt", "work"]
+            )
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertEqual(
+                "error: cbr is currently unavailable: runner pause is active: control-plane migration\n",
+                stderr,
+            )
+            self.assertFalse((Path(tmp) / "tasks" / "task.json").exists())
+            self.assertFalse(marker.exists())
+
     def test_post_mutation_trigger_runs_after_resolve_and_archive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "trigger.log"

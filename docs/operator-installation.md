@@ -140,7 +140,7 @@ Launch agent를 load했다면 첫 scheduler pass 이후 또는 manual `run-next`
 `doctor`를 다시 실행해 runtime path와 lock/state 파일이 예상 위치에 생기는지
 확인합니다.
 
-운영자가 scheduler는 그대로 둔 채 신규 runner admission만 잠시 막고 싶으면
+운영자가 scheduler는 그대로 둔 채 신규 queue admission만 잠시 막고 싶으면
 global cooldown 대신 runner pause를 사용합니다.
 
 ```bash
@@ -151,10 +151,10 @@ PYTHONPATH=src python3 -m codex_batch_runner --config /path/to/cbr-config.json p
 ```
 
 Pause는 rate-limit cooldown과 별개이며 expiry 없이 유지됩니다. 활성 중인 Codex
-child는 종료하지 않고, 이후 `run-next`는 queue lock 아래에서 stale `running`
-recovery만 수행한 뒤 `paused`로 종료합니다. `pause set`은 wake hook을 실행하지
-않고, `pause clear`는 runnable work가 다시 있을 수 있으므로 configured
-post-mutation trigger를 실행합니다.
+child는 종료하지 않고, 이후 `enqueue`는 task를 쓰지 않고 거부되며 `run-next`는
+queue lock 아래에서 stale `running` recovery만 수행한 뒤 `paused`로 종료합니다.
+`pause set`은 wake hook을 실행하지 않고, `pause clear`는 runnable work가 다시
+있을 수 있으므로 configured post-mutation trigger를 실행합니다.
 
 ## 수동 cooldown one-shot wake
 

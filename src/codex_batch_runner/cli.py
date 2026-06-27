@@ -356,12 +356,12 @@ def build_parser() -> argparse.ArgumentParser:
     cooldown_set.add_argument("value", help="reset time such as 7:6, 6/21 7:06, 2026-06-21 07:06, +90m")
     cooldown_set.set_defaults(func=cmd_cooldown_set)
 
-    pause = sub.add_parser("pause", help="show, set, or clear global runner admission pause")
+    pause = sub.add_parser("pause", help="show, set, or clear global queue admission pause")
     pause_sub = pause.add_subparsers(dest="pause_command", required=True)
     pause_show = pause_sub.add_parser("show", help="show runner pause status")
     pause_show.set_defaults(func=cmd_pause_show)
     pause_set = pause_sub.add_parser("set", help="set runner pause without expiry")
-    pause_set.add_argument("--reason", required=True, help="public-safe reason for pausing new runner admissions")
+    pause_set.add_argument("--reason", required=True, help="public-safe reason for pausing queue admission")
     pause_set.add_argument("--by", help="optional public-safe operator identifier")
     pause_set.set_defaults(func=cmd_pause_set)
     pause_clear = pause_sub.add_parser("clear", help="clear runner pause and wake configured scheduler hooks")
@@ -477,6 +477,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
+    pause = get_runner_pause(config)
+    if pause.get("active"):
+        reason = str(pause.get("reason") or "no reason recorded")
+        raise RuntimeError(f"cbr is currently unavailable: runner pause is active: {reason}")
     prompt = args.prompt
     if args.prompt_file:
         prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
