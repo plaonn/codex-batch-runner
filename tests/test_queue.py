@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 from pathlib import Path
 
 from codex_batch_runner.config import Config
@@ -21,6 +23,11 @@ from codex_batch_runner.queue import (
 
 
 class QueueTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._cbr_config_patcher = patch.dict("os.environ", {"CBR_CONFIG": ""}, clear=False)
+        self._cbr_config_patcher.start()
+        self.addCleanup(self._cbr_config_patcher.stop)
+
     def test_select_skips_unmet_dependency_and_picks_ready_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))

@@ -103,6 +103,11 @@ def create_clean_completed_task(config: Config, repo: Path, task_id: str = "revi
 
 
 class RunnerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._cbr_config_patcher = patch.dict("os.environ", {"CBR_CONFIG": ""}, clear=False)
+        self._cbr_config_patcher.start()
+        self.addCleanup(self._cbr_config_patcher.stop)
+
     def test_run_next_processes_one_task_and_triggers_after_lock_release_when_follow_up_is_eligible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "trigger.log"
@@ -323,21 +328,21 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("newer-run", task["active_run_id"])
             self.assertNotEqual("completed", task.get("last_result", {}).get("status"))
 
-    def test_invalid_task_execution_profile_fails_before_codex_invocation(self) -> None:
+    def test_invalid_task_model_requirement_fails_before_codex_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")
-            task = create_task(config, "work", tmp, task_id="bad-profile")
-            task["execution_profile"] = "missing"
+            task = create_task(config, "work", tmp, task_id="bad-requirement")
+            task["model_requirement_vector"] = {"dimensions": {"reasoning_depth": "extreme"}}
             save_task(config, task)
 
             with patch("codex_batch_runner.codex.subprocess.Popen", side_effect=AssertionError("unexpected Codex call")):
                 outcome = run_next(config)
 
-            loaded = load_task(config, "bad-profile")
+            loaded = load_task(config, "bad-requirement")
             self.assertEqual("failed", outcome.status)
             self.assertEqual("failed", loaded["status"])
             self.assertEqual(0, loaded["attempts"])
-            self.assertIn("invalid execution profile", loaded["last_error"])
+            self.assertIn("invalid execution config", loaded["last_error"])
 
     def test_run_next_does_not_auto_review_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -997,16 +1002,18 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("timed out", task["last_error"])
             self.assertNotIn("before" * 100, task_json)
 
-    def test_run_next_records_resolved_execution_profile_in_last_run(self) -> None:
+    def test_run_next_records_resolved_execution_config_in_last_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")
             config = replace(
                 config,
-                default_execution_profile="normal",
-                execution_profiles={
-                    "normal": {"config_overrides": {"model_reasoning_effort": "medium"}},
-                    "deep": {"config_overrides": {"model_reasoning_effort": "high"}},
-                },
+                model_selection_rules=[
+                    {
+                        "name": "high-capability",
+                        "when": {"reasoning_depth": "high"},
+                        "config_overrides": {"model_reasoning_effort": "high"},
+                    }
+                ],
             )
             create_task(
                 config,
@@ -1020,10 +1027,10 @@ class RunnerTests(unittest.TestCase):
             task = load_task(config, "task-critical-worktree")
 
             self.assertEqual("completed", outcome.status)
-            self.assertEqual("deep", task["last_run"]["execution_profile"])
-            self.assertEqual("high_risk_fallback", task["last_run"]["execution_profile_source"])
-            self.assertEqual("matched category/label: worktree-apply", task["last_run"]["execution_profile_reason"])
-            self.assertEqual(["model_reasoning_effort"], task["last_run"]["config_override_keys"])
+            resolved = task["last_run"]["resolved_execution_config"]
+            self.assertEqual("high-capability", resolved["selection_rule"])
+            self.assertEqual("high", resolved["model_requirement_vector"]["dimensions"]["reasoning_depth"])
+            self.assertEqual(["model_reasoning_effort"], resolved["config_override_keys"])
 
     def test_run_next_worktree_disabled_uses_original_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

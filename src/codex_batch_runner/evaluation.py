@@ -100,30 +100,36 @@ def _routing_section(task: dict[str, Any]) -> dict[str, Any]:
 
 def _worker_section(task: dict[str, Any]) -> dict[str, Any]:
     last_run = _dict_value(task.get("last_run"))
-    profile = _safe_metadata_value(last_run.get("execution_profile") or task.get("execution_profile"))
+    resolved_config = _dict_value(last_run.get("resolved_execution_config"))
+    requirement_vector = _dict_value(task.get("model_requirement_vector") or resolved_config.get("model_requirement_vector"))
+    dimensions = _dict_value(requirement_vector.get("dimensions"))
+    selection_rule = _safe_metadata_value(resolved_config.get("selection_rule"))
+    requirement_key = _join_key(
+        "requirement",
+        {key: _safe_metadata_value(dimensions.get(key)) for key in sorted(dimensions)},
+    )
     backend = _safe_metadata_value(last_run.get("execution_backend") or task.get("execution_backend"))
-    model_present = _has_value(last_run.get("model")) or _has_value(task.get("model"))
-    codex_profile_present = _has_value(last_run.get("codex_profile")) or _has_value(task.get("codex_profile"))
+    model_present = _has_value(resolved_config.get("model"))
+    codex_profile_present = _has_value(resolved_config.get("codex_profile"))
     duration = _number_value(last_run.get("duration_seconds"))
     attempts = _int_value(task.get("attempts"))
     run_count = _int_value(task.get("run_count"))
     terminal_status = _terminal_status(task.get("status"))
 
     return {
-        "worker_id": f"{backend}.{profile}" if backend != "unknown" and profile != "unknown" else "unknown",
+        "worker_id": f"{backend}.{selection_rule}" if backend != "unknown" and selection_rule != "unknown" else "unknown",
         "worker_cell_key": _join_key(
             "worker",
             {
                 "backend": backend,
-                "profile": profile,
+                "selection_rule": selection_rule,
                 "model_present": _bool_key(model_present),
                 "codex_profile_present": _bool_key(codex_profile_present),
             },
         ),
         "execution_backend": backend,
-        "worker_profile": profile,
-        "legacy_execution_profile": _safe_metadata_value(task.get("execution_profile")),
-        "last_run_execution_profile": _safe_metadata_value(last_run.get("execution_profile")),
+        "model_requirement_key": requirement_key,
+        "model_selection_rule": selection_rule,
         "model_present": model_present,
         "codex_profile_present": codex_profile_present,
         "terminal_status": terminal_status,
@@ -148,24 +154,24 @@ def _reviewer_section(task: dict[str, Any]) -> dict[str, Any]:
     review_attempts = _int_value(task.get("review_attempts"))
     fix_attempts = _int_value(task.get("fix_attempts"))
     reviewer_present = bool(reviewer_codex)
-    reviewer_profile = _safe_metadata_value(task.get("reviewer_execution_profile") or task.get("reviewer_profile"))
+    reviewer_role = _safe_metadata_value(task.get("reviewer_role") or "reviewer")
     policy_version = _safe_metadata_value(task.get("review_policy_version") or "legacy")
-    anchor_review = _anchor_review(task, reviewer_profile)
+    anchor_review = _anchor_review(task, reviewer_role)
 
     return {
-        "reviewer_id": f"codex.reviewer.{reviewer_profile}" if reviewer_present and reviewer_profile != "unknown" else "unknown",
+        "reviewer_id": f"codex.reviewer.{reviewer_role}" if reviewer_present and reviewer_role != "unknown" else "unknown",
         "reviewer_cell_key": _join_key(
             "reviewer",
             {
                 "present": _bool_key(reviewer_present),
-                "profile": reviewer_profile,
+                "role": reviewer_role,
                 "policy": policy_version,
                 "anchor": _tri_key(anchor_review),
             },
         ),
         "review_status": review_status,
         "reviewer_codex_present": reviewer_present,
-        "reviewer_profile": reviewer_profile,
+        "reviewer_role": reviewer_role,
         "review_policy_version": policy_version,
         "review_scope": _normalized_list(task.get("review_scope")) or ["unknown"],
         "anchor_review": anchor_review,
@@ -672,12 +678,12 @@ def _review_decision(value: Any) -> str | None:
     return None
 
 
-def _anchor_review(task: dict[str, Any], reviewer_profile: str) -> bool | None:
+def _anchor_review(task: dict[str, Any], reviewer_role: str) -> bool | None:
     if isinstance(task.get("anchor_review"), bool):
         return bool(task.get("anchor_review"))
     if not task.get("reviewer_codex"):
         return None
-    if reviewer_profile in {"deep", "anchor"}:
+    if reviewer_role in {"anchor"}:
         return True
     return None
 

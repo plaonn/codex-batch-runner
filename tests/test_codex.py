@@ -11,12 +11,12 @@ from codex_batch_runner.codex import (
     extract_final_response,
     first_recursive_value,
     format_command,
-    format_command_with_profile,
+    format_command_with_resolved_config,
     is_meaningful_event,
     run_codex,
     should_use_resume,
 )
-from codex_batch_runner.execution_profiles import resolve_execution_settings
+from codex_batch_runner.model_requirements import resolve_execution_config, resolve_model_requirement_vector
 
 
 class CodexParserTests(unittest.TestCase):
@@ -78,34 +78,52 @@ class CodexParserTests(unittest.TestCase):
 
         self.assertEqual(["codex", "resume", "thread-123", "continue"], command)
 
-    def test_format_command_with_profile_is_noop_without_profile_config(self) -> None:
+    def test_format_command_with_resolved_config_is_noop_without_model_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))
 
-            command = format_command_with_profile(["codex", "exec", "--json"], {"id": "task-1"}, "prompt", config)
+            command = format_command_with_resolved_config(["codex", "exec", "--json"], {"id": "task-1"}, "prompt", config)
 
             self.assertEqual(["codex", "exec", "--json", "prompt"], command)
 
-    def test_format_command_injects_profile_options_after_exec(self) -> None:
+    def test_format_command_injects_model_selection_options_after_exec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))
             config = Config(
                 **{
                     **config.__dict__,
-                    "default_execution_profile": "normal",
-                    "execution_profiles": {
-                        "normal": {
+                    "default_execution_config": {
+                        "model": "gpt-5-small",
+                        "codex_profile": "batch-small",
+                        "config_overrides": {"model_reasoning_effort": "low"},
+                    },
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
                             "model": "gpt-5-small",
                             "codex_profile": "batch-small",
                             "config_overrides": {"model_reasoning_effort": "low"},
                         }
-                    },
+                    ],
                 }
             )
 
-            command = format_command_with_profile(
+            command = format_command_with_resolved_config(
                 ["codex", "exec", "--sandbox", "workspace-write", "--json"],
-                {"id": "task-1"},
+                {
+                    "id": "task-1",
+                    "model_requirement_vector": {
+                        "dimensions": {
+                            "reasoning_depth": "low",
+                            "context_need": "low",
+                            "tool_reliability": "medium",
+                            "latency_priority": "high",
+                            "cost_sensitivity": "high",
+                            "review_strictness": "medium",
+                        }
+                    },
+                },
                 "prompt",
                 config,
             )
@@ -128,18 +146,17 @@ class CodexParserTests(unittest.TestCase):
                 command,
             )
 
-    def test_resume_command_preserves_resume_session_order_with_profile_options(self) -> None:
+    def test_resume_command_preserves_resume_session_order_with_model_options(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))
             config = Config(
                 **{
                     **config.__dict__,
-                    "default_execution_profile": "normal",
-                    "execution_profiles": {"normal": {"model": "gpt-5-small"}},
+                    "default_execution_config": {"model": "gpt-5-small"},
                 }
             )
 
-            command = format_command_with_profile(
+            command = format_command_with_resolved_config(
                 ["codex", "exec", "--sandbox", "workspace-write", "resume", "{session_id}", "--json"],
                 {"id": "task-1", "session_id": "session-123"},
                 "continue",
@@ -162,71 +179,55 @@ class CodexParserTests(unittest.TestCase):
                 command,
             )
 
-    def test_task_model_and_profile_override_config_default(self) -> None:
+    def test_model_selection_rule_overrides_config_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))
             config = Config(
                 **{
                     **config.__dict__,
-                    "default_execution_profile": "normal",
-                    "execution_profiles": {"normal": {"model": "gpt-5-small", "codex_profile": "batch-small"}},
+                    "default_execution_config": {"model": "gpt-5-small", "codex_profile": "batch-small"},
+                    "model_selection_rules": [
+                        {
+                            "name": "high-capability",
+                            "when": {"reasoning_depth": "high"},
+                            "model": "gpt-5",
+                            "codex_profile": "batch-deep",
+                        }
+                    ],
                 }
             )
 
-            command = format_command_with_profile(
+            command = format_command_with_resolved_config(
                 ["codex", "exec"],
-                {"id": "task-1", "model": "gpt-5", "codex_profile": "batch-deep"},
+                {"id": "task-1", "model_requirement_vector": {"dimensions": {"reasoning_depth": "high"}}},
                 "prompt",
                 config,
             )
 
             self.assertEqual(["codex", "exec", "--model", "gpt-5", "--profile", "batch-deep", "prompt"], command)
 
-    def test_deep_profile_fallback_uses_narrow_risk_labels(self) -> None:
+    def test_high_risk_metadata_derives_high_requirement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))
-            config = Config(
-                **{
-                    **config.__dict__,
-                    "default_execution_profile": "normal",
-                    "execution_profiles": {
-                        "normal": {"model": "gpt-5.4-mini"},
-                        "deep": {"model": "gpt-5.5"},
-                    },
-                }
-            )
 
-            general_worktree = resolve_execution_settings(
+            general_worktree = resolve_model_requirement_vector(
                 config,
                 {"id": "task-1", "category": "implementation", "labels": ["worktree"]},
             )
-            critical_worktree = resolve_execution_settings(
+            critical_worktree = resolve_model_requirement_vector(
                 config,
                 {"id": "task-2", "category": "implementation", "labels": ["worktree-apply"]},
             )
 
-            self.assertEqual("normal", general_worktree.profile_name)
-            self.assertEqual("config_default", general_worktree.profile_source)
-            self.assertEqual("deep", critical_worktree.profile_name)
-            self.assertEqual("high_risk_fallback", critical_worktree.profile_source)
-            self.assertEqual("matched category/label: worktree-apply", critical_worktree.profile_reason)
+            self.assertEqual("medium", general_worktree["dimensions"]["reasoning_depth"])
+            self.assertEqual("high", critical_worktree["dimensions"]["reasoning_depth"])
+            self.assertEqual("high", critical_worktree["dimensions"]["tool_reliability"])
 
-    def test_small_profile_fallback_uses_conservative_routing_metadata(self) -> None:
+    def test_low_risk_docs_metadata_derives_low_cost_requirement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))
-            config = Config(
-                **{
-                    **config.__dict__,
-                    "default_execution_profile": "normal",
-                    "execution_profiles": {
-                        "normal": {"model": "gpt-5.4-mini"},
-                        "small": {"model": "gpt-5-small"},
-                        "deep": {"model": "gpt-5.5"},
-                    },
-                }
-            )
 
-            low_risk_docs = resolve_execution_settings(
+            low_risk_docs = resolve_model_requirement_vector(
                 config,
                 {
                     "id": "task-1",
@@ -235,7 +236,7 @@ class CodexParserTests(unittest.TestCase):
                     "verification_scope": ["docs"],
                 },
             )
-            wider_verification = resolve_execution_settings(
+            wider_verification = resolve_model_requirement_vector(
                 config,
                 {
                     "id": "task-2",
@@ -244,7 +245,7 @@ class CodexParserTests(unittest.TestCase):
                     "verification_scope": ["unit", "docs"],
                 },
             )
-            high_risk_worktree = resolve_execution_settings(
+            high_risk_worktree = resolve_model_requirement_vector(
                 config,
                 {
                     "id": "task-3",
@@ -255,25 +256,22 @@ class CodexParserTests(unittest.TestCase):
                     "verification_scope": ["docs"],
                 },
             )
-            explicit_profile = resolve_execution_settings(
+            explicit_requirement = resolve_execution_config(
                 config,
                 {
                     "id": "task-4",
-                    "execution_profile": "normal",
+                    "model_requirement_vector": {"dimensions": {"reasoning_depth": "medium"}},
                     "routing_size": "small",
                     "routing_risk": "low",
                     "verification_scope": ["docs"],
                 },
             )
 
-            self.assertEqual("small", low_risk_docs.profile_name)
-            self.assertEqual("low_risk_downshift", low_risk_docs.profile_source)
-            self.assertEqual("matched routing metadata: size=small risk=low verify=docs", low_risk_docs.profile_reason)
-            self.assertEqual("normal", wider_verification.profile_name)
-            self.assertEqual("deep", high_risk_worktree.profile_name)
-            self.assertEqual("high_risk_fallback", high_risk_worktree.profile_source)
-            self.assertEqual("normal", explicit_profile.profile_name)
-            self.assertEqual("task", explicit_profile.profile_source)
+            self.assertEqual("low", low_risk_docs["dimensions"]["reasoning_depth"])
+            self.assertEqual("high", low_risk_docs["dimensions"]["cost_sensitivity"])
+            self.assertEqual("medium", wider_verification["dimensions"]["reasoning_depth"])
+            self.assertEqual("high", high_risk_worktree["dimensions"]["reasoning_depth"])
+            self.assertEqual("medium", explicit_requirement.requirement_vector["dimensions"]["reasoning_depth"])
 
     def test_should_use_resume_after_task_is_marked_running(self) -> None:
         task = {"status": "running", "resume_requested": True, "thread_id": "thread-123"}

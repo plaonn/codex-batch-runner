@@ -93,22 +93,22 @@ class TaskVectorTests(unittest.TestCase):
             "execution_backend": "codex",
             "provider": "private-provider",
             "model": "private-model",
-            "execution_profile": "small",
             "codex_profile": "private-profile",
+            "model_selection_rule": "private-rule",
             "quota_bucket": "private-quota",
             "capacity_pool": "private-capacity",
             "reviewer_codex": {"decision": "pass", "confidence": "high"},
             "review_status": "accepted",
             "last_review_decision": "pass",
             "status": "completed",
-            "last_run": {"duration_seconds": 1.2, "execution_profile": "small"},
+            "last_run": {"duration_seconds": 1.2, "resolved_execution_config": {"selection_rule": "private-rule"}},
         }
         serialized = json.dumps(derive_normalized_task_vector(task), sort_keys=True)
 
         for excluded_key in (
             "provider",
             "model",
-            "execution_profile",
+            "model_selection_rule",
             "codex_profile",
             "quota",
             "capacity",

@@ -322,28 +322,39 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(2, config.codex_watchdog_grace_seconds)
             self.assertEqual(120, config.codex_startup_stall_cooldown_seconds)
 
-    def test_execution_profiles_default_to_disabled_and_can_be_configured(self) -> None:
+    def test_model_requirements_default_to_disabled_and_can_be_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             default_config = Config.load(root=Path(tmp) / "default")
-            self.assertIsNone(default_config.default_execution_profile)
-            self.assertIsNone(default_config.review_execution_profile)
-            self.assertEqual({}, default_config.execution_profiles)
+            self.assertEqual({}, default_config.default_model_requirement_vector)
+            self.assertEqual({}, default_config.review_model_requirement_vector)
+            self.assertEqual({}, default_config.default_execution_config)
+            self.assertEqual([], default_config.model_selection_rules)
 
             config_path = Path(tmp) / "config.json"
             config_path.write_text(
                 json.dumps(
                     {
-                        "default_execution_profile": "normal",
-                        "review_execution_profile": "review",
-                        "execution_profiles": {
-                            "normal": {
+                        "default_model_requirement_vector": {
+                            "source": "config_default",
+                            "confidence": "medium",
+                            "dimensions": {"reasoning_depth": "medium"},
+                        },
+                        "review_model_requirement_vector": {
+                            "source": "config_review_default",
+                            "confidence": "medium",
+                            "dimensions": {"review_strictness": "high"},
+                        },
+                        "default_execution_config": {"model": "gpt-5"},
+                        "model_selection_rules": [
+                            {
+                                "name": "low-cost-docs",
+                                "when": {"reasoning_depth": "low"},
                                 "model": "gpt-5-small",
                                 "codex_profile": "batch-small",
                                 "config_overrides": {"model_reasoning_effort": "low"},
-                                "token_budget_hint": "small",
+                                "budget_hint": "small",
                             },
-                            "review": {"model": "gpt-5"},
-                        },
+                        ],
                     }
                 ),
                 encoding="utf-8",
@@ -351,21 +362,26 @@ class ConfigTests(unittest.TestCase):
 
             config = Config.load(str(config_path), root=Path(tmp))
 
-            self.assertEqual("normal", config.default_execution_profile)
-            self.assertEqual("review", config.review_execution_profile)
-            self.assertEqual("gpt-5-small", config.execution_profiles["normal"]["model"])
-            self.assertEqual({"model_reasoning_effort": "low"}, config.execution_profiles["normal"]["config_overrides"])
+            self.assertEqual("medium", config.default_model_requirement_vector["dimensions"]["reasoning_depth"])
+            self.assertEqual("high", config.review_model_requirement_vector["dimensions"]["review_strictness"])
+            self.assertEqual("gpt-5", config.default_execution_config["model"])
+            self.assertEqual("gpt-5-small", config.model_selection_rules[0]["model"])
+            self.assertEqual({"model_reasoning_effort": "low"}, config.model_selection_rules[0]["config_overrides"])
 
-    def test_execution_profile_config_rejects_unknown_defaults_and_overrides(self) -> None:
+    def test_removed_execution_profile_config_keys_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
             config_path.write_text(json.dumps({"default_execution_profile": "missing"}), encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "default_execution_profile references unknown execution profile"):
+            with self.assertRaisesRegex(ValueError, "removed config field"):
                 Config.load(str(config_path), root=Path(tmp))
 
+    def test_model_selection_config_rejects_unknown_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+
             config_path.write_text(
-                json.dumps({"execution_profiles": {"small": {"config_overrides": {"danger": "true"}}}}),
+                json.dumps({"model_selection_rules": [{"name": "bad", "config_overrides": {"danger": "true"}}]}),
                 encoding="utf-8",
             )
 

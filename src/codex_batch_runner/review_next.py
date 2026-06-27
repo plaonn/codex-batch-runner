@@ -1441,13 +1441,9 @@ def enqueue_auto_fix_task(
         created_by="auto-review-fix",
         title=title,
         description=f"Bounded auto-fix follow-up for reviewer findings on {parent_task_id}.",
-        execution_profile=parent_task.get("execution_profile"),
-        model=parent_task.get("model"),
-        codex_profile=parent_task.get("codex_profile"),
-        codex_config_overrides=parent_task.get("codex_config_overrides")
-        if isinstance(parent_task.get("codex_config_overrides"), dict)
+        model_requirement_vector=parent_task.get("model_requirement_vector")
+        if isinstance(parent_task.get("model_requirement_vector"), dict)
         else None,
-        token_budget_hint=parent_task.get("token_budget_hint"),
         subtask_type="auto_review_fix",
         subtask_for=parent_task_id,
         review_followup_for=parent_task_id,

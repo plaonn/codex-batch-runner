@@ -103,6 +103,23 @@ def json_lines(output: str) -> list[dict]:
     return [json.loads(line) for line in output.splitlines() if line.strip()]
 
 
+def requirement_vector(**overrides: str) -> dict:
+    dimensions = {
+        "reasoning_depth": "medium",
+        "context_need": "medium",
+        "tool_reliability": "medium",
+        "latency_priority": "medium",
+        "cost_sensitivity": "medium",
+        "review_strictness": "medium",
+    }
+    dimensions.update(overrides)
+    return {"source": "test", "confidence": "medium", "dimensions": dimensions}
+
+
+def requirement_key(**overrides: str) -> str:
+    return " ".join(f"{key}={value}" for key, value in sorted(requirement_vector(**overrides)["dimensions"].items()))
+
+
 def fixed_table_rows(output: str) -> list[dict[str, str]]:
     lines = list_lines(output)
     if not lines:
@@ -145,19 +162,19 @@ def compact_list_rows(output: str) -> list[dict[str, str]]:
             continue
         if headers in (
             ["TITLE", "STATUS", "ATT", "DEPS", "NOTE"],
-            ["[P]", "TITLE", "STATUS", "ATT", "DEPS", "NOTE"],
-            ["[P]", "TITLE", "STATUS", "DETAIL"],
+            ["[M]", "TITLE", "STATUS", "ATT", "DEPS", "NOTE"],
+            ["[M]", "TITLE", "STATUS", "DETAIL"],
         ):
             parsed = {}
             for index, header in enumerate(headers):
                 start = starts[index]
                 end = starts[index + 1] if index + 1 < len(starts) else None
                 parsed[header] = line[start:end].strip()
-            if headers == ["[P]", "TITLE", "STATUS", "DETAIL"]:
+            if headers == ["[M]", "TITLE", "STATUS", "DETAIL"]:
                 if parsed["STATUS"] and parsed["TITLE"]:
                     row = {
                         "ID": compact_title_key(parsed["TITLE"]),
-                        "PROFILE": parsed.get("[P]", ""),
+                        "MODEL": parsed.get("[M]", ""),
                         "TITLE": parsed["TITLE"],
                         "PROJECT": current_project,
                         "STATUS": parsed["STATUS"],
@@ -183,7 +200,7 @@ def compact_list_rows(output: str) -> list[dict[str, str]]:
             if (parsed["STATUS"] or parsed["ATT"]) and parsed["TITLE"]:
                 row = {
                     "ID": compact_title_key(parsed["TITLE"]),
-                    "PROFILE": parsed.get("[P]", ""),
+                    "MODEL": parsed.get("[M]", ""),
                     "TITLE": parsed["TITLE"],
                     "PROJECT": current_project,
                     "STATUS": strip_status_marker(parsed["STATUS"]),
@@ -1173,19 +1190,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual("Improve list output", task["title"])
             self.assertEqual("Make central queue triage easier.", task["description"])
 
-    def test_enqueue_records_execution_profile_metadata(self) -> None:
+    def test_enqueue_records_model_requirement_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(
-                tmp,
-                extra={
-                    "execution_profiles": {
-                        "small": {
-                            "model": "gpt-5-small",
-                            "config_overrides": {"model_reasoning_effort": "low"},
-                        }
-                    }
-                },
-            )
+            config_path = write_config(tmp)
 
             code, output = run_cli(
                 [
@@ -1195,34 +1202,34 @@ class CliTests(unittest.TestCase):
                     "--cwd",
                     tmp,
                     "--id",
-                    "profiled",
-                    "--profile",
-                    "small",
-                    "--model",
-                    "gpt-5",
-                    "--codex-profile",
-                    "batch-normal",
-                    "--config-override",
-                    "model_reasoning_effort=medium",
-                    "--token-budget-hint",
-                    "under 20k tokens",
+                    "requirement",
+                    "--reasoning-depth",
+                    "low",
+                    "--context-need",
+                    "low",
+                    "--tool-reliability",
+                    "medium",
+                    "--latency-priority",
+                    "high",
+                    "--cost-sensitivity",
+                    "high",
+                    "--review-strictness",
+                    "medium",
                     "--prompt",
                     "work",
                 ]
             )
-            task = load_task(Config.load(str(config_path)), "profiled")
+            task = load_task(Config.load(str(config_path)), "requirement")
 
             self.assertEqual(0, code)
-            self.assertEqual("profiled\n", output)
-            self.assertEqual("small", task["execution_profile"])
-            self.assertEqual("gpt-5", task["model"])
-            self.assertEqual("batch-normal", task["codex_profile"])
-            self.assertEqual({"model_reasoning_effort": "medium"}, task["codex_config_overrides"])
-            self.assertEqual("under 20k tokens", task["token_budget_hint"])
+            self.assertEqual("requirement\n", output)
+            self.assertEqual("explicit_cli", task["model_requirement_vector"]["source"])
+            self.assertEqual("low", task["model_requirement_vector"]["dimensions"]["reasoning_depth"])
+            self.assertEqual("high", task["model_requirement_vector"]["dimensions"]["cost_sensitivity"])
 
     def test_enqueue_records_routing_decision_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(tmp, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
+            config_path = write_config(tmp)
 
             code, output = run_cli(
                 [
@@ -1233,8 +1240,6 @@ class CliTests(unittest.TestCase):
                     tmp,
                     "--id",
                     "routed",
-                    "--profile",
-                    "small",
                     "--routing-reason",
                     "docs-only bounded change",
                     "--routing-risk-factor",
@@ -1265,6 +1270,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual("small", task["routing_size"])
             self.assertEqual("low", task["routing_risk"])
             self.assertEqual(["unit", "docs"], task["verification_scope"])
+            self.assertEqual("medium", task["model_requirement_vector"]["dimensions"]["reasoning_depth"])
 
     def test_enqueue_records_shell_command_json_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1336,7 +1342,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual("", output)
             self.assertIn("Codex tasks require --prompt or --prompt-file", stderr)
 
-    def test_enqueue_rejects_unallowlisted_config_override(self) -> None:
+    def test_enqueue_rejects_invalid_model_requirement_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
 
@@ -1347,8 +1353,8 @@ class CliTests(unittest.TestCase):
                     "enqueue",
                     "--cwd",
                     tmp,
-                    "--config-override",
-                    "danger=true",
+                    "--model-requirement-json",
+                    json.dumps({"dimensions": {"reasoning_depth": "extreme"}}),
                     "--prompt",
                     "work",
                 ]
@@ -1356,19 +1362,11 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(1, code)
             self.assertEqual("", output)
-            self.assertIn("is not allowlisted", stderr)
+            self.assertIn("reasoning_depth must be one of", stderr)
 
     def test_routing_report_groups_profile_category_and_label_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(
-                tmp,
-                extra={
-                    "execution_profiles": {
-                        "small": {"model": "gpt-5-small"},
-                        "normal": {"model": "gpt-5"},
-                    }
-                },
-            )
+            config_path = write_config(tmp)
             config = Config.load(str(config_path))
             accepted = create_task(
                 config,
@@ -1378,7 +1376,7 @@ class CliTests(unittest.TestCase):
                 project_id="project-a",
                 category="implementation",
                 labels=["docs", "safe"],
-                execution_profile="small",
+                model_requirement_vector=requirement_vector(reasoning_depth="low", cost_sensitivity="high"),
             )
             accepted["status"] = "completed"
             accepted["review_status"] = "accepted"
@@ -1396,7 +1394,7 @@ class CliTests(unittest.TestCase):
                 project_id="project-a",
                 category="implementation",
                 labels=["runner"],
-                execution_profile="normal",
+                model_requirement_vector=requirement_vector(reasoning_depth="medium"),
             )
             needs_fix["status"] = "completed"
             needs_fix["review_status"] = "needs_followup"
@@ -1416,7 +1414,7 @@ class CliTests(unittest.TestCase):
                 project_id="project-a",
                 category="implementation",
                 labels=["runner"],
-                execution_profile="normal",
+                model_requirement_vector=requirement_vector(reasoning_depth="medium"),
             )
             fix_task["status"] = "completed"
             fix_task["review_status"] = "accepted"
@@ -1432,7 +1430,7 @@ class CliTests(unittest.TestCase):
                 project_id="project-b",
                 category="docs",
                 labels=["docs"],
-                execution_profile="small",
+                model_requirement_vector=requirement_vector(reasoning_depth="low", cost_sensitivity="high"),
             )
             other["status"] = "completed"
             other["review_status"] = "accepted"
@@ -1440,19 +1438,21 @@ class CliTests(unittest.TestCase):
 
             code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
             report = json.loads(output)
-            profiles = {entry["key"]: entry for entry in report["groups"]["profile"]}
+            requirements = {entry["key"]: entry for entry in report["groups"]["model_requirement"]}
             labels = {entry["key"]: entry for entry in report["groups"]["label"]}
             categories = {entry["key"]: entry for entry in report["groups"]["category"]}
 
             self.assertEqual(0, code)
             self.assertEqual(3, report["task_count"])
-            self.assertEqual(1, profiles["small"]["tasks"])
-            self.assertEqual(1, profiles["small"]["first_pass_accepted"])
-            self.assertEqual(1.0, profiles["small"]["first_pass_accept_rate"])
-            self.assertEqual(2, profiles["normal"]["tasks"])
-            self.assertEqual(1, profiles["normal"]["needs_fix_or_rejected"])
-            self.assertEqual(1, profiles["normal"]["auto_fix_tasks"])
-            self.assertEqual(1, profiles["normal"]["roots_with_auto_fix"])
+            low_key = requirement_key(reasoning_depth="low", cost_sensitivity="high")
+            medium_key = requirement_key(reasoning_depth="medium")
+            self.assertEqual(1, requirements[low_key]["tasks"])
+            self.assertEqual(1, requirements[low_key]["first_pass_accepted"])
+            self.assertEqual(1.0, requirements[low_key]["first_pass_accept_rate"])
+            self.assertEqual(2, requirements[medium_key]["tasks"])
+            self.assertEqual(1, requirements[medium_key]["needs_fix_or_rejected"])
+            self.assertEqual(1, requirements[medium_key]["auto_fix_tasks"])
+            self.assertEqual(1, requirements[medium_key]["roots_with_auto_fix"])
             self.assertEqual(3, categories["implementation"]["tasks"])
             self.assertEqual(1, labels["docs"]["tasks"])
             self.assertEqual(2, labels["runner"]["tasks"])
@@ -1460,7 +1460,7 @@ class CliTests(unittest.TestCase):
 
     def test_routing_report_exposes_routing_decision_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(tmp, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
+            config_path = write_config(tmp)
             config = Config.load(str(config_path))
             task = create_task(
                 config,
@@ -1470,7 +1470,7 @@ class CliTests(unittest.TestCase):
                 project_id="project-a",
                 category="docs",
                 labels=["docs"],
-                execution_profile="small",
+                model_requirement_vector=requirement_vector(reasoning_depth="low", cost_sensitivity="high"),
                 routing_reason="docs-only bounded change",
                 routing_risk_factors=["public-docs", "low-blast-radius"],
                 routing_experiment="downshift_probe",
@@ -1491,10 +1491,15 @@ class CliTests(unittest.TestCase):
             risks = {entry["key"]: entry for entry in report["groups"]["routing_risk_factor"]}
             scopes = {entry["key"]: entry for entry in report["groups"]["verification_scope"]}
             decisions = {entry["key"]: entry for entry in report["groups"]["routing_decision"]}
-            profile_decisions = {entry["key"]: entry for entry in report["groups"]["profile_routing_decision"]}
-            profile_experiments = {entry["key"]: entry for entry in report["groups"]["profile_experiment"]}
+            requirement_decisions = {
+                entry["key"]: entry for entry in report["groups"]["model_requirement_routing_decision"]
+            }
+            requirement_experiments = {
+                entry["key"]: entry for entry in report["groups"]["model_requirement_experiment"]
+            }
             decision_key = "size=small risk=low verify=docs+unit"
-            profile_decision_key = "profile=small size=small risk=low verify=docs+unit"
+            req_key = requirement_key(reasoning_depth="low", cost_sensitivity="high")
+            requirement_decision_key = f"requirement={req_key} size=small risk=low verify=docs+unit"
 
             self.assertEqual(0, code)
             self.assertEqual("docs-only bounded change", report["task_rows"][0]["routing_reason"])
@@ -1510,22 +1515,20 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, scopes["unit"]["tasks"])
             self.assertEqual(1, scopes["docs"]["tasks"])
             self.assertEqual(decision_key, report["task_rows"][0]["routing_decision"])
-            self.assertEqual(profile_decision_key, report["task_rows"][0]["profile_routing_decision"])
+            self.assertEqual(requirement_decision_key, report["task_rows"][0]["model_requirement_routing_decision"])
             self.assertEqual(1, decisions[decision_key]["tasks"])
             self.assertEqual(1, decisions[decision_key]["first_pass_accepted"])
-            self.assertEqual(1, profile_decisions[profile_decision_key]["tasks"])
-            self.assertEqual(1, profile_experiments["small/downshift_probe"]["first_pass_accepted"])
+            self.assertEqual(1, requirement_decisions[requirement_decision_key]["tasks"])
+            self.assertEqual(1, requirement_experiments[f"{req_key}/downshift_probe"]["first_pass_accepted"])
 
-    def test_routing_report_exposes_resolved_profile_and_small_candidate_signal(self) -> None:
+    def test_routing_report_exposes_selection_rule_and_low_cost_candidate_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(
                 tmp,
                 extra={
-                    "default_execution_profile": "normal",
-                    "execution_profiles": {
-                        "small": {"model": "gpt-5-small"},
-                        "normal": {"model": "gpt-5"},
-                    },
+                    "model_selection_rules": [
+                        {"name": "low-cost-docs", "when": {"reasoning_depth": "low"}, "model": "gpt-5-small"}
+                    ],
                 },
             )
             config = Config.load(str(config_path))
@@ -1544,34 +1547,43 @@ class CliTests(unittest.TestCase):
             task["status"] = "completed"
             task["review_status"] = "accepted"
             task["attempts"] = 1
-            task["last_run"] = {"execution_profile": "normal", "duration_seconds": 10}
+            task["last_run"] = {
+                "resolved_execution_config": {"selection_rule": "low-cost-docs"},
+                "duration_seconds": 10,
+            }
             save_task(config, task)
 
             code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
             report = json.loads(output)
-            profiles = {entry["key"]: entry for entry in report["groups"]["profile"]}
-            resolved_profiles = {entry["key"]: entry for entry in report["groups"]["resolved_profile"]}
-            profile_decisions = {entry["key"]: entry for entry in report["groups"]["profile_routing_decision"]}
-            resolved_profile_decisions = {
-                entry["key"]: entry for entry in report["groups"]["resolved_profile_routing_decision"]
+            requirements = {entry["key"]: entry for entry in report["groups"]["model_requirement"]}
+            selection_rules = {entry["key"]: entry for entry in report["groups"]["model_selection_rule"]}
+            requirement_decisions = {
+                entry["key"]: entry for entry in report["groups"]["model_requirement_routing_decision"]
             }
-            small_candidates = {entry["key"]: entry for entry in report["groups"]["small_profile_candidate"]}
+            selection_decisions = {
+                entry["key"]: entry for entry in report["groups"]["model_selection_routing_decision"]
+            }
+            low_cost_candidates = {entry["key"]: entry for entry in report["groups"]["low_cost_candidate"]}
             row = report["task_rows"][0]
+            req_key = requirement_key(reasoning_depth="low", context_need="low", latency_priority="high", cost_sensitivity="high")
 
             self.assertEqual(0, code)
-            self.assertEqual("default", row["profile"])
-            self.assertEqual("normal", row["resolved_profile"])
-            self.assertEqual("profile=default size=small risk=low verify=docs", row["profile_routing_decision"])
+            self.assertEqual(req_key, row["model_requirement"])
+            self.assertEqual("low-cost-docs", row["model_selection_rule"])
             self.assertEqual(
-                "profile=normal size=small risk=low verify=docs",
-                row["resolved_profile_routing_decision"],
+                f"requirement={req_key} size=small risk=low verify=docs",
+                row["model_requirement_routing_decision"],
             )
-            self.assertEqual("candidate", row["small_profile_candidate"])
-            self.assertEqual(1, profiles["default"]["tasks"])
-            self.assertEqual(1, resolved_profiles["normal"]["tasks"])
-            self.assertEqual(1, profile_decisions["profile=default size=small risk=low verify=docs"]["tasks"])
-            self.assertEqual(1, resolved_profile_decisions["profile=normal size=small risk=low verify=docs"]["tasks"])
-            self.assertEqual(1, small_candidates["candidate"]["tasks"])
+            self.assertEqual(
+                "selection_rule=low-cost-docs size=small risk=low verify=docs",
+                row["model_selection_routing_decision"],
+            )
+            self.assertEqual("candidate", row["low_cost_candidate"])
+            self.assertEqual(1, requirements[req_key]["tasks"])
+            self.assertEqual(1, selection_rules["low-cost-docs"]["tasks"])
+            self.assertEqual(1, requirement_decisions[f"requirement={req_key} size=small risk=low verify=docs"]["tasks"])
+            self.assertEqual(1, selection_decisions["selection_rule=low-cost-docs size=small risk=low verify=docs"]["tasks"])
+            self.assertEqual(1, low_cost_candidates["candidate"]["tasks"])
 
     def test_routing_report_keeps_discarded_rejected_internal_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1631,10 +1643,13 @@ class CliTests(unittest.TestCase):
             risk_factors = {entry["key"]: entry for entry in report["groups"]["routing_risk_factor"]}
             scopes = {entry["key"]: entry for entry in report["groups"]["verification_scope"]}
             decisions = {entry["key"]: entry for entry in report["groups"]["routing_decision"]}
-            profile_decisions = {entry["key"]: entry for entry in report["groups"]["profile_routing_decision"]}
+            requirement_decisions = {
+                entry["key"]: entry for entry in report["groups"]["model_requirement_routing_decision"]
+            }
             row = report["task_rows"][0]
             decision_key = "size=unspecified risk=unspecified verify=none"
-            profile_decision_key = "profile=default size=unspecified risk=unspecified verify=none"
+            req_key = requirement_key()
+            requirement_decision_key = f"requirement={req_key} size=unspecified risk=unspecified verify=none"
 
             self.assertEqual(0, code)
             self.assertEqual("", row["routing_reason"])
@@ -1644,21 +1659,18 @@ class CliTests(unittest.TestCase):
             self.assertEqual("unspecified", row["routing_risk"])
             self.assertEqual(["none"], row["verification_scope"])
             self.assertEqual(decision_key, row["routing_decision"])
-            self.assertEqual(profile_decision_key, row["profile_routing_decision"])
+            self.assertEqual(requirement_decision_key, row["model_requirement_routing_decision"])
             self.assertEqual(1, experiments["unspecified"]["tasks"])
             self.assertEqual(1, sizes["unspecified"]["tasks"])
             self.assertEqual(1, risks["unspecified"]["tasks"])
             self.assertEqual(1, risk_factors["none"]["tasks"])
             self.assertEqual(1, scopes["none"]["tasks"])
             self.assertEqual(1, decisions[decision_key]["first_pass_accepted"])
-            self.assertEqual(1, profile_decisions[profile_decision_key]["tasks"])
+            self.assertEqual(1, requirement_decisions[requirement_decision_key]["tasks"])
 
     def test_routing_report_human_output_and_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(
-                tmp,
-                extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}},
-            )
+            config_path = write_config(tmp)
             config = Config.load(str(config_path))
             for index in range(3):
                 task = create_task(
@@ -1669,7 +1681,7 @@ class CliTests(unittest.TestCase):
                     project_id="project-a",
                     category="docs",
                     labels=["docs"],
-                    execution_profile="small",
+                    model_requirement_vector=requirement_vector(reasoning_depth="low", cost_sensitivity="high"),
                 )
                 task["status"] = "completed"
                 task["review_status"] = "accepted"
@@ -1681,22 +1693,19 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertIn("# routing report", output)
             self.assertIn("tasks: 2 of 3 filtered", output)
-            self.assertIn("## by_profile", output)
-            self.assertIn("## by_resolved_profile", output)
+            self.assertIn("## by_model_requirement", output)
+            self.assertIn("## by_model_selection_rule", output)
             self.assertIn("## by_routing_size", output)
             self.assertIn("## by_verification_scope", output)
             self.assertIn("## by_routing_decision", output)
-            self.assertIn("## by_profile_routing_decision", output)
-            self.assertIn("## by_resolved_profile_routing_decision", output)
-            self.assertIn("## by_small_profile_candidate", output)
-            self.assertIn("small", output)
+            self.assertIn("## by_model_requirement_routing_decision", output)
+            self.assertIn("## by_model_selection_routing_decision", output)
+            self.assertIn("## by_low_cost_candidate", output)
+            self.assertIn("reasoning_depth=low", output)
 
     def test_routing_report_evaluation_diagnostics_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(
-                tmp,
-                extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}},
-            )
+            config_path = write_config(tmp)
             config = Config.load(str(config_path))
             for index in range(3):
                 task = create_task(
@@ -1707,7 +1716,7 @@ class CliTests(unittest.TestCase):
                     project_id="project-a",
                     category="implementation",
                     labels=["routing"],
-                    execution_profile="small",
+                    model_requirement_vector=requirement_vector(reasoning_depth="low", cost_sensitivity="high"),
                     routing_size="small",
                     routing_risk="low",
                     verification_scope=["unit"],
@@ -1715,7 +1724,10 @@ class CliTests(unittest.TestCase):
                 task["status"] = "completed"
                 task["review_status"] = "accepted"
                 task["attempts"] = 1
-                task["last_run"] = {"execution_backend": "codex", "execution_profile": "small"}
+                task["last_run"] = {
+                    "execution_backend": "codex",
+                    "resolved_execution_config": {"selection_rule": "low-cost-docs"},
+                }
                 task["last_result"] = {
                     "task_id": f"clean-{index}",
                     "status": "completed",
@@ -1731,7 +1743,7 @@ class CliTests(unittest.TestCase):
                 project_id="project-a",
                 category="implementation",
                 labels=["routing"],
-                execution_profile="small",
+                model_requirement_vector=requirement_vector(reasoning_depth="low", cost_sensitivity="high"),
                 routing_size="small",
                 routing_risk="low",
                 verification_scope=["unit"],
@@ -1753,7 +1765,7 @@ class CliTests(unittest.TestCase):
                 project_id="project-a",
                 category="implementation",
                 labels=["routing"],
-                execution_profile="small",
+                model_requirement_vector=requirement_vector(reasoning_depth="high"),
                 routing_size="medium",
                 routing_risk="high",
                 verification_scope=["manual"],
@@ -1793,9 +1805,20 @@ class CliTests(unittest.TestCase):
             self.assertEqual(3, small_bucket["clean_samples"])
             self.assertTrue(small_bucket["policy_review_candidate"])
             self.assertEqual("advisory_read_only", small_bucket["policy_review_note"])
-            self.assertEqual(3, worker_cells["worker:backend=codex codex_profile_present=false model_present=false profile=small"]["usable_accepted_pass"])
-            self.assertEqual(1, reviewer_cells["reviewer:anchor=unknown policy=legacy present=true profile=unknown"]["reviewer_needs_fix"])
-            self.assertEqual(1, reviewer_cells["reviewer:anchor=unknown policy=legacy present=true profile=unknown"]["reviewer_failed_review"])
+            self.assertEqual(
+                3,
+                worker_cells[
+                    "worker:backend=codex codex_profile_present=false model_present=false selection_rule=low-cost-docs"
+                ]["usable_accepted_pass"],
+            )
+            self.assertEqual(
+                1,
+                reviewer_cells["reviewer:anchor=unknown policy=legacy present=true role=reviewer"]["reviewer_needs_fix"],
+            )
+            self.assertEqual(
+                1,
+                reviewer_cells["reviewer:anchor=unknown policy=legacy present=true role=reviewer"]["reviewer_failed_review"],
+            )
             self.assertEqual(1, exclusions["review_process_failed"]["rows"])
             self.assertEqual(1, exclusions["reviewer_unusable"]["rows"])
             self.assertIn("objective_unavailable", exclusions)
@@ -2049,7 +2072,7 @@ class CliTests(unittest.TestCase):
                     code, output = run_cli(["--config", str(config_path), "list", *filter_args])
 
                     self.assertEqual(0, code)
-                    self.assertEqual(["[P]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
+                    self.assertEqual(["[M]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
                     rows = compact_list_rows(output)
                     self.assertEqual(1, len(rows))
                     self.assertEqual("..new", rows[0]["STATUS"])
@@ -2067,7 +2090,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--project", Path(tmp).name])
 
             self.assertEqual(0, code)
-            self.assertEqual(["[P]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
+            self.assertEqual(["[M]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
             self.assertEqual("..new", compact_list_rows(output)[0]["STATUS"])
 
             code, output = run_cli(["--config", str(config_path), "list", "--project-root", tmp])
@@ -2386,7 +2409,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--all"])
 
             self.assertEqual(0, code)
-            self.assertEqual(["[P]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
+            self.assertEqual(["[M]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
             rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("??review", rows["completed"]["STATUS"])
             self.assertEqual("--archived", rows["archived"]["STATUS"])
@@ -2402,7 +2425,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "list", "--status", "archived"])
 
             self.assertEqual(0, code)
-            self.assertEqual(["[P]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
+            self.assertEqual(["[M]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
             rows = {row["ID"]: row for row in compact_list_rows(output)}
             self.assertEqual("--archived", rows["archived"]["STATUS"])
             self.assertNotIn("runnable", rows)
@@ -2554,7 +2577,18 @@ class CliTests(unittest.TestCase):
                 task_id="fix",
                 project_id="project-a",
             )
-            fix["execution_profile"] = "deep"
+            fix["model_requirement_vector"] = {
+                "source": "test",
+                "confidence": "medium",
+                "dimensions": {
+                    "reasoning_depth": "high",
+                    "context_need": "high",
+                    "tool_reliability": "high",
+                    "latency_priority": "medium",
+                    "cost_sensitivity": "low",
+                    "review_strictness": "medium",
+                },
+            }
             fix["review_followup_for"] = "source"
             fix["subtask_type"] = "auto_review_fix"
             fix["subtask_for"] = "source"
@@ -2569,7 +2603,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual(["Source task", "└─ Follow-up fix", "Separate work"], titles)
-            self.assertEqual("[D]", rows[1]["PROFILE"])
+            self.assertEqual("[D]", rows[1]["MODEL"])
             self.assertEqual("..new", rows[1]["STATUS"])
             self.assertIn("review fix for source", rows[1]["DETAIL"])
 
@@ -3138,14 +3172,14 @@ class CliTests(unittest.TestCase):
             rows = {row["ID"]: row for row in compact_list_rows(output)}
 
             self.assertEqual(0, code)
-            self.assertEqual(["[P]", "TITLE", "STATUS", "DETAIL"], lines[0].split())
+            self.assertEqual(["[M]", "TITLE", "STATUS", "DETAIL"], lines[0].split())
             self.assertEqual("[project-a]", lines[1])
             self.assertTrue(lines[2].startswith("[N]  Child task title"))
             self.assertNotIn("title:", output)
             self.assertNotIn("(child-task)", output)
             self.assertEqual("-", rows["child-task-title"]["DEPS"])
             self.assertEqual("ready", rows["child-task-title"]["DETAIL"])
-            self.assertEqual("[N]", rows["child-task-title"]["PROFILE"])
+            self.assertEqual("[N]", rows["child-task-title"]["MODEL"])
             self.assertEqual("Child task title", rows["child-task-title"]["TITLE"])
 
     def test_list_compact_splits_note_segments_onto_continuation_rows(self) -> None:
@@ -3361,7 +3395,7 @@ class CliTests(unittest.TestCase):
                 code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
 
             self.assertEqual(0, code)
-            self.assertNotEqual(["[P]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
+            self.assertNotEqual(["[M]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
             self.assertIn("STATUS:", output)
             self.assertNotIn("ID:", output)
             self.assertNotIn("PROJECT:", output)
@@ -3379,7 +3413,7 @@ class CliTests(unittest.TestCase):
                 code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
 
             self.assertEqual(0, code)
-            self.assertEqual(["[P]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
+            self.assertEqual(["[M]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
             self.assertIn("[project-a]", output)
             self.assertIn("[N]  Table title", output)
             self.assertTrue(all(width <= 80 for width in visible_line_widths(output)))
@@ -3402,7 +3436,7 @@ class CliTests(unittest.TestCase):
                 code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--color=never"])
 
             self.assertEqual(0, code)
-            self.assertEqual(["[P]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
+            self.assertEqual(["[M]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
             self.assertIn("dep_block", output)
             self.assertNotIn("STATUS:", output)
             self.assertTrue(all(width <= 80 for width in visible_line_widths(output)))
@@ -3437,7 +3471,7 @@ class CliTests(unittest.TestCase):
                 code, output = run_cli(["--config", str(config_path), "list", "--color=never"])
 
             self.assertEqual(0, code)
-            self.assertEqual(["[P]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
+            self.assertEqual(["[M]", "TITLE", "STATUS", "DETAIL"], list_lines(output)[0].split())
             self.assertIn("[N]  Task title", output)
             self.assertNotIn("[N] dependency (done)", output)
             self.assertNotIn("task-2026", output)
@@ -3464,7 +3498,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertLess(lines.index("[project-a]"), lines.index("[project-b]"))
-            self.assertEqual("[N]", rows["parent-work"]["PROFILE"])
+            self.assertEqual("[N]", rows["parent-work"]["MODEL"])
             self.assertEqual("Parent work", rows["parent-work"]["TITLE"])
             self.assertEqual("├─ Child work", rows["child-work"]["TITLE"])
             self.assertEqual("└─ Follow-up work", rows["follow-up-work"]["TITLE"])
@@ -3499,7 +3533,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(all(width <= 79 for width in visible_line_widths(output)))
-            self.assertIn("[P]:    [N]", output)
+            self.assertIn("[M]:    [N]", output)
             self.assertIn("TITLE:  ├─ Very long first child title that should wrap while keeping tree", output)
             self.assertIn("        │  rails visible", output)
             self.assertIn("TITLE:  └─ Very long second child title that should keep its own wrapped guide", output)
@@ -4169,9 +4203,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("op[0]\tdependency_changes\ttasks=task-b\twould_change=yes", output)
             self.assertEqual("runnable", load_task(config, "task-b")["status"])
 
-    def test_apply_plan_dry_run_accepts_execution_profile_and_routing_metadata(self) -> None:
+    def test_apply_plan_dry_run_accepts_model_requirement_and_routing_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(tmp, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
+            config_path = write_config(tmp)
             config = Config.load(str(config_path))
             create_task(config, "synthetic work", tmp, task_id="task-a")
             original = load_task(config, "task-a")
@@ -4187,7 +4221,9 @@ class CliTests(unittest.TestCase):
                             "task_id": "task-a",
                             "expected": {"updated_at": original["updated_at"]},
                             "fields": {
-                                "execution_profile": "small",
+                                "model_requirement_vector": {
+                                    "dimensions": {"reasoning_depth": "low", "cost_sensitivity": "high"}
+                                },
                                 "routing_reason": "docs-only bounded change",
                                 "routing_risk_factors": ["public-docs", "low-blast-radius"],
                                 "routing_experiment": "downshift_probe",
@@ -4206,7 +4242,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("mode: dry-run", output)
             self.assertIn("valid: true", output)
             task = load_task(config, "task-a")
-            self.assertNotIn("execution_profile", task)
+            self.assertEqual("medium", task["model_requirement_vector"]["dimensions"]["reasoning_depth"])
             self.assertIsNone(task["routing_reason"])
             self.assertEqual([], task["routing_risk_factors"])
             self.assertIsNone(task["routing_experiment"])
@@ -4254,9 +4290,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, code)
             self.assertIn("operation targets running task: running-task", output)
 
-    def test_apply_plan_dry_run_rejects_unknown_execution_profile(self) -> None:
+    def test_apply_plan_dry_run_rejects_removed_execution_profile_field(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(tmp, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
+            config_path = write_config(tmp)
             config = Config.load(str(config_path))
             create_task(config, "synthetic work", tmp, task_id="task-a")
             plan_path = write_plan(
@@ -4278,7 +4314,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--dry-run"])
 
             self.assertEqual(1, code)
-            self.assertIn("execution_profile references unknown execution profile: missing", output)
+            self.assertIn("execution_profile is no longer supported", output)
 
     def test_apply_plan_dry_run_rejects_dependency_cycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4335,7 +4371,7 @@ class CliTests(unittest.TestCase):
                 "from pathlib import Path; import sys; Path(sys.argv[1]).open('a', encoding='utf-8').write('x\\n')",
                 str(marker),
             ]
-            config_path = write_config(tmp, trigger, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
+            config_path = write_config(tmp, trigger)
             config = Config.load(str(config_path))
             create_task(config, "synthetic work", tmp, task_id="task-a")
             create_task(config, "synthetic work", tmp, task_id="task-b")
@@ -4359,7 +4395,9 @@ class CliTests(unittest.TestCase):
                                 "labels": ["safe", "mutation"],
                                 "depends_on": ["task-a"],
                                 "status": "paused",
-                                "execution_profile": "small",
+                                "model_requirement_vector": {
+                                    "dimensions": {"reasoning_depth": "low", "cost_sensitivity": "high"}
+                                },
                                 "routing_reason": "docs-only bounded change",
                                 "routing_risk_factors": ["public-docs", "low-blast-radius"],
                                 "routing_experiment": "downshift_probe",
@@ -4387,7 +4425,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(["safe", "mutation"], task["labels"])
             self.assertEqual(["task-a"], task["depends_on"])
             self.assertEqual("paused", task["status"])
-            self.assertEqual("small", task["execution_profile"])
+            self.assertEqual("low", task["model_requirement_vector"]["dimensions"]["reasoning_depth"])
             self.assertEqual("docs-only bounded change", task["routing_reason"])
             self.assertEqual(["public-docs", "low-blast-radius"], task["routing_risk_factors"])
             self.assertEqual("downshift_probe", task["routing_experiment"])
@@ -4401,8 +4439,8 @@ class CliTests(unittest.TestCase):
                     "category",
                     "depends_on",
                     "description",
-                    "execution_profile",
                     "labels",
+                    "model_requirement_vector",
                     "routing_experiment",
                     "routing_reason",
                     "routing_risk",
@@ -4414,7 +4452,10 @@ class CliTests(unittest.TestCase):
                 ],
                 events[0]["payload"]["changed_fields"],
             )
-            self.assertEqual("small", events[0]["payload"]["after"]["execution_profile"])
+            self.assertEqual(
+                "low",
+                events[0]["payload"]["after"]["model_requirement_vector"]["dimensions"]["reasoning_depth"],
+            )
             self.assertEqual("docs-only bounded change", events[0]["payload"]["after"]["routing_reason"])
             self.assertEqual(["public-docs", "low-blast-radius"], events[0]["payload"]["after"]["routing_risk_factors"])
             self.assertEqual("downshift_probe", events[0]["payload"]["after"]["routing_experiment"])
@@ -4644,17 +4685,17 @@ class CliTests(unittest.TestCase):
             child_row = next(row for row in rows if row["TITLE"] == "child work")
 
             self.assertEqual(0, code)
-            self.assertEqual(["[P]", "TITLE", "STATUS", "DETAIL"], lines[0].split())
+            self.assertEqual(["[M]", "TITLE", "STATUS", "DETAIL"], lines[0].split())
             self.assertNotIn("\t", output)
             self.assertEqual(
                 {
-                    "PROFILE": "[N]",
+                    "MODEL": "[N]",
                     "TITLE": "work",
                     "STATUS": "..new",
                     "PROJECT": "project-a",
                     "DETAIL": "ready",
                 },
-                {key: plain_row[key] for key in ("PROFILE", "TITLE", "STATUS", "PROJECT", "DETAIL")},
+                {key: plain_row[key] for key in ("MODEL", "TITLE", "STATUS", "PROJECT", "DETAIL")},
             )
             self.assertEqual("ready", child_row["DETAIL"])
 
@@ -4681,7 +4722,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("\t", output)
             self.assertEqual(["project-c", "project-b", "project-a"], [row["PROJECT"] for row in rows])
             self.assertEqual(["same-a", "same-b", "later"], [task["id"] for task in json.loads(json_output)])
-            self.assertEqual(["[P]", "TITLE", "STATUS", "DETAIL"], lines[0].split())
+            self.assertEqual(["[M]", "TITLE", "STATUS", "DETAIL"], lines[0].split())
 
     def test_list_summary_and_review_next_report_unaccepted_dependency_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4762,7 +4803,7 @@ class CliTests(unittest.TestCase):
                     "ATTEMPTS",
                     "DEPS",
                     "NOTE",
-                    "PROFILE",
+                    "MODEL",
                     "RAW_STATUS",
                     "LAST_RESULT",
                     "LAST_RUN",
@@ -4773,7 +4814,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual("failed", rows["verbose"]["STATUS"])
             self.assertEqual("failed", rows["verbose"]["RAW_STATUS"])
             self.assertEqual("error: error line one line two", rows["verbose"]["NOTE"])
-            self.assertEqual("-", rows["verbose"]["PROFILE"])
+            self.assertEqual("-", rows["verbose"]["MODEL"])
             self.assertEqual("status=failed summary=first line second line", rows["verbose"]["LAST_RESULT"])
             self.assertEqual("command=exec returncode=1 duration=2.5s", rows["verbose"]["LAST_RUN"])
             self.assertEqual("error line one line two", rows["verbose"]["LAST_ERROR"])
@@ -5096,37 +5137,42 @@ class CliTests(unittest.TestCase):
             self.assertIn("## logs", output)
             self.assertNotIn("private-value", output)
 
-    def test_list_and_summary_show_execution_profile_metadata(self) -> None:
+    def test_list_and_summary_show_model_requirement_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(tmp, extra={"execution_profiles": {"small": {"model": "gpt-5-small"}}})
+            config_path = write_config(tmp)
             config = Config.load(str(config_path))
             create_task(
                 config,
                 "work",
                 tmp,
-                task_id="profiled",
+                task_id="requirement",
                 project_id="project-a",
-                execution_profile="small",
-                model="gpt-5-small",
-                codex_profile="batch-small",
+                model_requirement_vector={
+                    "source": "test",
+                    "confidence": "medium",
+                    "dimensions": {
+                        "reasoning_depth": "low",
+                        "context_need": "low",
+                        "tool_reliability": "medium",
+                        "latency_priority": "high",
+                        "cost_sensitivity": "high",
+                        "review_strictness": "medium",
+                    },
+                },
             )
 
             list_code, list_output = run_cli(["--config", str(config_path), "list", "--color", "never"])
-            summary_code, summary_output = run_cli(["--config", str(config_path), "summary", "profiled"])
+            summary_code, summary_output = run_cli(["--config", str(config_path), "summary", "requirement"])
 
             self.assertEqual(0, list_code)
             self.assertIn("[S]  work", list_output)
-            self.assertNotIn("profile=small", list_output)
-            self.assertNotIn("model=gpt-5-small", list_output)
             verbose_code, verbose_output = run_cli(["--config", str(config_path), "list", "--verbose"])
             verbose_rows = {row["ID"]: row for row in fixed_table_rows(verbose_output)}
             self.assertEqual(0, verbose_code)
-            self.assertEqual("profile=small model=gpt-5-small codex_profile=batch-small", verbose_rows["profiled"]["PROFILE"])
+            self.assertIn("reasoning_depth=low", verbose_rows["requirement"]["MODEL"])
+            self.assertIn("cost_sensitivity=high", verbose_rows["requirement"]["MODEL"])
             self.assertEqual(0, summary_code)
-            self.assertIn(
-                "execution: execution_profile=small, model=gpt-5-small, codex_profile=batch-small",
-                summary_output,
-            )
+            self.assertIn("model_requirement_vector=", summary_output)
 
     def test_summary_and_list_show_startup_stall_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

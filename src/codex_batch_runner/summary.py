@@ -39,7 +39,7 @@ def render_task_summary(
         lines.append(f"created_by: {task.get('created_by')}")
     if task.get("cwd"):
         lines.append(f"cwd: {task.get('cwd')}")
-    append_execution_profile_summary(lines, task)
+    append_execution_config_summary(lines, task)
     append_scheduling_summary(lines, task)
     append_routing_summary(lines, task)
     append_counters(lines, task)
@@ -179,7 +179,7 @@ def append_review_follow_up_summary(lines: list[str], task: dict, by_id: dict[st
             )
 
 
-def append_execution_profile_summary(lines: list[str], task: dict) -> None:
+def append_execution_config_summary(lines: list[str], task: dict) -> None:
     fields = []
     if task.get("execution_backend") and task.get("execution_backend") != "codex":
         fields.append(f"execution_backend={sanitize(task.get('execution_backend'))}")
@@ -188,13 +188,13 @@ def append_execution_profile_summary(lines: list[str], task: dict) -> None:
         fields.append("shell_command=" + sanitize(shell_command))
     if task.get("shell_timeout_seconds"):
         fields.append(f"shell_timeout_seconds={sanitize(task.get('shell_timeout_seconds'))}")
-    for key in ("execution_profile", "model", "codex_profile", "token_budget_hint"):
-        value = task.get(key)
-        if value not in (None, "", [], {}):
-            fields.append(f"{key}={sanitize(value)}")
-    overrides = task.get("codex_config_overrides")
-    if isinstance(overrides, dict) and overrides:
-        fields.append("codex_config_overrides=" + ",".join(sorted(str(key) for key in overrides)))
+    vector = task.get("model_requirement_vector")
+    dimensions = vector.get("dimensions") if isinstance(vector, dict) else {}
+    if isinstance(dimensions, dict) and dimensions:
+        fields.append(
+            "model_requirement_vector="
+            + ",".join(f"{sanitize(key)}:{sanitize(value)}" for key, value in sorted(dimensions.items()))
+        )
     if fields:
         lines.append("execution: " + ", ".join(fields))
 
@@ -364,13 +364,9 @@ def render_last_run(last_run: object) -> str:
         "stderr_bytes",
         "resume_id_used",
         "log_path",
-        "execution_profile",
-        "execution_profile_source",
-        "execution_profile_reason",
-        "model",
-        "codex_profile",
+        "worker_role",
+        "resolved_execution_config",
         "config_override_keys",
-        "token_budget_hint",
         "watchdog_reason",
     ):
         if key in last_run:

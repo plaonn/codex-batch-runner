@@ -12,7 +12,7 @@
 
 - [Core spec index](docs/spec.md): 현재 구현 truth와 topic 문서 index.
 - [Task schema and dependency contract](docs/task-schema.md): task JSON fields, task/review status, dependency readiness.
-- [Execution contract](docs/execution.md): execution profiles, capacity/priority, shell backend, runner policy, watchdog, lock, atomic write, Codex command/prompt wrapper, rate-limit, queue mutation.
+- [Execution contract](docs/execution.md): model requirements, capacity/priority, shell backend, runner policy, watchdog, lock, atomic write, Codex command/prompt wrapper, rate-limit, queue mutation.
 - [Review contract](docs/review.md): review-bundle, review-next, reviewer Codex gates, bounded auto-fix loop.
 - [Worktree contract](docs/worktrees.md): worktree prepare/apply/rebase/conflict-fix/cleanup/branch-prune/recovery.
 - [Events and index contract](docs/events-and-index.md): event log, local SQLite read index, prune/retention.
@@ -110,7 +110,6 @@ PYTHONPATH=src python3 -m codex_batch_runner enqueue \
   --project codex-batch-runner \
   --category implementation \
   --label queue \
-  --profile small \
   --routing-size small \
   --routing-risk low \
   --verification-scope unit \
@@ -143,7 +142,7 @@ Config discovery order:
 
 If neither is provided, `cbr` exits with an error instead of creating a runtime directory under the current working directory. Example configs are available in [examples/config.example.json](examples/config.example.json) and [examples/config.automation.example.json](examples/config.automation.example.json).
 
-Optional `root` makes relative runtime paths independent of the process current working directory. `worktree_mode=task` enables task-specific git worktrees. `execution_profiles`, task-level `--profile`, `--model`, `--codex-profile`, and allowlisted `--config-override` values provide cost and routing hints without changing the correctness contract.
+Optional `root` makes relative runtime paths independent of the process current working directory. `worktree_mode=task` enables task-specific git worktrees. `model_requirement_vector`, `model_selection_rules`, and `default_execution_config` keep task intent separate from local Codex model/profile choices.
 
 For launchd/systemd installation, config discovery, and `doctor`, use [docs/operator-installation.md](docs/operator-installation.md). For execution policy and full config contracts, use [docs/execution.md](docs/execution.md).
 

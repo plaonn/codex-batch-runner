@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .execution_profiles import SAFE_CONFIG_OVERRIDE_KEYS, command_options, resolve_execution_settings
 from .fs import read_json
 from .lock import lock_status
+from .model_requirements import SAFE_CONFIG_OVERRIDE_KEYS, command_options, resolve_execution_config
 from .queue import RUNNABLE_STATUSES, capacity_blockers, dependency_status, is_in_cooldown
 from .state import load_state
 from .timeutil import parse_time, utc_now
@@ -25,7 +25,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
     tasks, task_warnings = load_tasks_for_doctor(config.queue_dir)
     by_id = {task.get("id"): task for task in tasks}
     codex_info = inspect_codex_command(config.codex_command)
-    profile = execution_profile_summary(config)
+    model_config = model_requirement_summary(config)
     codex_checks = codex_command_checks(codex_info)
     git = git_summary(config.root)
     checks = [
@@ -38,11 +38,11 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
     ]
     checks.extend(
         {
-            "name": f"execution_profile_{item['kind']}",
+            "name": f"model_requirement_{item['kind']}",
             "level": item["level"],
             "message": item["message"],
         }
-        for item in profile["checks"]
+        for item in model_config["checks"]
     )
     checks.extend(task_warnings)
     checks.extend(warning("git", message) for message in git["warnings"])
@@ -62,7 +62,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
         "git": git,
         "worktree": worktree_summary(config, tasks),
         "capacity": capacity_summary(config, tasks),
-        "execution_profiles": profile,
+        "model_requirements": model_config,
         "auto_review": auto_review_summary(tasks, config),
         "tasks": task_summary(tasks, by_id, config),
         "checks": checks,
@@ -70,10 +70,10 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
     return report
 
 
-def execution_profile_summary(config: Config) -> dict[str, Any]:
-    profile_checks = []
+def model_requirement_summary(config: Config) -> dict[str, Any]:
+    config_checks = []
     for reviewer in (False, True):
-        settings = resolve_execution_settings(config, {}, reviewer=reviewer)
+        settings = resolve_execution_config(config, {}, reviewer=reviewer)
         options = command_options(settings)
         if options:
             for name, command in (
@@ -82,28 +82,35 @@ def execution_profile_summary(config: Config) -> dict[str, Any]:
             ):
                 if "exec" in command or "resume" in command:
                     continue
-                profile_checks.append(
+                config_checks.append(
                     {
                         "kind": ("review" if reviewer else "default") + f"_{name}",
                         "level": "warning",
-                        "message": f"profile options will be appended because {name} has no exec or resume token",
+                        "message": f"model selection options will be appended because {name} has no exec or resume token",
                     }
                 )
     return {
-        "default_execution_profile": config.default_execution_profile,
-        "review_execution_profile": config.review_execution_profile,
-        "configured": sorted(config.execution_profiles),
+        "default_model_requirement_vector": config.default_model_requirement_vector,
+        "review_model_requirement_vector": config.review_model_requirement_vector,
+        "model_selection_rules": [rule.get("name") for rule in config.model_selection_rules],
         "allowlisted_config_override_keys": sorted(SAFE_CONFIG_OVERRIDE_KEYS),
-        "profiles": {
-            name: {
-                "has_model": bool(profile.get("model")),
-                "has_codex_profile": bool(profile.get("codex_profile")),
-                "config_override_keys": sorted((profile.get("config_overrides") or {}).keys()),
-                "token_budget_hint": profile.get("token_budget_hint"),
-            }
-            for name, profile in sorted(config.execution_profiles.items())
+        "default_execution_config": {
+            "has_model": bool(config.default_execution_config.get("model")),
+            "has_codex_profile": bool(config.default_execution_config.get("codex_profile")),
+            "config_override_keys": sorted((config.default_execution_config.get("config_overrides") or {}).keys()),
+            "budget_hint": config.default_execution_config.get("budget_hint"),
         },
-        "checks": profile_checks,
+        "rules": {
+            str(rule.get("name")): {
+                "when": rule.get("when"),
+                "has_model": bool(rule.get("model")),
+                "has_codex_profile": bool(rule.get("codex_profile")),
+                "config_override_keys": sorted((rule.get("config_overrides") or {}).keys()),
+                "budget_hint": rule.get("budget_hint"),
+            }
+            for rule in config.model_selection_rules
+        },
+        "checks": config_checks,
     }
 
 
@@ -718,27 +725,29 @@ def render_doctor_report(report: dict[str, Any]) -> str:
     for name in capacity.get("unknown_pools") or []:
         lines.append(f"    {name}: max_running=None running={running_by_pool.get(name, 0)}")
     auto_review = report["auto_review"]
-    execution_profiles = report["execution_profiles"]
+    model_requirements = report["model_requirements"]
     lines.extend(
         [
             "",
-            "execution_profiles:",
-            f"  default_execution_profile: {execution_profiles.get('default_execution_profile')}",
-            f"  review_execution_profile: {execution_profiles.get('review_execution_profile')}",
-            "  configured: "
-            + (", ".join(execution_profiles.get("configured") or []) if execution_profiles.get("configured") else "-"),
+            "model_requirements:",
+            "  model_selection_rules: "
+            + (
+                ", ".join(model_requirements.get("model_selection_rules") or [])
+                if model_requirements.get("model_selection_rules")
+                else "-"
+            ),
             "  allowlisted_config_override_keys: "
-            + ", ".join(execution_profiles.get("allowlisted_config_override_keys") or []),
+            + ", ".join(model_requirements.get("allowlisted_config_override_keys") or []),
         ]
     )
-    profiles = execution_profiles.get("profiles") or {}
-    if profiles:
-        lines.append("  profiles:")
-        for name, profile in profiles.items():
-            keys = profile.get("config_override_keys") or []
+    rules = model_requirements.get("rules") or {}
+    if rules:
+        lines.append("  rules:")
+        for name, rule in rules.items():
+            keys = rule.get("config_override_keys") or []
             lines.append(
-                f"    {name}: model={str(profile.get('has_model')).lower()} "
-                f"codex_profile={str(profile.get('has_codex_profile')).lower()} "
+                f"    {name}: model={str(rule.get('has_model')).lower()} "
+                f"codex_profile={str(rule.get('has_codex_profile')).lower()} "
                 f"config_overrides={','.join(keys) if keys else '-'}"
             )
     lines.extend(

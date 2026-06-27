@@ -5,8 +5,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .execution_profiles import execution_profiles_value, optional_profile_name
 from .fs import read_json
+from .model_requirements import (
+    execution_config_value,
+    model_requirement_vector_value,
+    model_selection_rules_value,
+)
 
 
 @dataclass(frozen=True)
@@ -54,9 +58,10 @@ class Config:
     codex_watchdog_grace_seconds: int = 5
     codex_startup_stall_cooldown_seconds: int = 60
     shell_task_timeout_seconds: int = 900
-    default_execution_profile: str | None = None
-    review_execution_profile: str | None = None
-    execution_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    default_model_requirement_vector: dict[str, Any] = field(default_factory=dict)
+    review_model_requirement_vector: dict[str, Any] = field(default_factory=dict)
+    default_execution_config: dict[str, Any] = field(default_factory=dict)
+    model_selection_rules: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def load(cls, config_path: str | None = None, root: Path | None = None) -> "Config":
@@ -77,7 +82,7 @@ class Config:
         log_dir = path_value("log_dir", ".codex-batch-runner/logs")
         event_dir = path_value("event_dir", str(log_dir.parent / "events"))
         notifier_cursor_state_paths = path_list_value("notifier_cursor_state_paths", data, base)
-        execution_profiles = execution_profiles_value(data.get("execution_profiles", {}))
+        reject_removed_config_keys(data)
 
         return cls(
             root=base,
@@ -187,17 +192,19 @@ class Config:
                 "shell_task_timeout_seconds",
                 data.get("shell_task_timeout_seconds", 900),
             ),
-            default_execution_profile=optional_profile_name(
-                "default_execution_profile",
-                data.get("default_execution_profile"),
-                execution_profiles,
+            default_model_requirement_vector=model_requirement_vector_value(
+                "default_model_requirement_vector",
+                data.get("default_model_requirement_vector"),
             ),
-            review_execution_profile=optional_profile_name(
-                "review_execution_profile",
-                data.get("review_execution_profile"),
-                execution_profiles,
+            review_model_requirement_vector=model_requirement_vector_value(
+                "review_model_requirement_vector",
+                data.get("review_model_requirement_vector"),
             ),
-            execution_profiles=execution_profiles,
+            default_execution_config=execution_config_value(
+                "default_execution_config",
+                data.get("default_execution_config"),
+            ),
+            model_selection_rules=model_selection_rules_value(data.get("model_selection_rules")),
         )
 
 
@@ -207,6 +214,20 @@ def argv_list(key: str, value: object) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{key} must be a list of strings")
     return value
+
+
+def reject_removed_config_keys(data: dict[str, Any]) -> None:
+    removed = sorted(
+        key
+        for key in ("default_execution_profile", "review_execution_profile", "execution_profiles")
+        if key in data
+    )
+    if removed:
+        raise ValueError(
+            "removed config field(s): "
+            + ", ".join(removed)
+            + "; use model_requirement_vector and model_selection_rules instead"
+        )
 
 
 def path_list_value(key: str, data: dict[str, Any], base: Path) -> list[Path]:

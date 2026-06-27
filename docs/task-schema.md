@@ -16,11 +16,19 @@
   "reviewed_at": null,
   "review_reason": null,
   "prompt": "작업 지시문",
-  "execution_profile": "normal",
-  "model": null,
-  "codex_profile": null,
-  "codex_config_overrides": {},
-  "token_budget_hint": null,
+  "model_requirement_vector": {
+    "schema_version": 1,
+    "source": "derived_from_task_vector",
+    "confidence": "medium",
+    "dimensions": {
+      "reasoning_depth": "medium",
+      "context_need": "medium",
+      "tool_reliability": "medium",
+      "latency_priority": "medium",
+      "cost_sensitivity": "medium",
+      "review_strictness": "medium"
+    }
+  },
   "next_prompt": null,
   "cwd": "/path/to/repo",
   "execution_backend": "codex",
@@ -84,11 +92,7 @@
 - `review_status`
 - `reviewed_at`
 - `review_reason`
-- `execution_profile`: config `execution_profiles`에 정의된 cbr profile 이름
-- `model`: task-level Codex `--model` override
-- `codex_profile`: task-level Codex `--profile` override
-- `codex_config_overrides`: task-level allowlisted Codex `-c key=value` override
-- `token_budget_hint`: 운영자가 보는 비강제 token/cost hint
+- `model_requirement_vector`: task가 요구하는 모델 특성 벡터. task JSON에는 provider/model/profile 이름을 저장하지 않습니다.
 
 
 ## Task status

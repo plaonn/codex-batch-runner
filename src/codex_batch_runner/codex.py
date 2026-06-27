@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .execution_profiles import command_options, insert_command_options, resolve_execution_settings
+from .model_requirements import command_options, insert_command_options, resolve_execution_config
 from .fs import ensure_dir
 from .limits import matched_rate_limit_markers
 from .timeutil import iso_now
@@ -117,7 +117,7 @@ def format_command(template: list[str], task: dict, prompt: str) -> list[str]:
     return [part.format(**values) for part in template] + [prompt]
 
 
-def format_command_with_profile(
+def format_command_with_resolved_config(
     template: list[str],
     task: dict,
     prompt: str,
@@ -126,7 +126,7 @@ def format_command_with_profile(
     reviewer: bool = False,
 ) -> list[str]:
     base = format_command(template, task, prompt)
-    settings = resolve_execution_settings(config, task, reviewer=reviewer)
+    settings = resolve_execution_config(config, task, reviewer=reviewer)
     return [*insert_command_options(base[:-1], command_options(settings)), base[-1]]
 
 
@@ -136,7 +136,7 @@ def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexRes
     use_resume = should_use_resume(task)
     resume_id_used = (task.get("session_id") or task.get("thread_id")) if use_resume else None
     command_kind = "resume" if use_resume else "exec"
-    command = format_command_with_profile(
+    command = format_command_with_resolved_config(
         config.codex_resume_command if use_resume else config.codex_command,
         task,
         prompt,

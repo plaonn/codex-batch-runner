@@ -13,7 +13,7 @@ from typing import Any
 from .codex import FIRST_MEANINGFUL_STALL_REASON, STARTUP_STALL_REASON, CodexResult, run_codex
 from .config import Config
 from .events import emit_task_event, result_summary_payload, transition_payload
-from .execution_profiles import ExecutionSettings, command_options, resolve_execution_settings
+from .model_requirements import ResolvedExecutionConfig, command_options, resolve_execution_config
 from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
 from .lock import FileLock
@@ -55,7 +55,7 @@ class ClaimedRun:
     active_run_id: str
     execution_backend: str
     execution_cwd: Path | None
-    execution_settings: ExecutionSettings | None
+    execution_settings: ResolvedExecutionConfig | None
 
 
 def run_next(config: Config, *, suppress_wake_hooks: bool = False) -> RunOutcome:
@@ -195,7 +195,7 @@ def claim_next_implementation_task_locked(
         mark_run(config, task["id"])
         return None, RunOutcome(status=task["status"], message=backend_error, task_id=task["id"])
     prompt = ""
-    profile_settings: ExecutionSettings | None = None
+    execution_config: ResolvedExecutionConfig | None = None
     resume_unavailable = False
     if execution_backend == "codex":
         resume_unavailable = bool(resume_requested and task.get("next_prompt") and not resume_id(task))
@@ -204,11 +204,11 @@ def claim_next_implementation_task_locked(
             resume_unavailable=resume_unavailable,
             execution_cwd=str(execution_cwd) if execution_cwd else None,
         )
-        profile_settings, profile_error = validate_execution_profile(config, task)
-        if profile_error:
-            mark_profile_failure(config, task, profile_error)
+        execution_config, config_error = validate_execution_config(config, task)
+        if config_error:
+            mark_execution_config_failure(config, task, config_error)
             mark_run(config, task["id"])
-            return None, RunOutcome(status=task["status"], message=profile_error, task_id=task["id"])
+            return None, RunOutcome(status=task["status"], message=config_error, task_id=task["id"])
 
     active_run_id = uuid.uuid4().hex
     task["status"] = "running"
@@ -257,7 +257,7 @@ def claim_next_implementation_task_locked(
         active_run_id=active_run_id,
         execution_backend=execution_backend,
         execution_cwd=execution_cwd,
-        execution_settings=profile_settings,
+        execution_settings=execution_config,
     ), None
 
 
@@ -339,9 +339,9 @@ def runner_pause_message(pause: dict[str, Any]) -> str:
     return f"runner pause is active: {reason}"
 
 
-def validate_execution_profile(config: Config, task: dict[str, Any]) -> tuple[ExecutionSettings | None, str | None]:
+def validate_execution_config(config: Config, task: dict[str, Any]) -> tuple[ResolvedExecutionConfig | None, str | None]:
     try:
-        settings = resolve_execution_settings(config, task)
+        settings = resolve_execution_config(config, task)
         command_options(settings)
     except ValueError as exc:
         return None, str(exc)
@@ -387,9 +387,9 @@ def mark_backend_failure(config: Config, task: dict, error_message: str) -> None
     )
 
 
-def mark_profile_failure(config: Config, task: dict[str, Any], error_message: str) -> None:
+def mark_execution_config_failure(config: Config, task: dict[str, Any], error_message: str) -> None:
     task["status"] = "failed"
-    task["last_error"] = f"invalid execution profile: {error_message}"
+    task["last_error"] = f"invalid execution config: {error_message}"
     task["failure_count"] = int(task.get("failure_count", 0)) + 1
     save_task(config, task)
     emit_task_event(
@@ -445,7 +445,7 @@ def apply_codex_result(
     result: CodexResult,
     *,
     git_status_cwd: Path | None = None,
-    execution_settings: ExecutionSettings | None = None,
+    execution_settings: ResolvedExecutionConfig | None = None,
 ) -> None:
     clear_active_run_metadata(task)
     task.setdefault("log_paths", []).append(str(result.log_path))
@@ -877,7 +877,7 @@ def startup_stall_error(reason: str, progress: dict[str, Any]) -> str:
     return "codex startup stalled before meaningful JSONL events"
 
 
-def record_last_run(task: dict, result: CodexResult, *, execution_settings: ExecutionSettings | None = None) -> None:
+def record_last_run(task: dict, result: CodexResult, *, execution_settings: ResolvedExecutionConfig | None = None) -> None:
     finished_at = iso_now()
     started_at = task.get("started_at")
     task["last_run"] = {
@@ -890,28 +890,30 @@ def record_last_run(task: dict, result: CodexResult, *, execution_settings: Exec
         "log_path": str(result.log_path),
     }
     if execution_settings and execution_settings_has_metadata(execution_settings):
-        task["last_run"]["execution_profile"] = execution_settings.profile_name
-        task["last_run"]["execution_profile_source"] = execution_settings.profile_source
-        task["last_run"]["execution_profile_reason"] = execution_settings.profile_reason
-        task["last_run"]["model"] = execution_settings.model
-        task["last_run"]["codex_profile"] = execution_settings.codex_profile
-        task["last_run"]["config_override_keys"] = sorted((execution_settings.config_overrides or {}).keys())
-        task["last_run"]["token_budget_hint"] = execution_settings.token_budget_hint
+        task["last_run"]["worker_role"] = execution_settings.worker_role
+        task["last_run"]["resolved_execution_config"] = {
+            "selection_rule": execution_settings.selection_rule,
+            "selection_reason": execution_settings.selection_reason,
+            "model": execution_settings.model,
+            "codex_profile": execution_settings.codex_profile,
+            "config_override_keys": sorted((execution_settings.config_overrides or {}).keys()),
+            "budget_hint": execution_settings.budget_hint,
+            "model_requirement_vector": execution_settings.requirement_vector,
+        }
     if result.watchdog_reason:
         task["last_run"]["watchdog_reason"] = result.watchdog_reason
 
 
-def execution_settings_has_metadata(settings: ExecutionSettings) -> bool:
+def execution_settings_has_metadata(settings: ResolvedExecutionConfig) -> bool:
     return any(
         value not in (None, "", {})
         for value in (
-            settings.profile_name,
-            settings.profile_source,
-            settings.profile_reason,
             settings.model,
             settings.codex_profile,
             settings.config_overrides,
-            settings.token_budget_hint,
+            settings.budget_hint,
+            settings.selection_rule,
+            settings.requirement_vector,
         )
     )
 

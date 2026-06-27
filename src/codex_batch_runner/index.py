@@ -201,7 +201,7 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
           capacity_pool TEXT,
           task_priority TEXT,
           execution_backend TEXT,
-          execution_profile TEXT,
+          model_requirement_json TEXT NOT NULL,
           routing_size TEXT,
           routing_risk TEXT,
           verification_scope_json TEXT NOT NULL,
@@ -307,7 +307,7 @@ def insert_task(conn: sqlite3.Connection, task: dict[str, Any]) -> None:
         INSERT INTO tasks (
           task_id, schema_version, title, description, status, project_id, category,
           labels_json, created_by, created_at, updated_at, started_at, completed_at, archived_at,
-          attempts, run_count, capacity_pool, task_priority, execution_backend, execution_profile,
+          attempts, run_count, capacity_pool, task_priority, execution_backend, model_requirement_json,
           routing_size, routing_risk, verification_scope_json, resolution, resolved_at, root_task_id,
           parent_task_id, subtask_type, subtask_for, blocks_root_completion, chain_status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -332,7 +332,7 @@ def insert_task(conn: sqlite3.Connection, task: dict[str, Any]) -> None:
             safe_text(task.get("capacity_pool")),
             safe_text(task.get("task_priority") or task.get("priority")),
             safe_text(task.get("execution_backend")),
-            safe_text(task.get("execution_profile")),
+            json_dumps_sanitized(task.get("model_requirement_vector") if isinstance(task.get("model_requirement_vector"), dict) else {}),
             safe_text(task.get("routing_size")),
             safe_text(task.get("routing_risk")),
             json_dumps_sanitized(list_value(task.get("verification_scope"))),

@@ -19,7 +19,7 @@ from .cooldown import MANUAL_COOLDOWN_SAFETY_OFFSET_SECONDS, cooldown_status, fo
 from .doctor import build_doctor_report, render_doctor_report
 from .direct_worktrees import build_direct_worktrees_report, render_direct_worktrees_report
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write_event_nonfatal
-from .execution_profiles import config_overrides_value
+from .model_requirements import REQUIREMENT_DIMENSIONS, REQUIREMENT_LEVELS, model_requirement_vector_value
 from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
 from .index import build_rebuild_report, build_status_report, render_rebuild_report, render_status_report
@@ -154,18 +154,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="concise list title, usually 4-8 words: action + object + short qualifier",
     )
     enqueue.add_argument("--description", help="optional human-readable task description")
-    enqueue.add_argument("--profile", dest="execution_profile", help="cbr execution profile name")
-    enqueue.add_argument("--model", help="Codex model override")
-    enqueue.add_argument("--codex-profile", help="Codex CONFIG_PROFILE_V2 override")
-    enqueue.add_argument(
-        "--config-override",
-        action="append",
-        default=[],
-        metavar="KEY=VALUE",
-        help="allowlisted Codex -c config override, repeatable",
-    )
-    enqueue.add_argument("--token-budget-hint", help="non-enforced token or budget hint")
-    enqueue.add_argument("--routing-reason", help="public-safe reason for the profile/provider routing decision")
+    enqueue.add_argument("--model-requirement-json", help="model requirement vector JSON object")
+    for dimension in REQUIREMENT_DIMENSIONS:
+        enqueue.add_argument(
+            "--" + dimension.replace("_", "-"),
+            choices=sorted(REQUIREMENT_LEVELS),
+            help=f"model requirement dimension: {dimension}",
+        )
+    enqueue.add_argument("--routing-reason", help="public-safe reason for the model requirement decision")
     enqueue.add_argument("--routing-risk-factor", action="append", default=[], help="public-safe routing risk factor, repeatable")
     enqueue.add_argument("--routing-experiment", help="routing experiment label such as baseline, downshift_probe, upshift_guard, or manual")
     enqueue.add_argument("--routing-size", choices=ROUTING_SIZES, help="public-safe pre-enqueue work size estimate")
@@ -255,7 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_next.add_argument("--json", action="store_true", help="print JSON")
     review_next.set_defaults(func=cmd_review_next)
 
-    routing_report = sub.add_parser("routing-report", help="summarize profile routing outcomes without mutating tasks")
+    routing_report = sub.add_parser("routing-report", help="summarize model requirement outcomes without mutating tasks")
     routing_report.add_argument("--project", dest="project_id", help="filter by project id")
     routing_report.add_argument("--project-root", help="filter by project root")
     routing_report.add_argument("--category", help="filter by category")
@@ -503,11 +499,7 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         created_by=args.created_by,
         title=args.title,
         description=args.description,
-        execution_profile=args.execution_profile,
-        model=args.model,
-        codex_profile=args.codex_profile,
-        codex_config_overrides=parse_config_overrides(args.config_override),
-        token_budget_hint=args.token_budget_hint,
+        model_requirement_vector=parse_model_requirement_args(args),
         routing_reason=args.routing_reason,
         routing_risk_factors=args.routing_risk_factor,
         routing_experiment=args.routing_experiment,
@@ -546,14 +538,26 @@ def parse_shell_command_args(args: argparse.Namespace) -> list[str] | None:
     return None
 
 
-def parse_config_overrides(items: list[str]) -> dict[str, str]:
-    overrides: dict[str, str] = {}
-    for item in items:
-        if "=" not in item:
-            raise ValueError("--config-override must use KEY=VALUE")
-        key, value = item.split("=", 1)
-        overrides[key] = value
-    return config_overrides_value("codex_config_overrides", overrides)
+def parse_model_requirement_args(args: argparse.Namespace) -> dict | None:
+    explicit = {}
+    if args.model_requirement_json:
+        try:
+            explicit = json.loads(args.model_requirement_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("--model-requirement-json must be a JSON object") from exc
+        if not isinstance(explicit, dict):
+            raise ValueError("--model-requirement-json must be a JSON object")
+    dimensions = dict(explicit.get("dimensions", {})) if isinstance(explicit.get("dimensions"), dict) else {}
+    for dimension in REQUIREMENT_DIMENSIONS:
+        value = getattr(args, dimension)
+        if value:
+            dimensions[dimension] = value
+    if not dimensions and not explicit:
+        return None
+    explicit["dimensions"] = dimensions
+    explicit.setdefault("source", "explicit_cli")
+    explicit.setdefault("confidence", "high")
+    return model_requirement_vector_value("model_requirement_vector", explicit)
 
 
 def cmd_list(config: Config, args: argparse.Namespace) -> int:
@@ -753,7 +757,7 @@ def render_list_output(config: Config, args: argparse.Namespace, terminal_width:
         output = render_compact_list(tasks, by_id, config, color, terminal_width=terminal_width, include_capacity=not args.demo)
         return "\n".join([*banners, output]) if banners else output
     header = ["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"]
-    header.append("PROFILE")
+    header.append("MODEL")
     header.extend(["RAW_STATUS", "LAST_RESULT", "LAST_RUN", "LAST_ERROR"])
     rows = []
     for task in tasks:
@@ -821,8 +825,35 @@ def demo_list_tasks() -> list[dict]:
             **extra,
         }
 
+    low_requirement = {
+        "schema_version": 1,
+        "source": "demo",
+        "confidence": "medium",
+        "dimensions": {
+            "reasoning_depth": "low",
+            "context_need": "low",
+            "tool_reliability": "medium",
+            "latency_priority": "high",
+            "cost_sensitivity": "high",
+            "review_strictness": "medium",
+        },
+    }
+    high_requirement = {
+        "schema_version": 1,
+        "source": "demo",
+        "confidence": "medium",
+        "dimensions": {
+            "reasoning_depth": "high",
+            "context_need": "high",
+            "tool_reliability": "high",
+            "latency_priority": "medium",
+            "cost_sensitivity": "low",
+            "review_strictness": "medium",
+        },
+    }
+
     return [
-        task("demo-ready", "Prepare parser cleanup notes", created_ago=900, execution_profile="small"),
+        task("demo-ready", "Prepare parser cleanup notes", created_ago=900, model_requirement_vector=low_requirement),
         task(
             "demo-build-parser",
             "Build shared parser",
@@ -931,7 +962,7 @@ def demo_list_tasks() -> list[dict]:
             created_ago=480,
             started_at=ago(125),
             last_progress={"last_jsonl_event_at": ago(35), "jsonl_event_count": 14},
-            execution_profile="deep",
+            model_requirement_vector=high_requirement,
         ),
     ]
 
@@ -1504,12 +1535,12 @@ def dependency_graph_edge_tail(index: int) -> str:
 def styled_compact_title_fragment(value: str, color: "ListColor", *, dim_title: bool = False) -> str:
     for marker in ListColor.PROFILE_MARKER_STYLES:
         if value == marker:
-            return color.profile_marker(value)
+            return color.model_marker(value)
         prefix = marker + " "
         if value.startswith(prefix):
             title = value[len(prefix) :]
             styled_title = color.dim_text(title) if dim_title else color.title(title)
-            return f"{color.profile_marker(marker)} {styled_title}"
+            return f"{color.model_marker(marker)} {styled_title}"
     return color.dim_text(value) if dim_title else color.title(value)
 
 
@@ -1641,7 +1672,7 @@ def render_compact_list(
     terminal_width: int | None = None,
     include_capacity: bool = True,
 ) -> str:
-    header = ["[P]", "TITLE", "STATUS", "DETAIL"]
+    header = ["[M]", "TITLE", "STATUS", "DETAIL"]
     if terminal_width is not None and terminal_width < COMPACT_TABLE_BLOCK_LAYOUT_WIDTH:
         project_groups = compact_project_groups(tasks, by_id, config, color, include_capacity=include_capacity)
         return render_compact_block_list(project_groups, terminal_width, color)
@@ -1837,7 +1868,7 @@ def compact_task_group(
         color.dim_text(tree_continuation_prefix(tree_prefix)) if dim_child else tree_continuation_prefix(tree_prefix)
     )
     return {
-        "profile": cells["profile"],
+        "model": cells["model"],
         "summary": [cells["status"]],
         "details": detail_segments or ["-"],
         "title": compact_group_title(task, color, tree_prefix, relationship),
@@ -1856,7 +1887,7 @@ def task_display_cells(
 ) -> dict[str, str]:
     projection = task_list_presentation(task, by_id, config)
     return {
-        "profile": color.profile_marker(execution_profile_marker(task)),
+        "model": color.model_marker(model_requirement_marker(task)),
         "status": compact_table_status(projection, color, narrow_table=narrow_table),
         "title": task_title(task),
     }
@@ -1884,8 +1915,8 @@ def project_section_header(project: str, terminal_width: int | None, color: "Lis
 
 
 def compact_widths(header: list[str], row_groups: list[dict[str, object]], terminal_width: int | None) -> list[int]:
-    profile_width = max(
-        [visible_len(header[0]), *(visible_len(str(group.get("profile") or "")) for group in row_groups)]
+    model_width = max(
+        [visible_len(header[0]), *(visible_len(str(group.get("model") or "")) for group in row_groups)]
         or [visible_len(header[0])]
     )
     details = [cell for group in row_groups for cell in group["details"]]  # type: ignore[index]
@@ -1898,10 +1929,10 @@ def compact_widths(header: list[str], row_groups: list[dict[str, object]], termi
     title_width = max([title_min, *(visible_len(str(title)) for title in titles)] or [title_min])
     status = compact_status_width(header, row_groups)
     detail_width = max([detail_min, *(visible_len(str(detail)) for detail in details)] or [detail_min])
-    widths = [profile_width, title_width, status, detail_width]
+    widths = [model_width, title_width, status, detail_width]
     if terminal_width is None:
         return widths
-    fixed = profile_width + status + (len(widths) - 1) * 2
+    fixed = model_width + status + (len(widths) - 1) * 2
     available = max(3, terminal_width - fixed)
     minimums = [title_min, detail_min]
     minimums = compact_table_minimums_for_available(available, minimums)
@@ -1972,7 +2003,7 @@ def render_compact_group(group: dict[str, object], widths: list[int], terminal_w
     detail_lines = wrap_cell_list([str(detail) for detail in details], widths[3])
     row_count = max(1, len(detail_lines))
     summary = group["summary"] if isinstance(group["summary"], list) else [""]
-    profile = str(group.get("profile") or "")
+    model = str(group.get("model") or "")
     title_prefix = str(group.get("title_prefix") or "")
     title_continuation_prefix = str(group.get("title_continuation_prefix") or "")
     title_value = str(group.get("title_value") or group.get("title") or "-")
@@ -1982,7 +2013,7 @@ def render_compact_group(group: dict[str, object], widths: list[int], terminal_w
         lines.append(
             render_compact_row(
                 [
-                    fit_visible(profile, widths[0]) if index == 0 else "",
+                    fit_visible(model, widths[0]) if index == 0 else "",
                     title_lines[index] if index < len(title_lines) else "",
                     fit_visible(str(summary[0]), widths[2]) if index == 0 else "",
                     detail_lines[index] if index < len(detail_lines) else "",
@@ -2023,7 +2054,7 @@ def render_compact_block_list(
                 lines.append("")
             summary = group["summary"] if isinstance(group["summary"], list) else ["-", "-"]
             block_rows = [
-                ("[P]", str(group.get("profile") or "-")),
+                ("[M]", str(group.get("model") or "-")),
                 ("STATUS", str(summary[0])),
                 (
                     "TITLE",
@@ -2332,14 +2363,14 @@ def worktree_apply_note(task: dict) -> str:
     return "accepted_unapplied; not applied"
 
 
-def execution_profile_note(task: dict) -> str:
+def model_requirement_note(task: dict) -> str:
     parts = []
-    if task.get("execution_profile"):
-        parts.append("profile=" + one_line(task.get("execution_profile")))
-    if task.get("model"):
-        parts.append("model=" + one_line(task.get("model")))
-    if task.get("codex_profile"):
-        parts.append("codex_profile=" + one_line(task.get("codex_profile")))
+    vector = task.get("model_requirement_vector")
+    if isinstance(vector, dict) and vector.get("source") == "derived_from_task_vector":
+        return ""
+    dimensions = vector.get("dimensions") if isinstance(vector, dict) else {}
+    if isinstance(dimensions, dict):
+        parts.extend(f"{key}={one_line(value)}" for key, value in sorted(dimensions.items()))
     return " ".join(parts)
 
 
@@ -2350,13 +2381,13 @@ def execution_backend_note(task: dict) -> str:
 
 
 def compact_title(task: dict) -> str:
-    marker = execution_profile_marker(task)
+    marker = model_requirement_marker(task)
     title = task_title(task)
     return f"{marker} {title}"
 
 
 def styled_compact_title(task: dict, color: "ListColor", *, dim_title: bool = False) -> str:
-    marker = color.profile_marker(execution_profile_marker(task))
+    marker = color.model_marker(model_requirement_marker(task))
     title = task_title(task)
     if dim_title:
         title = color.dim_text(title)
@@ -2368,17 +2399,14 @@ def styled_task_title(task: dict, color: "ListColor", *, dim_title: bool = False
     return color.dim_text(title) if dim_title else color.title(title)
 
 
-def execution_profile_marker(task: dict) -> str:
-    profile = str(task.get("execution_profile") or "").strip().lower()
-    budget = str(task.get("token_budget_hint") or "").strip().lower()
-    model = str(task.get("model") or "").strip().lower()
-    codex_profile = str(task.get("codex_profile") or "").strip().lower()
-    values = " ".join(value for value in [profile, budget, model, codex_profile] if value)
-    if not values:
+def model_requirement_marker(task: dict) -> str:
+    vector = task.get("model_requirement_vector")
+    dimensions = vector.get("dimensions") if isinstance(vector, dict) else {}
+    if not isinstance(dimensions, dict) or not dimensions:
         return "[N]"
-    if any(term in values for term in ("small", "light", "low-cost", "low_cost", "lite")):
+    if dimensions.get("reasoning_depth") == "low" and dimensions.get("cost_sensitivity") == "high":
         return "[S]"
-    if any(term in values for term in ("deep", "high-cost", "high_cost", "large", "max")):
+    if dimensions.get("reasoning_depth") == "high" or dimensions.get("tool_reliability") == "high":
         return "[D]"
     return "[N]"
 
@@ -2818,7 +2846,7 @@ class ListColor:
             return self.apply(value, self.ID_COLORS[key % len(self.ID_COLORS)])
         return self.graph_branch(key, value)
 
-    def profile_marker(self, marker: str) -> str:
+    def model_marker(self, marker: str) -> str:
         return self.apply(marker, self.PROFILE_MARKER_STYLES.get(marker, self.GREEN))
 
     def project(self, project_id: str) -> str:
@@ -3106,7 +3134,7 @@ def truncate_table_text(value: str, limit: int) -> str:
 
 def verbose_table_cells(task: dict) -> list[str]:
     return [
-        execution_profile_note(task) or "-",
+        model_requirement_note(task) or "-",
         scalar_cell(task.get("status")),
         last_result_cell(task.get("last_result"), task.get("git_status")),
         last_run_cell(task.get("last_run")),

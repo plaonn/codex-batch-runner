@@ -20,15 +20,26 @@ def base_task(**overrides: object) -> dict:
         "verification_scope": ["unit"],
         "routing_risk_factors": ["public-tests"],
         "execution_backend": "codex",
-        "execution_profile": "normal",
+        "model_requirement_vector": {
+            "dimensions": {
+                "reasoning_depth": "medium",
+                "context_need": "medium",
+                "tool_reliability": "medium",
+                "latency_priority": "medium",
+                "cost_sensitivity": "medium",
+                "review_strictness": "medium",
+            }
+        },
         "capacity_pool": "default",
         "cwd": "/Users/example/private/project",
         "project_root": "/Users/example/private/project",
         "attempts": 1,
         "run_count": 1,
         "last_run": {
-            "execution_profile": "normal",
-            "model": "model-name-not-returned",
+            "resolved_execution_config": {
+                "selection_rule": "standard",
+                "model": "model-name-not-returned",
+            },
             "duration_seconds": 125,
             "log_path": "/Users/example/private/log.jsonl",
         },
@@ -211,7 +222,7 @@ class EvaluationRowTests(unittest.TestCase):
                 category="implementation",
                 execution_backend="codex",
                 routing_risk_factors=["source"],
-                last_run={"execution_backend": "codex", "execution_profile": "normal"},
+                last_run={"execution_backend": "codex", "resolved_execution_config": {"selection_rule": "standard"}},
                 last_result={
                     "task_id": "task-2026-06-25T170111-447743Z0000",
                     "status": "completed",
@@ -248,7 +259,7 @@ class EvaluationRowTests(unittest.TestCase):
                 category="docs",
                 execution_backend="codex",
                 labels=["implementation"],
-                last_run={"execution_backend": "codex", "execution_profile": "normal"},
+                last_run={"execution_backend": "codex", "resolved_execution_config": {"selection_rule": "standard"}},
                 last_result={
                     "task_id": "task-2026-06-25T170111-447743Z0000",
                     "status": "completed",
@@ -271,7 +282,7 @@ class EvaluationRowTests(unittest.TestCase):
 
         self.assertEqual("unknown", row["task_id"])
         self.assertEqual("unknown", row["worker"]["execution_backend"])
-        self.assertEqual("unknown", row["worker"]["worker_profile"])
+        self.assertEqual("unknown", row["worker"]["model_selection_rule"])
         self.assertEqual("unknown", row["reviewer"]["review_status"])
         self.assertEqual("unknown", row["objective_checks"]["final_result_status"])
         self.assertEqual([], row["task_vector"]["dimensions"]["labels"])

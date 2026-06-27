@@ -5,7 +5,7 @@ from typing import Any
 
 from .config import Config
 from .evaluation import derive_evaluation_row
-from .execution_profiles import small_profile_routing_candidate
+from .model_requirements import low_cost_candidate
 from .queue import list_tasks, task_labels, task_project_id, task_project_root
 from .request_fingerprint import find_request_fingerprint_candidates
 from .timeutil import iso_now
@@ -56,23 +56,25 @@ def build_routing_report(
         "task_count": len(rows),
         "task_rows": rows,
         "groups": {
-            "profile": summarize_groups(group_rows(rows, "profile")),
-            "resolved_profile": summarize_groups(group_rows(rows, "resolved_profile")),
+            "model_requirement": summarize_groups(group_rows(rows, "model_requirement")),
+            "model_selection_rule": summarize_groups(group_rows(rows, "model_selection_rule")),
             "category": summarize_groups(group_rows(rows, "category")),
             "label": summarize_groups(group_rows_by_label(rows)),
-            "profile_category": summarize_groups(group_rows(rows, "profile_category")),
+            "model_requirement_category": summarize_groups(group_rows(rows, "model_requirement_category")),
             "routing_experiment": summarize_groups(group_rows(rows, "routing_experiment")),
             "routing_size": summarize_groups(group_rows(rows, "routing_size")),
             "routing_risk": summarize_groups(group_rows(rows, "routing_risk")),
             "routing_risk_factor": summarize_groups(group_rows_by_risk_factor(rows)),
             "verification_scope": summarize_groups(group_rows_by_verification_scope(rows)),
             "routing_decision": summarize_groups(group_rows(rows, "routing_decision")),
-            "profile_routing_decision": summarize_groups(group_rows(rows, "profile_routing_decision")),
-            "resolved_profile_routing_decision": summarize_groups(
-                group_rows(rows, "resolved_profile_routing_decision")
+            "model_requirement_routing_decision": summarize_groups(
+                group_rows(rows, "model_requirement_routing_decision")
             ),
-            "small_profile_candidate": summarize_groups(group_rows(rows, "small_profile_candidate")),
-            "profile_experiment": summarize_groups(group_rows(rows, "profile_experiment")),
+            "model_selection_routing_decision": summarize_groups(
+                group_rows(rows, "model_selection_routing_decision")
+            ),
+            "low_cost_candidate": summarize_groups(group_rows(rows, "low_cost_candidate")),
+            "model_requirement_experiment": summarize_groups(group_rows(rows, "model_requirement_experiment")),
         },
         "evaluation_diagnostics": summarize_evaluation_diagnostics(evaluation_rows),
         "request_fingerprint_candidates": find_request_fingerprint_candidates(tasks),
@@ -103,9 +105,10 @@ def filter_tasks(
 
 
 def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
-    profile = str(task.get("execution_profile") or "default")
     last_run = task.get("last_run") if isinstance(task.get("last_run"), dict) else {}
-    resolved_profile = str(last_run.get("execution_profile") or task.get("execution_profile") or "default")
+    resolved_config = last_run.get("resolved_execution_config") if isinstance(last_run.get("resolved_execution_config"), dict) else {}
+    requirement = model_requirement_key(task.get("model_requirement_vector"))
+    selection_rule = str(resolved_config.get("selection_rule") or "unresolved")
     category = str(task.get("category") or "uncategorized")
     routing_experiment = str(task.get("routing_experiment") or "unspecified")
     routing_size = str(task.get("routing_size") or "unspecified")
@@ -117,13 +120,13 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
     attempts = int(task.get("attempts") or 0)
     review_status = completed_review_status(task)
     reviewer_decision = str(reviewer.get("decision") or task.get("last_review_decision") or "")
-    candidate = small_profile_candidate(task, profile=profile, resolved_profile=resolved_profile)
+    candidate = low_cost_candidate(task)
     return {
         "id": task.get("id"),
-        "profile": profile,
-        "resolved_profile": resolved_profile,
+        "model_requirement": requirement,
+        "model_selection_rule": selection_rule,
         "category": category,
-        "profile_category": f"{profile}/{category}",
+        "model_requirement_category": f"{requirement}/{category}",
         "labels": task_labels(task) or ["unlabeled"],
         "routing_reason": sanitize(task.get("routing_reason")) if task.get("routing_reason") else "",
         "routing_risk_factors": routing_risk_factors(task),
@@ -132,10 +135,10 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
         "routing_risk": sanitize(routing_risk),
         "verification_scope": scopes,
         "routing_decision": decision_key,
-        "profile_routing_decision": f"profile={sanitize(profile)} {decision_key}",
-        "resolved_profile_routing_decision": f"profile={sanitize(resolved_profile)} {decision_key}",
-        "small_profile_candidate": "candidate" if candidate else "not_candidate",
-        "profile_experiment": f"{profile}/{sanitize(routing_experiment)}",
+        "model_requirement_routing_decision": f"requirement={sanitize(requirement)} {decision_key}",
+        "model_selection_routing_decision": f"selection_rule={sanitize(selection_rule)} {decision_key}",
+        "low_cost_candidate": "candidate" if candidate else "not_candidate",
+        "model_requirement_experiment": f"{requirement}/{sanitize(routing_experiment)}",
         "status": str(task.get("status") or ""),
         "review_status": review_status,
         "reviewer_decision": reviewer_decision,
@@ -149,17 +152,14 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def small_profile_candidate(
-    task: dict[str, Any],
-    *,
-    profile: str,
-    resolved_profile: str,
-) -> bool:
-    return (
-        small_profile_routing_candidate(task)
-        and sanitize(profile) != "small"
-        and sanitize(resolved_profile) != "small"
-    )
+def model_requirement_key(value: object) -> str:
+    if not isinstance(value, dict):
+        return "unknown"
+    dimensions = value.get("dimensions")
+    if not isinstance(dimensions, dict):
+        return "unknown"
+    parts = [f"{key}={sanitize(dimensions.get(key))}" for key in sorted(dimensions)]
+    return " ".join(parts) if parts else "unknown"
 
 
 def completed_review_status(task: dict[str, Any]) -> str:
@@ -500,21 +500,21 @@ def render_routing_report(report: dict[str, Any]) -> str:
         lines.append("filters: " + " ".join(active_filters))
     groups = report.get("groups") if isinstance(report.get("groups"), dict) else {}
     for group_name in (
-        "profile",
-        "resolved_profile",
+        "model_requirement",
+        "model_selection_rule",
         "category",
         "label",
-        "profile_category",
+        "model_requirement_category",
         "routing_experiment",
         "routing_size",
         "routing_risk",
         "routing_risk_factor",
         "verification_scope",
         "routing_decision",
-        "profile_routing_decision",
-        "resolved_profile_routing_decision",
-        "small_profile_candidate",
-        "profile_experiment",
+        "model_requirement_routing_decision",
+        "model_selection_routing_decision",
+        "low_cost_candidate",
+        "model_requirement_experiment",
     ):
         entries = groups.get(group_name) if isinstance(groups.get(group_name), list) else []
         lines.append("")

@@ -5,7 +5,7 @@
 ## Topic map
 
 - [Task schema and dependency contract](task-schema.md): task JSON fields, task status, review status, project routing metadata, dependency readiness.
-- [Execution contract](execution.md): execution profiles, shell backend, capacity and priority, queue mutation, runner execution policy, watchdog, lock, atomic writes, Codex command/prompt wrapper, rate-limit, Codex CLI maintenance.
+- [Execution contract](execution.md): model requirements, shell backend, capacity and priority, queue mutation, runner execution policy, watchdog, lock, atomic writes, Codex command/prompt wrapper, rate-limit, Codex CLI maintenance.
 - [Review contract](review.md): review-bundle, review-next, reviewer Codex safety model, mechanical gates, bounded auto-fix loop.
 - [Worktree isolation and apply contract](worktrees.md): worktree execution isolation, apply/rebase/conflict-fix, cleanup, branch-prune, recovery.
 - [Events, index, and retention contract](events-and-index.md): event log, local SQLite read index, prune/retention behavior.

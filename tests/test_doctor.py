@@ -155,7 +155,7 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("runner_pause_reason: operator drain", human_output)
             self.assertIn("runner_pause_paused_by: ops-user", human_output)
 
-    def test_doctor_reports_execution_profiles_without_private_values(self) -> None:
+    def test_doctor_reports_model_requirements_without_private_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executable = Path(tmp) / "codex"
             executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
@@ -164,16 +164,16 @@ class DoctorTests(unittest.TestCase):
                 tmp,
                 [str(executable), "exec", "--json"],
                 extra={
-                    "default_execution_profile": "small",
-                    "review_execution_profile": "review",
-                    "execution_profiles": {
-                        "small": {
+                    "default_execution_config": {"model": "gpt-5"},
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
                             "model": "gpt-5-small",
                             "codex_profile": "batch-small",
                             "config_overrides": {"model_reasoning_effort": "low"},
                         },
-                        "review": {"model": "gpt-5"},
-                    },
+                    ],
                 },
             )
 
@@ -182,14 +182,15 @@ class DoctorTests(unittest.TestCase):
             human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
 
             self.assertEqual(0, code)
-            self.assertEqual("small", report["execution_profiles"]["default_execution_profile"])
-            self.assertEqual("review", report["execution_profiles"]["review_execution_profile"])
-            self.assertEqual(["review", "small"], report["execution_profiles"]["configured"])
-            self.assertEqual(["model_reasoning_effort"], report["execution_profiles"]["profiles"]["small"]["config_override_keys"])
-            self.assertNotIn('"model_reasoning_effort": "low"', json.dumps(report["execution_profiles"], sort_keys=True))
+            self.assertEqual(["low-cost-docs"], report["model_requirements"]["model_selection_rules"])
+            self.assertEqual(
+                ["model_reasoning_effort"],
+                report["model_requirements"]["rules"]["low-cost-docs"]["config_override_keys"],
+            )
+            self.assertNotIn('"model_reasoning_effort": "low"', json.dumps(report["model_requirements"], sort_keys=True))
             self.assertEqual(0, human_code)
-            self.assertIn("execution_profiles:", human_output)
-            self.assertIn("small: model=true codex_profile=true config_overrides=model_reasoning_effort", human_output)
+            self.assertIn("model_requirements:", human_output)
+            self.assertIn("low-cost-docs: model=true codex_profile=true config_overrides=model_reasoning_effort", human_output)
 
     def test_doctor_warns_when_codex_version_fails_without_failing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

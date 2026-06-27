@@ -5,30 +5,65 @@
   "state_file": ".codex-batch-runner/state.json",
   "codex_command": ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--json"],
   "codex_resume_command": ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "resume", "{session_id}", "--json"],
-  "default_execution_profile": "normal",
-  "review_execution_profile": "review",
-  "execution_profiles": {
-    "small": {
+  "default_model_requirement_vector": {
+    "source": "config_default",
+    "confidence": "medium",
+    "dimensions": {
+      "reasoning_depth": "medium",
+      "context_need": "medium",
+      "tool_reliability": "medium",
+      "latency_priority": "medium",
+      "cost_sensitivity": "medium",
+      "review_strictness": "medium"
+    }
+  },
+  "review_model_requirement_vector": {
+    "source": "config_review_default",
+    "confidence": "medium",
+    "dimensions": {
+      "reasoning_depth": "high",
+      "context_need": "medium",
+      "tool_reliability": "high",
+      "latency_priority": "medium",
+      "cost_sensitivity": "low",
+      "review_strictness": "high"
+    }
+  },
+  "default_execution_config": {
+    "model": "gpt-5",
+    "codex_profile": "batch-normal"
+  },
+  "model_selection_rules": [
+    {
+      "name": "low-cost-docs",
+      "when": {
+        "reasoning_depth": "low",
+        "cost_sensitivity": "high"
+      },
       "model": "gpt-5-small",
       "codex_profile": "batch-small",
       "config_overrides": {
         "model_reasoning_effort": "low"
       },
-      "token_budget_hint": "small documentation or test-only task"
+      "budget_hint": "small documentation or test-only task"
     },
-    "normal": {
-      "model": "gpt-5",
-      "codex_profile": "batch-normal"
-    },
-    "deep": {
+    {
+      "name": "high-capability",
+      "when": {
+        "reasoning_depth": "high"
+      },
       "model": "gpt-5",
       "codex_profile": "batch-deep"
     },
-    "review": {
+    {
+      "name": "strict-review",
+      "when": {
+        "review_strictness": "high"
+      },
       "model": "gpt-5",
       "codex_profile": "batch-review"
     }
-  },
+  ],
   "manual_cooldown_wake_scheduler": "disabled",
   "manual_cooldown_wake_command": [],
   "codex_cli_update_command": [],
