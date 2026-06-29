@@ -547,7 +547,12 @@ def parse_model_requirement_args(args: argparse.Namespace) -> dict | None:
             raise ValueError("--model-requirement-json must be a JSON object") from exc
         if not isinstance(explicit, dict):
             raise ValueError("--model-requirement-json must be a JSON object")
-    dimensions = dict(explicit.get("dimensions", {})) if isinstance(explicit.get("dimensions"), dict) else {}
+    raw_dimensions = explicit.get("dimensions", {})
+    if raw_dimensions in (None, ""):
+        raw_dimensions = {}
+    if not isinstance(raw_dimensions, dict):
+        raise ValueError("--model-requirement-json dimensions must be an object")
+    dimensions = dict(raw_dimensions)
     for dimension in REQUIREMENT_DIMENSIONS:
         value = getattr(args, dimension)
         if value:

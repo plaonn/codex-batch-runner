@@ -1364,6 +1364,28 @@ class CliTests(unittest.TestCase):
             self.assertEqual("", output)
             self.assertIn("reasoning_depth must be one of", stderr)
 
+    def test_enqueue_rejects_model_requirement_json_with_non_object_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output, stderr = run_cli_with_stderr(
+                [
+                    "--config",
+                    str(config_path),
+                    "enqueue",
+                    "--cwd",
+                    tmp,
+                    "--model-requirement-json",
+                    json.dumps({"dimensions": "bad"}),
+                    "--prompt",
+                    "work",
+                ]
+            )
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("--model-requirement-json dimensions must be an object", stderr)
+
     def test_routing_report_groups_profile_category_and_label_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -1584,6 +1606,42 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, requirement_decisions[f"requirement={req_key} size=small risk=low verify=docs"]["tasks"])
             self.assertEqual(1, selection_decisions["selection_rule=low-cost-docs size=small risk=low verify=docs"]["tasks"])
             self.assertEqual(1, low_cost_candidates["candidate"]["tasks"])
+
+    def test_routing_report_uses_last_run_requirement_for_outcome_attribution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="changed-requirement-after-run",
+                project_id="project-a",
+                model_requirement_vector=requirement_vector(reasoning_depth="high"),
+                routing_size="small",
+                routing_risk="low",
+                verification_scope=["docs"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            task["last_run"] = {
+                "resolved_execution_config": {
+                    "selection_rule": "low-cost-docs",
+                    "model_requirement_vector": requirement_vector(reasoning_depth="low", cost_sensitivity="high"),
+                },
+                "duration_seconds": 10,
+            }
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
+            report = json.loads(output)
+            row = report["task_rows"][0]
+            low_key = requirement_key(reasoning_depth="low", cost_sensitivity="high")
+            high_key = requirement_key(reasoning_depth="high")
+
+            self.assertEqual(0, code)
+            self.assertEqual(low_key, row["model_requirement"])
+            self.assertNotEqual(high_key, row["model_requirement"])
 
     def test_routing_report_keeps_discarded_rejected_internal_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -23,6 +23,7 @@ HIGH_RISK_TERMS = {
     "worktree-critical",
     "worktree-recovery",
 }
+DERIVED_REQUIREMENT_SOURCE = "derived_from_task_vector"
 REQUIREMENT_DIMENSIONS = (
     "reasoning_depth",
     "context_need",
@@ -147,7 +148,10 @@ def resolve_execution_config(config: Any, task: dict[str, Any], *, reviewer: boo
 def resolve_model_requirement_vector(config: Any, task: dict[str, Any], *, reviewer: bool = False) -> dict[str, Any]:
     explicit = task.get("model_requirement_vector")
     if explicit not in (None, "", {}):
-        return model_requirement_vector_value("model_requirement_vector", explicit)
+        vector = model_requirement_vector_value("model_requirement_vector", explicit)
+        if vector.get("source") == DERIVED_REQUIREMENT_SOURCE:
+            return derive_model_requirement_vector(task, reviewer=reviewer)
+        return vector
     default = config.review_model_requirement_vector if reviewer else config.default_model_requirement_vector
     if default:
         return model_requirement_vector_value(
@@ -175,7 +179,7 @@ def derive_model_requirement_vector(task: dict[str, Any], *, reviewer: bool = Fa
         source_fields.append("worker_role")
     return {
         "schema_version": 1,
-        "source": "derived_from_task_vector",
+        "source": DERIVED_REQUIREMENT_SOURCE,
         "confidence": "medium",
         "derived_from": source_fields,
         "dimensions": dimensions,

@@ -273,6 +273,47 @@ class CodexParserTests(unittest.TestCase):
             self.assertEqual("high", high_risk_worktree["dimensions"]["reasoning_depth"])
             self.assertEqual("medium", explicit_requirement.requirement_vector["dimensions"]["reasoning_depth"])
 
+    def test_stored_derived_requirement_recomputes_from_current_routing_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            config = Config(
+                **{
+                    **config.__dict__,
+                    "default_model_requirement_vector": {
+                        "source": "config_default",
+                        "dimensions": {"reasoning_depth": "medium", "cost_sensitivity": "medium"},
+                    },
+                }
+            )
+
+            resolved = resolve_model_requirement_vector(
+                config,
+                {
+                    "id": "task-stale-derived",
+                    "model_requirement_vector": {
+                        "source": "derived_from_task_vector",
+                        "dimensions": {"reasoning_depth": "low", "cost_sensitivity": "high"},
+                    },
+                    "routing_size": "small",
+                    "routing_risk": "high",
+                    "verification_scope": ["docs"],
+                },
+            )
+
+            self.assertEqual("high", resolved["dimensions"]["reasoning_depth"])
+            self.assertEqual("low", resolved["dimensions"]["cost_sensitivity"])
+
+    def test_example_configs_route_reviewers_before_general_high_capability_rule(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        for config_name in ("config.example.json", "config.automation.example.json"):
+            with self.subTest(config_name=config_name):
+                config = Config.load(str(repo_root / "examples" / config_name))
+
+                resolved = resolve_execution_config(config, {}, reviewer=True)
+
+                self.assertEqual("strict-review", resolved.selection_rule)
+                self.assertEqual("batch-review", resolved.codex_profile)
+
     def test_should_use_resume_after_task_is_marked_running(self) -> None:
         task = {"status": "running", "resume_requested": True, "thread_id": "thread-123"}
 

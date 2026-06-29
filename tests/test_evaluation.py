@@ -96,6 +96,23 @@ class EvaluationRowTests(unittest.TestCase):
         self.assertFalse(row["policy_usage"]["usable_for_worker_policy"])
         self.assertTrue(row["policy_usage"]["usable_for_task_vector_evaluation"])
 
+    def test_worker_requirement_uses_last_run_vector_for_outcome_attribution(self) -> None:
+        row = derive_evaluation_row(
+            base_task(
+                model_requirement_vector={"dimensions": {"reasoning_depth": "high"}},
+                last_run={
+                    "resolved_execution_config": {
+                        "selection_rule": "low-cost-docs",
+                        "model_requirement_vector": {"dimensions": {"reasoning_depth": "low"}},
+                    },
+                    "duration_seconds": 10,
+                },
+            )
+        )
+
+        self.assertIn("reasoning_depth=low", row["worker"]["model_requirement_key"])
+        self.assertNotIn("reasoning_depth=high", row["worker"]["model_requirement_key"])
+
     def test_rejected_and_needs_followup_keep_reviewer_decision_separate(self) -> None:
         rejected = derive_evaluation_row(
             base_task(

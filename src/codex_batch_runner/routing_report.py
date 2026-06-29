@@ -107,7 +107,7 @@ def filter_tasks(
 def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
     last_run = task.get("last_run") if isinstance(task.get("last_run"), dict) else {}
     resolved_config = last_run.get("resolved_execution_config") if isinstance(last_run.get("resolved_execution_config"), dict) else {}
-    requirement = model_requirement_key(task.get("model_requirement_vector"))
+    requirement = model_requirement_key(resolved_config.get("model_requirement_vector") or task.get("model_requirement_vector"))
     selection_rule = str(resolved_config.get("selection_rule") or "unresolved")
     category = str(task.get("category") or "uncategorized")
     routing_experiment = str(task.get("routing_experiment") or "unspecified")

@@ -48,20 +48,20 @@
       "budget_hint": "small documentation or test-only task"
     },
     {
-      "name": "high-capability",
-      "when": {
-        "reasoning_depth": "high"
-      },
-      "model": "gpt-5",
-      "codex_profile": "batch-deep"
-    },
-    {
       "name": "strict-review",
       "when": {
         "review_strictness": "high"
       },
       "model": "gpt-5",
       "codex_profile": "batch-review"
+    },
+    {
+      "name": "high-capability",
+      "when": {
+        "reasoning_depth": "high"
+      },
+      "model": "gpt-5",
+      "codex_profile": "batch-deep"
     }
   ],
   "manual_cooldown_wake_scheduler": "disabled",

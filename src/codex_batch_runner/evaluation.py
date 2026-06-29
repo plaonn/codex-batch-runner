@@ -101,7 +101,7 @@ def _routing_section(task: dict[str, Any]) -> dict[str, Any]:
 def _worker_section(task: dict[str, Any]) -> dict[str, Any]:
     last_run = _dict_value(task.get("last_run"))
     resolved_config = _dict_value(last_run.get("resolved_execution_config"))
-    requirement_vector = _dict_value(task.get("model_requirement_vector") or resolved_config.get("model_requirement_vector"))
+    requirement_vector = _dict_value(resolved_config.get("model_requirement_vector") or task.get("model_requirement_vector"))
     dimensions = _dict_value(requirement_vector.get("dimensions"))
     selection_rule = _safe_metadata_value(resolved_config.get("selection_rule"))
     requirement_key = _join_key(
