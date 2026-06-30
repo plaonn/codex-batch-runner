@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -52,7 +53,7 @@ def build_rebuild_report(config: Config, *, apply: bool) -> dict[str, Any]:
     try:
         tasks = retained_tasks(config)
         events = retained_events(config)
-        with sqlite3.connect(tmp_path) as conn:
+        with contextlib.closing(sqlite3.connect(tmp_path)) as conn:
             conn.execute("PRAGMA journal_mode=DELETE")
             initialize_schema(conn)
             counts = populate_index(conn, tasks, events)
@@ -94,7 +95,7 @@ def build_status_report(config: Config) -> dict[str, Any]:
         report["warnings"].append("index database is missing; JSON/JSONL fallback remains authoritative")
         return report
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        with contextlib.closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
             schema_version = read_metadata_int(conn, "schema_version")
             report["schema_version"] = schema_version
             report["last_rebuild_at"] = read_metadata(conn, "last_rebuild_at")

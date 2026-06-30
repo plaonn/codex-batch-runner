@@ -77,7 +77,7 @@ class IndexCommandTests(unittest.TestCase):
             self.assertEqual(1, report["indexed_dependencies"])
             self.assertTrue(index_db_path(config).exists())
 
-            with sqlite3.connect(index_db_path(config)) as conn:
+            with contextlib.closing(sqlite3.connect(index_db_path(config))) as conn:
                 statuses = dict(conn.execute("SELECT task_id, status FROM tasks").fetchall())
                 deps = conn.execute("SELECT task_id, depends_on FROM task_dependencies").fetchall()
                 review = conn.execute("SELECT review_status FROM task_review_state WHERE task_id = 'child'").fetchone()[0]
@@ -111,7 +111,7 @@ class IndexCommandTests(unittest.TestCase):
 
             db_path = index_db_path(config)
             db_path.parent.mkdir(parents=True, exist_ok=True)
-            with sqlite3.connect(db_path) as conn:
+            with contextlib.closing(sqlite3.connect(db_path)) as conn:
                 conn.execute("CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
                 conn.execute("INSERT INTO index_metadata (key, value) VALUES ('schema_version', '0')")
                 conn.commit()
@@ -357,7 +357,7 @@ class IndexCommandTests(unittest.TestCase):
 
 def dump_sqlite_text(path: Path) -> str:
     values: list[str] = []
-    with sqlite3.connect(path) as conn:
+    with contextlib.closing(sqlite3.connect(path)) as conn:
         table_names = [
             row[0]
             for row in conn.execute(
