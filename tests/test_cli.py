@@ -1513,6 +1513,7 @@ class CliTests(unittest.TestCase):
             risks = {entry["key"]: entry for entry in report["groups"]["routing_risk_factor"]}
             scopes = {entry["key"]: entry for entry in report["groups"]["verification_scope"]}
             decisions = {entry["key"]: entry for entry in report["groups"]["routing_decision"]}
+            provider_resources = {entry["key"]: entry for entry in report["groups"]["provider_resource"]}
             requirement_decisions = {
                 entry["key"]: entry for entry in report["groups"]["model_requirement_routing_decision"]
             }
@@ -1520,6 +1521,7 @@ class CliTests(unittest.TestCase):
                 entry["key"]: entry for entry in report["groups"]["model_requirement_experiment"]
             }
             decision_key = "size=small risk=low verify=docs+unit"
+            provider_key = "provider=codex quota_boundary=unknown sharing=not_independent"
             req_key = requirement_key(reasoning_depth="low", cost_sensitivity="high")
             requirement_decision_key = f"requirement={req_key} size=small risk=low verify=docs+unit"
 
@@ -1529,6 +1531,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual("small", report["task_rows"][0]["routing_size"])
             self.assertEqual("low", report["task_rows"][0]["routing_risk"])
             self.assertEqual(["unit", "docs"], report["task_rows"][0]["verification_scope"])
+            self.assertEqual("codex", report["task_rows"][0]["provider_resource"]["provider_id"])
+            self.assertEqual("unknown", report["task_rows"][0]["provider_resource"]["quota_boundary"])
+            self.assertEqual("not_independent", report["task_rows"][0]["provider_resource"]["sharing_assumption"])
+            self.assertTrue(report["task_rows"][0]["provider_resource"]["advisory_only"])
+            self.assertFalse(report["task_rows"][0]["provider_resource"]["derived_from_capacity_pool"])
             self.assertEqual(1, experiments["downshift_probe"]["tasks"])
             self.assertEqual(1, sizes["small"]["tasks"])
             self.assertEqual(1, risks_by_level["low"]["tasks"])
@@ -1540,6 +1547,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(requirement_decision_key, report["task_rows"][0]["model_requirement_routing_decision"])
             self.assertEqual(1, decisions[decision_key]["tasks"])
             self.assertEqual(1, decisions[decision_key]["first_pass_accepted"])
+            self.assertEqual(1, provider_resources[provider_key]["tasks"])
             self.assertEqual(1, requirement_decisions[requirement_decision_key]["tasks"])
             self.assertEqual(1, requirement_experiments[f"{req_key}/downshift_probe"]["first_pass_accepted"])
 
@@ -2019,9 +2027,14 @@ class CliTests(unittest.TestCase):
             self.assertIn("task_vector", row)
             self.assertIn("worker", row)
             self.assertIn("reviewer", row)
+            self.assertIn("provider_resource", row)
             self.assertIn("objective_checks", row)
             self.assertIn("task_vector_evaluation", row)
             self.assertIn("policy_usage", row)
+            self.assertEqual("codex", row["provider_resource"]["provider_id"])
+            self.assertEqual("unknown", row["provider_resource"]["quota_boundary"])
+            self.assertEqual("not_independent", row["provider_resource"]["sharing_assumption"])
+            self.assertFalse(row["provider_resource"]["derived_from_capacity_pool"])
             self.assertNotIn("raw private prompt", serialized)
             self.assertNotIn("raw summary mentions", serialized)
             self.assertNotIn("session_abcdefghijklmnopqrstuvwxyz", serialized)

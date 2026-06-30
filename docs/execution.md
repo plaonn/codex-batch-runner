@@ -36,12 +36,13 @@ Low-risk docs-only routing metadata에는 낮은 reasoning depth와 높은 cost 
 
 `cbr list`와 `cbr summary`는 explicit `model_requirement_vector`를 표시할 수 있습니다. `cbr summary`와 `review-bundle`은 routing decision metadata도 sanitized task metadata로 표시해 review outcome과 original routing decision을 대조할 수 있게 합니다. Runner는 각 Codex 실행의 `last_run.resolved_execution_config`에 worker role, selection rule, model/profile 존재 여부, override key 이름, 사용한 requirement vector를 기록합니다. `cbr doctor`는 configured model selection rule 이름과 override key 이름만 표시하고 override 값은 출력하지 않습니다.
 
-`cbr routing-report`는 model requirement와 selection rule을 조정하기 위한 read-only evidence surface입니다. 명령은 queue task를 model requirement, model selection rule, category, label, requirement/category 조합, routing experiment, routing size, routing risk, routing risk factor, verification scope, routing decision tuple, requirement/routing decision tuple, selection/routing decision tuple, low-cost candidate 신호, requirement/experiment 조합으로 집계하고 accepted count, first-pass accepted count, needs-fix/rejected rate, reviewer decision count, auto-fix task frequency, attempts, run count, duration 기반 cost proxy를 출력합니다. Report는 task JSON, event log, review status를 변경하지 않고 Codex 또는 reviewer Codex를 호출하지 않습니다. 운영자는 이 결과를 보고 requirement derivation 또는 selection rule 변경을 별도 policy change로 반영합니다.
+`cbr routing-report`는 model requirement와 selection rule을 조정하기 위한 read-only evidence surface입니다. 명령은 queue task를 model requirement, model selection rule, category, label, requirement/category 조합, routing experiment, routing size, routing risk, routing risk factor, verification scope, routing decision tuple, requirement/routing decision tuple, selection/routing decision tuple, low-cost candidate 신호, requirement/experiment 조합, provider resource evidence로 집계하고 accepted count, first-pass accepted count, needs-fix/rejected rate, reviewer decision count, auto-fix task frequency, attempts, run count, duration 기반 cost proxy를 출력합니다. Provider resource evidence는 현재 Codex provider 불확실성을 명시하기 위해 기본적으로 `provider_id=codex`, `quota_boundary=unknown`, `sharing_assumption=not_independent`를 사용합니다. 이 evidence는 local `capacity_pool`, worker/reviewer role, legacy profile name과 분리되며 provider quota bucket을 추론하지 않습니다. Report는 task JSON, event log, review status를 변경하지 않고 Codex 또는 reviewer Codex를 호출하지 않습니다. 운영자는 이 결과를 보고 requirement derivation 또는 selection rule 변경을 별도 policy change로 반영합니다.
 
 `routing-report`는 의사결정 근거가 아니라 운영 진단입니다. task 선택, dependency readiness, review acceptance, cleanup/apply/archiving, cooldown, reject/resolve, run/claim 정책을 바꾸지 않습니다. 보고가 보여주지 않는 항목은 다음과 같습니다.
 - 개별 task의 raw prompt, full transcript/JSONL, raw log body
 - 다음 실행에서 바꿔 적용할 patch나 실행 계획
 - 안전성 판단 근거의 원문 근거 데이터(요약되지 않은 증거)
+- local `capacity_pool`에서 추론한 provider quota/resource identity
 - 정책 변경 자동 실행
 
 그래서 `routing-report`는 운영자 판단의 입력값으로만 쓰고, policy 변경은 별도 제어면에서 수동으로 수행해야 합니다. 즉 advisory + read-only입니다.

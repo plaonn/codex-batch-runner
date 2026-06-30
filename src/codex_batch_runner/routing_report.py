@@ -6,6 +6,7 @@ from typing import Any
 from .config import Config
 from .evaluation import derive_evaluation_row
 from .model_requirements import low_cost_candidate
+from .provider_resource import derive_provider_resource_evidence, provider_resource_key
 from .queue import list_tasks, task_labels, task_project_id, task_project_root
 from .request_fingerprint import find_request_fingerprint_candidates
 from .timeutil import iso_now
@@ -75,6 +76,7 @@ def build_routing_report(
             ),
             "low_cost_candidate": summarize_groups(group_rows(rows, "low_cost_candidate")),
             "model_requirement_experiment": summarize_groups(group_rows(rows, "model_requirement_experiment")),
+            "provider_resource": summarize_groups(group_rows(rows, "provider_resource_key")),
         },
         "evaluation_diagnostics": summarize_evaluation_diagnostics(evaluation_rows),
         "request_fingerprint_candidates": find_request_fingerprint_candidates(tasks),
@@ -121,6 +123,7 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
     review_status = completed_review_status(task)
     reviewer_decision = str(reviewer.get("decision") or task.get("last_review_decision") or "")
     candidate = low_cost_candidate(task)
+    provider_resource = derive_provider_resource_evidence(task)
     return {
         "id": task.get("id"),
         "model_requirement": requirement,
@@ -139,6 +142,8 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
         "model_selection_routing_decision": f"selection_rule={sanitize(selection_rule)} {decision_key}",
         "low_cost_candidate": "candidate" if candidate else "not_candidate",
         "model_requirement_experiment": f"{requirement}/{sanitize(routing_experiment)}",
+        "provider_resource": provider_resource,
+        "provider_resource_key": provider_resource_key(provider_resource),
         "status": str(task.get("status") or ""),
         "review_status": review_status,
         "reviewer_decision": reviewer_decision,
@@ -293,6 +298,10 @@ def summarize_evaluation_diagnostics(rows: list[dict[str, Any]]) -> dict[str, An
         "row_count": len(rows),
         "policy_usage": summarize_policy_usage(rows),
         "worker_cells": summarize_evaluation_groups(group_evaluation_rows(rows, worker_cell_key), summarize_worker_cell),
+        "provider_resources": summarize_evaluation_groups(
+            group_evaluation_rows(rows, provider_resource_cell_key),
+            summarize_provider_resource_cell,
+        ),
         "reviewer_cells": summarize_evaluation_groups(group_evaluation_rows(rows, reviewer_cell_key), summarize_reviewer_cell),
         "policy_exclusions": summarize_exclusion_reasons(rows),
         "task_buckets": summarize_evaluation_groups(group_evaluation_rows(rows, task_bucket_key), summarize_task_bucket),
@@ -368,6 +377,18 @@ def summarize_reviewer_cell(key: str, rows: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+def summarize_provider_resource_cell(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "key": key,
+        "tasks": len(rows),
+        "usable_for_quota_debugging": count(
+            rows,
+            lambda row: bool(policy_usage(row).get("usable_for_quota_debugging")),
+        ),
+        "advisory_read_only": True,
+    }
+
+
 def summarize_exclusion_reasons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -424,6 +445,11 @@ def summarize_task_bucket(key: str, rows: list[dict[str, Any]]) -> dict[str, Any
 
 def worker_cell_key(row: dict[str, Any]) -> str:
     return str(worker(row).get("worker_cell_key") or "unknown")
+
+
+def provider_resource_cell_key(row: dict[str, Any]) -> str:
+    value = row.get("provider_resource")
+    return provider_resource_key(value if isinstance(value, dict) else {})
 
 
 def reviewer_cell_key(row: dict[str, Any]) -> str:
@@ -515,6 +541,7 @@ def render_routing_report(report: dict[str, Any]) -> str:
         "model_selection_routing_decision",
         "low_cost_candidate",
         "model_requirement_experiment",
+        "provider_resource",
     ):
         entries = groups.get(group_name) if isinstance(groups.get(group_name), list) else []
         lines.append("")
@@ -567,12 +594,16 @@ def render_evaluation_diagnostics(diagnostics: dict[str, Any]) -> str:
                 "usable_for_worker_policy",
                 "usable_for_reviewer_calibration",
                 "usable_for_task_vector_evaluation",
+                "usable_for_quota_debugging",
             )
         )
     )
     lines.append("")
     lines.append("worker_cells")
     lines.append(render_worker_cell_table(list_value(diagnostics.get("worker_cells"))[:10]))
+    lines.append("")
+    lines.append("provider_resources")
+    lines.append(render_provider_resource_table(list_value(diagnostics.get("provider_resources"))[:10]))
     lines.append("")
     lines.append("reviewer_cells")
     lines.append(render_reviewer_cell_table(list_value(diagnostics.get("reviewer_cells"))[:10]))
@@ -596,6 +627,20 @@ def render_worker_cell_table(entries: list[dict[str, Any]]) -> str:
             str(entry.get("usable_accepted_pass") or 0),
             str(entry.get("failed") or 0),
             str(entry.get("needs_resume") or 0),
+        ]
+        for entry in entries
+    ]
+    return render_table(header, rows)
+
+
+def render_provider_resource_table(entries: list[dict[str, Any]]) -> str:
+    header = ["PROVIDER_RESOURCE", "TASKS", "QUOTA_DEBUG", "READ_ONLY"]
+    rows = [
+        [
+            str(entry.get("key") or "-"),
+            str(entry.get("tasks") or 0),
+            str(entry.get("usable_for_quota_debugging") or 0),
+            "yes" if entry.get("advisory_read_only") else "no",
         ]
         for entry in entries
     ]

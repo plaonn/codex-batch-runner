@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .provider_resource import derive_provider_resource_evidence, provider_resource_key
 from .request_fingerprint import _has_value, _normalized_list, _safe_id_hash, _safe_metadata_value, derive_request_fingerprint
 from .task_vector import derive_normalized_task_vector
 
@@ -23,6 +24,7 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
     task_vector = derive_normalized_task_vector(task)
     worker = _worker_section(task)
     reviewer = _reviewer_section(task)
+    provider_resource = derive_provider_resource_evidence(task)
     objective_checks = _objective_checks(task, reviewer)
     outcomes = _outcomes(task, reviewer)
     task_vector_evaluation = _task_vector_evaluation(task, task_vector, worker, objective_checks, outcomes)
@@ -40,6 +42,7 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
         "request_family_key": _request_family_key(fingerprint),
         "lineage": _lineage_section(fingerprint, task),
         "routing": _routing_section(task),
+        "provider_resource": provider_resource,
         "worker": worker,
         "reviewer": reviewer,
         "objective_checks": objective_checks,
@@ -647,6 +650,7 @@ def _experiment_cell_key(row: dict[str, Any]) -> str:
     return "|".join(
         (
             str(row.get("task_bucket_key") or "unknown"),
+            provider_resource_key(_dict_value(row.get("provider_resource"))),
             str(row.get("worker", {}).get("worker_cell_key") or "unknown"),
             str(row.get("reviewer", {}).get("reviewer_cell_key") or "unknown"),
         )

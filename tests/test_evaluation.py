@@ -113,6 +113,36 @@ class EvaluationRowTests(unittest.TestCase):
         self.assertIn("reasoning_depth=low", row["worker"]["model_requirement_key"])
         self.assertNotIn("reasoning_depth=high", row["worker"]["model_requirement_key"])
 
+    def test_provider_resource_evidence_is_advisory_and_separate_from_capacity_pool(self) -> None:
+        baseline = derive_evaluation_row(
+            base_task(
+                status="completed",
+                review_status="accepted",
+                anchor_review=True,
+                reviewer_codex={"decision": "pass", "confidence": "high", "findings": []},
+            )
+        )
+        with_pool = derive_evaluation_row(
+            base_task(
+                status="completed",
+                review_status="accepted",
+                capacity_pool="spark",
+                anchor_review=True,
+                reviewer_codex={"decision": "pass", "confidence": "high", "findings": []},
+            )
+        )
+
+        self.assertEqual("spark", with_pool["routing"]["capacity_pool"])
+        self.assertEqual("codex", with_pool["provider_resource"]["provider_id"])
+        self.assertEqual("unknown", with_pool["provider_resource"]["quota_boundary"])
+        self.assertEqual("not_independent", with_pool["provider_resource"]["sharing_assumption"])
+        self.assertTrue(with_pool["provider_resource"]["read_only"])
+        self.assertTrue(with_pool["provider_resource"]["advisory_only"])
+        self.assertFalse(with_pool["provider_resource"]["derived_from_capacity_pool"])
+        self.assertFalse(with_pool["provider_resource"]["derived_from_worker_role"])
+        self.assertFalse(with_pool["provider_resource"]["derived_from_legacy_profile"])
+        self.assertEqual(baseline["policy_usage"], with_pool["policy_usage"])
+
     def test_rejected_and_needs_followup_keep_reviewer_decision_separate(self) -> None:
         rejected = derive_evaluation_row(
             base_task(
