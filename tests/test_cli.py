@@ -6757,6 +6757,31 @@ class CliTests(unittest.TestCase):
             self.assertIn("### assistant", output)
             self.assertIn("session summary", output)
 
+    def test_dashboard_command_dispatches_read_only_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            with patch("codex_batch_runner.cli.serve_dashboard") as serve_dashboard:
+                code, output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "dashboard",
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        "9876",
+                    ]
+                )
+
+            self.assertEqual(0, code)
+            self.assertEqual("", output)
+            serve_dashboard.assert_called_once()
+            called_config = serve_dashboard.call_args.args[0]
+            self.assertIsInstance(called_config, Config)
+            self.assertEqual("127.0.0.1", serve_dashboard.call_args.kwargs["host"])
+            self.assertEqual(9876, serve_dashboard.call_args.kwargs["port"])
+
 
 if __name__ == "__main__":
     unittest.main()

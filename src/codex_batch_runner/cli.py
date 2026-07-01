@@ -18,6 +18,7 @@ from .config import Config
 from .cooldown import MANUAL_COOLDOWN_SAFETY_OFFSET_SECONDS, cooldown_status, format_duration, parse_manual_cooldown
 from .doctor import build_doctor_report, render_doctor_report
 from .direct_worktrees import build_direct_worktrees_report, render_direct_worktrees_report
+from .dashboard import DEFAULT_DASHBOARD_HOST, DEFAULT_DASHBOARD_PORT, serve_dashboard
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write_event_nonfatal
 from .model_requirements import REQUIREMENT_DIMENSIONS, REQUIREMENT_LEVELS, model_requirement_vector_value
 from .evidence import list_rate_limit_evidence
@@ -384,6 +385,11 @@ def build_parser() -> argparse.ArgumentParser:
     index_status = index_sub.add_parser("status", help="show local SQLite read index status")
     index_status.add_argument("--json", action="store_true", help="print JSON")
     index_status.set_defaults(func=cmd_index_status)
+
+    dashboard = sub.add_parser("dashboard", help="serve a local read-only dashboard")
+    dashboard.add_argument("--host", default=DEFAULT_DASHBOARD_HOST, help=f"bind host (default: {DEFAULT_DASHBOARD_HOST})")
+    dashboard.add_argument("--port", type=int, default=DEFAULT_DASHBOARD_PORT, help=f"bind port (default: {DEFAULT_DASHBOARD_PORT})")
+    dashboard.set_defaults(func=cmd_dashboard)
 
     doctor = sub.add_parser("doctor", help="check local cbr health and Codex CLI version without running Codex exec")
     doctor.add_argument("--json", action="store_true", help="print JSON")
@@ -3758,6 +3764,13 @@ def cmd_index_status(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_status_report(report), end="")
+    return 0
+
+
+def cmd_dashboard(config: Config, args: argparse.Namespace) -> int:
+    if args.port <= 0 or args.port > 65535:
+        raise ValueError("--port must be between 1 and 65535")
+    serve_dashboard(config, host=args.host, port=args.port)
     return 0
 
 
