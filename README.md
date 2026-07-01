@@ -120,6 +120,7 @@ PYTHONPATH=src python3 -m codex_batch_runner list --project codex-batch-runner
 PYTHONPATH=src python3 -m codex_batch_runner follow task-id --lines 40 --poll-interval 1
 PYTHONPATH=src python3 -m codex_batch_runner transcript task-id
 PYTHONPATH=src python3 -m codex_batch_runner events --task-id task-id --limit 10
+PYTHONPATH=src python3 -m codex_batch_runner dashboard
 
 # Review automation reports
 PYTHONPATH=src python3 -m codex_batch_runner review-next --dry-run
@@ -132,6 +133,8 @@ PYTHONPATH=src python3 -m codex_batch_runner worktree branch-prune task-id --dry
 ```
 
 Detailed command semantics are in [docs/cli-reference.md](docs/cli-reference.md). Worktree apply/rebase/cleanup/branch-prune safety rules are in [docs/worktrees.md](docs/worktrees.md).
+
+`cbr dashboard` serves a local read-only operator overview on `127.0.0.1:8765` by default. The page and `/api/dashboard` use the sanitized dashboard read model and show queue, review/apply, failure, running, cooldown, index warning, and recent event summaries without raw prompts, full logs, session/thread ids, credentials, or private local paths.
 
 ## Configuration
 

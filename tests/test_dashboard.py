@@ -84,10 +84,20 @@ class DashboardHttpTests(unittest.TestCase):
 
             self.assertEqual(200, status)
             self.assertIn("text/html", content_type)
-            self.assertIn("Local read-only overview", body)
+            self.assertIn("Local read-only operator overview", body)
             self.assertIn("Index warnings", body)
+            self.assertIn("Queue overview", body)
+            self.assertIn("Operator attention", body)
+            self.assertIn("Recent sanitized events", body)
             self.assertIn("index database is missing", body)
             self.assertIn("/api/dashboard", body)
+            self.assertIn("cbr list --needs-review", body)
+            self.assertIn("cbr review-next --dry-run", body)
+            self.assertIn("cbr worktree apply TASK_ID --dry-run", body)
+            self.assertIn("cbr events --limit 10", body)
+            self.assertIn("cbr index rebuild --dry-run", body)
+            self.assertNotIn("<button", body.lower())
+            self.assertNotIn("<form", body.lower())
 
     def test_non_get_and_unknown_routes_do_not_mutate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,12 +118,19 @@ class DashboardHttpTests(unittest.TestCase):
         body = render_dashboard_html(
             {
                 "warnings": ["<script>alert(1)</script>"],
-                "tasks": {"total": 0, "active": 0, "runnable": 0, "needs_resume": 0, "by_status": {}},
-                "review": {"backlog": {"total": 0}, "accepted_unapplied": 0},
-                "failures": {"failed_or_blocked": 0},
-                "running": {"stale_progress": 0},
+                "tasks": {
+                    "total": 0,
+                    "active": 0,
+                    "runnable": 0,
+                    "needs_resume": 0,
+                    "by_status": {},
+                    "capacity": {"running_total": 0, "max_total_running": 1, "max_running_per_project": 1},
+                },
+                "review": {"backlog": {"total": 0, "by_review_status": {}}, "accepted_unapplied": 0},
+                "failures": {"failed": 0, "blocked_user": 0, "usage_exhausted": 0, "failed_or_blocked": 0},
+                "running": {"total": 0, "stale_progress": 0},
                 "cooldowns": {},
-                "recent_events": {"recent_count": 0},
+                "recent_events": {"recent_count": 0, "by_type": {}, "recent": []},
                 "data_source": "canonical_fallback",
                 "fallback_used": True,
             }
@@ -121,6 +138,86 @@ class DashboardHttpTests(unittest.TestCase):
 
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
         self.assertNotIn("<script>", body)
+
+    def test_render_dashboard_html_contains_v1_operator_overview_and_sanitized_events(self) -> None:
+        body = render_dashboard_html(
+            {
+                "warnings": ["index schema mismatch: found 0, expected 1; canonical fallback used"],
+                "tasks": {
+                    "total": 9,
+                    "active": 6,
+                    "runnable": 2,
+                    "needs_resume": 1,
+                    "by_status": {"failed": 1, "needs_resume": 1, "runnable": 2, "running": 2},
+                    "capacity": {"running_total": 2, "max_total_running": 3, "max_running_per_project": 1},
+                },
+                "review": {
+                    "backlog": {"total": 3, "by_review_status": {"needs_followup": 1, "unreviewed": 2}},
+                    "accepted_unapplied": 4,
+                },
+                "failures": {"failed": 1, "blocked_user": 1, "usage_exhausted": 1, "failed_or_blocked": 3},
+                "running": {"total": 2, "stale_progress": 1},
+                "cooldowns": {
+                    "global": {
+                        "active": True,
+                        "cooldown_until": "2026-01-01T00:00:00+00:00",
+                        "last_rate_limit_at": "2025-12-31T23:00:00+00:00",
+                    },
+                    "reviewer_codex": {"active": False, "cooldown_until": None, "last_rate_limit_at": None},
+                },
+                "recent_events": {
+                    "recent_count": 1,
+                    "by_type": {"task_created": 1},
+                    "recent": [
+                        {
+                            "event_type": "task_created",
+                            "occurred_at": "2026-01-01T00:00:00+00:00",
+                            "task_id": "task-public",
+                            "project_id": "project-public",
+                            "payload": {"prompt": "SECRET_PROMPT"},
+                            "summary": "SECRET_SUMMARY",
+                        }
+                    ],
+                },
+                "data_source": "sqlite_index",
+                "fallback_used": False,
+            }
+        )
+
+        for expected in [
+            "Queue overview",
+            "Total tasks",
+            "Active tasks",
+            "Runnable",
+            "Needs resume",
+            "Running total",
+            "Operator attention",
+            "Review needed",
+            "Accepted unapplied",
+            "Failed or blocked",
+            "Running stale progress",
+            "Global cooldown",
+            "Reviewer rate-limit",
+            "Recent sanitized events",
+            "task_created",
+            "task-public",
+            "project-public",
+        ]:
+            self.assertIn(expected, body)
+        for command in [
+            "cbr list --needs-review",
+            "cbr review-next --dry-run",
+            "cbr worktree apply TASK_ID --dry-run",
+            "cbr events --limit 10",
+            "cbr index rebuild --dry-run",
+        ]:
+            self.assertIn(command, body)
+        self.assertIn("index schema mismatch", body)
+        self.assertNotIn("SECRET_PROMPT", body)
+        self.assertNotIn("SECRET_SUMMARY", body)
+        self.assertNotIn("payload", body)
+        self.assertNotIn("<button", body.lower())
+        self.assertNotIn("<form", body.lower())
 
 
 if __name__ == "__main__":
