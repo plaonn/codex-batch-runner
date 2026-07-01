@@ -13,6 +13,9 @@ from .worktree import build_apply_report, build_apply_report_locked
 def accept_task_and_integrate(config: Config, task_id: str, reason: str | None, *, source: str) -> dict[str, Any]:
     lock = FileLock(config.lock_file, config.stale_lock_seconds)
     if not lock.acquire(task_id=task_id):
+        locked_result = already_accepted_applied_result(config, task_id)
+        if locked_result is not None:
+            return locked_result
         return {
             "task": None,
             "post_accept": {"status": "locked", "errors": [f"another runner is active: {config.lock_file}"]},
@@ -23,6 +26,24 @@ def accept_task_and_integrate(config: Config, task_id: str, reason: str | None, 
         return {"task": load_task(config, task_id), "post_accept": post_accept}
     finally:
         lock.release()
+
+
+def already_accepted_applied_result(config: Config, task_id: str) -> dict[str, Any] | None:
+    try:
+        task = load_task(config, task_id)
+    except FileNotFoundError:
+        return None
+    if (
+        task.get("status") == "completed"
+        and task.get("review_status") == "accepted"
+        and task.get("execution_mode") == "git_worktree"
+        and task.get("execution_apply_status") == "applied"
+    ):
+        return {
+            "task": task,
+            "post_accept": {"status": "already_applied", "available": True, "should_wake": False},
+        }
+    return None
 
 
 def mark_task_accepted_locked(config: Config, task_id: str, reason: str | None, *, source: str) -> dict[str, Any]:

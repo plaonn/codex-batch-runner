@@ -13,6 +13,7 @@ from unittest.mock import patch
 from codex_batch_runner.cli import main
 from codex_batch_runner.config import Config
 from codex_batch_runner.events import list_events
+from codex_batch_runner.lock import FileLock
 from codex_batch_runner.queue import create_task, load_task, save_task, task_path
 from codex_batch_runner.worktree import sanitize_branch_name
 
@@ -1167,6 +1168,50 @@ class WorktreeTests(unittest.TestCase):
             self.assertEqual("accepted", loaded["review_status"])
             self.assertEqual("applied", loaded["execution_apply_status"])
             self.assertEqual(branch_head, loaded["execution_applied_head"])
+
+    def test_accept_reports_already_applied_success_when_lock_follows_successful_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "work", str(repo), task_id="accept-applied-lock")
+            self.assertEqual(
+                0,
+                run_cli(["--config", str(config_path), "worktree", "prepare", "accept-applied-lock", "--apply", "--json"])[0],
+            )
+            task = load_task(config, "accept-applied-lock")
+            worktree = Path(task["execution_worktree_path"])
+            (worktree / "file.txt").write_text("base\naccepted change\n", encoding="utf-8")
+            git(worktree, "commit", "-am", "accepted change")
+            branch_head = git(worktree, "rev-parse", "HEAD")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            save_task(config, task)
+            code, output = run_cli(["--config", str(config_path), "accept", "accept-applied-lock", "--reason", "verified", "--json"])
+            self.assertEqual(0, code)
+            self.assertEqual("applied", output["post_accept"]["status"])
+
+            lock = FileLock(config.lock_file, config.stale_lock_seconds)
+            self.assertTrue(lock.acquire(task_id="maintenance"))
+            try:
+                code, output = run_cli(
+                    ["--config", str(config_path), "accept", "accept-applied-lock", "--reason", "verified again", "--json"]
+                )
+            finally:
+                lock.release()
+
+            self.assertEqual(0, code)
+            self.assertEqual("accept-applied-lock", output["task"]["id"])
+            self.assertEqual("accepted", output["task"]["review_status"])
+            self.assertEqual("applied", output["task"]["execution_apply_status"])
+            self.assertEqual(branch_head, output["task"]["execution_applied_head"])
+            self.assertEqual(branch_head, git(repo, "rev-parse", "HEAD"))
+            self.assertEqual("already_applied", output["post_accept"]["status"])
+            self.assertTrue(output["post_accept"]["available"])
+            self.assertFalse(output["post_accept"]["should_wake"])
 
     def test_review_next_auto_accept_applies_fast_forward_worktree_branch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
