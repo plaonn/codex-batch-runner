@@ -340,6 +340,40 @@ class WorktreeTests(unittest.TestCase):
             self.assertEqual(0, list_code)
             self.assertIn("applied to main", list_output)
 
+    def test_cleanup_blocks_applied_worktree_when_applied_head_not_in_current_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_applied_worktree_task(config_path, config, repo, "cleanup-stale-applied")
+            worktree_path = Path(task["execution_worktree_path"])
+            initial_head = git(repo, "rev-parse", "HEAD~1")
+            git(repo, "reset", "--hard", initial_head)
+
+            dry_code, dry_report = run_cli(
+                ["--config", str(config_path), "worktree", "cleanup", "cleanup-stale-applied", "--dry-run", "--json"]
+            )
+            apply_code, apply_report = run_cli(
+                ["--config", str(config_path), "worktree", "cleanup", "cleanup-stale-applied", "--apply", "--json"]
+            )
+
+            self.assertEqual(1, dry_code)
+            self.assertFalse(dry_report["applied"])
+            self.assertEqual("applied", dry_report["cleanup_kind"])
+            self.assertEqual("recovery_required", dry_report["classification"]["status"])
+            self.assertEqual("stale_applied_metadata", dry_report["applied_metadata"]["status"])
+            self.assertIn("execution_applied_head is not contained", dry_report["errors"][0])
+            self.assertTrue(worktree_path.exists())
+            self.assertNotIn("execution_cleaned_at", load_task(config, "cleanup-stale-applied"))
+            self.assertEqual(1, apply_code)
+            self.assertFalse(apply_report["applied"])
+            self.assertEqual("stale_applied_metadata", apply_report["applied_metadata"]["status"])
+            self.assertTrue(worktree_path.exists())
+            self.assertNotIn("execution_cleaned_at", load_task(config, "cleanup-stale-applied"))
+
     def test_cleanup_after_applied_task_preserves_branch_task_logs_and_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

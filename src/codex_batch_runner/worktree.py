@@ -219,6 +219,14 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
         repo_root = Path(str(task.get("execution_repo_root") or task.get("project_root") or task.get("cwd"))).expanduser().resolve()
         registry = worktree_registry(repo_root)
         classification = classify_cleanup_state(task, branch, worktree_path, registry)
+        if classification["status"] == "cleanup_candidate" and eligibility.get("cleanup_kind") == "applied":
+            applied_check = verify_applied_cleanup_target(task, repo_root)
+            report["applied_metadata"] = applied_check
+            if applied_check["status"] != "current":
+                classification = {
+                    "status": "recovery_required",
+                    "reason": applied_check["reason"],
+                }
         report.update(
             {
                 "repo_root": str(repo_root),
@@ -551,6 +559,46 @@ def has_applied_worktree_metadata(task: dict[str, Any]) -> bool:
     if task.get("execution_apply_status") == "applied":
         return True
     return bool(task.get("execution_applied_at") and task.get("execution_applied_head"))
+
+
+def verify_applied_cleanup_target(task: dict[str, Any], repo_root: Path) -> dict[str, str]:
+    applied_head = str(task.get("execution_applied_head") or "").strip()
+    target = str(task.get("execution_apply_target") or "").strip()
+    if not applied_head:
+        return {
+            "status": "stale_applied_metadata",
+            "reason": "stale applied metadata: missing execution_applied_head",
+        }
+    if not target:
+        target = git_optional(repo_root, "symbolic-ref", "--quiet", "--short", "HEAD") or "HEAD"
+    try:
+        verified_applied_head = git(repo_root, "rev-parse", "--verify", f"{applied_head}^{{commit}}")
+        target_head = git(repo_root, "rev-parse", "--verify", f"{target}^{{commit}}")
+    except subprocess.CalledProcessError as exc:
+        detail = clean_git_exception(exc)
+        return {
+            "status": "stale_applied_metadata",
+            "reason": f"stale applied metadata: cannot verify execution_applied_head against apply target {target}: {detail}",
+            "apply_target": target,
+        }
+    if not is_ancestor(repo_root, verified_applied_head, target_head):
+        return {
+            "status": "stale_applied_metadata",
+            "reason": (
+                "stale applied metadata: execution_applied_head is not contained in "
+                f"current apply target {target}"
+            ),
+            "apply_target": target,
+            "execution_applied_head": verified_applied_head,
+            "target_head": target_head,
+        }
+    return {
+        "status": "current",
+        "reason": "execution_applied_head is contained in current apply target",
+        "apply_target": target,
+        "execution_applied_head": verified_applied_head,
+        "target_head": target_head,
+    }
 
 
 def _build_apply_report_locked(config: Config, task_id: str, *, apply: bool) -> dict[str, Any]:
