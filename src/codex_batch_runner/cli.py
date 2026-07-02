@@ -1294,6 +1294,10 @@ def dependency_graph_layout(source_nodes: list[dict], dependency_runs: dict[int,
         )
         if len(dep_indices) == 1:
             for source_index in range(first_dep_index + 1, target_index):
+                if dependency_graph_preserves_shared_dependency_target_prefix(
+                    source_index, first_dep_index, dep_indices, prefixes, dependency_runs
+                ):
+                    continue
                 prefix = "| *"
                 prefixes[source_index] = prefix + (" " * max(0, width - visible_len(prefix)))
                 source_glyph_metadata[source_index] = graph_prefix_glyph_metadata(
@@ -1314,6 +1318,10 @@ def dependency_graph_layout(source_nodes: list[dict], dependency_runs: dict[int,
             )
         else:
             for source_index in range(first_dep_index + 1, target_index):
+                if dependency_graph_preserves_shared_dependency_target_prefix(
+                    source_index, first_dep_index, dep_indices, prefixes, dependency_runs
+                ):
+                    continue
                 prefix = "| *"
                 prefixes[source_index] = prefix + (" " * max(0, width - visible_len(prefix)))
                 source_glyph_metadata[source_index] = graph_prefix_glyph_metadata(
@@ -1354,6 +1362,24 @@ def dependency_graph_layout(source_nodes: list[dict], dependency_runs: dict[int,
         "child_graph_prefixes": child_graph_prefixes,
         "child_glyph_metadata": child_glyph_metadata,
     }
+
+
+def dependency_graph_preserves_shared_dependency_target_prefix(
+    source_index: int,
+    first_dep_index: int,
+    dep_indices: list[int],
+    prefixes: list[str],
+    dependency_runs: dict[int, dict[str, object]],
+) -> bool:
+    existing_run = dependency_runs.get(source_index)
+    existing_dep_indices = existing_run.get("dep_indices") if isinstance(existing_run, dict) else None
+    return (
+        isinstance(existing_dep_indices, list)
+        and existing_dep_indices
+        and existing_dep_indices[0] == first_dep_index
+        and source_index not in dep_indices
+        and prefixes[source_index].startswith("*")
+    )
 
 
 def dependency_graph_node_color_indices(source_nodes: list[dict], dependency_runs: dict[int, dict[str, object]]) -> list[int]:

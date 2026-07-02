@@ -2791,6 +2791,38 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("awaiting review", output)
             self.assertNotIn("DETAIL", output)
 
+    def test_list_graph_keeps_shared_dependency_sibling_edges_attached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "Record model source provenance", tmp, task_id="record", project_id="project-a")
+            create_task(
+                config,
+                "Diagnose model freshness state",
+                tmp,
+                task_id="diagnose",
+                project_id="project-a",
+                depends_on=["record"],
+            )
+            create_task(
+                config,
+                "Group reports by model source",
+                tmp,
+                task_id="group",
+                project_id="project-a",
+                depends_on=["record"],
+            )
+
+            code, output = run_cli(["--config", str(config_path), "list", "--project", "project-a", "--graph", "--color=never"])
+
+            self.assertEqual(0, code)
+            self.assertIn("*       ..new  [N] Record model source provenance", output)
+            self.assertIn("*       ##dep  [N] Diagnose model freshness state", output)
+            self.assertIn("*       ##dep  [N] Group reports by model source", output)
+            self.assertNotIn("| *     ##dep  [N] Diagnose model freshness state", output)
+            assert_graph_connector_attaches(self, output, "Diagnose model freshness state")
+            assert_graph_connector_attaches(self, output, "Group reports by model source")
+
     def test_list_graph_renders_dependencies_as_git_style_edges(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp, dependency_requires_accepted_review=True)
