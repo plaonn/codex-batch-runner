@@ -39,6 +39,8 @@ def base_task(**overrides: object) -> dict:
             "resolved_execution_config": {
                 "selection_rule": "standard",
                 "model": "model-name-not-returned",
+                "model_source": "explicit_model",
+                "execution_target": "local",
             },
             "duration_seconds": 125,
             "log_path": "/Users/example/private/log.jsonl",
@@ -86,6 +88,8 @@ class EvaluationRowTests(unittest.TestCase):
         self.assertEqual([], row["exclusion_reasons"])
         self.assertTrue(row["policy_usage"]["usable_for_worker_policy"])
         self.assertIn(row["task_bucket_key"], row["experiment_cell_key"])
+        self.assertEqual("explicit_model", row["worker"]["model_source"])
+        self.assertEqual("local", row["worker"]["execution_target"])
 
     def test_unreviewed_completed_is_not_worker_policy_usable(self) -> None:
         row = derive_evaluation_row(base_task(status="completed", review_status="unreviewed"))
@@ -112,6 +116,8 @@ class EvaluationRowTests(unittest.TestCase):
 
         self.assertIn("reasoning_depth=low", row["worker"]["model_requirement_key"])
         self.assertNotIn("reasoning_depth=high", row["worker"]["model_requirement_key"])
+        self.assertEqual("unknown", row["worker"]["model_source"])
+        self.assertEqual("none", row["worker"]["execution_target"])
 
     def test_provider_resource_evidence_is_advisory_and_separate_from_capacity_pool(self) -> None:
         baseline = derive_evaluation_row(

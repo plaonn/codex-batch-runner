@@ -8,7 +8,7 @@ from .evaluation import derive_evaluation_row
 from .model_requirements import low_cost_candidate
 from .provider_resource import derive_provider_resource_evidence, provider_resource_key
 from .queue import list_tasks, task_labels, task_project_id, task_project_root
-from .request_fingerprint import find_request_fingerprint_candidates
+from .request_fingerprint import _safe_metadata_value, find_request_fingerprint_candidates
 from .timeutil import iso_now
 from .transcript import sanitize
 
@@ -59,6 +59,9 @@ def build_routing_report(
         "groups": {
             "model_requirement": summarize_groups(group_rows(rows, "model_requirement")),
             "model_selection_rule": summarize_groups(group_rows(rows, "model_selection_rule")),
+            "model_source": summarize_groups(group_rows(rows, "model_source")),
+            "execution_target": summarize_groups(group_rows(rows, "execution_target")),
+            "model_source_execution_target": summarize_groups(group_rows(rows, "model_source_execution_target")),
             "category": summarize_groups(group_rows(rows, "category")),
             "label": summarize_groups(group_rows_by_label(rows)),
             "model_requirement_category": summarize_groups(group_rows(rows, "model_requirement_category")),
@@ -111,6 +114,8 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
     resolved_config = last_run.get("resolved_execution_config") if isinstance(last_run.get("resolved_execution_config"), dict) else {}
     requirement = model_requirement_key(resolved_config.get("model_requirement_vector") or task.get("model_requirement_vector"))
     selection_rule = str(resolved_config.get("selection_rule") or "unresolved")
+    model_source = _safe_metadata_value(resolved_config.get("model_source"))
+    execution_target = execution_target_value(resolved_config)
     category = str(task.get("category") or "uncategorized")
     routing_experiment = str(task.get("routing_experiment") or "unspecified")
     routing_size = str(task.get("routing_size") or "unspecified")
@@ -128,6 +133,9 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
         "id": task.get("id"),
         "model_requirement": requirement,
         "model_selection_rule": selection_rule,
+        "model_source": model_source,
+        "execution_target": execution_target,
+        "model_source_execution_target": model_source_execution_target_key_from_values(model_source, execution_target),
         "category": category,
         "model_requirement_category": f"{requirement}/{category}",
         "labels": task_labels(task) or ["unlabeled"],
@@ -165,6 +173,16 @@ def model_requirement_key(value: object) -> str:
         return "unknown"
     parts = [f"{key}={sanitize(dimensions.get(key))}" for key in sorted(dimensions)]
     return " ".join(parts) if parts else "unknown"
+
+
+def execution_target_value(resolved_config: dict[str, Any]) -> str:
+    if "execution_target" not in resolved_config:
+        return "none"
+    return _safe_metadata_value(resolved_config.get("execution_target"))
+
+
+def model_source_execution_target_key_from_values(model_source: str, execution_target: str) -> str:
+    return f"model_source={model_source} execution_target={execution_target}"
 
 
 def completed_review_status(task: dict[str, Any]) -> str:
@@ -297,6 +315,18 @@ def summarize_evaluation_diagnostics(rows: list[dict[str, Any]]) -> dict[str, An
     return {
         "row_count": len(rows),
         "policy_usage": summarize_policy_usage(rows),
+        "model_sources": summarize_evaluation_groups(
+            group_evaluation_rows(rows, model_source_key),
+            summarize_model_source_cell,
+        ),
+        "execution_targets": summarize_evaluation_groups(
+            group_evaluation_rows(rows, execution_target_key),
+            summarize_execution_target_cell,
+        ),
+        "model_source_execution_targets": summarize_evaluation_groups(
+            group_evaluation_rows(rows, model_source_execution_target_key),
+            summarize_model_source_execution_target_cell,
+        ),
         "worker_cells": summarize_evaluation_groups(group_evaluation_rows(rows, worker_cell_key), summarize_worker_cell),
         "provider_resources": summarize_evaluation_groups(
             group_evaluation_rows(rows, provider_resource_cell_key),
@@ -320,6 +350,44 @@ def summarize_policy_usage(rows: list[dict[str, Any]]) -> dict[str, int]:
         "usable_for_quota_debugging",
     )
     return {key: count(rows, lambda row, key=key: bool(policy_usage(row).get(key))) for key in keys}
+
+
+def summarize_model_source_cell(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "key": key,
+        "tasks": len(rows),
+        "explicit_model_pins": count(rows, lambda row: worker(row).get("model_source") == "explicit_model"),
+        "cli_default_runs": count(rows, lambda row: worker(row).get("model_source") == "cli_default"),
+        "unknown_legacy_runs": count(rows, lambda row: worker(row).get("model_source") == "unknown"),
+        "accepted": count(rows, lambda row: bool(outcomes(row).get("accepted"))),
+        "needs_followup": count(rows, lambda row: bool(outcomes(row).get("needs_followup"))),
+        "failed": count(rows, lambda row: outcomes(row).get("worker_terminal_status") == "failed"),
+        "usable_for_worker_policy": count(rows, usable_for_worker_policy),
+    }
+
+
+def summarize_execution_target_cell(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "key": key,
+        "tasks": len(rows),
+        "target_recorded": count(rows, lambda row: worker(row).get("execution_target") not in {"none", "unknown"}),
+        "target_absent": count(rows, lambda row: worker(row).get("execution_target") == "none"),
+        "accepted": count(rows, lambda row: bool(outcomes(row).get("accepted"))),
+        "needs_followup": count(rows, lambda row: bool(outcomes(row).get("needs_followup"))),
+        "failed": count(rows, lambda row: outcomes(row).get("worker_terminal_status") == "failed"),
+        "usable_for_worker_policy": count(rows, usable_for_worker_policy),
+    }
+
+
+def summarize_model_source_execution_target_cell(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "key": key,
+        "tasks": len(rows),
+        "accepted": count(rows, lambda row: bool(outcomes(row).get("accepted"))),
+        "needs_followup": count(rows, lambda row: bool(outcomes(row).get("needs_followup"))),
+        "failed": count(rows, lambda row: outcomes(row).get("worker_terminal_status") == "failed"),
+        "usable_for_worker_policy": count(rows, usable_for_worker_policy),
+    }
 
 
 def group_evaluation_rows(
@@ -447,6 +515,18 @@ def worker_cell_key(row: dict[str, Any]) -> str:
     return str(worker(row).get("worker_cell_key") or "unknown")
 
 
+def model_source_key(row: dict[str, Any]) -> str:
+    return str(worker(row).get("model_source") or "unknown")
+
+
+def execution_target_key(row: dict[str, Any]) -> str:
+    return str(worker(row).get("execution_target") or "none")
+
+
+def model_source_execution_target_key(row: dict[str, Any]) -> str:
+    return model_source_execution_target_key_from_values(model_source_key(row), execution_target_key(row))
+
+
 def provider_resource_cell_key(row: dict[str, Any]) -> str:
     value = row.get("provider_resource")
     return provider_resource_key(value if isinstance(value, dict) else {})
@@ -528,6 +608,9 @@ def render_routing_report(report: dict[str, Any]) -> str:
     for group_name in (
         "model_requirement",
         "model_selection_rule",
+        "model_source",
+        "execution_target",
+        "model_source_execution_target",
         "category",
         "label",
         "model_requirement_category",
@@ -599,6 +682,17 @@ def render_evaluation_diagnostics(diagnostics: dict[str, Any]) -> str:
         )
     )
     lines.append("")
+    lines.append("model_sources")
+    lines.append(render_model_source_table(list_value(diagnostics.get("model_sources"))[:10]))
+    lines.append("")
+    lines.append("execution_targets")
+    lines.append(render_execution_target_table(list_value(diagnostics.get("execution_targets"))[:10]))
+    lines.append("")
+    lines.append("model_source_execution_targets")
+    lines.append(
+        render_model_source_execution_target_table(list_value(diagnostics.get("model_source_execution_targets"))[:10])
+    )
+    lines.append("")
     lines.append("worker_cells")
     lines.append(render_worker_cell_table(list_value(diagnostics.get("worker_cells"))[:10]))
     lines.append("")
@@ -614,6 +708,59 @@ def render_evaluation_diagnostics(diagnostics: dict[str, Any]) -> str:
     lines.append("task_buckets")
     lines.append(render_task_bucket_table(list_value(diagnostics.get("task_buckets"))[:10]))
     return "\n".join(lines)
+
+
+def render_model_source_table(entries: list[dict[str, Any]]) -> str:
+    header = ["MODEL_SOURCE", "TASKS", "EXPLICIT", "CLI_DEF", "UNKNOWN", "ACCEPT", "FOLLOWUP", "FAILED", "USABLE"]
+    rows = [
+        [
+            str(entry.get("key") or "-"),
+            str(entry.get("tasks") or 0),
+            str(entry.get("explicit_model_pins") or 0),
+            str(entry.get("cli_default_runs") or 0),
+            str(entry.get("unknown_legacy_runs") or 0),
+            str(entry.get("accepted") or 0),
+            str(entry.get("needs_followup") or 0),
+            str(entry.get("failed") or 0),
+            str(entry.get("usable_for_worker_policy") or 0),
+        ]
+        for entry in entries
+    ]
+    return render_table(header, rows)
+
+
+def render_execution_target_table(entries: list[dict[str, Any]]) -> str:
+    header = ["EXECUTION_TARGET", "TASKS", "RECORDED", "ABSENT", "ACCEPT", "FOLLOWUP", "FAILED", "USABLE"]
+    rows = [
+        [
+            str(entry.get("key") or "-"),
+            str(entry.get("tasks") or 0),
+            str(entry.get("target_recorded") or 0),
+            str(entry.get("target_absent") or 0),
+            str(entry.get("accepted") or 0),
+            str(entry.get("needs_followup") or 0),
+            str(entry.get("failed") or 0),
+            str(entry.get("usable_for_worker_policy") or 0),
+        ]
+        for entry in entries
+    ]
+    return render_table(header, rows)
+
+
+def render_model_source_execution_target_table(entries: list[dict[str, Any]]) -> str:
+    header = ["MODEL_SOURCE_TARGET", "TASKS", "ACCEPT", "FOLLOWUP", "FAILED", "USABLE"]
+    rows = [
+        [
+            str(entry.get("key") or "-"),
+            str(entry.get("tasks") or 0),
+            str(entry.get("accepted") or 0),
+            str(entry.get("needs_followup") or 0),
+            str(entry.get("failed") or 0),
+            str(entry.get("usable_for_worker_policy") or 0),
+        ]
+        for entry in entries
+    ]
+    return render_table(header, rows)
 
 
 def render_worker_cell_table(entries: list[dict[str, Any]]) -> str:

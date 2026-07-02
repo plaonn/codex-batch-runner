@@ -1632,7 +1632,11 @@ class CliTests(unittest.TestCase):
             task["review_status"] = "accepted"
             task["attempts"] = 1
             task["last_run"] = {
-                "resolved_execution_config": {"selection_rule": "low-cost-docs"},
+                "resolved_execution_config": {
+                    "selection_rule": "low-cost-docs",
+                    "model_source": "cli_default",
+                    "execution_target": "local",
+                },
                 "duration_seconds": 10,
             }
             save_task(config, task)
@@ -1641,6 +1645,9 @@ class CliTests(unittest.TestCase):
             report = json.loads(output)
             requirements = {entry["key"]: entry for entry in report["groups"]["model_requirement"]}
             selection_rules = {entry["key"]: entry for entry in report["groups"]["model_selection_rule"]}
+            model_sources = {entry["key"]: entry for entry in report["groups"]["model_source"]}
+            execution_targets = {entry["key"]: entry for entry in report["groups"]["execution_target"]}
+            source_targets = {entry["key"]: entry for entry in report["groups"]["model_source_execution_target"]}
             requirement_decisions = {
                 entry["key"]: entry for entry in report["groups"]["model_requirement_routing_decision"]
             }
@@ -1654,6 +1661,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual(req_key, row["model_requirement"])
             self.assertEqual("low-cost-docs", row["model_selection_rule"])
+            self.assertEqual("cli_default", row["model_source"])
+            self.assertEqual("local", row["execution_target"])
+            self.assertEqual(
+                "model_source=cli_default execution_target=local",
+                row["model_source_execution_target"],
+            )
             self.assertEqual(
                 f"requirement={req_key} size=small risk=low verify=docs",
                 row["model_requirement_routing_decision"],
@@ -1665,6 +1678,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual("candidate", row["low_cost_candidate"])
             self.assertEqual(1, requirements[req_key]["tasks"])
             self.assertEqual(1, selection_rules["low-cost-docs"]["tasks"])
+            self.assertEqual(1, model_sources["cli_default"]["tasks"])
+            self.assertEqual(1, execution_targets["local"]["tasks"])
+            self.assertEqual(1, source_targets["model_source=cli_default execution_target=local"]["tasks"])
             self.assertEqual(1, requirement_decisions[f"requirement={req_key} size=small risk=low verify=docs"]["tasks"])
             self.assertEqual(1, selection_decisions["selection_rule=low-cost-docs size=small risk=low verify=docs"]["tasks"])
             self.assertEqual(1, low_cost_candidates["candidate"]["tasks"])
@@ -1815,6 +1831,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("tasks: 2 of 3 filtered", output)
             self.assertIn("## by_model_requirement", output)
             self.assertIn("## by_model_selection_rule", output)
+            self.assertIn("## by_model_source", output)
+            self.assertIn("## by_execution_target", output)
+            self.assertIn("## by_model_source_execution_target", output)
             self.assertIn("## by_routing_size", output)
             self.assertIn("## by_verification_scope", output)
             self.assertIn("## by_routing_decision", output)
@@ -1844,9 +1863,15 @@ class CliTests(unittest.TestCase):
                 task["status"] = "completed"
                 task["review_status"] = "accepted"
                 task["attempts"] = 1
+                resolved_config = {"selection_rule": "low-cost-docs"}
+                if index == 0:
+                    resolved_config["model_source"] = "explicit_model"
+                    resolved_config["execution_target"] = "local"
+                elif index == 1:
+                    resolved_config["model_source"] = "cli_default"
                 task["last_run"] = {
                     "execution_backend": "codex",
-                    "resolved_execution_config": {"selection_rule": "low-cost-docs"},
+                    "resolved_execution_config": resolved_config,
                 }
                 task["last_result"] = {
                     "task_id": f"clean-{index}",
@@ -1911,6 +1936,9 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
             report = json.loads(output)
             diagnostics = report["evaluation_diagnostics"]
+            model_sources = {entry["key"]: entry for entry in diagnostics["model_sources"]}
+            execution_targets = {entry["key"]: entry for entry in diagnostics["execution_targets"]}
+            source_targets = {entry["key"]: entry for entry in diagnostics["model_source_execution_targets"]}
             worker_cells = {entry["key"]: entry for entry in diagnostics["worker_cells"]}
             reviewer_cells = {entry["key"]: entry for entry in diagnostics["reviewer_cells"]}
             exclusions = {entry["key"]: entry for entry in diagnostics["policy_exclusions"]}
@@ -1922,6 +1950,13 @@ class CliTests(unittest.TestCase):
             self.assertEqual(4, diagnostics["policy_usage"]["usable_for_worker_policy"])
             self.assertEqual(5, diagnostics["policy_usage"]["usable_for_reviewer_calibration"])
             self.assertTrue(diagnostics["advisory"]["read_only"])
+            self.assertEqual(1, model_sources["explicit_model"]["explicit_model_pins"])
+            self.assertEqual(1, model_sources["cli_default"]["cli_default_runs"])
+            self.assertEqual(4, model_sources["unknown"]["unknown_legacy_runs"])
+            self.assertEqual(1, execution_targets["local"]["target_recorded"])
+            self.assertEqual(5, execution_targets["none"]["target_absent"])
+            self.assertEqual(1, source_targets["model_source=explicit_model execution_target=local"]["tasks"])
+            self.assertEqual(1, source_targets["model_source=cli_default execution_target=none"]["tasks"])
             self.assertEqual(3, small_bucket["clean_samples"])
             self.assertTrue(small_bucket["policy_review_candidate"])
             self.assertEqual("advisory_read_only", small_bucket["policy_review_note"])
@@ -2016,6 +2051,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertIn("## evaluation_diagnostics", output)
             self.assertIn("policy_usage: usable_for_worker_policy=1", output)
+            self.assertIn("model_sources", output)
+            self.assertIn("execution_targets", output)
+            self.assertIn("model_source_execution_targets", output)
             self.assertIn("worker_cells", output)
             self.assertIn("reviewer_cells", output)
             self.assertIn("policy_exclusions", output)
@@ -2056,6 +2094,14 @@ class CliTests(unittest.TestCase):
             task["session_id"] = "session_abcdefghijklmnopqrstuvwxyz"
             task["thread_id"] = "thread_abcdefghijklmnopqrstuvwxyz"
             task["execution_worktree_path"] = private_path
+            task["last_run"] = {
+                "execution_backend": "codex",
+                "resolved_execution_config": {
+                    "selection_rule": "standard",
+                    "model_source": "explicit_model",
+                    "execution_target": "local",
+                },
+            }
             task["last_result"] = {
                 "task_id": "eval-public-safe",
                 "status": "completed",
@@ -2085,6 +2131,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("objective_checks", row)
             self.assertIn("task_vector_evaluation", row)
             self.assertIn("policy_usage", row)
+            self.assertEqual("explicit_model", row["worker"]["model_source"])
+            self.assertEqual("local", row["worker"]["execution_target"])
             self.assertEqual("codex", row["provider_resource"]["provider_id"])
             self.assertEqual("unknown", row["provider_resource"]["quota_boundary"])
             self.assertEqual("not_independent", row["provider_resource"]["sharing_assumption"])

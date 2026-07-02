@@ -114,6 +114,8 @@ def _worker_section(task: dict[str, Any]) -> dict[str, Any]:
     backend = _safe_metadata_value(last_run.get("execution_backend") or task.get("execution_backend"))
     model_present = _has_value(resolved_config.get("model"))
     codex_profile_present = _has_value(resolved_config.get("codex_profile"))
+    model_source = _safe_metadata_value(resolved_config.get("model_source"))
+    execution_target = _execution_target_value(resolved_config)
     duration = _number_value(last_run.get("duration_seconds"))
     attempts = _int_value(task.get("attempts"))
     run_count = _int_value(task.get("run_count"))
@@ -133,6 +135,8 @@ def _worker_section(task: dict[str, Any]) -> dict[str, Any]:
         "execution_backend": backend,
         "model_requirement_key": requirement_key,
         "model_selection_rule": selection_rule,
+        "model_source": model_source,
+        "execution_target": execution_target,
         "model_present": model_present,
         "codex_profile_present": codex_profile_present,
         "terminal_status": terminal_status,
@@ -721,6 +725,12 @@ def _error_finding_count(findings: list[Any]) -> int:
 
 def _dict_value(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _execution_target_value(resolved_config: dict[str, Any]) -> str:
+    if "execution_target" not in resolved_config:
+        return "none"
+    return _safe_metadata_value(resolved_config.get("execution_target"))
 
 
 def _list_value(value: Any) -> list[Any]:
