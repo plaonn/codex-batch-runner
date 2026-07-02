@@ -50,6 +50,12 @@ Low-risk docs-only routing metadata에는 낮은 reasoning depth와 높은 cost 
 
 `routing-report`와 `routing-eval-report`는 `--execution-evidence-json PATH`를 반복 지정해 queue 밖에서 나온 sanitized 실행 근거를 supplemental evaluation row로 함께 볼 수 있습니다. 첫 지원 record kind는 `codex_subagent_execution`입니다. 이 입력은 queue task로 변환되지 않고 `task_rows`, task count, queue group 집계에도 섞이지 않습니다. JSON output은 `execution_evidence_rows`와 `execution_evidence_count`에 별도로 표시하며, row에는 `execution_surface=codex_subagent`, `subject.queue_task=false`, hashed work id만 포함합니다. 입력 파일은 structured metadata(`project_id`, `category`, `labels`, `routing_size`, `routing_risk`, `verification_scope`, `last_run`, `last_result`, optional reviewer result)만 담아야 합니다. raw prompt, transcript/log body, stdout/stderr dump, session id, thread id, credential, private absolute path를 장기 저장하거나 report에 노출하는 용도로 쓰면 안 됩니다.
 
+### Supplemental Codex subagent execution evidence
+
+Codex parent thread나 operator script가 subagent 실행 결과를 평가 report에 합치려면 `examples/subagent-execution-evidence.example.json` 형식의 public-safe summary artifact를 만듭니다. `work_id`는 parent가 만든 synthetic correlation id여야 하며 Codex thread id, session id, app URL, transcript path, log path, private prompt hash에서 파생하면 안 됩니다. 실제 subagent/thread와의 매핑이 필요하면 `.private/` 또는 runtime state에만 보관합니다.
+
+Producer는 allowlisted structured field만 넣습니다. 권장 필드는 `record_kind`, `work_id`, `execution_surface`, `execution_backend`, task characterization metadata, terminal `status`, `review_status`, `attempts`, `run_count`, sanitized `last_run.resolved_execution_config`, sanitized `last_result.changed_files`, sanitized `last_result.verification`, optional `reviewer_codex` decision metadata입니다. `changed_files`는 repo-relative public-safe path만 넣고 private/local file은 omit합니다. 실제 Codex app model identity를 신뢰할 수 없으면 `model_source=codex_app_default` 또는 `unknown`을 사용하고 actual model name은 쓰지 않습니다.
+
 `routing-report`는 의사결정 근거가 아니라 운영 진단입니다. task 선택, dependency readiness, review acceptance, cleanup/apply/archiving, cooldown, reject/resolve, run/claim 정책을 바꾸지 않습니다. 보고가 보여주지 않는 항목은 다음과 같습니다.
 - 개별 task의 raw prompt, full transcript/JSONL, raw log body
 - 다음 실행에서 바꿔 적용할 patch나 실행 계획

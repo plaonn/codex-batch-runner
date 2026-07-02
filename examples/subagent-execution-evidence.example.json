@@ -1,0 +1,64 @@
+{
+  "records": [
+    {
+      "record_kind": "codex_subagent_execution",
+      "work_id": "subagent-2026-07-03-routing-docs-001",
+      "execution_surface": "codex_subagent",
+      "execution_backend": "codex_app",
+      "project_id": "codex-batch-runner",
+      "category": "docs",
+      "labels": [
+        "routing",
+        "subagent-evidence"
+      ],
+      "routing_size": "small",
+      "routing_risk": "low",
+      "routing_risk_factors": [
+        "public-docs-only"
+      ],
+      "verification_scope": [
+        "docs",
+        "manual"
+      ],
+      "status": "completed",
+      "review_status": "accepted",
+      "attempts": 1,
+      "run_count": 1,
+      "last_run": {
+        "command_kind": "subagent",
+        "execution_backend": "codex_app",
+        "duration_seconds": 95,
+        "timed_out": false,
+        "resolved_execution_config": {
+          "selection_rule": "codex-app-default",
+          "model_source": "codex_app_default",
+          "execution_target": "codex_app_subagent",
+          "model_requirement_vector": {
+            "dimensions": {
+              "reasoning_depth": "normal",
+              "context_need": "medium",
+              "tool_reliability": "medium",
+              "cost_sensitivity": "high"
+            }
+          }
+        }
+      },
+      "last_result": {
+        "status": "completed",
+        "changed_files": [
+          "docs/execution.md",
+          "docs/cli-reference.md"
+        ],
+        "verification": [
+          "manual docs review"
+        ]
+      },
+      "reviewer_codex": {
+        "decision": "pass",
+        "confidence": "high",
+        "findings": [],
+        "required_human_checks": []
+      }
+    }
+  ]
+}

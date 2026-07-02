@@ -2184,6 +2184,33 @@ class CliTests(unittest.TestCase):
             self.assertEqual("", output)
             self.assertIn("unsupported execution evidence record_kind", stderr)
 
+    def test_routing_report_accepts_checked_in_subagent_execution_evidence_example(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            example_path = Path(__file__).parents[1] / "examples" / "subagent-execution-evidence.example.json"
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "routing-report",
+                    "--execution-evidence-json",
+                    str(example_path),
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+            serialized = json.dumps(report, sort_keys=True)
+            row = report["execution_evidence_rows"][0]
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, report["task_count"])
+            self.assertEqual(1, report["execution_evidence_count"])
+            self.assertEqual("codex_subagent", row["execution_surface"])
+            self.assertFalse(row["subject"]["queue_task"])
+            self.assertEqual("codex_app_default", row["worker"]["model_source"])
+            self.assertNotIn("subagent-2026-07-03-routing-docs-001", serialized)
+
     def test_routing_eval_report_json_returns_bounded_public_safe_rows_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
