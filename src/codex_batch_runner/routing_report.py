@@ -321,6 +321,10 @@ def summarize_evaluation_diagnostics(rows: list[dict[str, Any]]) -> dict[str, An
     return {
         "row_count": len(rows),
         "policy_usage": summarize_policy_usage(rows),
+        "execution_surfaces": summarize_evaluation_groups(
+            group_evaluation_rows(rows, execution_surface_key),
+            summarize_execution_surface_cell,
+        ),
         "model_sources": summarize_evaluation_groups(
             group_evaluation_rows(rows, model_source_key),
             summarize_model_source_cell,
@@ -356,6 +360,18 @@ def summarize_policy_usage(rows: list[dict[str, Any]]) -> dict[str, int]:
         "usable_for_quota_debugging",
     )
     return {key: count(rows, lambda row, key=key: bool(policy_usage(row).get(key))) for key in keys}
+
+
+def summarize_execution_surface_cell(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "key": key,
+        "tasks": len(rows),
+        "queue_tasks": count(rows, lambda row: bool(subject(row).get("queue_task"))),
+        "supplemental_evidence": count(rows, lambda row: not bool(subject(row).get("queue_task"))),
+        "accepted": count(rows, lambda row: bool(outcomes(row).get("accepted"))),
+        "failed": count(rows, lambda row: outcomes(row).get("worker_terminal_status") == "failed"),
+        "usable_for_worker_policy": count(rows, usable_for_worker_policy),
+    }
 
 
 def summarize_model_source_cell(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -521,6 +537,10 @@ def worker_cell_key(row: dict[str, Any]) -> str:
     return str(worker(row).get("worker_cell_key") or "unknown")
 
 
+def execution_surface_key(row: dict[str, Any]) -> str:
+    return str(row.get("execution_surface") or subject(row).get("execution_surface") or "unknown")
+
+
 def model_source_key(row: dict[str, Any]) -> str:
     return str(worker(row).get("model_source") or "unknown")
 
@@ -548,6 +568,11 @@ def task_bucket_key(row: dict[str, Any]) -> str:
 
 def worker(row: dict[str, Any]) -> dict[str, Any]:
     value = row.get("worker")
+    return value if isinstance(value, dict) else {}
+
+
+def subject(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("subject")
     return value if isinstance(value, dict) else {}
 
 
@@ -690,6 +715,9 @@ def render_evaluation_diagnostics(diagnostics: dict[str, Any]) -> str:
         )
     )
     lines.append("")
+    lines.append("execution_surfaces")
+    lines.append(render_execution_surface_table(list_value(diagnostics.get("execution_surfaces"))[:10]))
+    lines.append("")
     lines.append("model_sources")
     lines.append(render_model_source_table(list_value(diagnostics.get("model_sources"))[:10]))
     lines.append("")
@@ -716,6 +744,23 @@ def render_evaluation_diagnostics(diagnostics: dict[str, Any]) -> str:
     lines.append("task_buckets")
     lines.append(render_task_bucket_table(list_value(diagnostics.get("task_buckets"))[:10]))
     return "\n".join(lines)
+
+
+def render_execution_surface_table(entries: list[dict[str, Any]]) -> str:
+    header = ["SURFACE", "ROWS", "QUEUE", "EVIDENCE", "ACCEPT", "FAILED", "USABLE"]
+    rows = [
+        [
+            str(entry.get("key") or "-"),
+            str(entry.get("tasks") or 0),
+            str(entry.get("queue_tasks") or 0),
+            str(entry.get("supplemental_evidence") or 0),
+            str(entry.get("accepted") or 0),
+            str(entry.get("failed") or 0),
+            str(entry.get("usable_for_worker_policy") or 0),
+        ]
+        for entry in entries
+    ]
+    return render_table(header, rows)
 
 
 def render_model_source_table(entries: list[dict[str, Any]]) -> str:

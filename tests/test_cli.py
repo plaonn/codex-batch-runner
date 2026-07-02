@@ -1936,6 +1936,7 @@ class CliTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
             report = json.loads(output)
             diagnostics = report["evaluation_diagnostics"]
+            execution_surfaces = {entry["key"]: entry for entry in diagnostics["execution_surfaces"]}
             model_sources = {entry["key"]: entry for entry in diagnostics["model_sources"]}
             execution_targets = {entry["key"]: entry for entry in diagnostics["execution_targets"]}
             source_targets = {entry["key"]: entry for entry in diagnostics["model_source_execution_targets"]}
@@ -1950,6 +1951,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(4, diagnostics["policy_usage"]["usable_for_worker_policy"])
             self.assertEqual(5, diagnostics["policy_usage"]["usable_for_reviewer_calibration"])
             self.assertTrue(diagnostics["advisory"]["read_only"])
+            self.assertEqual(6, execution_surfaces["cbr_batch"]["tasks"])
+            self.assertEqual(6, execution_surfaces["cbr_batch"]["queue_tasks"])
+            self.assertEqual(0, execution_surfaces["cbr_batch"]["supplemental_evidence"])
             self.assertEqual(1, model_sources["explicit_model"]["explicit_model_pins"])
             self.assertEqual(1, model_sources["cli_default"]["cli_default_runs"])
             self.assertEqual(4, model_sources["unknown"]["unknown_legacy_runs"])
@@ -2051,6 +2055,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertIn("## evaluation_diagnostics", output)
             self.assertIn("policy_usage: usable_for_worker_policy=1", output)
+            self.assertIn("execution_surfaces", output)
             self.assertIn("model_sources", output)
             self.assertIn("execution_targets", output)
             self.assertIn("model_source_execution_targets", output)
@@ -2146,6 +2151,9 @@ class CliTests(unittest.TestCase):
             report = json.loads(output)
             serialized = json.dumps(report, sort_keys=True)
             evidence_row = report["execution_evidence_rows"][0]
+            evidence_surfaces = {
+                entry["key"]: entry for entry in report["execution_evidence_diagnostics"]["execution_surfaces"]
+            }
 
             self.assertEqual(0, code)
             self.assertEqual(before, after)
@@ -2156,6 +2164,8 @@ class CliTests(unittest.TestCase):
             self.assertFalse(evidence_row["subject"]["queue_task"])
             self.assertEqual("supplemental_execution_evidence", evidence_row["subject"]["kind"])
             self.assertEqual("codex_app_default", evidence_row["worker"]["model_source"])
+            self.assertEqual(1, evidence_surfaces["codex_subagent"]["supplemental_evidence"])
+            self.assertEqual(0, evidence_surfaces["codex_subagent"]["queue_tasks"])
             self.assertNotIn("raw prompt mentions", serialized)
             self.assertNotIn("raw summary mentions", serialized)
             self.assertNotIn("raw evidence", serialized)
