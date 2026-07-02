@@ -187,10 +187,101 @@ class DoctorTests(unittest.TestCase):
                 ["model_reasoning_effort"],
                 report["model_requirements"]["rules"]["low-cost-docs"]["config_override_keys"],
             )
+            provenance = report["model_requirements"]["model_selection_provenance"]
+            self.assertEqual("explicit_model", provenance["default_execution_config"]["model_source"])
+            self.assertTrue(provenance["default_execution_config"]["has_explicit_model_pin"])
+            self.assertEqual("absent", provenance["default_execution_config"]["freshness_metadata"]["status"])
+            self.assertEqual(
+                "execution_targets_not_available",
+                provenance["default_execution_config"]["freshness_metadata"]["reason"],
+            )
+            self.assertEqual("explicit_model", provenance["rules"]["low-cost-docs"]["model_source"])
+            self.assertTrue(provenance["rules"]["low-cost-docs"]["has_explicit_model_pin"])
+            self.assertEqual("absent", provenance["rules"]["low-cost-docs"]["freshness_metadata"]["status"])
             self.assertNotIn('"model_reasoning_effort": "low"', json.dumps(report["model_requirements"], sort_keys=True))
+            self.assertNotIn("gpt-5", json.dumps(provenance, sort_keys=True))
+            self.assertIn(
+                {
+                    "name": "model_requirement_model_selection_default_execution_config_freshness",
+                    "level": "warning",
+                    "message": "default_execution_config has an explicit model pin but no freshness metadata; execution_targets do not exist yet",
+                },
+                report["checks"],
+            )
+            self.assertIn(
+                {
+                    "name": "model_requirement_model_selection_rule_low-cost-docs_freshness",
+                    "level": "warning",
+                    "message": "model_selection_rule has an explicit model pin but no freshness metadata; execution_targets do not exist yet",
+                },
+                report["checks"],
+            )
             self.assertEqual(0, human_code)
             self.assertIn("model_requirements:", human_output)
             self.assertIn("low-cost-docs: model=true codex_profile=true config_overrides=model_reasoning_effort", human_output)
+            self.assertIn("model_selection_provenance:", human_output)
+            self.assertIn(
+                "default_execution_config: model_source=explicit_model explicit_pin=true "
+                "freshness=absent(execution_targets_not_available)",
+                human_output,
+            )
+            self.assertIn(
+                "low-cost-docs: model_source=explicit_model explicit_pin=true "
+                "freshness=absent(execution_targets_not_available)",
+                human_output,
+            )
+
+    def test_doctor_reports_cli_default_model_selection_provenance_without_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(
+                tmp,
+                [str(executable), "exec", "--json"],
+                extra={
+                    "model_selection_rules": [
+                        {
+                            "name": "high-effort-default-model",
+                            "when": {"review_strictness": "high"},
+                            "config_overrides": {"model_reasoning_effort": "high"},
+                        },
+                    ],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["ok"])
+            provenance = report["model_requirements"]["model_selection_provenance"]
+            self.assertEqual("cli_default", provenance["default_execution_config"]["model_source"])
+            self.assertFalse(provenance["default_execution_config"]["has_explicit_model_pin"])
+            self.assertTrue(provenance["default_execution_config"]["uses_cli_default_model"])
+            self.assertEqual(
+                "not_applicable",
+                provenance["default_execution_config"]["freshness_metadata"]["status"],
+            )
+            self.assertEqual("cli_default", provenance["reviewer_selected"]["model_source"])
+            self.assertEqual("high-effort-default-model", provenance["reviewer_selected"]["selection_rule"])
+            self.assertTrue(provenance["reviewer_selected"]["uses_cli_default_model"])
+            self.assertIn(
+                {
+                    "name": "model_requirement_model_selection_reviewer_selected",
+                    "level": "warning",
+                    "message": "selected execution config relies on the Codex CLI default model because no model is configured",
+                },
+                report["checks"],
+            )
+            self.assertEqual(0, human_code)
+            self.assertIn(
+                "reviewer_selected: selection_rule=high-effort-default-model "
+                "model_source=cli_default explicit_pin=false "
+                "freshness=not_applicable(no_explicit_model_pin)",
+                human_output,
+            )
 
     def test_doctor_warns_when_codex_version_fails_without_failing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

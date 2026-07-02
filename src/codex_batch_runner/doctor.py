@@ -89,6 +89,8 @@ def model_requirement_summary(config: Config) -> dict[str, Any]:
                         "message": f"model selection options will be appended because {name} has no exec or resume token",
                     }
                 )
+    provenance = model_selection_provenance(config)
+    config_checks.extend(model_selection_provenance_checks(provenance))
     return {
         "default_model_requirement_vector": config.default_model_requirement_vector,
         "review_model_requirement_vector": config.review_model_requirement_vector,
@@ -110,8 +112,94 @@ def model_requirement_summary(config: Config) -> dict[str, Any]:
             }
             for rule in config.model_selection_rules
         },
+        "model_selection_provenance": provenance,
         "checks": config_checks,
     }
+
+
+def model_selection_provenance(config: Config) -> dict[str, Any]:
+    return {
+        "implementer_selected": resolved_model_selection_provenance(
+            resolve_execution_config(config, {}, reviewer=False)
+        ),
+        "reviewer_selected": resolved_model_selection_provenance(
+            resolve_execution_config(config, {}, reviewer=True)
+        ),
+        "default_execution_config": configured_model_selection_provenance(
+            "default_execution_config",
+            config.default_execution_config,
+        ),
+        "rules": {
+            str(rule.get("name")): configured_model_selection_provenance("model_selection_rule", rule)
+            for rule in config.model_selection_rules
+        },
+    }
+
+
+def resolved_model_selection_provenance(settings: Any) -> dict[str, Any]:
+    has_pin = settings.model_source == "explicit_model"
+    return {
+        "selection_rule": settings.selection_rule,
+        "selection_reason": settings.selection_reason,
+        "model_source": settings.model_source,
+        "has_explicit_model_pin": has_pin,
+        "uses_cli_default_model": settings.model_source == "cli_default",
+        "freshness_metadata": model_pin_freshness_metadata(has_pin),
+    }
+
+
+def configured_model_selection_provenance(kind: str, selection: dict[str, Any]) -> dict[str, Any]:
+    has_pin = bool(selection.get("model"))
+    return {
+        "kind": kind,
+        "model_source": "explicit_model" if has_pin else "cli_default",
+        "has_explicit_model_pin": has_pin,
+        "uses_cli_default_model": not has_pin,
+        "freshness_metadata": model_pin_freshness_metadata(has_pin),
+    }
+
+
+def model_pin_freshness_metadata(has_pin: bool) -> dict[str, str | None]:
+    if not has_pin:
+        return {"status": "not_applicable", "reason": "no_explicit_model_pin"}
+    return {
+        "status": "absent",
+        "reason": "execution_targets_not_available",
+    }
+
+
+def model_selection_provenance_checks(provenance: dict[str, Any]) -> list[dict[str, str]]:
+    checks: list[dict[str, str]] = []
+    for name in ("implementer_selected", "reviewer_selected"):
+        selected = provenance.get(name) if isinstance(provenance.get(name), dict) else {}
+        if selected.get("uses_cli_default_model"):
+            checks.append(
+                {
+                    "kind": f"model_selection_{name}",
+                    "level": "warning",
+                    "message": "selected execution config relies on the Codex CLI default model because no model is configured",
+                }
+            )
+    default = provenance.get("default_execution_config")
+    if isinstance(default, dict) and default.get("has_explicit_model_pin"):
+        checks.append(
+            {
+                "kind": "model_selection_default_execution_config_freshness",
+                "level": "warning",
+                "message": "default_execution_config has an explicit model pin but no freshness metadata; execution_targets do not exist yet",
+            }
+        )
+    rules = provenance.get("rules") if isinstance(provenance.get("rules"), dict) else {}
+    for name, rule in rules.items():
+        if isinstance(rule, dict) and rule.get("has_explicit_model_pin"):
+            checks.append(
+                {
+                    "kind": f"model_selection_rule_{name}_freshness",
+                    "level": "warning",
+                    "message": "model_selection_rule has an explicit model pin but no freshness metadata; execution_targets do not exist yet",
+                }
+            )
+    return checks
 
 
 def load_tasks_for_doctor(queue_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -751,6 +839,35 @@ def render_doctor_report(report: dict[str, Any]) -> str:
                 f"codex_profile={str(rule.get('has_codex_profile')).lower()} "
                 f"config_overrides={','.join(keys) if keys else '-'}"
             )
+    provenance = model_requirements.get("model_selection_provenance") or {}
+    lines.append("  model_selection_provenance:")
+    default_provenance = provenance.get("default_execution_config") or {}
+    lines.append(
+        "    default_execution_config: "
+        f"model_source={default_provenance.get('model_source') or '-'} "
+        f"explicit_pin={str(bool(default_provenance.get('has_explicit_model_pin'))).lower()} "
+        f"freshness={freshness_status(default_provenance)}"
+    )
+    for label, selected in (
+        ("implementer_selected", provenance.get("implementer_selected") or {}),
+        ("reviewer_selected", provenance.get("reviewer_selected") or {}),
+    ):
+        lines.append(
+            f"    {label}: "
+            f"selection_rule={selected.get('selection_rule') or '-'} "
+            f"model_source={selected.get('model_source') or '-'} "
+            f"explicit_pin={str(bool(selected.get('has_explicit_model_pin'))).lower()} "
+            f"freshness={freshness_status(selected)}"
+        )
+    provenance_rules = provenance.get("rules") or {}
+    if provenance_rules:
+        lines.append("    rules:")
+        for name, rule in provenance_rules.items():
+            lines.append(
+                f"      {name}: model_source={rule.get('model_source') or '-'} "
+                f"explicit_pin={str(bool(rule.get('has_explicit_model_pin'))).lower()} "
+                f"freshness={freshness_status(rule)}"
+            )
     lines.extend(
         [
             "",
@@ -817,6 +934,13 @@ def format_optional_bool(value: Any) -> str:
     if value is None:
         return "None"
     return str(value).lower()
+
+
+def freshness_status(item: dict[str, Any]) -> str:
+    metadata = item.get("freshness_metadata") if isinstance(item.get("freshness_metadata"), dict) else {}
+    status = metadata.get("status") or "-"
+    reason = metadata.get("reason")
+    return f"{status}({reason})" if reason else str(status)
 
 
 def review_status(task: dict[str, Any]) -> str:
