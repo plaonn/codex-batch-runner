@@ -6,6 +6,16 @@
 
 Task JSON은 provider/model/profile 이름이 아니라 `model_requirement_vector`를 저장합니다. 이 벡터는 작업이 요구하는 모델 특성이고, 현재 설치된 Codex 모델 선택은 config의 `model_selection_rules`와 `default_execution_config`가 실행 직전에 해석합니다.
 
+### 모델 신선도와 실제 모델 식별 한계
+
+Task JSON은 `model_requirement_vector`만 저장하며 provider/model/profile 식별자는 저장하지 않습니다. 즉, 작업 자체가 "무엇을 써야 한다"가 아니라 "어떤 성능/안전 특성이 필요한지"만 정의합니다.
+
+- 로컬 config는 `model_selection_rules`에서 `model`/`codex_profile`를 명시적으로 고정할 수 있거나, 이를 생략하고 Codex CLI 기본 동작에 의존할 수 있습니다.
+- 명시적 모델 핀(`model: ...`)은 새 모델 출시 시 자동 갱신되지 않습니다. 새 모델이 추가되면 운영자가 최신 CLI/provider 동향을 보고 규칙을 검토·갱신해야 합니다.
+- CLI 기본 경로는 설치된 Codex/프로바이더 기본값을 따르지만, cbr는 이를 실행 전에는 실제 모델 정체를 알 수 없습니다.
+- cbr가 실제 사용 모델을 명시적으로 알 수 있는 경우는 config에 명시되었거나, 실행 결과에서 `last_run.resolved_execution_config`로 신뢰성 있게 관측될 때에 한정됩니다.
+- `routing-report`/`cbr doctor`는 진단/자문용 증거 surface로, 모델 자동 발견(auto-discover), 자동 롤아웃(auto-rollout), 정책 자동 변경(auto-mutate) 기능을 수행하지 않습니다.
+
 Config는 선택적으로 아래 field를 가질 수 있습니다.
 
 - `default_model_requirement_vector`: task에 explicit vector가 없을 때 사용할 기본 요구 벡터
