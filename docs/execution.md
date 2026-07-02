@@ -1,6 +1,6 @@
 # Execution Contract
 
-이 문서는 model requirement vector, shell backend, capacity/priority, queue admission, Codex command wrapper, watchdog, lock, atomic write, rate-limit, queue mutation control plane을 정의합니다. 핵심 스펙 index는 [spec.md](spec.md)입니다.
+이 문서는 model requirement vector, shell/external-json-command backend, capacity/priority, queue admission, Codex command wrapper, watchdog, lock, atomic write, rate-limit, queue mutation control plane을 정의합니다. 핵심 스펙 index는 [spec.md](spec.md)입니다.
 
 ## Model Requirements
 
@@ -61,6 +61,23 @@ Shell attempt log는 stdout/stderr 전체를 task log file에 저장합니다. T
 `shell_task_timeout_seconds` config 기본값은 `900`입니다. `--shell-timeout` 또는 task `shell_timeout_seconds`가 있으면 해당 task에만 override합니다.
 
 Codex CLI update 같은 guarded maintenance workflow는 runner-level maintenance로 처리합니다. Shell task는 프로젝트별 ordered dependency gate로 사용할 수 있지만, runner pause를 잡고 queue idle gate를 확인하는 solo maintenance mode 자체는 shell backend가 아니라 별도 maintenance command가 담당합니다.
+
+
+## External JSON command backend
+
+`execution_backend=external-json-command` task는 Codex를 호출하지 않고 generic local argv list command를 실행하되, command stdout에서 cbr-compatible final JSON object를 읽어 task 결과로 사용합니다. 이 backend는 vendor-neutral adapter boundary입니다. cbr는 provider-native resume id, model/quota identity, auth, GUI automation, model discovery, quota probing, worker-created commit/push policy를 추론하거나 구현하지 않습니다.
+
+Enqueue CLI는 `--backend external-json-command`와 함께 `--command-json '["path/to/wrapper", "--flag"]'` 또는 마지막 option인 `--command path/to/wrapper --flag`를 받습니다. Raw shell string은 받지 않습니다. Runner는 기존 cbr task prompt wrapper를 만들고 그 prompt를 final argv argument로 append합니다. External wrapper는 마지막 argv argument를 작업 지시문으로 읽어야 합니다.
+
+Runner는 external-json-command task에도 기존 queue ordering, dependency readiness, cooldown skip, runner lock, stale running recovery, worktree cwd adapter, attempts/run count, log path, status transition event, post-run wake trigger를 적용합니다. `worktree_mode=task`이면 command cwd는 prepared task worktree입니다. Timeout은 Codex JSONL progress watchdog이 아니라 wall-clock subprocess timeout입니다.
+
+External command stdout은 하나의 JSON object여야 합니다. Required final JSON shape는 Codex final response와 같습니다: `task_id`, `status`, `summary`, `changed_files`, `verification`, optional `next_prompt`, optional `commits`, optional `push_status`. 허용 status는 `completed`, `needs_resume`, `blocked_user`, `failed`입니다. `completed`는 `review_status=unreviewed`를 기록합니다. `needs_resume`은 `next_prompt`를 저장하고 다음 실행에서 provider-native conversation id 없이 resume-unavailable continuation prompt를 사용합니다.
+
+Invalid JSON, task id mismatch, missing required key, invalid status, executable failure, timeout, and nonzero exit without valid `status=failed` or `status=blocked_user` final JSON은 `failed`와 sanitized `last_error`로 기록합니다. Nonzero exit가 valid final JSON을 출력했더라도 `completed` 또는 `needs_resume`은 성공으로 인정하지 않습니다. Nonzero exit with valid `failed` 또는 `blocked_user` final JSON은 external worker가 보고한 terminal result로 기록할 수 있습니다.
+
+External attempt log는 command, cwd, started/finished time, duration, timeout, return code, timeout flag, sanitized error metadata, stdout, stderr를 task log file에 저장합니다. Task JSON의 `last_run`은 execution backend, command kind, configured argv command without the appended prompt, returncode, timing, timeout flag/seconds, stdout/stderr byte count, log path만 저장합니다. Event payload에는 raw stdout/stderr 또는 prompt text를 넣지 않고 sanitized summary/count/path metadata만 남깁니다.
+
+`external_json_command_timeout_seconds` config 기본값은 `900`입니다. `--external-timeout` 또는 task `external_timeout_seconds`가 있으면 해당 task에만 override합니다.
 
 
 ## Model requirement routing optimization policy

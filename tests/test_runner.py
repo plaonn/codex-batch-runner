@@ -1002,6 +1002,221 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("timed out", task["last_error"])
             self.assertNotIn("before" * 100, task_json)
 
+    def test_run_next_external_json_command_completes_and_sets_unreviewed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(
+                config,
+                "external work",
+                tmp,
+                task_id="external-ok",
+                execution_backend="external-json-command",
+                external_command=[
+                    sys.executable,
+                    "-c",
+                    "import json, sys; print(json.dumps({'task_id':'external-ok','status':'completed','summary':'ok','changed_files':['file.txt'],'verification':['checked']}))",
+                ],
+            )
+
+            with patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")):
+                outcome = run_next(config)
+            task = load_task(config, "external-ok")
+            log_text = Path(task["log_paths"][0]).read_text(encoding="utf-8")
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("completed", task["status"])
+            self.assertEqual("unreviewed", task["review_status"])
+            self.assertEqual("external-json-command", task["last_run"]["execution_backend"])
+            self.assertEqual("completed", task["last_result"]["status"])
+            self.assertIn("stdout:", log_text)
+
+    def test_run_next_external_json_command_missing_command_fails_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            task = create_task(config, "external work", tmp, task_id="external-missing")
+            task["execution_backend"] = "external-json-command"
+            task["external_command"] = []
+            save_task(config, task)
+
+            outcome = run_next(config)
+            task = load_task(config, "external-missing")
+
+            self.assertEqual("failed", outcome.status)
+            self.assertIn("external_command argv list", task["last_error"])
+            self.assertFalse(task["log_paths"])
+
+    def test_run_next_external_json_command_needs_resume_uses_resume_unavailable_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(
+                config,
+                "external work",
+                tmp,
+                task_id="external-resume",
+                execution_backend="external-json-command",
+                external_command=[
+                    sys.executable,
+                    "-c",
+                    "import json; print(json.dumps({'task_id':'external-resume','status':'needs_resume','summary':'more','changed_files':[],'verification':[],'next_prompt':'continue this'}))",
+                ],
+            )
+
+            first = run_next(config)
+            task = load_task(config, "external-resume")
+            task["external_command"] = [
+                sys.executable,
+                "-c",
+                "import json, sys; prompt=sys.argv[-1]; expected='continue ' + 'this'; assert 'resume_unavailable: true' in prompt; assert expected in prompt; print(json.dumps({'task_id':'external-resume','status':'completed','summary':'done','changed_files':[],'verification':['resumed']}))",
+            ]
+            save_task(config, task)
+            second = run_next(config)
+            task = load_task(config, "external-resume")
+
+            self.assertEqual("needs_resume", first.status)
+            self.assertEqual("completed", second.status)
+            self.assertNotIn("continue this", json.dumps(task["last_run"]))
+            self.assertTrue(task["resume_unavailable"])
+            self.assertEqual(1, task["resume_unavailable_attempts"])
+
+    def test_run_next_external_json_command_invalid_json_fails_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(
+                config,
+                "secret prompt token=private",
+                tmp,
+                task_id="external-invalid",
+                execution_backend="external-json-command",
+                external_command=[sys.executable, "-c", "value = 'token=' + 'raw-stdout'; print('not json with ' + value)"],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "external-invalid")
+            events = list_events(config, task_id="external-invalid", limit=10)
+            event_text = json.dumps(events, ensure_ascii=False)
+
+            self.assertEqual("failed", outcome.status)
+            self.assertEqual("invalid final JSON response", task["last_error"])
+            self.assertNotIn("token=raw-stdout", json.dumps(task))
+            self.assertNotIn("token=private", event_text)
+            self.assertNotIn("token=raw-stdout", event_text)
+
+    def test_run_next_external_json_command_task_id_mismatch_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(
+                config,
+                "external work",
+                tmp,
+                task_id="external-mismatch",
+                execution_backend="external-json-command",
+                external_command=[
+                    sys.executable,
+                    "-c",
+                    "import json; print(json.dumps({'task_id':'other','status':'completed','summary':'ok','changed_files':[],'verification':[]}))",
+                ],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "external-mismatch")
+
+            self.assertEqual("failed", outcome.status)
+            self.assertEqual("final JSON task_id mismatch", task["last_error"])
+
+    def test_run_next_external_json_command_nonzero_without_final_json_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(
+                config,
+                "external work",
+                tmp,
+                task_id="external-nonzero",
+                execution_backend="external-json-command",
+                external_command=[sys.executable, "-c", "import sys; print('bad'); sys.exit(7)"],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "external-nonzero")
+
+            self.assertEqual("failed", outcome.status)
+            self.assertEqual(7, task["last_run"]["returncode"])
+            self.assertIn("invalid final JSON response", task["last_error"])
+
+    def test_run_next_external_json_command_nonzero_failed_final_json_records_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(
+                config,
+                "external work",
+                tmp,
+                task_id="external-reported-fail",
+                execution_backend="external-json-command",
+                external_command=[
+                    sys.executable,
+                    "-c",
+                    "import json, sys; print(json.dumps({'task_id':'external-reported-fail','status':'failed','summary':'worker failed','changed_files':[],'verification':['reported']})); sys.exit(7)",
+                ],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "external-reported-fail")
+
+            self.assertEqual("failed", outcome.status)
+            self.assertEqual("worker failed", task["last_error"])
+            self.assertEqual("failed", task["last_result"]["status"])
+            self.assertEqual(7, task["last_run"]["returncode"])
+
+    def test_run_next_external_json_command_timeout_fails_and_writes_log_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(make_config(tmp, "success"), external_json_command_timeout_seconds=1)
+            create_task(
+                config,
+                "external work",
+                tmp,
+                task_id="external-timeout",
+                execution_backend="external-json-command",
+                external_command=[sys.executable, "-c", "import time; print('before'); time.sleep(5)"],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "external-timeout")
+            log_text = Path(task["log_paths"][0]).read_text(encoding="utf-8")
+
+            self.assertEqual("failed", outcome.status)
+            self.assertTrue(task["last_run"]["timed_out"])
+            self.assertEqual(1, task["last_run"]["timeout_seconds"])
+            self.assertIn("timed out", task["last_error"])
+            self.assertIn("timeout_seconds: 1", log_text)
+            self.assertIn("timed_out: true", log_text)
+
+    def test_run_next_external_json_command_worktree_mode_uses_task_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            init_repo(repo)
+            config = replace(make_config(tmp, "success"), worktree_mode="task", worktree_root=root / "worktrees")
+            create_task(
+                config,
+                "external work",
+                str(repo),
+                task_id="external-worktree",
+                execution_backend="external-json-command",
+                external_command=[
+                    sys.executable,
+                    "-c",
+                    "import json, pathlib; pathlib.Path('external.txt').write_text('worktree\\n'); print(json.dumps({'task_id':'external-worktree','status':'completed','summary':'ok','changed_files':['external.txt'],'verification':['checked']}))",
+                ],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "external-worktree")
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("retained", task["execution_worktree_status"])
+            self.assertTrue((Path(task["execution_worktree_path"]) / "external.txt").exists())
+            self.assertFalse((repo / "external.txt").exists())
+            self.assertEqual("", git(repo, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip())
+
     def test_run_next_records_resolved_execution_config_in_last_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")

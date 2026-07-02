@@ -58,6 +58,7 @@ class Config:
     codex_watchdog_grace_seconds: int = 5
     codex_startup_stall_cooldown_seconds: int = 60
     shell_task_timeout_seconds: int = 900
+    external_json_command_timeout_seconds: int = 900
     default_model_requirement_vector: dict[str, Any] = field(default_factory=dict)
     review_model_requirement_vector: dict[str, Any] = field(default_factory=dict)
     default_execution_config: dict[str, Any] = field(default_factory=dict)
@@ -191,6 +192,10 @@ class Config:
             shell_task_timeout_seconds=positive_int_value(
                 "shell_task_timeout_seconds",
                 data.get("shell_task_timeout_seconds", 900),
+            ),
+            external_json_command_timeout_seconds=positive_int_value(
+                "external_json_command_timeout_seconds",
+                data.get("external_json_command_timeout_seconds", 900),
             ),
             default_model_requirement_vector=model_requirement_vector_value(
                 "default_model_requirement_vector",

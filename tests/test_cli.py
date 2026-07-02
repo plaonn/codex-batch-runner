@@ -1330,6 +1330,60 @@ class CliTests(unittest.TestCase):
             self.assertEqual("shell", task["execution_backend"])
             self.assertEqual([sys.executable, "-c", "print('ok')"], task["shell_command"])
 
+    def test_enqueue_records_external_json_command_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp, extra={"external_json_command_timeout_seconds": 45})
+
+            command = [sys.executable, "-c", "print('{\"task_id\":\"external-json\",\"status\":\"completed\",\"summary\":\"ok\",\"changed_files\":[],\"verification\":[]}')"]
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "enqueue",
+                    "--cwd",
+                    tmp,
+                    "--id",
+                    "external-json",
+                    "--backend",
+                    "external-json-command",
+                    "--external-timeout",
+                    "120",
+                    "--command-json",
+                    json.dumps(command),
+                ]
+            )
+            task = load_task(Config.load(str(config_path)), "external-json")
+
+            self.assertEqual(0, code)
+            self.assertEqual("external-json\n", output)
+            self.assertEqual("external-json-command", task["execution_backend"])
+            self.assertEqual(command, task["external_command"])
+            self.assertEqual(120, task["external_timeout_seconds"])
+            self.assertEqual("External JSON command task: " + shlex.join(command), task["prompt"])
+
+    def test_enqueue_rejects_empty_external_command_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "enqueue",
+                    "--cwd",
+                    tmp,
+                    "--id",
+                    "external-empty",
+                    "--backend",
+                    "external-json-command",
+                    "--command-json",
+                    "[]",
+                ]
+            )
+
+            self.assertEqual(1, code)
+            self.assertFalse((Path(tmp) / "tasks" / "external-empty.json").exists())
+
     def test_enqueue_codex_default_still_requires_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

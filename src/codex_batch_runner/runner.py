@@ -13,6 +13,11 @@ from typing import Any
 from .codex import FIRST_MEANINGFUL_STALL_REASON, STARTUP_STALL_REASON, CodexResult, run_codex
 from .config import Config
 from .events import emit_task_event, result_summary_payload, transition_payload
+from .external_json_command import (
+    ExternalJsonCommandResult,
+    run_external_json_command_task,
+    validate_final_response,
+)
 from .model_requirements import ResolvedExecutionConfig, command_options, resolve_execution_config
 from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
@@ -142,6 +147,9 @@ def run_next(config: Config, *, suppress_wake_hooks: bool = False) -> RunOutcome
     if claimed.execution_backend == "shell":
         result = run_shell_task(config, claimed.run_task, claimed.attempt)
         outcome = finalize_shell_run(config, claimed, result)
+    elif claimed.execution_backend == "external-json-command":
+        result = run_external_json_command_task(config, claimed.run_task, claimed.prompt, claimed.attempt)
+        outcome = finalize_external_json_command_run(config, claimed, result)
     else:
         result = run_codex(config, claimed.run_task, claimed.prompt, claimed.attempt)
         outcome = finalize_codex_run(config, claimed, result)
@@ -178,7 +186,7 @@ def claim_next_implementation_task_locked(
 
     started_at = iso_now()
     execution_backend = task_execution_backend(task)
-    resume_requested = execution_backend == "codex" and task.get("status") == "needs_resume"
+    resume_requested = execution_backend in {"codex", "external-json-command"} and task.get("status") == "needs_resume"
     execution_cwd: Path | None = None
     if config.worktree_mode == "task":
         worktree_result = prepare_task_worktree_for_run_locked(config, task)
@@ -197,13 +205,14 @@ def claim_next_implementation_task_locked(
     prompt = ""
     execution_config: ResolvedExecutionConfig | None = None
     resume_unavailable = False
-    if execution_backend == "codex":
+    if execution_backend in {"codex", "external-json-command"}:
         resume_unavailable = bool(resume_requested and task.get("next_prompt") and not resume_id(task))
         prompt = build_prompt(
             task,
             resume_unavailable=resume_unavailable,
             execution_cwd=str(execution_cwd) if execution_cwd else None,
         )
+    if execution_backend == "codex":
         execution_config, config_error = validate_execution_config(config, task)
         if config_error:
             mark_execution_config_failure(config, task, config_error)
@@ -294,6 +303,26 @@ def finalize_shell_run(config: Config, claimed: ClaimedRun, result: ShellResult)
         lock.release()
 
 
+def finalize_external_json_command_run(
+    config: Config,
+    claimed: ClaimedRun,
+    result: ExternalJsonCommandResult,
+) -> RunOutcome:
+    lock = acquire_finalize_lock(config)
+    try:
+        task = load_claimed_task_for_finalize(config, claimed)
+        if not task:
+            return RunOutcome(status="stale_finalization", message="active run id no longer matches", task_id=claimed.task["id"])
+        if claimed.execution_cwd:
+            task["execution_worktree_status"] = "retained"
+            task["execution_retained_at"] = iso_now()
+        apply_external_json_command_result(config, task, result, git_status_cwd=claimed.execution_cwd)
+        claimed.task = task
+        return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
+    finally:
+        lock.release()
+
+
 def load_claimed_task_for_finalize(config: Config, claimed: ClaimedRun) -> dict[str, Any] | None:
     from .queue import load_task
 
@@ -357,19 +386,31 @@ def validate_task_backend(task: dict[str, Any]) -> str | None:
     backend = task_execution_backend(task)
     if backend == "codex":
         return None
-    if backend != "shell":
-        return f"invalid execution backend: {backend}"
-    command = task.get("shell_command")
-    if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
-        return "shell task requires non-empty shell_command argv list"
-    timeout = task.get("shell_timeout_seconds")
-    if timeout is not None:
-        try:
-            if int(timeout) < 1:
+    if backend == "shell":
+        command = task.get("shell_command")
+        if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
+            return "shell task requires non-empty shell_command argv list"
+        timeout = task.get("shell_timeout_seconds")
+        if timeout is not None:
+            try:
+                if int(timeout) < 1:
+                    return "shell_timeout_seconds must be a positive integer"
+            except (TypeError, ValueError):
                 return "shell_timeout_seconds must be a positive integer"
-        except (TypeError, ValueError):
-            return "shell_timeout_seconds must be a positive integer"
-    return None
+        return None
+    if backend == "external-json-command":
+        command = task.get("external_command")
+        if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
+            return "external-json-command task requires non-empty external_command argv list"
+        timeout = task.get("external_timeout_seconds")
+        if timeout is not None:
+            try:
+                if int(timeout) < 1:
+                    return "external_timeout_seconds must be a positive integer"
+            except (TypeError, ValueError):
+                return "external_timeout_seconds must be a positive integer"
+        return None
+    return f"invalid execution backend: {backend}"
 
 
 def mark_backend_failure(config: Config, task: dict, error_message: str) -> None:
@@ -640,11 +681,189 @@ def apply_shell_result(
     )
 
 
+def apply_external_json_command_result(
+    config: Config,
+    task: dict,
+    result: ExternalJsonCommandResult,
+    *,
+    git_status_cwd: Path | None = None,
+) -> None:
+    clear_active_run_metadata(task)
+    task.setdefault("log_paths", []).append(str(result.log_path))
+    record_external_json_command_last_run(task, result)
+    task["cooldown_until"] = None
+    git_status = inspect_task_git_status(str(git_status_cwd) if git_status_cwd else task.get("cwd"))
+    if git_status:
+        task["git_status"] = git_status
+    else:
+        task.pop("git_status", None)
+
+    if result.timed_out:
+        mark_external_json_command_failure(
+            config,
+            task,
+            result,
+            f"external-json-command timed out after {result.timeout_seconds}s",
+        )
+        return
+    final_response = result.final_response
+    if not final_response:
+        mark_external_json_command_failure(config, task, result, result.error or "missing final JSON response")
+        return
+    validation_error = validate_final_response(final_response, str(task.get("id") or ""))
+    if validation_error:
+        mark_external_json_command_failure(config, task, result, validation_error)
+        return
+    status = str(final_response.get("status") or "")
+    if result.returncode != 0 and status not in {"failed", "blocked_user"}:
+        mark_external_json_command_failure(
+            config,
+            task,
+            result,
+            f"external-json-command exited with {result.returncode} and status={status}",
+        )
+        return
+
+    task["last_result"] = final_response
+    task["last_error"] = None
+    if status == "completed":
+        task["status"] = "completed"
+        task["review_status"] = "unreviewed"
+        task["reviewed_at"] = None
+        task["review_reason"] = None
+        task.pop("reviewer_codex_backoff", None)
+        if task.get("root_task_id") or task.get("chain_status"):
+            task["chain_status"] = "awaiting_review"
+        task["next_prompt"] = None
+        task["completed_at"] = iso_now()
+        save_task(config, task)
+        mark_success(config, task["id"])
+        payload = transition_payload(task, completed_at=task.get("completed_at"))
+        payload.update(result_summary_payload(task))
+        emit_task_event(
+            config,
+            "task_completed",
+            task,
+            source="run-next",
+            summary=payload.get("summary_excerpt") or f"completed task {task.get('id')}",
+            payload=payload,
+        )
+        return
+    if status == "needs_resume":
+        task["status"] = "needs_resume"
+        task["next_prompt"] = final_response.get("next_prompt") or ""
+        save_task(config, task)
+        payload = transition_payload(task)
+        payload.update(result_summary_payload(task))
+        emit_task_event(
+            config,
+            "task_needs_resume",
+            task,
+            source="run-next",
+            summary=payload.get("summary_excerpt") or f"task {task.get('id')} needs resume",
+            payload=payload,
+        )
+        return
+    if status == "blocked_user":
+        task["status"] = "blocked_user"
+        task["next_prompt"] = final_response.get("next_prompt") or None
+        save_task(config, task)
+        payload = transition_payload(task)
+        payload.update(result_summary_payload(task))
+        emit_task_event(
+            config,
+            "task_blocked_user",
+            task,
+            source="run-next",
+            summary=payload.get("summary_excerpt") or f"task {task.get('id')} blocked on user input",
+            payload=payload,
+        )
+        return
+    task["status"] = "failed"
+    task["last_error"] = final_response.get("summary") or "external-json-command reported failed"
+    task["failure_count"] = int(task.get("failure_count", 0)) + 1
+    save_task(config, task)
+    payload = transition_payload(task, failure_count=task.get("failure_count"))
+    payload.update(result_summary_payload(task))
+    emit_task_event(
+        config,
+        "task_failed",
+        task,
+        source="run-next",
+        summary=payload.get("summary_excerpt") or str(task.get("last_error") or f"failed task {task.get('id')}"),
+        payload=payload,
+    )
+
+
+def mark_external_json_command_failure(
+    config: Config,
+    task: dict,
+    result: ExternalJsonCommandResult,
+    reason: str,
+) -> None:
+    task["status"] = "failed"
+    task["last_error"] = reason
+    task["last_result"] = external_json_command_failure_result(task, result, reason)
+    task["failure_count"] = int(task.get("failure_count", 0)) + 1
+    save_task(config, task)
+    payload = transition_payload(
+        task,
+        failure_count=task.get("failure_count"),
+        timed_out=result.timed_out,
+        returncode=result.returncode,
+        reason=reason,
+    )
+    payload.update(result_summary_payload(task))
+    emit_task_event(
+        config,
+        "task_failed",
+        task,
+        source="run-next",
+        summary=payload.get("summary_excerpt") or reason,
+        payload=payload,
+    )
+
+
+def external_json_command_failure_result(
+    task: dict,
+    result: ExternalJsonCommandResult,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "task_id": task.get("id"),
+        "status": "failed",
+        "summary": reason,
+        "changed_files": [],
+        "verification": [
+            f"external-json-command exited with {result.returncode}"
+            if result.returncode is not None
+            else f"external-json-command timed out after {result.timeout_seconds}s"
+        ],
+    }
+
+
 def record_shell_last_run(task: dict, result: ShellResult) -> None:
     task["last_run"] = {
         "execution_backend": "shell",
         "command_kind": "shell",
         "command": result.command,
+        "returncode": result.returncode,
+        "started_at": task.get("started_at") or result.started_at,
+        "finished_at": result.finished_at,
+        "duration_seconds": result.duration_seconds,
+        "timeout_seconds": result.timeout_seconds,
+        "timed_out": result.timed_out,
+        "log_path": str(result.log_path),
+        "stdout_bytes": result.stdout_bytes,
+        "stderr_bytes": result.stderr_bytes,
+    }
+
+
+def record_external_json_command_last_run(task: dict, result: ExternalJsonCommandResult) -> None:
+    task["last_run"] = {
+        "execution_backend": "external-json-command",
+        "command_kind": "external-json-command",
+        "command": result.command[:-1],
         "returncode": result.returncode,
         "started_at": task.get("started_at") or result.started_at,
         "finished_at": result.finished_at,

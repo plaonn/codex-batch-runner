@@ -140,6 +140,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual({}, config.project_priorities)
             self.assertEqual(100, config.default_project_priority)
             self.assertEqual(24, config.project_priority_aging_hours)
+            self.assertEqual(900, config.external_json_command_timeout_seconds)
 
     def test_dependency_requires_accepted_review_can_be_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -321,6 +322,15 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(7200, config.codex_total_runtime_timeout_seconds)
             self.assertEqual(2, config.codex_watchdog_grace_seconds)
             self.assertEqual(120, config.codex_startup_stall_cooldown_seconds)
+
+    def test_external_json_command_timeout_can_be_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"external_json_command_timeout_seconds": 42}), encoding="utf-8")
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertEqual(42, config.external_json_command_timeout_seconds)
 
     def test_model_requirements_default_to_disabled_and_can_be_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

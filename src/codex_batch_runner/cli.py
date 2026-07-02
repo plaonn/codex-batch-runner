@@ -139,11 +139,22 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_group = enqueue.add_mutually_exclusive_group()
     prompt_group.add_argument("--prompt", help="task prompt")
     prompt_group.add_argument("--prompt-file", help="file containing task prompt")
-    enqueue.add_argument("--backend", choices=("codex", "shell"), default="codex", help="execution backend (default: codex)")
+    enqueue.add_argument(
+        "--backend",
+        choices=("codex", "shell", "external-json-command"),
+        default="codex",
+        help="execution backend (default: codex)",
+    )
     command_group = enqueue.add_mutually_exclusive_group()
     command_group.add_argument("--command-json", help="shell backend argv as a JSON string list")
     command_group.add_argument("--command", nargs=argparse.REMAINDER, help="shell backend argv; must be the final cbr option")
     enqueue.add_argument("--shell-timeout", type=int, dest="shell_timeout_seconds", help="shell backend timeout in seconds")
+    enqueue.add_argument(
+        "--external-timeout",
+        type=int,
+        dest="external_timeout_seconds",
+        help="external-json-command backend timeout in seconds",
+    )
     enqueue.add_argument("--id", dest="task_id", help="explicit task id")
     enqueue.add_argument("--depends-on", action="append", default=[], help="dependency task id, repeatable")
     enqueue.add_argument("--project", dest="project_id", help="project identifier")
@@ -486,13 +497,15 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
     prompt = args.prompt
     if args.prompt_file:
         prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
-    shell_command = parse_shell_command_args(args)
+    command = parse_command_args(args)
     if args.backend == "codex" and prompt is None:
         raise ValueError("Codex tasks require --prompt or --prompt-file")
-    if args.backend == "shell" and not shell_command:
-        raise ValueError("shell tasks require --command-json or --command")
+    if args.backend in {"shell", "external-json-command"} and not command:
+        raise ValueError(f"{args.backend} tasks require --command-json or --command")
     if args.backend == "shell" and prompt is None:
-        prompt = "Shell task: " + shlex.join(shell_command or [])
+        prompt = "Shell task: " + shlex.join(command or [])
+    if args.backend == "external-json-command" and prompt is None:
+        prompt = "External JSON command task: " + shlex.join(command or [])
     task = create_task(
         config=config,
         prompt=prompt or "",
@@ -513,8 +526,10 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         routing_risk=args.routing_risk,
         verification_scope=args.verification_scope,
         execution_backend=args.backend,
-        shell_command=shell_command,
+        shell_command=command if args.backend == "shell" else None,
         shell_timeout_seconds=args.shell_timeout_seconds,
+        external_command=command if args.backend == "external-json-command" else None,
+        external_timeout_seconds=args.external_timeout_seconds,
         capacity_pool=args.capacity_pool,
         task_priority=args.priority,
     )
@@ -523,7 +538,7 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-def parse_shell_command_args(args: argparse.Namespace) -> list[str] | None:
+def parse_command_args(args: argparse.Namespace) -> list[str] | None:
     if args.command_json:
         try:
             value = json.loads(args.command_json)

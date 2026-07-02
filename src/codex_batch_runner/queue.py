@@ -16,7 +16,7 @@ DEFAULT_HIDDEN_LIST_STATUSES = {"completed", "archived"}
 REVIEW_STATUSES = {"unreviewed", "accepted", "rejected", "needs_followup"}
 RESOLUTIONS = {"wont_fix", "superseded", "manual", "smoke", "duplicate"}
 RESOLVABLE_COMPLETED_REVIEW_STATUSES = {"rejected", "needs_followup"}
-EXECUTION_BACKENDS = {"codex", "shell"}
+EXECUTION_BACKENDS = {"codex", "shell", "external-json-command"}
 TASK_PRIORITIES = ("asap", "high", "normal", "low", "background")
 TASK_PRIORITY_RANK = {name: index for index, name in enumerate(TASK_PRIORITIES)}
 ROUTING_SIZES = ("tiny", "small", "medium", "large", "xlarge")
@@ -212,6 +212,8 @@ def create_task(
     execution_backend: str = "codex",
     shell_command: list[str] | None = None,
     shell_timeout_seconds: int | None = None,
+    external_command: list[str] | None = None,
+    external_timeout_seconds: int | None = None,
     capacity_pool: str = "codex",
     task_priority: str = "normal",
     subtask_type: str | None = None,
@@ -235,8 +237,18 @@ def create_task(
     verification_scope = validate_choice_list("verification_scope", verification_scope, VERIFICATION_SCOPES)
     if execution_backend == "codex" and shell_command:
         raise ValueError("shell_command requires execution_backend=shell")
+    if execution_backend == "codex" and external_command:
+        raise ValueError("external_command requires execution_backend=external-json-command")
+    if execution_backend == "shell" and external_command:
+        raise ValueError("external_command requires execution_backend=external-json-command")
+    if execution_backend == "external-json-command" and shell_command:
+        raise ValueError("shell_command requires execution_backend=shell")
     shell_command = validate_shell_command(shell_command) if execution_backend == "shell" else None
     shell_timeout_seconds = validate_shell_timeout(shell_timeout_seconds) if shell_timeout_seconds is not None else None
+    external_command = validate_external_command(external_command) if execution_backend == "external-json-command" else None
+    external_timeout_seconds = (
+        validate_external_timeout(external_timeout_seconds) if external_timeout_seconds is not None else None
+    )
     path = task_path(config, task_id)
     if path.exists():
         raise FileExistsError(f"task already exists: {task_id}")
@@ -286,6 +298,8 @@ def create_task(
         "task_priority": task_priority,
         "shell_command": shell_command,
         "shell_timeout_seconds": shell_timeout_seconds,
+        "external_command": external_command,
+        "external_timeout_seconds": external_timeout_seconds,
         "session_id": None,
         "thread_id": None,
         "depends_on": depends_on or [],
@@ -405,6 +419,26 @@ def validate_shell_timeout(value: object) -> int:
         raise ValueError("shell_timeout_seconds must be a positive integer") from exc
     if seconds < 1:
         raise ValueError("shell_timeout_seconds must be a positive integer")
+    return seconds
+
+
+def validate_external_command(value: object) -> list[str]:
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+        raise ValueError("external_command must be a non-empty list of strings")
+    if any(item == "" for item in value):
+        raise ValueError("external_command entries must be non-empty strings")
+    return list(value)
+
+
+def validate_external_timeout(value: object) -> int:
+    if isinstance(value, bool):
+        raise ValueError("external_timeout_seconds must be a positive integer")
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("external_timeout_seconds must be a positive integer") from exc
+    if seconds < 1:
+        raise ValueError("external_timeout_seconds must be a positive integer")
     return seconds
 
 

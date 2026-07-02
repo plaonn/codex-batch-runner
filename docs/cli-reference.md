@@ -30,6 +30,8 @@ cbr enqueue --cwd /repo --prompt "작업 지시문"
 cbr enqueue --cwd /repo --project project-id --category implementation --label queue --created-by operator --prompt-file prompt.md
 cbr enqueue --cwd /repo --reasoning-depth low --cost-sensitivity high --prompt-file prompt.md
 cbr enqueue --cwd /repo --routing-size small --routing-risk low --verification-scope unit --verification-scope docs --prompt-file prompt.md
+cbr enqueue --cwd /repo --backend shell --command-json '["python3", "-m", "pytest", "tests/test_smoke.py"]'
+cbr enqueue --cwd /repo --backend external-json-command --prompt-file task.md --command-json '["./tools/cbr-json-wrapper"]'
 cbr list
 cbr list --project project-id
 cbr list --project-root /repo
@@ -85,6 +87,8 @@ cbr prune --notifier-cursor-state path/to/notify-state.json
 ```bash
 --config path/to/config.json
 ```
+
+`cbr enqueue --backend external-json-command` requires `--command-json` or final-position `--command`. The command must be an argv list; cbr does not evaluate shell strings. The runner appends the wrapped cbr prompt as the command's final argv argument and expects stdout to contain one final JSON object with `task_id`, `status`, `summary`, `changed_files`, and `verification`.
 
 config 탐색 순서:
 

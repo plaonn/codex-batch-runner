@@ -34,6 +34,8 @@
   "execution_backend": "codex",
   "shell_command": null,
   "shell_timeout_seconds": null,
+  "external_command": null,
+  "external_timeout_seconds": null,
   "session_id": null,
   "thread_id": null,
   "depends_on": [],
@@ -67,9 +69,11 @@
 - `next_prompt`
 - `session_id`
 - `thread_id`
-- `execution_backend`: `codex` 또는 `shell`. 생략된 기존 task는 `codex`로 해석합니다.
+- `execution_backend`: `codex`, `shell`, 또는 `external-json-command`. 생략된 기존 task는 `codex`로 해석합니다.
 - `shell_command`: shell backend가 실행할 non-empty argv string list. Raw shell string은 저장하지 않고, shell 기능이 필요하면 `["bash", "-lc", "..."]`처럼 명시합니다.
 - `shell_timeout_seconds`: shell backend task-specific timeout. 없으면 config `shell_task_timeout_seconds` 기본값을 사용합니다.
+- `external_command`: external-json-command backend가 실행할 non-empty argv string list. Raw shell string은 저장하지 않습니다. Runner는 정상 cbr prompt wrapper를 마지막 argv argument로 추가합니다.
+- `external_timeout_seconds`: external-json-command task-specific wall-clock timeout. 없으면 config `external_json_command_timeout_seconds` 기본값을 사용합니다.
 - bounded review/fix chain metadata:
   - `root_task_id`
   - `parent_task_id`
