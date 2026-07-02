@@ -4,7 +4,7 @@
 
 ## Topic map
 
-- [요구사항 계층 (R0-R6, R8)](requirements.md): 토큰 효율/스케줄링·완화·감사·리뷰·격리·안전 경계·프로젝트 진실 분리를 수렴적으로 설명.
+- [요구사항 계층 (R0-R8)](requirements.md): 토큰 효율/스케줄링·완화·감사·리뷰·격리·안전 경계·모델 요구사항·프로젝트 진실 분리를 수렴적으로 설명.
 - [Task schema and dependency contract](task-schema.md): task JSON fields, task status, review status, project routing metadata, dependency readiness.
 - [Execution contract](execution.md): model requirements, shell backend, capacity and priority, queue mutation, runner execution policy, watchdog, lock, atomic writes, Codex command/prompt wrapper, rate-limit, Codex CLI maintenance.
 - [Review contract](review.md): review-bundle, review-next, reviewer Codex safety model, mechanical gates, bounded auto-fix loop.

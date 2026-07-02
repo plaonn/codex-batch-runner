@@ -73,6 +73,16 @@
 재검토 시점: 감사/리포팅 계약이 추가되거나 로그 스키마가 바뀔 때.  
 근거 문서: [AGENTS.md](../AGENTS.md), [README.md](../README.md), [docs/events-and-index.md](events-and-index.md), [docs/review.md](review.md)
 
+## R7: 작업 특성, 모델 요구사항, 실행 설정, 평가 근거 분리
+
+상태: 활성
+요구사항: task intent, model requirement, concrete execution config, worker/reviewer evidence, provider resource evidence, policy evaluation은 서로 다른 개념으로 유지한다.
+근거: routing/cost 최적화는 작업 요구, provider availability, reviewer reliability, worker quality를 하나의 opaque profile label로 합치지 않을 때만 검토 가능한 근거가 된다.
+방지 실패: legacy profile 이름이 durable policy primitive가 되는 문제, `routing-report`가 정책을 자동 변경하는 문제, reviewer drift가 worker 평가를 오염시키는 문제, `capacity_pool`이나 local role 이름에서 provider quota bucket을 추론하는 문제.
+파생 규칙: task JSON은 `model_requirement_vector`를 저장하고, 실제 실행 선택은 `last_run.resolved_execution_config`에 기록하며, `routing-report`와 provider resource evidence는 read-only/advisory 진단으로만 사용한다.
+재검토 시점: 충분한 accepted/rejected/routed sample을 바탕으로 public schema나 자동 routing policy 변경을 검토할 때.
+근거 문서: [docs/execution.md](execution.md)
+
 ## R8: 프로젝트 로컬 진실과 글로벌 큐 분리
 
 상태: 활성  
@@ -82,3 +92,27 @@
 파생 규칙: `.codex-batch-runner/`는 runtime state 전용, 로컬 task dashboard는 별도 유지, enqueue 메타데이터는 라우팅 보조로 제한.  
 재검토 시점: 멀티 프로젝트 오케스트레이션 정책이 변경되거나 큐 오너십 모델이 바뀔 때.  
 근거 문서: [AGENTS.md](../AGENTS.md), [docs/spec.md](spec.md)
+
+## Tests / Checks
+
+공통 검증 기준:
+
+- 변경된 requirement가 public contract를 바꾸면 관련 topic spec, README, CLI reference, 테스트를 함께 확인한다.
+- queue state, review/apply, worktree, event/index, routing behavior를 바꾸는 구현은 관련 unit test와 public/private safety review를 통과해야 한다.
+- requirement hierarchy 자체는 index 문서이므로 상세 검증 절차는 topic spec과 테스트에 둔다.
+
+## Non-goals
+
+공통 비목표:
+
+- 이 문서는 topic-specific spec을 대체하지 않는다.
+- 이 문서만으로 queue mutation, active runner config 변경, review acceptance, worktree apply/cleanup, provider routing policy 변경을 수행하지 않는다.
+- private runtime state, 실제 prompt/log/transcript/session/thread id, personal path, Todoist id 같은 operator-local detail을 공개 requirement로 승격하지 않는다.
+
+## Automation boundary
+
+공통 자동화 경계:
+
+- `routing-report`, dashboard, review bundle, doctor 같은 진단 표면은 기본적으로 read-only evidence로 취급한다.
+- state-changing automation은 각 topic spec의 opt-in, dry-run, stale check, safety gate를 통과해야 한다.
+- provider routing policy, reviewer policy, active runner config, public/private 문서 경계 변경은 자동 진단 결과만으로 적용하지 않고 별도 operator decision으로 처리한다.

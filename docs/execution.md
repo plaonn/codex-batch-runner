@@ -63,22 +63,22 @@ Shell attempt log는 stdout/stderr 전체를 task log file에 저장합니다. T
 Codex CLI update 같은 guarded maintenance workflow는 runner-level maintenance로 처리합니다. Shell task는 프로젝트별 ordered dependency gate로 사용할 수 있지만, runner pause를 잡고 queue idle gate를 확인하는 solo maintenance mode 자체는 shell backend가 아니라 별도 maintenance command가 담당합니다.
 
 
-## Profile routing optimization policy
+## Model requirement routing optimization policy
 
-Profile routing 최적화는 비용을 줄이기 위한 운영 루프이지만, task prompt와 verification 요구를 낮추는 방식으로 사용하지 않습니다. Runner는 routing-report 결과를 근거로 자동 policy mutation을 수행하지 않습니다. 운영자 또는 별도 control-plane 작업이 명시적으로 repo-local 기준, enqueue skill 기준, 또는 config를 수정할 때만 routing 기준이 바뀝니다.
+Model requirement routing 최적화는 비용을 줄이기 위한 운영 루프이지만, task prompt와 verification 요구를 낮추는 방식으로 사용하지 않습니다. Runner는 routing-report 결과를 근거로 자동 policy mutation을 수행하지 않습니다. 운영자 또는 별도 control-plane 작업이 명시적으로 repo-local 기준, enqueue skill 기준, 또는 config를 수정할 때만 routing 기준이 바뀝니다.
 
 기본 운영 원칙:
 
-- `normal`은 일반 implementation fallback입니다. 명시 profile이 없고 high-risk fallback에 걸리지 않는 작업은 우선 normal로 처리합니다.
-- `deep`은 손상 비용이 큰 작업의 guardrail입니다. runner state, lock, queue mutation, reviewer safety, worktree apply/recovery, stale-base/rebase, dependency semantics, 자동 review/fix loop처럼 control-plane 의미가 있는 작업은 성공 사례가 누적되어도 기본적으로 deep을 유지합니다.
-- `small` 또는 동등한 저비용 profile은 bounded, low-blast-radius 작업에서만 사용합니다. 예시는 공개 문서의 작은 수정, 예제/README 보강, 단순 textual cleanup처럼 실패해도 리뷰 단계에서 쉽게 감지되고 main apply 전 되돌릴 수 있는 작업입니다. `routing_size=tiny|small`, `routing_risk=low`, `verification_scope=docs|none` 조합은 config에 `small` profile이 있을 때 자동 `small` fallback 대상입니다.
-- `spark`처럼 별도 capacity slot이 있는 profile이 생겨도 profile 이름만으로 안전하다고 간주하지 않습니다. 비용 profile과 capacity pool은 별도 개념이며, routing 기준은 outcome evidence와 risk factor에 따라 결정합니다.
+- General implementation fallback은 config의 `default_execution_config`와 `model_selection_rules`가 결정합니다.
+- 손상 비용이 큰 작업은 높은 `model_requirement_vector` 또는 보수적인 selection rule을 유지합니다. runner state, lock, queue mutation, reviewer safety, worktree apply/recovery, stale-base/rebase, dependency semantics, 자동 review/fix loop처럼 control-plane 의미가 있는 작업은 성공 사례가 누적되어도 낮은 requirement 후보로 자동 전환하지 않습니다.
+- 낮은 비용의 execution config 또는 selection rule은 bounded, low-blast-radius 작업에서만 사용합니다. 예시는 공개 문서의 작은 수정, 예제/README 보강, 단순 textual cleanup처럼 실패해도 리뷰 단계에서 쉽게 감지되고 main apply 전 되돌릴 수 있는 작업입니다. `routing_size=tiny|small`, `routing_risk=low`, `verification_scope=docs|none` 조합은 low-cost candidate가 될 수 있습니다.
+- `small`, `normal`, `deep`, `spark` 같은 이름이 local config나 historical output에 남아 있더라도 durable policy primitive가 아닙니다. 비용 설정, model requirement, concrete execution config, provider resource evidence, capacity pool은 별도 개념이며, routing 기준은 outcome evidence와 risk factor에 따라 결정합니다.
 
 `routing_experiment` 권장 의미:
 
-- `baseline`: 현재 정책이 선택한 profile입니다. 비교 기준으로 충분한 표본을 모으기 위해 일반 작업의 기본 label로 사용할 수 있습니다.
-- `downshift_probe`: 원래 normal 이상으로 처리했을 작업을 한 단계 낮은 profile로 제한적으로 시험합니다. 한 번에 넓히지 않고 category/label/risk factor 조합별로 작게 시작합니다.
-- `upshift_guard`: 최근 품질 이슈, 재시도, reviewer needs_human, needs_fix, stale/conflict 위험 때문에 상위 profile을 명시적으로 선택한 작업입니다.
+- `baseline`: 현재 정책이 선택한 model requirement와 execution config입니다. 비교 기준으로 충분한 표본을 모으기 위해 일반 작업의 기본 label로 사용할 수 있습니다.
+- `downshift_probe`: 원래 더 높은 requirement 또는 더 보수적인 execution config로 처리했을 작업을 낮은 비용 후보로 제한적으로 시험합니다. 한 번에 넓히지 않고 category/label/risk factor 조합별로 작게 시작합니다.
+- `upshift_guard`: 최근 품질 이슈, 재시도, reviewer needs_human, needs_fix, stale/conflict 위험 때문에 더 보수적인 requirement 또는 execution config를 명시적으로 선택한 작업입니다.
 - `manual`: 운영자가 대화 문맥이나 외부 제약 때문에 자동 기준과 다르게 선택한 작업입니다.
 
 Downshift 후보는 아래 조건을 모두 만족할 때만 확대합니다.
@@ -108,7 +108,7 @@ Practical enqueue/model selection loop:
 - `cbr routing-report --json` 또는 human report에서 `by_routing_decision`은 같은 size/risk/verification 요구가 전반적으로 안정적인지 확인하는 기준이고, `by_model_requirement_routing_decision`은 task requirement 기준 outcome/cost를, `by_model_selection_routing_decision`은 실제 recorded selection rule 기준 outcome/cost를 확인하는 기준입니다. `by_low_cost_candidate`는 conservative low-risk docs/none tuple 후보를 찾는 보조 신호입니다.
 - Downshift 후보는 같은 routing decision tuple과 category/label 또는 risk factor가 충분한 accepted 표본을 가진 경우에만 검토합니다. Verification scope가 더 넓어졌거나 risk가 올라간 작업은 기존 low-risk tuple의 성공 사례로 대체하지 않습니다.
 - Upshift 후보는 같은 requirement/routing decision tuple에서 reviewer `needs_fix`, `needs_human`, rejected/needs_followup, auto-fix, retry 비용이 반복될 때 검토합니다.
-- 실제 model selection 기준 변경은 report 실행과 분리된 operator change로 수행합니다. 대상 tuple, 기존 requirement/selection rule, 새 rule, 근거 report 범위, rollback 기준을 public-safe docs 또는 local operator memo에 남긴 뒤 derivation 기준 또는 config를 수정합니다.
+- 실제 model requirement 또는 model selection 기준 변경은 report 실행과 분리된 operator change로 수행합니다. 대상 tuple, 기존 requirement/selection rule, 새 rule, 근거 report 범위, rollback 기준을 public-safe docs 또는 local operator memo에 남긴 뒤 derivation 기준 또는 config를 수정합니다.
 
 
 ## Capacity, concurrency, and priority config

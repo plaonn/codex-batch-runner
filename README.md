@@ -10,7 +10,7 @@
 
 ## 문서 지도
 
-- [요구사항 계층 (R0~R6, R8)](docs/requirements.md)
+- [요구사항 계층 (R0~R8)](docs/requirements.md)
 - [Core spec index](docs/spec.md): 현재 구현 truth와 topic 문서 index.
 - [Task schema and dependency contract](docs/task-schema.md): task JSON fields, task/review status, dependency readiness.
 - [Execution contract](docs/execution.md): model requirements, capacity/priority, shell backend, runner policy, watchdog, lock, atomic write, Codex command/prompt wrapper, rate-limit, queue mutation.
