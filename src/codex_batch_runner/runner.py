@@ -316,6 +316,8 @@ def finalize_external_json_command_run(
         if claimed.execution_cwd:
             task["execution_worktree_status"] = "retained"
             task["execution_retained_at"] = iso_now()
+            if external_json_command_completed_success(task, result):
+                auto_commit_worktree_final_response(config, task, result.final_response, claimed.execution_cwd)
         apply_external_json_command_result(config, task, result, git_status_cwd=claimed.execution_cwd)
         claimed.task = task
         return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
@@ -795,6 +797,22 @@ def apply_external_json_command_result(
     )
 
 
+def external_json_command_completed_success(task: dict[str, Any], result: ExternalJsonCommandResult) -> bool:
+    if result.timed_out:
+        return False
+    final_response = result.final_response
+    if not isinstance(final_response, dict):
+        return False
+    if validate_final_response(final_response, str(task.get("id") or "")):
+        return False
+    status = str(final_response.get("status") or "")
+    if status != "completed":
+        return False
+    if result.returncode != 0:
+        return False
+    return True
+
+
 def mark_external_json_command_failure(
     config: Config,
     task: dict,
@@ -938,7 +956,18 @@ def mark_worktree_prepare_failure(config: Config, task: dict, report: dict[str, 
 
 def auto_commit_worktree_result(config: Config, task: dict[str, Any], result: CodexResult, worktree_path: Path) -> None:
     final_response = result.final_response if isinstance(result.final_response, dict) else None
-    if not final_response or final_response.get("status") != "completed":
+    if not final_response:
+        return
+    auto_commit_worktree_final_response(config, task, final_response, worktree_path)
+
+
+def auto_commit_worktree_final_response(
+    config: Config,
+    task: dict[str, Any],
+    final_response: dict[str, Any],
+    worktree_path: Path,
+) -> None:
+    if final_response.get("status") != "completed":
         return
     if task.get("execution_mode") != "git_worktree":
         return

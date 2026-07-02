@@ -15,7 +15,7 @@ Opt-in placeholder config는 다음과 같습니다.
 }
 ```
 
-`worktree_mode`의 허용값은 `disabled`와 `task`입니다. `disabled`에서는 기존처럼 task의 원래 `cwd`에서 실행합니다. `task`에서는 `run-next`가 실행 가능한 task를 처리하기 직전에 task별 branch/worktree를 만들거나 기존 연결 상태를 재확인하고, 통과한 worktree를 Codex process `cwd`로 사용합니다. `worktree_root`는 relative path이면 runner root 기준으로 해석하며, 기본값은 runtime directory 아래 local-only 경로입니다. Public example에는 실제 absolute path, private queue path, 작업자 계정명을 넣지 않습니다.
+`worktree_mode`의 허용값은 `disabled`와 `task`입니다. `disabled`에서는 기존처럼 task의 원래 `cwd`에서 실행합니다. `task`에서는 `run-next`가 실행 가능한 task를 처리하기 직전에 task별 branch/worktree를 만들거나 기존 연결 상태를 재확인하고, 통과한 worktree를 worker process `cwd`로 사용합니다. `worktree_root`는 relative path이면 runner root 기준으로 해석하며, 기본값은 runtime directory 아래 local-only 경로입니다. Public example에는 실제 absolute path, private queue path, 작업자 계정명을 넣지 않습니다.
 
 Worktree mode의 핵심 모델:
 
@@ -38,7 +38,7 @@ Worktree 격리가 도움을 주는 영역:
 Worktree 격리가 해결하지 않는 영역:
 
 - runner의 queue lock, global cooldown, dependency policy, single-task-at-a-time 기본 실행 정책을 대체하지 않습니다.
-- Codex가 의도에 맞는 변경을 했는지, 공개 저장소 안전 정책을 지켰는지, 검증이 충분한지는 여전히 review workflow가 판단해야 합니다.
+- Worker가 의도에 맞는 변경을 했는지, 공개 저장소 안전 정책을 지켰는지, 검증이 충분한지는 여전히 review workflow가 판단해야 합니다.
 - stale `git_status` snapshot, 오래된 unpushed/ahead 정보, task 완료 후 operator가 push 또는 추가 commit을 수행한 상태는 worktree만으로 신뢰할 수 없습니다.
 - 같은 branch나 같은 파일을 여러 task가 수정할 때 생기는 semantic conflict를 자동으로 해결하지 않습니다.
 - credentials, runtime state, 실제 prompt/log/session id/thread id를 보호하는 public/private safety policy를 완화하지 않습니다.
@@ -85,13 +85,13 @@ Branch naming and base policy:
 
 - 기본 branch pattern은 `cbr/<task-id>`입니다. Slash를 포함한 task id 충돌을 피하기 위해 invalid ref 문자는 `-`로 바꾸고, 연속 separator를 축약합니다.
 - Existing branch가 있으면 task metadata와 branch HEAD가 일치할 때만 재사용합니다. 다른 task가 만든 branch이거나 base가 맞지 않으면 실행하지 않고 recovery 또는 operator review로 남깁니다.
-- Independent task의 기본 base는 main worktree의 current `HEAD` 또는 configured baseline ref입니다. Worktree 생성 또는 재사용 guard가 recovery-required 상태를 감지하면 stale/recovery 상태로 보고 Codex 실행을 거부합니다.
+- Independent task의 기본 base는 main worktree의 current `HEAD` 또는 configured baseline ref입니다. Worktree 생성 또는 재사용 guard가 recovery-required 상태를 감지하면 stale/recovery 상태로 보고 worker 실행을 거부합니다.
 - Dependent task는 dependency가 `accepted`이고 dependency policy가 branch inheritance를 요구할 때 parent branch를 base로 삼을 수 있습니다. Parent가 이미 explicit merge/apply phase로 main에 반영되었으면 main baseline에서 시작할 수 있습니다.
 - `dependency_requires_accepted_review=false`인 compatibility mode에서도 worktree branch inheritance는 completed-but-unaccepted parent를 자동 base로 쓰지 않습니다. Parent branch 기반 실행은 accepted parent 또는 explicit operator override가 필요합니다.
 
 Review, reject, follow-up, accept model:
 
-- `run-next`는 task JSON의 canonical `cwd`를 원래 task cwd로 보존하고, Codex 호출에 전달하는 실행 cwd만 task worktree로 바꿉니다. 정상 final JSON이 `completed`이고 task worktree에 변경이 남아 있으면 runner는 final JSON의 `changed_files`에 보고된 안전한 상대 경로만 stage하여 task branch에 local commit을 만듭니다. 이 commit은 review unit을 고정하기 위한 것이며 remote push 또는 main 반영은 수행하지 않습니다. 저장하는 `git_status` snapshot은 자동 commit 이후 실제 Codex 실행 cwd인 task worktree에서 수집합니다.
+- `run-next`는 task JSON의 canonical `cwd`를 원래 task cwd로 보존하고, worker에 전달하는 실행 cwd만 task worktree로 바꿉니다. 정상 final JSON이 `completed`이고 task worktree에 변경이 남아 있으면 runner는 final JSON의 `changed_files`에 보고된 안전한 상대 경로만 stage하여 task branch에 local commit을 만듭니다. 이 commit은 review unit을 고정하기 위한 것이며 remote push 또는 main 반영은 수행하지 않습니다. 저장하는 `git_status` snapshot은 자동 commit 이후 실제 worker 실행 cwd인 task worktree에서 수집합니다.
 - `review-bundle`은 main repository state와 task worktree state를 분리해 표시합니다. Completion-time snapshot, review-time current main state, review-time task worktree state, branch, base ref, inferred commits, retained worktree path 존재 여부를 각각 기록합니다. Worktree-backed task에서 `execution_base_head..execution_branch` commit 또는 commit range를 추론할 수 있으면 이를 원자적인 review unit으로 취급합니다. Compatibility field인 `current_git_repository`와 `git_repository`는 review gate가 검사하는 task execution repository를 가리키며, worktree-backed task에서는 task worktree state입니다.
 - `summary`, `review-bundle`, `review-next`, `doctor`는 worktree 준비/정리 단계가 저장한 task metadata를 read-only로 표시합니다. 표시 대상은 `execution_mode`, branch, base ref/head, apply status/head/target, worktree status, sanitized worktree path/root이며, 실제 개인 절대 경로는 공개 보고에 그대로 노출하지 않습니다.
 - `review-next`는 missing/stale/recovery_required worktree metadata를 별도 report field와 warning으로 표시합니다. 이 warning은 operator review를 돕기 위한 정보이며, 기존 review gate가 명시적으로 요구하지 않는 한 단독으로 fatal gate가 되지 않습니다.
@@ -141,7 +141,7 @@ Stale worktree recovery and failure handling:
 
 - Worktree path가 존재하지만 Git registry에 없거나, registry에는 있으나 path가 없으면 `recovery_required`로 표시하고 raw execution을 중단합니다.
 - Branch HEAD가 task metadata의 expected head와 다르거나, worktree에 unexpected dirty changes가 있으면 자동 재사용하지 않습니다.
-- Codex process 실패, startup stall, final JSON schema failure, runner crash가 발생하면 worktree metadata와 branch ref를 task에 남겨 retry 또는 수동 점검이 가능하게 합니다. Codex 실행이 끝난 뒤 task worktree는 기본적으로 `retained`로 남깁니다. 자동 commit이 실패하거나 `changed_files`가 안전한 상대 경로가 아니어서 stage할 수 없으면 task는 dirty retained worktree로 남고 review gate가 human check를 요구합니다.
+- Worker process 실패, startup stall, final JSON schema failure, runner crash가 발생하면 worktree metadata와 branch ref를 task에 남겨 retry 또는 수동 점검이 가능하게 합니다. Worker 실행이 끝난 뒤 task worktree는 기본적으로 `retained`로 남깁니다. 자동 commit이 실패하거나 `changed_files`가 안전한 상대 경로가 아니어서 stage할 수 없으면 task는 dirty retained worktree로 남고 review gate가 human check를 요구합니다.
 - Resume은 기존 session/thread id 정책을 따르되, resume cwd가 같은 retained worktree인지 확인합니다. Retained worktree metadata가 없거나, path/branch/registry check가 recovery-required 상태이면 새 worktree를 만들지 않고 Codex를 호출하지 않습니다. 이 경우 task를 `failed`로 표시하고 `last_error`와 sanitized event에 worktree prepare/recovery failure를 남겨 operator review를 요구합니다.
 - Worktree prepare가 실패하면 Codex를 호출하지 않고 task를 `failed` 또는 retryable `runnable`로 돌릴지 phase별로 정합니다. 초기 prepare/cleanup command는 mutation 실패를 task execution 실패와 분리해 report-only로 시작합니다.
 

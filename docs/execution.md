@@ -71,6 +71,8 @@ Enqueue CLI는 `--backend external-json-command`와 함께 `--command-json '["pa
 
 Runner는 external-json-command task에도 기존 queue ordering, dependency readiness, cooldown skip, runner lock, stale running recovery, worktree cwd adapter, attempts/run count, log path, status transition event, post-run wake trigger를 적용합니다. `worktree_mode=task`이면 command cwd는 prepared task worktree입니다. Timeout은 Codex JSONL progress watchdog이 아니라 wall-clock subprocess timeout입니다.
 
+`worktree_mode=task`에서 external worker는 task worktree 파일을 수정하고 final JSON `changed_files`에 안전한 상대 경로를 보고해야 합니다. External worker는 직접 commit하거나 push하지 않습니다. Valid `completed` final JSON이면 cbr가 보고된 safe `changed_files`만 stage하여 task branch에 local auto-commit을 만들고, 그 commit을 review/apply unit으로 기록합니다. cbr-created commit은 `last_result.commits`에 추가되고 `last_result.push_status.status=not_pushed`로 저장됩니다.
+
 External command stdout은 하나의 JSON object여야 합니다. Required final JSON shape는 Codex final response와 같습니다: `task_id`, `status`, `summary`, `changed_files`, `verification`, optional `next_prompt`, optional `commits`, optional `push_status`. 허용 status는 `completed`, `needs_resume`, `blocked_user`, `failed`입니다. `completed`는 `review_status=unreviewed`를 기록합니다. `needs_resume`은 `next_prompt`를 저장하고 다음 실행에서 provider-native conversation id 없이 resume-unavailable continuation prompt를 사용합니다.
 
 Invalid JSON, task id mismatch, missing required key, invalid status, executable failure, timeout, and nonzero exit without valid `status=failed` or `status=blocked_user` final JSON은 `failed`와 sanitized `last_error`로 기록합니다. Nonzero exit가 valid final JSON을 출력했더라도 `completed` 또는 `needs_resume`은 성공으로 인정하지 않습니다. Nonzero exit with valid `failed` 또는 `blocked_user` final JSON은 external worker가 보고한 terminal result로 기록할 수 있습니다.

@@ -1210,12 +1210,55 @@ class RunnerTests(unittest.TestCase):
 
             outcome = run_next(config)
             task = load_task(config, "external-worktree")
+            worktree_path = Path(task["execution_worktree_path"])
+            base = task["execution_base_head"]
+            rev_list = git(worktree_path, "rev-list", "--count", f"{base}..HEAD").stdout.strip()
+            status = git(worktree_path, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip()
 
             self.assertEqual("completed", outcome.status)
             self.assertEqual("retained", task["execution_worktree_status"])
-            self.assertTrue((Path(task["execution_worktree_path"]) / "external.txt").exists())
+            self.assertTrue((worktree_path / "external.txt").exists())
             self.assertFalse((repo / "external.txt").exists())
+            self.assertEqual("1", rev_list)
+            self.assertEqual("", status)
+            self.assertFalse(task["git_status"]["dirty"])
+            self.assertTrue(task["execution_commit"])
+            self.assertIn(task["execution_commit"], task["last_result"]["commits"])
+            self.assertEqual("not_pushed", task["last_result"]["push_status"]["status"])
             self.assertEqual("", git(repo, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip())
+
+    def test_run_next_external_json_command_worktree_unsafe_changed_files_remains_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            init_repo(repo)
+            config = replace(make_config(tmp, "success"), worktree_mode="task", worktree_root=root / "worktrees")
+            create_task(
+                config,
+                "external work",
+                str(repo),
+                task_id="external-worktree-unsafe",
+                execution_backend="external-json-command",
+                external_command=[
+                    sys.executable,
+                    "-c",
+                    "import json, pathlib; pathlib.Path('external.txt').write_text('worktree\\n'); print(json.dumps({'task_id':'external-worktree-unsafe','status':'completed','summary':'ok','changed_files':['../external.txt'],'verification':['checked']}))",
+                ],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "external-worktree-unsafe")
+            worktree_path = Path(task["execution_worktree_path"])
+            status = git(worktree_path, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip()
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("retained", task["execution_worktree_status"])
+            self.assertNotIn("execution_commit", task)
+            self.assertNotIn("commits", task["last_result"])
+            self.assertNotIn("push_status", task["last_result"])
+            self.assertIn("no safe changed_files", task["execution_commit_warning"])
+            self.assertTrue(status)
+            self.assertTrue(task["git_status"]["dirty"])
 
     def test_run_next_records_resolved_execution_config_in_last_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
