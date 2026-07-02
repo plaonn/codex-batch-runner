@@ -356,6 +356,8 @@ class WorktreeTests(unittest.TestCase):
             dry_code, dry_report = run_cli(
                 ["--config", str(config_path), "worktree", "cleanup", "cleanup-stale-applied", "--dry-run", "--json"]
             )
+            doctor_code, doctor_output = run_cli_text(["--config", str(config_path), "doctor", "--json"])
+            doctor_report = json.loads(doctor_output)
             apply_code, apply_report = run_cli(
                 ["--config", str(config_path), "worktree", "cleanup", "cleanup-stale-applied", "--apply", "--json"]
             )
@@ -366,6 +368,12 @@ class WorktreeTests(unittest.TestCase):
             self.assertEqual("recovery_required", dry_report["classification"]["status"])
             self.assertEqual("stale_applied_metadata", dry_report["applied_metadata"]["status"])
             self.assertIn("execution_applied_head is not contained", dry_report["errors"][0])
+            self.assertEqual(0, doctor_code)
+            self.assertEqual(1, doctor_report["worktree"]["tasks"]["recovery_required"])
+            branch_items = doctor_report["worktree"]["task_branches"]
+            self.assertEqual("cleanup-stale-applied", branch_items[0]["task_id"])
+            self.assertTrue(branch_items[0]["recovery_required"])
+            self.assertEqual("stale_applied_metadata", branch_items[0]["applied_metadata"]["status"])
             self.assertTrue(worktree_path.exists())
             self.assertNotIn("execution_cleaned_at", load_task(config, "cleanup-stale-applied"))
             self.assertEqual(1, apply_code)

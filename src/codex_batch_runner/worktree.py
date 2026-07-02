@@ -1469,6 +1469,21 @@ def task_worktree_report(task: dict[str, Any]) -> dict[str, Any]:
         except (OSError, subprocess.SubprocessError) as exc:
             report["warnings"].append("cannot inspect worktree branch: " + sanitize_report_value(exc))
 
+    if status in WORKTREE_RETAINED_STATUSES and has_applied_worktree_metadata(task):
+        if repo_value:
+            try:
+                repo_root = Path(str(repo_value)).expanduser()
+                applied_metadata = verify_applied_cleanup_target(task, repo_root)
+                report["applied_metadata"] = {key: sanitize_report_value(value) for key, value in applied_metadata.items()}
+                if applied_metadata.get("status") == "stale_applied_metadata":
+                    report["recovery_required"] = True
+                    report["stale_metadata"].append("applied_metadata")
+                    report["warnings"].append(str(applied_metadata.get("reason") or "stale applied metadata"))
+            except (OSError, subprocess.SubprocessError) as exc:
+                report["warnings"].append("cannot inspect applied metadata: " + sanitize_report_value(exc))
+        else:
+            report["warnings"].append("cannot inspect applied metadata: missing repository metadata")
+
     report["missing_metadata"] = sorted(set(report["missing_metadata"]))
     report["stale_metadata"] = sorted(set(report["stale_metadata"]))
     report["warnings"] = sorted(set(report["warnings"]))

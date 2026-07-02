@@ -455,6 +455,7 @@ def task_branch_lifecycle_summary(tasks: list[dict[str, Any]]) -> list[dict[str,
             "branch_pruned_head": sanitize_report_value(task.get("execution_branch_pruned_head")),
             "branch_pruned_at": task.get("execution_branch_pruned_at"),
             "recovery_required": worktree_report.get("recovery_required"),
+            "applied_metadata": worktree_report.get("applied_metadata"),
             "remote_task_branch": remote_task_branch_summary(task, branch),
         }
         items.append({key: value for key, value in item.items() if value not in (None, "", [])})

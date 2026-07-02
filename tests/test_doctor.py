@@ -459,6 +459,55 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(1, report["worktree"]["tasks"]["retained"])
             self.assertEqual(1, report["worktree"]["tasks"]["recovery_required"])
 
+    def test_doctor_flags_stale_applied_metadata_as_recovery_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = root / "codex"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(tmp, [str(executable)], worktree_mode="task")
+            config = Config.load(str(config_path))
+            initial_head = git_output(repo, ["rev-parse", "HEAD"])
+            (repo / "file.txt").write_text("base\napplied\n", encoding="utf-8")
+            run_git(repo, ["commit", "-am", "applied"])
+            applied_head = git_output(repo, ["rev-parse", "HEAD"])
+            run_git(repo, ["reset", "--hard", initial_head])
+            run_git(repo, ["branch", "cbr/stale-applied", initial_head])
+            worktree_path = root / "worktrees" / "stale-applied"
+            worktree_path.mkdir(parents=True)
+            task = create_task(config, "work", str(repo), task_id="stale-applied")
+            task.update(
+                {
+                    "status": "completed",
+                    "review_status": "accepted",
+                    "execution_mode": "git_worktree",
+                    "execution_branch": "cbr/stale-applied",
+                    "execution_repo_root": str(repo),
+                    "execution_base_ref": "HEAD",
+                    "execution_base_head": initial_head,
+                    "execution_worktree_status": "retained",
+                    "execution_worktree_path": str(worktree_path),
+                    "execution_apply_status": "applied",
+                    "execution_applied_head": applied_head,
+                }
+            )
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(1, report["worktree"]["tasks"]["retained"])
+            self.assertEqual(1, report["worktree"]["tasks"]["recovery_required"])
+            branch = report["worktree"]["task_branches"][0]
+            self.assertEqual("stale-applied", branch["task_id"])
+            self.assertTrue(branch["recovery_required"])
+            self.assertEqual("stale_applied_metadata", branch["applied_metadata"]["status"])
+            self.assertIn("execution_applied_head is not contained", branch["applied_metadata"]["reason"])
+
     def test_doctor_reports_task_branch_lifecycle_visibility(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
