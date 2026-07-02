@@ -15,7 +15,12 @@ FINAL_SCHEMA = {
 }
 
 
-def build_prompt(task: dict, resume_unavailable: bool = False, execution_cwd: str | None = None) -> str:
+def build_prompt(
+    task: dict,
+    resume_unavailable: bool = False,
+    execution_cwd: str | None = None,
+    execution_backend: str | None = None,
+) -> str:
     prompt = task.get("next_prompt") if task.get("status") == "needs_resume" and task.get("next_prompt") else task.get("prompt", "")
     is_git_worktree = task.get("execution_mode") == "git_worktree"
     worktree_path = execution_cwd or task.get("execution_worktree_path")
@@ -36,12 +41,20 @@ def build_prompt(task: dict, resume_unavailable: bool = False, execution_cwd: st
     ]
     if is_git_worktree:
         original_cwd = task.get("cwd")
+        worktree_usage = "Use cwd/execution_worktree_path as the current process cwd for edits and tests."
+        if execution_backend == "external-json-command":
+            worktree_usage = (
+                "Use cwd/execution_worktree_path as the current process cwd for edits and tests. "
+                "Do not create local commits or push; report safe relative changed_files so cbr can create the review commit."
+            )
+        elif execution_backend != "external-json-command":
+            worktree_usage = "Use cwd/execution_worktree_path as the current process cwd for edits, tests, and commits."
         parts.extend(
             [
                 "execution_mode: git_worktree",
                 f"execution_worktree_path: {worktree_path or cwd}",
                 f"original_task_cwd: {original_cwd}",
-                "Use cwd/execution_worktree_path as the current process cwd for edits, tests, and commits.",
+                worktree_usage,
                 "Do not use original_task_cwd for repository commands during this task.",
             ]
         )

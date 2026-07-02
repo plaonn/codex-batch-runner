@@ -211,6 +211,7 @@ def claim_next_implementation_task_locked(
             task,
             resume_unavailable=resume_unavailable,
             execution_cwd=str(execution_cwd) if execution_cwd else None,
+            execution_backend=execution_backend,
         )
     if execution_backend == "codex":
         execution_config, config_error = validate_execution_config(config, task)
@@ -316,9 +317,20 @@ def finalize_external_json_command_run(
         if claimed.execution_cwd:
             task["execution_worktree_status"] = "retained"
             task["execution_retained_at"] = iso_now()
+            completion_guard_error = None
             if external_json_command_completed_success(task, result):
-                auto_commit_worktree_final_response(config, task, result.final_response, claimed.execution_cwd)
-        apply_external_json_command_result(config, task, result, git_status_cwd=claimed.execution_cwd)
+                completion_guard_error = external_json_command_worker_commit_error(task, claimed.execution_cwd)
+                if not completion_guard_error:
+                    auto_commit_worktree_final_response(config, task, result.final_response, claimed.execution_cwd)
+        else:
+            completion_guard_error = None
+        apply_external_json_command_result(
+            config,
+            task,
+            result,
+            git_status_cwd=claimed.execution_cwd,
+            completion_guard_error=completion_guard_error,
+        )
         claimed.task = task
         return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
     finally:
@@ -689,6 +701,7 @@ def apply_external_json_command_result(
     result: ExternalJsonCommandResult,
     *,
     git_status_cwd: Path | None = None,
+    completion_guard_error: str | None = None,
 ) -> None:
     clear_active_run_metadata(task)
     task.setdefault("log_paths", []).append(str(result.log_path))
@@ -724,6 +737,9 @@ def apply_external_json_command_result(
             result,
             f"external-json-command exited with {result.returncode} and status={status}",
         )
+        return
+    if completion_guard_error:
+        mark_external_json_command_failure(config, task, result, completion_guard_error)
         return
 
     task["last_result"] = final_response
@@ -811,6 +827,41 @@ def external_json_command_completed_success(task: dict[str, Any], result: Extern
     if result.returncode != 0:
         return False
     return True
+
+
+def external_json_command_worker_commit_error(task: dict[str, Any], worktree_path: Path) -> str | None:
+    if task.get("execution_mode") != "git_worktree":
+        return None
+
+    base = str(task.get("execution_base_head") or "").strip()
+    if not base:
+        return (
+            "external-json-command worktree commit guard could not verify execution_base_head; "
+            "retained task worktree/branch for recovery"
+        )
+
+    base_rev = run_git(worktree_path, ["rev-parse", "--verify", f"{base}^{{commit}}"])
+    if base_rev.returncode != 0 or not base_rev.stdout.strip():
+        return (
+            "external-json-command worktree commit guard could not verify execution_base_head: "
+            + clean_git_error(base_rev)
+        )
+    head_rev = run_git(worktree_path, ["rev-parse", "--verify", "HEAD^{commit}"])
+    if head_rev.returncode != 0 or not head_rev.stdout.strip():
+        return "external-json-command worktree commit guard could not inspect HEAD: " + clean_git_error(head_rev)
+
+    base_commit = base_rev.stdout.strip()
+    head_commit = head_rev.stdout.strip()
+    if head_commit == base_commit:
+        return None
+
+    count_result = run_git(worktree_path, ["rev-list", "--count", f"{base_commit}..HEAD"])
+    count = count_result.stdout.strip() if count_result.returncode == 0 else "unknown"
+    return (
+        "external-json-command worker-created local commit(s) detected before cbr auto-commit "
+        f"(count={count}); external-json-command v1 workers must not commit or push. "
+        "Retained task worktree/branch for recovery/review."
+    )
 
 
 def mark_external_json_command_failure(

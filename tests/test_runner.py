@@ -18,6 +18,7 @@ import codex_batch_runner.runner as runner_module
 from codex_batch_runner.codex import CodexResult
 from codex_batch_runner.evidence import list_rate_limit_evidence
 from codex_batch_runner.events import list_events
+from codex_batch_runner.prompts import build_prompt
 from codex_batch_runner.queue import create_task, load_task, save_task
 from codex_batch_runner.runner import apply_codex_result, run_next
 from codex_batch_runner.state import load_state
@@ -1260,6 +1261,48 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(status)
             self.assertTrue(task["git_status"]["dirty"])
 
+    def test_run_next_external_json_command_worktree_rejects_worker_created_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            init_repo(repo)
+            config = replace(make_config(tmp, "success"), worktree_mode="task", worktree_root=root / "worktrees")
+            create_task(
+                config,
+                "external work",
+                str(repo),
+                task_id="external-worktree-worker-commit",
+                execution_backend="external-json-command",
+                external_command=[
+                    sys.executable,
+                    "-c",
+                    (
+                        "import json, pathlib, subprocess; "
+                        "pathlib.Path('external.txt').write_text('worktree\\n', encoding='utf-8'); "
+                        "subprocess.run(['git','add','external.txt'], check=True); "
+                        "subprocess.run(['git','commit','-m','worker commit'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True); "
+                        "print(json.dumps({'task_id':'external-worktree-worker-commit','status':'completed','summary':'ok','changed_files':['external.txt'],'verification':['checked']}))"
+                    ),
+                ],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "external-worktree-worker-commit")
+            worktree_path = Path(task["execution_worktree_path"])
+            base = task["execution_base_head"]
+            rev_list = git(worktree_path, "rev-list", "--count", f"{base}..HEAD").stdout.strip()
+            status = git(worktree_path, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip()
+
+            self.assertEqual("failed", outcome.status)
+            self.assertEqual("failed", task["status"])
+            self.assertEqual("retained", task["execution_worktree_status"])
+            self.assertIn("worker-created local commit", task["last_error"])
+            self.assertIn("must not commit or push", task["last_error"])
+            self.assertNotIn("execution_commit", task)
+            self.assertEqual("failed", task["last_result"]["status"])
+            self.assertEqual("1", rev_list)
+            self.assertEqual("", status)
+
     def test_run_next_records_resolved_execution_config_in_last_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")
@@ -1383,6 +1426,25 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("retained", task["execution_worktree_status"])
             self.assertTrue(worktree_path.is_dir())
             self.assertEqual(str(worktree_path), task["git_status"]["root"])
+
+    def test_external_json_command_git_worktree_prompt_disallows_commit_and_push(self) -> None:
+        prompt = build_prompt(
+            {
+                "id": "external-prompt",
+                "cwd": "/repo",
+                "prompt": "make a change",
+                "execution_mode": "git_worktree",
+                "execution_worktree_path": "/worktrees/external-prompt",
+            },
+            execution_cwd="/worktrees/external-prompt",
+            execution_backend="external-json-command",
+        )
+
+        self.assertIn("execution_mode: git_worktree", prompt)
+        self.assertIn("Use cwd/execution_worktree_path as the current process cwd for edits and tests.", prompt)
+        self.assertIn("Do not create local commits or push", prompt)
+        self.assertIn("report safe relative changed_files so cbr can create the review commit", prompt)
+        self.assertNotIn("edits, tests, and commits", prompt)
 
     def test_run_next_worktree_completed_task_commits_reported_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
