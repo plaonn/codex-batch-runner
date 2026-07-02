@@ -41,6 +41,7 @@ class ResolvedExecutionConfig:
     selection_rule: str | None = None
     selection_reason: str | None = None
     model: str | None = None
+    model_source: str = "unknown"
     codex_profile: str | None = None
     config_overrides: dict[str, str] | None = None
     budget_hint: str | None = None
@@ -138,6 +139,7 @@ def resolve_execution_config(config: Any, task: dict[str, Any], *, reviewer: boo
         selection_rule=selection.get("selection_rule"),
         selection_reason=selection.get("selection_reason"),
         model=selection.get("model"),
+        model_source=model_source_for_selection(selection),
         codex_profile=selection.get("codex_profile"),
         config_overrides=selection.get("config_overrides") or None,
         budget_hint=selection.get("budget_hint"),
@@ -199,6 +201,12 @@ def select_execution_config(config: Any, vector: dict[str, Any]) -> dict[str, An
         default["selection_rule"] = "default_execution_config"
         default["selection_reason"] = "no model_selection_rule matched"
     return default
+
+
+def model_source_for_selection(selection: dict[str, Any]) -> str:
+    if selection.get("model"):
+        return "explicit_model"
+    return "cli_default"
 
 
 def rule_matches(when: object, dimensions: dict[str, Any]) -> bool:

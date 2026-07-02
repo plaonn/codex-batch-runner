@@ -83,8 +83,11 @@ class CodexParserTests(unittest.TestCase):
             config = Config.load(root=Path(tmp))
 
             command = format_command_with_resolved_config(["codex", "exec", "--json"], {"id": "task-1"}, "prompt", config)
+            resolved = resolve_execution_config(config, {"id": "task-1"})
 
             self.assertEqual(["codex", "exec", "--json", "prompt"], command)
+            self.assertEqual("cli_default", resolved.model_source)
+            self.assertIsNone(resolved.model)
 
     def test_format_command_injects_model_selection_options_after_exec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,6 +208,43 @@ class CodexParserTests(unittest.TestCase):
             )
 
             self.assertEqual(["codex", "exec", "--model", "gpt-5", "--profile", "batch-deep", "prompt"], command)
+            resolved = resolve_execution_config(
+                config,
+                {"id": "task-1", "model_requirement_vector": {"dimensions": {"reasoning_depth": "high"}}},
+            )
+            self.assertEqual("explicit_model", resolved.model_source)
+            self.assertEqual("gpt-5", resolved.model)
+
+    def test_model_selection_rule_without_model_uses_cli_default_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            config = Config(
+                **{
+                    **config.__dict__,
+                    "model_selection_rules": [
+                        {
+                            "name": "high-effort-default-model",
+                            "when": {"reasoning_depth": "high"},
+                            "config_overrides": {"model_reasoning_effort": "high"},
+                        }
+                    ],
+                }
+            )
+
+            command = format_command_with_resolved_config(
+                ["codex", "exec"],
+                {"id": "task-1", "model_requirement_vector": {"dimensions": {"reasoning_depth": "high"}}},
+                "prompt",
+                config,
+            )
+            resolved = resolve_execution_config(
+                config,
+                {"id": "task-1", "model_requirement_vector": {"dimensions": {"reasoning_depth": "high"}}},
+            )
+
+            self.assertEqual(["codex", "exec", "-c", "model_reasoning_effort=high", "prompt"], command)
+            self.assertEqual("cli_default", resolved.model_source)
+            self.assertIsNone(resolved.model)
 
     def test_high_risk_metadata_derives_high_requirement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

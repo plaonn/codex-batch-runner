@@ -1312,6 +1312,7 @@ class RunnerTests(unittest.TestCase):
                     {
                         "name": "high-capability",
                         "when": {"reasoning_depth": "high"},
+                        "model": "gpt-5",
                         "config_overrides": {"model_reasoning_effort": "high"},
                     }
                 ],
@@ -1330,8 +1331,40 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("completed", outcome.status)
             resolved = task["last_run"]["resolved_execution_config"]
             self.assertEqual("high-capability", resolved["selection_rule"])
+            self.assertEqual("explicit_model", resolved["model_source"])
+            self.assertEqual("gpt-5", resolved["model"])
             self.assertEqual("high", resolved["model_requirement_vector"]["dimensions"]["reasoning_depth"])
             self.assertEqual(["model_reasoning_effort"], resolved["config_override_keys"])
+
+    def test_run_next_records_cli_default_model_source_for_no_model_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            config = replace(
+                config,
+                model_selection_rules=[
+                    {
+                        "name": "high-capability",
+                        "when": {"reasoning_depth": "high"},
+                        "config_overrides": {"model_reasoning_effort": "high"},
+                    }
+                ],
+            )
+            create_task(
+                config,
+                "do it",
+                tmp,
+                task_id="task-critical-worktree",
+                labels=["worktree-apply"],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "task-critical-worktree")
+
+            self.assertEqual("completed", outcome.status)
+            resolved = task["last_run"]["resolved_execution_config"]
+            self.assertEqual("high-capability", resolved["selection_rule"])
+            self.assertEqual("cli_default", resolved["model_source"])
+            self.assertIsNone(resolved["model"])
 
     def test_run_next_worktree_disabled_uses_original_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
