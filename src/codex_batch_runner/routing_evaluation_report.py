@@ -5,6 +5,7 @@ from typing import Any
 
 from .config import Config
 from .evaluation import derive_evaluation_row
+from .execution_evidence import derive_execution_evidence_rows
 from .queue import list_tasks, task_labels, task_project_id, task_project_root
 from .timeutil import iso_now
 
@@ -20,6 +21,7 @@ def build_routing_evaluation_report(
     label: str | None = None,
     limit: int = DEFAULT_ROUTING_EVAL_REPORT_LIMIT,
     include_archived: bool = False,
+    execution_evidence_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     tasks = list_tasks(config)
     total_available = len(tasks)
@@ -36,6 +38,7 @@ def build_routing_evaluation_report(
     if limit > 0:
         tasks = tasks[:limit]
     rows = [derive_evaluation_row(task) for task in tasks]
+    execution_evidence_rows = derive_execution_evidence_rows(execution_evidence_records)
     return {
         "generated_at": iso_now(),
         "filters": {
@@ -51,6 +54,8 @@ def build_routing_evaluation_report(
         "filtered_count": filtered_count,
         "row_count": len(rows),
         "evaluation_rows": rows,
+        "execution_evidence_count": len(execution_evidence_rows),
+        "execution_evidence_rows": execution_evidence_rows,
         "privacy": {
             "raw_prompts_included": False,
             "raw_transcripts_included": False,
@@ -93,6 +98,8 @@ def render_routing_evaluation_report(report: dict[str, Any]) -> str:
         "# routing evaluation report",
         f"rows: {report.get('row_count')} of {report.get('filtered_count')} filtered",
     ]
+    if int(report.get("execution_evidence_count") or 0):
+        lines.append(f"execution_evidence_rows: {report.get('execution_evidence_count')}")
     filters = report.get("filters") if isinstance(report.get("filters"), dict) else {}
     active_filters = [
         f"{key}={value}"

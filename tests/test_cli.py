@@ -2072,6 +2072,118 @@ class CliTests(unittest.TestCase):
             self.assertEqual("", output)
             self.assertIn("--limit must be non-negative", stderr)
 
+    def test_routing_report_accepts_supplemental_execution_evidence_without_changing_task_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "queue task",
+                tmp,
+                task_id="queue-task",
+                project_id="project-a",
+                category="implementation",
+                labels=["routing"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
+            task_path = config.queue_dir / "queue-task.json"
+            before = task_path.read_text(encoding="utf-8")
+            private_path = f"{tmp}/private/session-transcript.jsonl"
+            evidence_path = Path(tmp) / "subagent-evidence.json"
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "record_kind": "codex_subagent_execution",
+                        "work_id": "thread_sensitive_identifier_123456789",
+                        "project_id": "project-a",
+                        "category": "implementation",
+                        "labels": ["routing"],
+                        "routing_size": "small",
+                        "routing_risk": "medium",
+                        "verification_scope": ["unit"],
+                        "prompt": f"raw prompt mentions {private_path}",
+                        "session_id": "session_sensitive_identifier_123456789",
+                        "thread_id": "thread_sensitive_identifier_123456789",
+                        "last_run": {
+                            "duration_seconds": 22,
+                            "log_path": private_path,
+                            "resolved_execution_config": {
+                                "selection_rule": "codex-app-default",
+                                "model_source": "codex_app_default",
+                            },
+                        },
+                        "last_result": {
+                            "status": "completed",
+                            "summary": f"raw summary mentions {private_path}",
+                            "changed_files": [private_path],
+                            "verification": [f"python -m unittest {private_path}"],
+                        },
+                        "reviewer_codex": {
+                            "decision": "pass",
+                            "confidence": "high",
+                            "findings": [{"severity": "info", "evidence": f"raw evidence {private_path}"}],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "routing-report",
+                    "--project",
+                    "project-a",
+                    "--execution-evidence-json",
+                    str(evidence_path),
+                    "--json",
+                ]
+            )
+            after = task_path.read_text(encoding="utf-8")
+            report = json.loads(output)
+            serialized = json.dumps(report, sort_keys=True)
+            evidence_row = report["execution_evidence_rows"][0]
+
+            self.assertEqual(0, code)
+            self.assertEqual(before, after)
+            self.assertEqual(1, report["task_count"])
+            self.assertEqual(1, report["execution_evidence_count"])
+            self.assertEqual(1, report["groups"]["category"][0]["tasks"])
+            self.assertEqual("codex_subagent", evidence_row["execution_surface"])
+            self.assertFalse(evidence_row["subject"]["queue_task"])
+            self.assertEqual("supplemental_execution_evidence", evidence_row["subject"]["kind"])
+            self.assertEqual("codex_app_default", evidence_row["worker"]["model_source"])
+            self.assertNotIn("raw prompt mentions", serialized)
+            self.assertNotIn("raw summary mentions", serialized)
+            self.assertNotIn("raw evidence", serialized)
+            self.assertNotIn("session_sensitive_identifier_123456789", serialized)
+            self.assertNotIn("thread_sensitive_identifier_123456789", serialized)
+            self.assertNotIn(private_path, serialized)
+
+    def test_routing_report_rejects_invalid_execution_evidence_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            evidence_path = Path(tmp) / "subagent-evidence.json"
+            evidence_path.write_text(json.dumps({"record_kind": "raw_thread_dump"}), encoding="utf-8")
+
+            code, output, stderr = run_cli_with_stderr(
+                [
+                    "--config",
+                    str(config_path),
+                    "routing-report",
+                    "--execution-evidence-json",
+                    str(evidence_path),
+                    "--json",
+                ]
+            )
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("unsupported execution evidence record_kind", stderr)
+
     def test_routing_eval_report_json_returns_bounded_public_safe_rows_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -2207,6 +2319,58 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, code)
             self.assertEqual("", output)
             self.assertIn("--limit must be non-negative", stderr)
+
+    def test_routing_eval_report_keeps_supplemental_execution_evidence_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            evidence_path = Path(tmp) / "subagent-evidence.json"
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "records": [
+                            {
+                                "record_kind": "codex_subagent_execution",
+                                "work_id": "codex-thread-not-for-output-123456789",
+                                "project_id": "project-a",
+                                "category": "docs",
+                                "labels": ["eval"],
+                                "routing_size": "small",
+                                "routing_risk": "low",
+                                "verification_scope": ["manual"],
+                                "last_run": {
+                                    "duration_seconds": 5,
+                                    "resolved_execution_config": {"selection_rule": "codex-app-default"},
+                                },
+                                "last_result": {"status": "completed", "verification": ["manual review"]},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "routing-eval-report",
+                    "--execution-evidence-json",
+                    str(evidence_path),
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+            row = report["execution_evidence_rows"][0]
+            serialized = json.dumps(report, sort_keys=True)
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, report["row_count"])
+            self.assertEqual([], report["evaluation_rows"])
+            self.assertEqual(1, report["execution_evidence_count"])
+            self.assertEqual("codex_subagent", row["execution_surface"])
+            self.assertEqual("supplemental_execution_evidence", row["subject"]["kind"])
+            self.assertEqual("codex_app_default", row["worker"]["model_source"])
+            self.assertNotIn("codex-thread-not-for-output-123456789", serialized)
 
     def test_list_filters_by_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

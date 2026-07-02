@@ -34,6 +34,8 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
     row = {
         "schema_version": SCHEMA_VERSION,
         "derivation_version": DERIVATION_VERSION,
+        "execution_surface": _execution_surface(task),
+        "subject": _subject_section(task, fingerprint),
         "task_id": _task_id(task),
         "task_id_hash": fingerprint.get("task_id_hash"),
         "request_fingerprint": _fingerprint_section(fingerprint),
@@ -60,6 +62,25 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
     }
     row["experiment_cell_key"] = _experiment_cell_key(row)
     return row
+
+
+def _subject_section(task: dict[str, Any], fingerprint: dict[str, Any]) -> dict[str, Any]:
+    queue_task = task.get("queue_task") is not False
+    return {
+        "kind": "cbr_queue_task" if queue_task else "supplemental_execution_evidence",
+        "queue_task": queue_task,
+        "execution_surface": _execution_surface(task),
+        "work_id_hash": fingerprint.get("task_id_hash"),
+    }
+
+
+def _execution_surface(task: dict[str, Any]) -> str:
+    surface = _safe_metadata_value(task.get("execution_surface"))
+    if surface != "unknown":
+        return surface
+    if task.get("queue_task") is False:
+        return "unknown"
+    return "cbr_batch"
 
 
 def _fingerprint_section(fingerprint: dict[str, Any]) -> dict[str, Any]:

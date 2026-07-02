@@ -79,7 +79,7 @@
 요구사항: task intent, model requirement, concrete execution config, worker/reviewer evidence, provider resource evidence, policy evaluation은 서로 다른 개념으로 유지한다.
 근거: routing/cost 최적화는 작업 요구, provider availability, reviewer reliability, worker quality를 하나의 opaque profile label로 합치지 않을 때만 검토 가능한 근거가 된다.
 방지 실패: legacy profile 이름이 durable policy primitive가 되는 문제, `routing-report`가 정책을 자동 변경하는 문제, reviewer drift가 worker 평가를 오염시키는 문제, `capacity_pool`이나 local role 이름에서 provider quota bucket을 추론하는 문제.
-파생 규칙: task JSON은 `model_requirement_vector`를 저장하고, 실제 실행 선택은 `last_run.resolved_execution_config`에 기록하며, `routing-report`와 provider resource evidence는 read-only/advisory 진단으로만 사용한다.
+파생 규칙: task JSON은 `model_requirement_vector`를 저장하고, 실제 실행 선택은 `last_run.resolved_execution_config`에 기록하며, `routing-report`와 provider resource evidence는 read-only/advisory 진단으로만 사용한다. Queue 밖 실행 근거는 fake task로 만들지 않고 `execution_surface`와 `subject.queue_task=false`로 stratify된 supplemental evidence row로만 병합한다.
 재검토 시점: 충분한 accepted/rejected/routed sample을 바탕으로 public schema나 자동 routing policy 변경을 검토할 때.
 근거 문서: [docs/execution.md](execution.md)
 

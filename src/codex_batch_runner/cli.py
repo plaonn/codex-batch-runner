@@ -20,6 +20,7 @@ from .doctor import build_doctor_report, render_doctor_report
 from .direct_worktrees import build_direct_worktrees_report, render_direct_worktrees_report
 from .dashboard import DEFAULT_DASHBOARD_HOST, DEFAULT_DASHBOARD_PORT, serve_dashboard
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write_event_nonfatal
+from .execution_evidence import ExecutionEvidenceError, load_execution_evidence_records
 from .model_requirements import REQUIREMENT_DIMENSIONS, REQUIREMENT_LEVELS, model_requirement_vector_value
 from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
@@ -275,6 +276,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"maximum recent tasks to include after filtering; 0 means no limit (default: {DEFAULT_ROUTING_REPORT_LIMIT})",
     )
     routing_report.add_argument("--include-archived", action="store_true", help="include archived tasks")
+    routing_report.add_argument(
+        "--execution-evidence-json",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="include sanitized supplemental execution evidence rows from JSON without mutating queue tasks",
+    )
     routing_report.add_argument("--json", action="store_true", help="print JSON")
     routing_report.set_defaults(func=cmd_routing_report)
 
@@ -293,6 +301,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"maximum recent tasks to include after filtering; 0 means no limit (default: {DEFAULT_ROUTING_EVAL_REPORT_LIMIT})",
     )
     routing_eval_report.add_argument("--include-archived", action="store_true", help="include archived tasks")
+    routing_eval_report.add_argument(
+        "--execution-evidence-json",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="include sanitized supplemental execution evidence rows from JSON without mutating queue tasks",
+    )
     routing_eval_report.add_argument("--json", action="store_true", help="print JSON")
     routing_eval_report.set_defaults(func=cmd_routing_eval_report)
 
@@ -3455,6 +3470,11 @@ def cmd_routing_report(config: Config, args: argparse.Namespace) -> int:
     if args.limit < 0:
         print("error: --limit must be non-negative", file=sys.stderr)
         return 1
+    try:
+        execution_evidence_records = load_execution_evidence_records(args.execution_evidence_json)
+    except ExecutionEvidenceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     report = build_routing_report(
         config,
         project_id=args.project_id,
@@ -3463,6 +3483,7 @@ def cmd_routing_report(config: Config, args: argparse.Namespace) -> int:
         label=args.label,
         limit=args.limit,
         include_archived=args.include_archived,
+        execution_evidence_records=execution_evidence_records,
     )
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
@@ -3475,6 +3496,11 @@ def cmd_routing_eval_report(config: Config, args: argparse.Namespace) -> int:
     if args.limit < 0:
         print("error: --limit must be non-negative", file=sys.stderr)
         return 1
+    try:
+        execution_evidence_records = load_execution_evidence_records(args.execution_evidence_json)
+    except ExecutionEvidenceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     report = build_routing_evaluation_report(
         config,
         project_id=args.project_id,
@@ -3483,6 +3509,7 @@ def cmd_routing_eval_report(config: Config, args: argparse.Namespace) -> int:
         label=args.label,
         limit=args.limit,
         include_archived=args.include_archived,
+        execution_evidence_records=execution_evidence_records,
     )
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
