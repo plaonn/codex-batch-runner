@@ -5545,7 +5545,19 @@ class CliTests(unittest.TestCase):
 
     def test_list_and_summary_show_model_requirement_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_config(tmp)
+            config_path = write_config(
+                tmp,
+                extra={
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "config_overrides": {"model_reasoning_effort": "low"},
+                            "budget_hint": "low-cost",
+                        }
+                    ]
+                },
+            )
             config = Config.load(str(config_path))
             create_task(
                 config,
@@ -5572,6 +5584,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, list_code)
             self.assertIn("[S]  work", list_output)
+            self.assertIn("plan cli_default/low-cost-docs/none", list_output)
             verbose_code, verbose_output = run_cli(["--config", str(config_path), "list", "--verbose"])
             verbose_rows = {row["ID"]: row for row in fixed_table_rows(verbose_output)}
             self.assertEqual(0, verbose_code)
@@ -5579,6 +5592,49 @@ class CliTests(unittest.TestCase):
             self.assertIn("cost_sensitivity=high", verbose_rows["requirement"]["MODEL"])
             self.assertEqual(0, summary_code)
             self.assertIn("model_requirement_vector=", summary_output)
+            self.assertIn(
+                "planned_execution: model_source=cli_default, selection_rule=low-cost-docs, "
+                "execution_target=none, config_override_keys=model_reasoning_effort, budget_hint=low-cost",
+                summary_output,
+            )
+
+    def test_planned_execution_note_is_hidden_when_actual_run_config_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                extra={
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "config_overrides": {"model_reasoning_effort": "low"},
+                        }
+                    ]
+                },
+            )
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="actual",
+                model_requirement_vector=requirement_vector(reasoning_depth="low"),
+            )
+            task["last_run"] = {
+                "resolved_execution_config": {
+                    "selection_rule": "previous",
+                    "model_source": "explicit_model",
+                }
+            }
+            save_task(config, task)
+
+            list_code, list_output = run_cli(["--config", str(config_path), "list", "--color", "never"])
+            summary_code, summary_output = run_cli(["--config", str(config_path), "summary", "actual"])
+
+            self.assertEqual(0, list_code)
+            self.assertNotIn("plan cli_default/low-cost-docs/none", list_output)
+            self.assertEqual(0, summary_code)
+            self.assertNotIn("planned_execution:", summary_output)
 
     def test_summary_and_list_show_startup_stall_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

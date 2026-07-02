@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .planned_execution import planned_execution_summary
 from .queue import (
     dependency_blockers,
     dependency_status,
@@ -20,6 +21,7 @@ def render_task_summary(
     task: dict,
     by_id: dict[str, dict] | None = None,
     *,
+    config=None,
     require_accepted_review: bool = False,
 ) -> str:
     lines = [
@@ -40,6 +42,7 @@ def render_task_summary(
     if task.get("cwd"):
         lines.append(f"cwd: {task.get('cwd')}")
     append_execution_config_summary(lines, task)
+    append_planned_execution_summary(lines, config, task)
     append_scheduling_summary(lines, task)
     append_routing_summary(lines, task)
     append_counters(lines, task)
@@ -197,6 +200,14 @@ def append_execution_config_summary(lines: list[str], task: dict) -> None:
         )
     if fields:
         lines.append("execution: " + ", ".join(fields))
+
+
+def append_planned_execution_summary(lines: list[str], config, task: dict) -> None:
+    if config is None:
+        return
+    summary = planned_execution_summary(config, task)
+    if summary:
+        lines.append("planned_execution: " + summary)
 
 
 def append_routing_summary(lines: list[str], task: dict) -> None:

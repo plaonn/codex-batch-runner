@@ -22,6 +22,7 @@ from .dashboard import DEFAULT_DASHBOARD_HOST, DEFAULT_DASHBOARD_PORT, serve_das
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write_event_nonfatal
 from .execution_evidence import ExecutionEvidenceError, load_execution_evidence_records
 from .model_requirements import REQUIREMENT_DIMENSIONS, REQUIREMENT_LEVELS, model_requirement_vector_value
+from .planned_execution import planned_execution_compact_note
 from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
 from .index import build_rebuild_report, build_status_report, render_rebuild_report, render_status_report
@@ -2243,6 +2244,8 @@ def detail_cells(task: dict, by_id: dict[str, dict], config: Config, include_cap
     projection = task_list_presentation(task, by_id, config)
     details: list[str] = []
     append_unique_detail(details, projection.detail)
+    if projection.phase == "ready":
+        append_unique_detail(details, planned_execution_compact_note(config, task))
     blocker_summary = projection_blocker_summary(projection, by_id)
     if blocker_summary:
         append_unique_detail(details, blocker_summary)
@@ -3419,6 +3422,7 @@ def cmd_summary(config: Config, args: argparse.Namespace) -> int:
         render_task_summary(
             task,
             by_id=by_id,
+            config=config,
             require_accepted_review=config.dependency_requires_accepted_review,
         ),
         end="",
