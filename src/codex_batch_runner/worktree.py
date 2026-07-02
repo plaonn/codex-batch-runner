@@ -227,6 +227,14 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
                     "status": "recovery_required",
                     "reason": applied_check["reason"],
                 }
+        if classification["status"] == "cleanup_candidate" and eligibility.get("cleanup_kind") == "no_change":
+            no_change_check = verify_no_change_cleanup_target(task, repo_root, worktree_path)
+            report["no_change_metadata"] = no_change_check
+            if no_change_check["status"] != "already_contained":
+                classification = {
+                    "status": "recovery_required",
+                    "reason": no_change_check["reason"],
+                }
         report.update(
             {
                 "repo_root": str(repo_root),
@@ -256,6 +264,8 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
     report["applied"] = True
     if eligibility.get("cleanup_kind") == "discard":
         reason = "worktree cleaned after explicit discard; branch retained; task result was not applied"
+    elif eligibility.get("cleanup_kind") == "no_change":
+        reason = "worktree cleaned after no-change accepted result; branch retained"
     else:
         reason = "worktree cleaned; branch retained"
     report["classification"] = {**classification, "status": "cleaned", "reason": reason}
@@ -523,12 +533,7 @@ def cleanup_eligibility(task: dict[str, Any]) -> dict[str, Any]:
         }
 
     if status in {"completed", "archived"} and review == "accepted":
-        return {
-            "error": (
-                "worktree cleanup requires execution_apply_status=applied before removing retained worktree; "
-                f"found execution_apply_status={task.get('execution_apply_status') or '-'}"
-            )
-        }
+        return {"cleanup_kind": "no_change", "cleanup_reason": "already_contained"}
 
     if resolution in DISCARD_CLEANUP_RESOLUTIONS and status in {"archived", "blocked_user", "completed", "failed"} and review != "accepted":
         return {"cleanup_kind": "discard", "cleanup_reason": f"resolution={resolution}"}
@@ -597,6 +602,67 @@ def verify_applied_cleanup_target(task: dict[str, Any], repo_root: Path) -> dict
         "reason": "execution_applied_head is contained in current apply target",
         "apply_target": target,
         "execution_applied_head": verified_applied_head,
+        "target_head": target_head,
+    }
+
+
+def verify_no_change_cleanup_target(task: dict[str, Any], repo_root: Path, worktree_path: Path) -> dict[str, str]:
+    branch = str(task.get("execution_branch") or "").strip()
+    base_head = str(task.get("execution_base_head") or "").strip()
+    if not branch:
+        return {"status": "blocked", "reason": "no-change cleanup requires execution_branch"}
+    if not base_head:
+        return {"status": "blocked", "reason": "no-change cleanup requires execution_base_head"}
+
+    dirty = git(worktree_path, "status", "--porcelain")
+    if dirty.strip():
+        return {"status": "blocked", "reason": "no-change cleanup requires a clean retained worktree"}
+
+    target = str(task.get("execution_apply_target") or "").strip()
+    if not target:
+        target = git_optional(repo_root, "symbolic-ref", "--quiet", "--short", "HEAD") or "HEAD"
+    try:
+        branch_head = git(repo_root, "rev-parse", "--verify", f"{branch}^{{commit}}")
+        verified_base_head = git(repo_root, "rev-parse", "--verify", f"{base_head}^{{commit}}")
+        target_head = git(repo_root, "rev-parse", "--verify", f"{target}^{{commit}}")
+    except subprocess.CalledProcessError as exc:
+        detail = clean_git_exception(exc)
+        return {
+            "status": "blocked",
+            "reason": f"no-change cleanup cannot verify branch against apply target {target}: {detail}",
+            "apply_target": target,
+        }
+
+    if is_ancestor(repo_root, branch_head, target_head):
+        return {
+            "status": "already_contained",
+            "reason": "branch head is already contained in current apply target",
+            "cleanup_kind": "no_change",
+            "apply_target": target,
+            "execution_branch_head": branch_head,
+            "execution_base_head": verified_base_head,
+            "target_head": target_head,
+        }
+
+    commits_after_base = rev_list(repo_root, f"{verified_base_head}..{branch_head}")
+    if not commits_after_base:
+        return {
+            "status": "already_contained",
+            "reason": "branch has zero commits after execution_base_head and retained worktree is clean",
+            "cleanup_kind": "no_change",
+            "apply_target": target,
+            "execution_branch_head": branch_head,
+            "execution_base_head": verified_base_head,
+            "target_head": target_head,
+        }
+
+    return {
+        "status": "blocked",
+        "reason": "no-change cleanup refused: branch head is not contained in current apply target",
+        "cleanup_kind": "no_change",
+        "apply_target": target,
+        "execution_branch_head": branch_head,
+        "execution_base_head": verified_base_head,
         "target_head": target_head,
     }
 
