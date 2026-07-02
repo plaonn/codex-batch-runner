@@ -89,7 +89,7 @@ Downshift 후보는 아래 조건을 모두 만족할 때만 확대합니다.
 - reviewer `needs_human`, `failed_review`, auto-fix 생성, repeated finding, startup/no-progress retry가 최근 표본에서 반복되지 않습니다.
 - 변경 범위가 public docs, examples, low-risk tests, local-only operator docs처럼 review surface가 작습니다.
 
-Upshift는 downshift보다 빠르게 적용합니다. 아래 신호 중 하나가 같은 category/label/risk factor 조합에서 반복되면 다음 enqueue 기준을 상위 profile로 올립니다.
+Upshift는 downshift보다 빠르게 적용합니다. 아래 신호 중 하나가 같은 category/label/risk factor 조합에서 반복되면 다음 enqueue 기준을 더 보수적인 `model_requirement_vector`로 올리거나, 더 보수적인 execution config가 선택되도록 selection 기준을 조정합니다.
 
 - reviewer `needs_fix`, `needs_human`, `failed_review`
 - `review_status=rejected` 또는 `needs_followup`
