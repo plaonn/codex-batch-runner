@@ -474,6 +474,98 @@ class WorktreeTests(unittest.TestCase):
             self.assertTrue(worktree_path.exists())
             self.assertNotIn("execution_cleaned_at", load_task(config, "cleanup-stale-applied"))
 
+    def test_discard_stale_applied_worktree_enables_discard_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            task = create_applied_worktree_task(config_path, config, repo, "discard-stale-applied")
+            worktree_path = Path(task["execution_worktree_path"])
+            applied_head = task["execution_applied_head"]
+            initial_head = git(repo, "rev-parse", "HEAD~1")
+            git(repo, "reset", "--hard", initial_head)
+
+            dry_code, dry_report = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "worktree",
+                    "discard-stale-applied",
+                    "discard-stale-applied",
+                    "--dry-run",
+                    "--resolution",
+                    "superseded",
+                    "--reason",
+                    "superseded by later cleanup policy",
+                    "--json",
+                ]
+            )
+            loaded_after_dry_run = load_task(config, "discard-stale-applied")
+            apply_code, apply_report = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "worktree",
+                    "discard-stale-applied",
+                    "discard-stale-applied",
+                    "--apply",
+                    "--resolution",
+                    "superseded",
+                    "--reason",
+                    "superseded by later cleanup policy",
+                    "--json",
+                ]
+            )
+            loaded_after_discard = load_task(config, "discard-stale-applied")
+            cleanup_code, cleanup_report = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "worktree",
+                    "cleanup",
+                    "discard-stale-applied",
+                    "--apply",
+                    "--json",
+                ]
+            )
+            loaded_after_cleanup = load_task(config, "discard-stale-applied")
+            events = list_events(config, task_id="discard-stale-applied", limit=0)
+
+            self.assertEqual(0, dry_code)
+            self.assertFalse(dry_report["applied"])
+            self.assertEqual("eligible", dry_report["classification"]["status"])
+            self.assertEqual("stale_applied_metadata", dry_report["applied_metadata"]["status"])
+            self.assertEqual("applied", loaded_after_dry_run["execution_apply_status"])
+            self.assertEqual(applied_head, loaded_after_dry_run["execution_applied_head"])
+
+            self.assertEqual(0, apply_code)
+            self.assertTrue(apply_report["applied"])
+            self.assertEqual("discarded", apply_report["classification"]["status"])
+            self.assertEqual("discarded", loaded_after_discard["execution_apply_status"])
+            self.assertEqual("rejected", loaded_after_discard["review_status"])
+            self.assertEqual("superseded", loaded_after_discard["resolution"])
+            self.assertNotIn("execution_applied_head", loaded_after_discard)
+            self.assertEqual(
+                applied_head,
+                loaded_after_discard["execution_stale_applied_discard"]["previous"]["execution_applied_head"],
+            )
+
+            self.assertEqual(0, cleanup_code)
+            self.assertTrue(cleanup_report["applied"])
+            self.assertEqual("discard", cleanup_report["cleanup_kind"])
+            self.assertEqual("resolution=superseded", cleanup_report["cleanup_reason"])
+            self.assertFalse(worktree_path.exists())
+            self.assertEqual("cleaned", loaded_after_cleanup["execution_worktree_status"])
+            self.assertEqual("discard", loaded_after_cleanup["execution_cleanup_kind"])
+            self.assertFalse(loaded_after_cleanup["execution_cleanup_result_applied"])
+            self.assertIn("cbr/discard-stale-applied", git(repo, "branch", "--list", "cbr/discard-stale-applied"))
+            event_types = {event["event_type"] for event in events}
+            self.assertIn("task_worktree_stale_applied_discarded", event_types)
+            self.assertIn("task_worktree_cleaned", event_types)
+
     def test_cleanup_after_applied_task_preserves_branch_task_logs_and_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

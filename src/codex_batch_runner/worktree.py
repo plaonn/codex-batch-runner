@@ -46,6 +46,35 @@ def build_cleanup_report(config: Config, task_id: str, *, apply: bool = False) -
     return _build_cleanup_report_locked(config, task_id, apply=False)
 
 
+def build_discard_stale_applied_report(
+    config: Config,
+    task_id: str,
+    *,
+    resolution: str,
+    reason: str,
+    apply: bool = False,
+) -> dict[str, Any]:
+    if apply:
+        return _with_lock(
+            config,
+            task_id,
+            lambda: _build_discard_stale_applied_report_locked(
+                config,
+                task_id,
+                resolution=resolution,
+                reason=reason,
+                apply=True,
+            ),
+        )
+    return _build_discard_stale_applied_report_locked(
+        config,
+        task_id,
+        resolution=resolution,
+        reason=reason,
+        apply=False,
+    )
+
+
 def build_branch_prune_report(config: Config, task_id: str, *, apply: bool = False) -> dict[str, Any]:
     if apply:
         return _with_lock(config, task_id, lambda: _build_branch_prune_report_locked(config, task_id, apply=True))
@@ -286,6 +315,108 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
             execution_cleanup_reason=task.get("execution_cleanup_reason"),
             execution_cleanup_branch_retained=task.get("execution_cleanup_branch_retained"),
             execution_cleanup_result_applied=task.get("execution_cleanup_result_applied"),
+        ),
+    )
+    return report
+
+
+def _build_discard_stale_applied_report_locked(
+    config: Config,
+    task_id: str,
+    *,
+    resolution: str,
+    reason: str,
+    apply: bool,
+) -> dict[str, Any]:
+    task = load_task(config, task_id)
+    report = base_report("discard-stale-applied", task, apply)
+    report["resolution"] = resolution
+    report["reason"] = reason
+    if resolution not in DISCARD_CLEANUP_RESOLUTIONS:
+        report["errors"].append(
+            "discard stale applied worktree requires resolution=duplicate|manual|superseded|wont_fix"
+        )
+        return report
+    if not reason.strip():
+        report["errors"].append("discard stale applied worktree requires a non-empty reason")
+        return report
+    if task.get("execution_mode") != "git_worktree":
+        report["errors"].append("discard stale applied worktree requires execution_mode=git_worktree")
+        return report
+    if task.get("execution_worktree_status") not in CLEANUP_OK_WORKTREE_STATUSES:
+        report["errors"].append(
+            "discard stale applied worktree requires retained cleanup-capable worktree metadata"
+        )
+        return report
+    if task.get("status") != "completed" or task.get("review_status") != "accepted":
+        report["errors"].append("discard stale applied worktree requires completed + accepted task metadata")
+        return report
+    if not has_applied_worktree_metadata(task):
+        report["errors"].append("discard stale applied worktree requires applied metadata")
+        return report
+
+    repo_root = Path(str(task.get("execution_repo_root") or task.get("project_root") or task.get("cwd"))).expanduser()
+    try:
+        applied_check = verify_applied_cleanup_target(task, repo_root)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        report["errors"].append(str(exc))
+        return report
+    report["applied_metadata"] = applied_check
+    if applied_check["status"] != "stale_applied_metadata":
+        report["errors"].append("discard stale applied worktree only applies to stale applied metadata")
+        return report
+    report["classification"] = {
+        "status": "eligible",
+        "reason": "stale applied metadata can be reclassified as an explicit discard",
+    }
+    if report["errors"] or not apply:
+        return report
+
+    now = iso_now()
+    previous = {
+        "review_status": task.get("review_status"),
+        "review_reason": task.get("review_reason"),
+        "reviewed_at": task.get("reviewed_at"),
+        "execution_apply_status": task.get("execution_apply_status"),
+        "execution_applied_at": task.get("execution_applied_at"),
+        "execution_applied_head": task.get("execution_applied_head"),
+        "execution_apply_target": task.get("execution_apply_target"),
+    }
+    task["execution_stale_applied_discard"] = {
+        "recorded_at": now,
+        "resolution": resolution,
+        "reason": reason,
+        "applied_metadata": applied_check,
+        "previous": {key: value for key, value in previous.items() if value not in (None, "")},
+    }
+    task["review_status"] = "rejected"
+    task["reviewed_at"] = now
+    task["review_reason"] = reason
+    task["resolution"] = resolution
+    task["resolved_at"] = now
+    task["resolution_reason"] = reason
+    task["execution_apply_status"] = "discarded"
+    for key in ("execution_applied_at", "execution_applied_head", "execution_apply_target"):
+        task.pop(key, None)
+    save_task(config, task)
+    report["applied"] = True
+    report["classification"] = {
+        "status": "discarded",
+        "reason": "stale applied metadata recorded and task result marked for discard cleanup",
+    }
+    write_event_nonfatal(
+        config,
+        "task_worktree_stale_applied_discarded",
+        task=task,
+        source="worktree discard-stale-applied",
+        summary=f"discarded stale applied metadata for task {task_id}",
+        payload=transition_payload(
+            task,
+            resolution=resolution,
+            resolved_at=task.get("resolved_at"),
+            review_status=task.get("review_status"),
+            execution_apply_status=task.get("execution_apply_status"),
+            stale_applied_metadata_status=applied_check.get("status"),
         ),
     )
     return report

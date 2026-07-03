@@ -103,6 +103,7 @@ from .worktree import (
     build_apply_report,
     build_branch_prune_report,
     build_cleanup_report,
+    build_discard_stale_applied_report,
     build_prepare_report,
     render_worktree_report,
     task_worktree_metadata,
@@ -527,6 +528,24 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_mode.add_argument("--apply", action="store_true", help="remove the worktree and store task metadata under the queue lock")
     worktree_cleanup.add_argument("--json", action="store_true", help="print JSON")
     worktree_cleanup.set_defaults(func=cmd_worktree_cleanup)
+
+    worktree_discard_stale = worktree_sub.add_parser(
+        "discard-stale-applied",
+        help="mark a stale applied worktree result as explicitly discarded",
+    )
+    worktree_discard_stale.add_argument("task_id")
+    discard_mode = worktree_discard_stale.add_mutually_exclusive_group(required=True)
+    discard_mode.add_argument("--dry-run", action="store_true", help="report stale applied discard eligibility")
+    discard_mode.add_argument("--apply", action="store_true", help="store discard metadata under the queue lock")
+    worktree_discard_stale.add_argument(
+        "--resolution",
+        required=True,
+        choices=["duplicate", "manual", "superseded", "wont_fix"],
+        help="terminal discard resolution",
+    )
+    worktree_discard_stale.add_argument("--reason", required=True, help="discard decision note")
+    worktree_discard_stale.add_argument("--json", action="store_true", help="print JSON")
+    worktree_discard_stale.set_defaults(func=cmd_worktree_discard_stale_applied)
 
     worktree_branch_prune = worktree_sub.add_parser("branch-prune", help="delete an eligible cleaned local task branch")
     worktree_branch_prune.add_argument("task_id")
@@ -4024,6 +4043,21 @@ def cmd_worktree_prepare(config: Config, args: argparse.Namespace) -> int:
 
 def cmd_worktree_cleanup(config: Config, args: argparse.Namespace) -> int:
     report = build_cleanup_report(config, args.task_id, apply=args.apply)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_worktree_report(report), end="")
+    return 1 if report.get("errors") else 0
+
+
+def cmd_worktree_discard_stale_applied(config: Config, args: argparse.Namespace) -> int:
+    report = build_discard_stale_applied_report(
+        config,
+        args.task_id,
+        resolution=args.resolution,
+        reason=args.reason,
+        apply=args.apply,
+    )
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
