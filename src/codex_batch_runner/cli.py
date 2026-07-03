@@ -23,6 +23,10 @@ from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write
 from .execution_evidence import ExecutionEvidenceError, load_execution_evidence_records
 from .model_requirements import REQUIREMENT_DIMENSIONS, REQUIREMENT_LEVELS, model_requirement_vector_value
 from .planned_execution import planned_execution_compact_note
+from .policy_proposals import (
+    build_execution_target_freshness_proposal_report,
+    render_execution_target_freshness_proposal_report,
+)
 from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
 from .index import build_rebuild_report, build_status_report, render_rebuild_report, render_status_report
@@ -421,6 +425,15 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="check local cbr health and Codex CLI version without running Codex exec")
     doctor.add_argument("--json", action="store_true", help="print JSON")
     doctor.set_defaults(func=cmd_doctor)
+
+    policy_proposals = sub.add_parser("policy-proposals", help="generate read-only policy proposals")
+    policy_proposals_sub = policy_proposals.add_subparsers(dest="policy_proposal_command", required=True)
+    execution_target_freshness = policy_proposals_sub.add_parser(
+        "execution-target-freshness",
+        help="generate read-only execution_target freshness proposals",
+    )
+    execution_target_freshness.add_argument("--json", action="store_true", help="print JSON")
+    execution_target_freshness.set_defaults(func=cmd_policy_proposals_execution_target_freshness)
 
     maintenance = sub.add_parser("maintenance", help="run guarded local maintenance workflows")
     maintenance_sub = maintenance.add_subparsers(dest="maintenance_command", required=True)
@@ -3853,6 +3866,15 @@ def cmd_doctor(config: Config, args: argparse.Namespace) -> int:
     else:
         print(render_doctor_report(report), end="")
     return 0 if report["ok"] else 1
+
+
+def cmd_policy_proposals_execution_target_freshness(config: Config, args: argparse.Namespace) -> int:
+    report = build_execution_target_freshness_proposal_report(config)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_execution_target_freshness_proposal_report(report), end="")
+    return 0
 
 
 def cmd_maintenance_codex_cli(config: Config, args: argparse.Namespace) -> int:
