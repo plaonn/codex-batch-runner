@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .config import Config
 from .doctor import execution_target_freshness_metadata
+from .fs import write_json_atomic
 from .timeutil import utc_now
 from .transcript import sanitize
 
@@ -16,8 +19,12 @@ REPORT_KIND = "policy_proposal_report"
 PREVIEW_KIND = "policy_proposal_preview"
 APPROVAL_TEMPLATE_KIND = "policy_proposal_approval_template"
 APPROVAL_VALIDATION_KIND = "policy_proposal_approval_validation"
+APPLY_KIND = "policy_proposal_apply"
 EXECUTION_TARGET_FRESHNESS_CLASS = "execution_target_freshness"
 READ_ONLY_MODE = "read_only"
+DRY_RUN_MODE = "dry_run"
+APPLY_MODE = "apply"
+DEFAULT_FRESHNESS_REVIEW_AFTER_DAYS = 14
 PROHIBITED_STATE_CHANGES = [
     "apply",
     "config_rewrite",
@@ -26,6 +33,10 @@ PROHIBITED_STATE_CHANGES = [
     "rule_replacement",
 ]
 PREVIEW_BLOCKED_REASON = "preview_only_no_apply_target"
+SUPPORTED_APPLY_ACTIONS = {
+    "review_execution_target_freshness": "stale",
+    "add_execution_target_freshness_metadata": "missing",
+}
 
 
 def build_execution_target_freshness_proposal_report(config: Config) -> dict[str, Any]:
@@ -310,6 +321,320 @@ def build_policy_proposal_approval_validation(approval: Any, preview: Any) -> di
         "items": items,
         "warnings": warnings,
         "errors": errors,
+    }
+
+
+def build_policy_proposal_apply_report(
+    approval: Any,
+    preview: Any,
+    config_target_path: str,
+    *,
+    apply: bool,
+    approve: bool,
+    repo_root: Path | None = None,
+) -> dict[str, Any]:
+    mode = APPLY_MODE if apply else DRY_RUN_MODE
+    errors: list[str] = []
+    warnings: list[str] = []
+    validation = build_policy_proposal_approval_validation(approval, preview)
+    if not validation.get("valid"):
+        errors.append("approval validation failed")
+    if apply and not approve:
+        errors.append("--apply requires --approve")
+
+    target_path = Path(config_target_path).expanduser()
+    resolved_target_path = target_path.resolve(strict=False)
+    target_guard = config_target_guard(resolved_target_path, repo_root=repo_root)
+    errors.extend(target_guard["errors"])
+
+    raw_config: dict[str, Any] | None = None
+    loaded_config: Config | None = None
+    config_sha256_before: str | None = None
+    if not target_guard["errors"]:
+        raw_config, loaded_config, config_sha256_before, load_errors = load_config_target(resolved_target_path)
+        errors.extend(load_errors)
+
+    approval_items = approvals_by_proposal_id(approval.get("approvals") if isinstance(approval, dict) else None)
+    raw_preview_items = preview.get("items") if isinstance(preview, dict) else []
+    preview_items = preview_items_by_proposal_id(raw_preview_items if isinstance(raw_preview_items, list) else [])[0]
+    planned_items: list[dict[str, Any]] = []
+    mutated_config = deepcopy(raw_config) if raw_config is not None else None
+    if not errors and raw_config is not None and loaded_config is not None and mutated_config is not None:
+        for validation_item in validation.get("items") or []:
+            if not isinstance(validation_item, dict) or validation_item.get("approved") is not True:
+                continue
+            proposal_id = sanitize(validation_item.get("proposal_id"))
+            approval_item = approval_items.get(proposal_id, {})
+            preview_item = preview_items.get(proposal_id, {})
+            planned = apply_item_plan(validation_item, approval_item, preview_item, loaded_config, mutated_config)
+            planned_items.append(planned)
+
+    item_error_count = sum(1 for item in planned_items if item.get("errors"))
+    eligible = not errors and item_error_count == 0
+    applied = False
+    config_sha256_after = config_sha256_before
+    if apply and eligible and raw_config is not None and mutated_config is not None:
+        if non_freshness_config_changed(raw_config, mutated_config):
+            errors.append("internal safety check failed: non-freshness config change detected")
+            eligible = False
+        else:
+            write_json_atomic(resolved_target_path, mutated_config)
+            config_sha256_after = canonical_json_sha256(mutated_config)
+            applied = True
+            for item in planned_items:
+                item["applied"] = True
+
+    approved_count = sum(1 for item in validation.get("items") or [] if isinstance(item, dict) and item.get("approved") is True)
+    eligible_count = sum(1 for item in planned_items if item.get("eligible") is True)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": APPLY_KIND,
+        "proposal_class": validation.get("proposal_class"),
+        "mode": mode,
+        "valid": eligible,
+        "mutation": {
+            "allowed": eligible,
+            "applied": applied,
+            "requires_approve": apply,
+            "approved": bool(approve),
+            "allowed_state_changes": ["execution_target_freshness_metadata"] if eligible else [],
+            "prohibited_state_changes": [
+                "task_mutation",
+                "model_replacement",
+                "rule_replacement",
+                "routing_rule_rewrite",
+            ],
+        },
+        "summary": {
+            "approval_count": validation.get("summary", {}).get("approval_count", 0),
+            "approved_count": approved_count,
+            "eligible_count": eligible_count,
+            "applied_count": len(planned_items) if applied else 0,
+            "rejected_count": len(planned_items) - eligible_count + len(errors),
+        },
+        "config_target": {
+            "supported": not target_guard["errors"],
+            "classification": target_guard["classification"],
+            "sha256_before": config_sha256_before,
+            "sha256_after": config_sha256_after,
+        },
+        "source_preview_sha256": approval.get("source_preview_sha256") if isinstance(approval, dict) else None,
+        "validation": validation,
+        "items": planned_items,
+        "audit": apply_audit_payload(
+            validation=validation,
+            planned_items=planned_items,
+            config_sha256_before=config_sha256_before,
+            config_sha256_after=config_sha256_after,
+            applied=applied,
+        ),
+        "warnings": warnings + validation.get("warnings", []),
+        "errors": errors,
+    }
+
+
+def config_target_guard(path: Path, *, repo_root: Path | None) -> dict[str, Any]:
+    errors: list[str] = []
+    classification = "external_json"
+    if path.suffix != ".json":
+        errors.append("unsupported config target path: expected a JSON file")
+
+    root = repo_root.resolve() if repo_root is not None else Path.cwd().resolve()
+    if path_is_relative_to(path, root):
+        relative = path.relative_to(root)
+        parts = relative.parts
+        if parts and parts[0] == ".private":
+            classification = "repo_private_json"
+        elif parts and parts[0] == ".codex-batch-runner":
+            errors.append("unsupported config target path: repo runtime state is not a mutable config target")
+            classification = "repo_runtime_json"
+        elif path.name.endswith(".local.json"):
+            classification = "repo_local_json"
+        else:
+            errors.append("unsupported config target path: repo public files are not mutable config targets")
+            classification = "repo_public_json"
+
+    return {"classification": classification, "errors": errors}
+
+
+def path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def load_config_target(path: Path) -> tuple[dict[str, Any] | None, Config | None, str | None, list[str]]:
+    if not path.exists():
+        return None, None, None, ["config target does not exist"]
+    if not path.is_file():
+        return None, None, None, ["config target is not a file"]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, None, None, [f"failed to read config target: {exc}"]
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return None, None, None, [f"failed to parse config target JSON: {exc}"]
+    if not isinstance(raw, dict):
+        return None, None, None, ["config target JSON must be an object"]
+    try:
+        loaded = Config.load(str(path))
+    except Exception as exc:
+        return raw, None, canonical_json_sha256(raw), [f"config target is invalid: {exc}"]
+    return raw, loaded, canonical_json_sha256(raw), []
+
+
+def approvals_by_proposal_id(approvals: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(approvals, list):
+        return {}
+    by_id: dict[str, dict[str, Any]] = {}
+    for approval in approvals:
+        if not isinstance(approval, dict):
+            continue
+        proposal_id = sanitize(approval.get("proposal_id"))
+        if proposal_id and proposal_id not in by_id:
+            by_id[proposal_id] = approval
+    return by_id
+
+
+def apply_item_plan(
+    validation_item: dict[str, Any],
+    approval_item: dict[str, Any],
+    preview_item: dict[str, Any],
+    config: Config,
+    mutable_config: dict[str, Any],
+) -> dict[str, Any]:
+    proposal_id = sanitize(validation_item.get("proposal_id"))
+    target_alias = sanitize(validation_item.get("target_alias"))
+    target_path = sanitize(validation_item.get("target"))
+    action = sanitize(validation_item.get("recommended_action"))
+    item_errors: list[str] = []
+
+    if validation_item.get("proposal_class") != EXECUTION_TARGET_FRESHNESS_CLASS:
+        item_errors.append("unsupported proposal_class")
+    if proposal_id != f"{EXECUTION_TARGET_FRESHNESS_CLASS}:{target_alias}":
+        item_errors.append("proposal_id does not match target_alias")
+    if target_path != f"execution_targets.{target_alias}.freshness":
+        item_errors.append("unsupported target path")
+    expected_status = SUPPORTED_APPLY_ACTIONS.get(action)
+    if expected_status is None:
+        item_errors.append("unsupported recommended_action")
+
+    execution_targets = mutable_config.get("execution_targets")
+    target_config = execution_targets.get(target_alias) if isinstance(execution_targets, dict) else None
+    if not isinstance(target_config, dict):
+        item_errors.append("missing target")
+        target_config = {}
+
+    metadata = execution_target_freshness_metadata(config, target_alias)
+    current_status = proposal_status(metadata)
+    current_reason = sanitize(metadata.get("reason"))
+    preview_reason = sanitize(preview_item.get("reason"))
+    if expected_status is not None and current_status != expected_status:
+        item_errors.append(f"config target is dirty: expected freshness status {expected_status}, found {current_status}")
+    if preview_reason and current_reason != preview_reason:
+        item_errors.append(f"config target is dirty: expected freshness reason {preview_reason}, found {current_reason}")
+
+    reviewer = str(approval_item.get("reviewer") or "").strip()
+    reviewed_at = str(approval_item.get("reviewed_at") or "").strip()
+    reviewed_date = reviewed_at_date(reviewed_at)
+    if reviewed_date is None:
+        item_errors.append("approved item requires reviewed_at ISO datetime")
+
+    before_freshness = deepcopy(target_config.get("freshness") if isinstance(target_config.get("freshness"), dict) else {})
+    after_freshness = deepcopy(before_freshness)
+    if reviewed_date is not None:
+        after_freshness["owner"] = reviewer
+        after_freshness["last_reviewed_at"] = reviewed_date
+        if not isinstance(after_freshness.get("review_after_days"), int):
+            after_freshness["review_after_days"] = DEFAULT_FRESHNESS_REVIEW_AFTER_DAYS
+
+    if not item_errors and isinstance(execution_targets, dict):
+        execution_targets[target_alias]["freshness"] = after_freshness
+
+    changed_keys = sorted(
+        key for key in set(before_freshness) | set(after_freshness) if before_freshness.get(key) != after_freshness.get(key)
+    )
+    return {
+        "proposal_id": proposal_id,
+        "proposal_class": validation_item.get("proposal_class"),
+        "target_alias": target_alias,
+        "target": target_path,
+        "recommended_action": action,
+        "approved": True,
+        "eligible": not item_errors,
+        "applied": False,
+        "current_freshness_status": current_status,
+        "current_freshness_reason": current_reason,
+        "before": {"freshness": before_freshness},
+        "after": {"freshness": after_freshness},
+        "diff": {
+            "changed_keys": changed_keys,
+            "only_execution_target_freshness_metadata": True,
+        },
+        "approved_metadata": {
+            "reviewer": reviewer,
+            "reviewed_at": reviewed_at,
+            "decision_note_sha256": canonical_json_sha256(approval_item.get("decision_note")),
+        },
+        "errors": item_errors,
+    }
+
+
+def reviewed_at_date(value: str) -> str | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        return None
+
+
+def non_freshness_config_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    before_without_freshness = deepcopy(before)
+    after_without_freshness = deepcopy(after)
+    for config_doc in (before_without_freshness, after_without_freshness):
+        execution_targets = config_doc.get("execution_targets")
+        if not isinstance(execution_targets, dict):
+            continue
+        for target in execution_targets.values():
+            if isinstance(target, dict):
+                target.pop("freshness", None)
+    return before_without_freshness != after_without_freshness
+
+
+def apply_audit_payload(
+    *,
+    validation: dict[str, Any],
+    planned_items: list[dict[str, Any]],
+    config_sha256_before: str | None,
+    config_sha256_after: str | None,
+    applied: bool,
+) -> dict[str, Any]:
+    return {
+        "event_type": "policy_proposal_apply",
+        "source": "policy-proposals apply",
+        "proposal_class": validation.get("proposal_class"),
+        "applied": applied,
+        "config_target": {
+            "sha256_before": config_sha256_before,
+            "sha256_after": config_sha256_after,
+        },
+        "items": [
+            {
+                "proposal_id": item.get("proposal_id"),
+                "target_alias": item.get("target_alias"),
+                "recommended_action": item.get("recommended_action"),
+                "eligible": item.get("eligible"),
+                "applied": item.get("applied"),
+                "changed_keys": item.get("diff", {}).get("changed_keys"),
+                "reviewer": item.get("approved_metadata", {}).get("reviewer"),
+                "reviewed_at": item.get("approved_metadata", {}).get("reviewed_at"),
+                "decision_note_sha256": item.get("approved_metadata", {}).get("decision_note_sha256"),
+            }
+            for item in planned_items
+        ],
     }
 
 
@@ -657,6 +982,47 @@ def render_policy_proposal_approval_validation(validation: dict[str, Any]) -> st
                     f"     approved: {str(item.get('approved')).lower()}",
                     f"     target: {item.get('target')}",
                     f"     source_item_sha256_matches: {str(item.get('source_item_sha256_matches')).lower()}",
+                ]
+            )
+            for error in item.get("errors") or []:
+                lines.append(f"     error: {error}")
+    return "\n".join(lines) + "\n"
+
+
+def render_policy_proposal_apply_report(report: dict[str, Any]) -> str:
+    summary = report.get("summary") or {}
+    mutation = report.get("mutation") or {}
+    config_target = report.get("config_target") or {}
+    lines = [
+        "cbr policy-proposals apply",
+        f"schema_version: {report.get('schema_version')}",
+        f"proposal_class: {report.get('proposal_class')}",
+        f"mode: {report.get('mode')}",
+        f"valid: {str(report.get('valid')).lower()}",
+        f"approved_count: {summary.get('approved_count')}",
+        f"eligible_count: {summary.get('eligible_count')}",
+        f"applied_count: {summary.get('applied_count')}",
+        f"mutation: allowed={str(mutation.get('allowed')).lower()} applied={str(mutation.get('applied')).lower()}",
+        f"config_target_supported: {str(config_target.get('supported')).lower()}",
+    ]
+    errors = report.get("errors") or []
+    if errors:
+        lines.append("errors:")
+        for error in errors:
+            lines.append(f"  - {error}")
+    items = report.get("items") or []
+    if items:
+        lines.append("items:")
+        for index, item in enumerate(items, start=1):
+            changed_keys = ",".join(item.get("diff", {}).get("changed_keys") or []) or "-"
+            lines.extend(
+                [
+                    f"  {index}. {item.get('proposal_id')}",
+                    f"     action: {item.get('recommended_action')}",
+                    f"     target: {item.get('target')}",
+                    f"     eligible: {str(item.get('eligible')).lower()}",
+                    f"     applied: {str(item.get('applied')).lower()}",
+                    f"     changed_keys: {changed_keys}",
                 ]
             )
             for error in item.get("errors") or []:

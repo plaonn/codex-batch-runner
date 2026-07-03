@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 from codex_batch_runner.cli import main
+from codex_batch_runner.config import Config
+from codex_batch_runner.events import list_events
 
 
 def write_config(tmp: str, extra: dict) -> Path:
@@ -162,6 +164,7 @@ def stale_policy_preview() -> dict:
 
 
 def approved_stale_policy_approval(preview: dict) -> dict:
+    item = preview["items"][0]
     return {
         "schema_version": 1,
         "kind": "policy_proposal_approval_template",
@@ -189,12 +192,12 @@ def approved_stale_policy_approval(preview: dict) -> dict:
         },
         "approvals": [
             {
-                "proposal_id": "execution_target_freshness:balanced_current",
-                "proposal_class": "execution_target_freshness",
-                "target_alias": "balanced_current",
-                "target": "execution_targets.balanced_current.freshness",
-                "recommended_action": "review_execution_target_freshness",
-                "source_item_sha256": canonical_json_sha256(preview["items"][0]),
+                "proposal_id": item["proposal_id"],
+                "proposal_class": item["proposal_class"],
+                "target_alias": item["target_alias"],
+                "target": item["target"],
+                "recommended_action": item["recommended_action"],
+                "source_item_sha256": canonical_json_sha256(item),
                 "approved": True,
                 "reviewer": "operator",
                 "reviewed_at": "2026-07-03T00:00:00+00:00",
@@ -909,3 +912,490 @@ class PolicyProposalTests(unittest.TestCase):
             self.assertFalse((root / "logs").exists())
             self.assertFalse((root / "events").exists())
             self.assertFalse((root / "runner.lock").exists())
+
+    def test_policy_proposal_apply_dry_run_reports_before_after_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(
+                tmp,
+                {
+                    "execution_targets": {
+                        "balanced_current": {
+                            "model": "gpt-5",
+                            "freshness": {
+                                "owner": "previous",
+                                "last_reviewed_at": "2026-06-19",
+                                "review_after_days": 14,
+                            },
+                        }
+                    },
+                    "default_execution_config": {"execution_target": "balanced_current"},
+                },
+            )
+            preview = stale_policy_preview()
+            preview_path = write_stale_policy_preview(root)
+            approval_path = write_approved_stale_policy_approval(root, preview)
+            before = config_path.read_text(encoding="utf-8")
+
+            now = datetime(2026, 7, 3, tzinfo=timezone.utc)
+            with mock.patch("codex_batch_runner.doctor.utc_now", return_value=now):
+                code, output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "policy-proposals",
+                        "apply",
+                        str(approval_path),
+                        "--preview",
+                        str(preview_path),
+                        "--config-target",
+                        str(config_path),
+                        "--dry-run",
+                        "--json",
+                    ]
+                )
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["valid"])
+            self.assertEqual("dry_run", report["mode"])
+            self.assertFalse(report["mutation"]["applied"])
+            self.assertEqual(1, report["summary"]["eligible_count"])
+            self.assertEqual(
+                {"owner": "previous", "last_reviewed_at": "2026-06-19", "review_after_days": 14},
+                report["items"][0]["before"]["freshness"],
+            )
+            self.assertEqual(
+                {"owner": "operator", "last_reviewed_at": "2026-07-03", "review_after_days": 14},
+                report["items"][0]["after"]["freshness"],
+            )
+            self.assertEqual(before, config_path.read_text(encoding="utf-8"))
+            self.assertFalse((root / "events").exists())
+
+    def test_policy_proposal_apply_requires_approve_for_apply_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(
+                tmp,
+                {
+                    "execution_targets": {
+                        "balanced_current": {
+                            "model": "gpt-5",
+                            "freshness": {
+                                "owner": "previous",
+                                "last_reviewed_at": "2026-06-19",
+                                "review_after_days": 14,
+                            },
+                        }
+                    },
+                    "default_execution_config": {"execution_target": "balanced_current"},
+                },
+            )
+            preview_path = write_stale_policy_preview(root)
+            approval_path = write_approved_stale_policy_approval(root, stale_policy_preview())
+            before = config_path.read_text(encoding="utf-8")
+
+            now = datetime(2026, 7, 3, tzinfo=timezone.utc)
+            with mock.patch("codex_batch_runner.doctor.utc_now", return_value=now):
+                code, output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "policy-proposals",
+                        "apply",
+                        str(approval_path),
+                        "--preview",
+                        str(preview_path),
+                        "--config-target",
+                        str(config_path),
+                        "--apply",
+                        "--json",
+                    ]
+                )
+            report = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertFalse(report["valid"])
+            self.assertIn("--apply requires --approve", report["errors"])
+            self.assertEqual(before, config_path.read_text(encoding="utf-8"))
+
+    def test_policy_proposal_apply_updates_only_execution_target_freshness_and_emits_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(
+                tmp,
+                {
+                    "execution_targets": {
+                        "balanced_current": {
+                            "model": "gpt-5",
+                            "codex_profile": "batch-normal",
+                            "freshness": {
+                                "owner": "previous",
+                                "last_reviewed_at": "2026-06-19",
+                                "review_after_days": 14,
+                            },
+                        }
+                    },
+                    "default_execution_config": {"execution_target": "balanced_current"},
+                    "model_selection_rules": [
+                        {
+                            "name": "balanced",
+                            "when": {"reasoning_depth": "medium"},
+                            "execution_target": "balanced_current",
+                        }
+                    ],
+                },
+            )
+            preview_path = write_stale_policy_preview(root)
+            approval_path = write_approved_stale_policy_approval(root, stale_policy_preview())
+
+            now = datetime(2026, 7, 3, tzinfo=timezone.utc)
+            with mock.patch("codex_batch_runner.doctor.utc_now", return_value=now):
+                code, output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "policy-proposals",
+                        "apply",
+                        str(approval_path),
+                        "--preview",
+                        str(preview_path),
+                        "--config-target",
+                        str(config_path),
+                        "--apply",
+                        "--approve",
+                        "--json",
+                    ]
+                )
+            report = json.loads(output)
+            config_data = json.loads(config_path.read_text(encoding="utf-8"))
+            events = list_events(Config.load(str(config_path)), limit=10)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["mutation"]["applied"])
+            self.assertEqual(1, report["summary"]["applied_count"])
+            self.assertEqual(
+                {"owner": "operator", "last_reviewed_at": "2026-07-03", "review_after_days": 14},
+                config_data["execution_targets"]["balanced_current"]["freshness"],
+            )
+            self.assertEqual("gpt-5", config_data["execution_targets"]["balanced_current"]["model"])
+            self.assertEqual("batch-normal", config_data["execution_targets"]["balanced_current"]["codex_profile"])
+            self.assertEqual("balanced_current", config_data["model_selection_rules"][0]["execution_target"])
+            self.assertEqual("policy_proposal_applied", events[0]["event_type"])
+            event_payload = events[0]["payload"]
+            self.assertEqual("execution_target_freshness", event_payload["proposal_class"])
+            self.assertNotIn(str(config_path), json.dumps(event_payload, sort_keys=True))
+            self.assertNotIn("freshness reviewed", json.dumps(event_payload, sort_keys=True))
+
+    def test_policy_proposal_apply_adds_missing_freshness_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(
+                tmp,
+                {
+                    "execution_targets": {"balanced_current": {"model": "gpt-5"}},
+                    "default_execution_config": {"execution_target": "balanced_current"},
+                },
+            )
+            preview = stale_policy_preview()
+            preview["items"][0]["reason"] = "target_freshness_not_configured"
+            preview["items"][0]["recommended_action"] = "add_execution_target_freshness_metadata"
+            preview_path = root / "preview.json"
+            preview_path.write_text(json.dumps(preview, sort_keys=True), encoding="utf-8")
+            approval_path = write_approved_stale_policy_approval(root, preview)
+
+            now = datetime(2026, 7, 3, tzinfo=timezone.utc)
+            with mock.patch("codex_batch_runner.doctor.utc_now", return_value=now):
+                code, output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "policy-proposals",
+                        "apply",
+                        str(approval_path),
+                        "--preview",
+                        str(preview_path),
+                        "--config-target",
+                        str(config_path),
+                        "--apply",
+                        "--approve",
+                        "--json",
+                    ]
+                )
+            report = json.loads(output)
+            config_data = json.loads(config_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["valid"])
+            self.assertEqual(
+                {"owner": "operator", "last_reviewed_at": "2026-07-03", "review_after_days": 14},
+                config_data["execution_targets"]["balanced_current"]["freshness"],
+            )
+
+    def test_policy_proposal_apply_rejects_dirty_config_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(
+                tmp,
+                {
+                    "execution_targets": {
+                        "balanced_current": {
+                            "model": "gpt-5",
+                            "freshness": {
+                                "owner": "operator",
+                                "last_reviewed_at": "2026-07-03",
+                                "review_after_days": 14,
+                            },
+                        }
+                    },
+                    "default_execution_config": {"execution_target": "balanced_current"},
+                },
+            )
+            preview_path = write_stale_policy_preview(root)
+            approval_path = write_approved_stale_policy_approval(root, stale_policy_preview())
+            before = config_path.read_text(encoding="utf-8")
+
+            now = datetime(2026, 7, 3, tzinfo=timezone.utc)
+            with mock.patch("codex_batch_runner.doctor.utc_now", return_value=now):
+                code, output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "policy-proposals",
+                        "apply",
+                        str(approval_path),
+                        "--preview",
+                        str(preview_path),
+                        "--config-target",
+                        str(config_path),
+                        "--dry-run",
+                        "--json",
+                    ]
+                )
+            report = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertFalse(report["valid"])
+            self.assertIn("config target is dirty: expected freshness status stale, found fresh", report["items"][0]["errors"])
+            self.assertEqual(before, config_path.read_text(encoding="utf-8"))
+
+    def test_policy_proposal_apply_rejects_unsupported_repo_public_target_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            preview_path = write_stale_policy_preview(root)
+            approval_path = write_approved_stale_policy_approval(root, stale_policy_preview())
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "policy-proposals",
+                    "apply",
+                    str(approval_path),
+                    "--preview",
+                    str(preview_path),
+                    "--config-target",
+                    str(Path.cwd() / "docs" / "cli-reference.md"),
+                    "--dry-run",
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertFalse(report["valid"])
+            self.assertIn("unsupported config target path: expected a JSON file", report["errors"])
+            self.assertIn("unsupported config target path: repo public files are not mutable config targets", report["errors"])
+
+            public_json_path = Path.cwd() / "docs" / "public-config.json"
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "policy-proposals",
+                    "apply",
+                    str(approval_path),
+                    "--preview",
+                    str(preview_path),
+                    "--config-target",
+                    str(public_json_path),
+                    "--dry-run",
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertFalse(report["valid"])
+            self.assertEqual("repo_public_json", report["config_target"]["classification"])
+            self.assertIn("unsupported config target path: repo public files are not mutable config targets", report["errors"])
+
+            runtime_json_path = Path.cwd() / ".codex-batch-runner" / "config.json"
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "policy-proposals",
+                    "apply",
+                    str(approval_path),
+                    "--preview",
+                    str(preview_path),
+                    "--config-target",
+                    str(runtime_json_path),
+                    "--dry-run",
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertFalse(report["valid"])
+            self.assertEqual("repo_runtime_json", report["config_target"]["classification"])
+            self.assertIn("unsupported config target path: repo runtime state is not a mutable config target", report["errors"])
+
+    def test_policy_proposal_apply_revalidates_source_preview_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(
+                tmp,
+                {
+                    "execution_targets": {
+                        "balanced_current": {
+                            "model": "gpt-5",
+                            "freshness": {
+                                "owner": "previous",
+                                "last_reviewed_at": "2026-06-19",
+                                "review_after_days": 14,
+                            },
+                        }
+                    },
+                    "default_execution_config": {"execution_target": "balanced_current"},
+                },
+            )
+            preview = stale_policy_preview()
+            approval = approved_stale_policy_approval(preview)
+            approval["source_preview_sha256"] = "0" * 64
+            preview_path = write_stale_policy_preview(root)
+            approval_path = root / "approval.json"
+            approval_path.write_text(json.dumps(approval, sort_keys=True), encoding="utf-8")
+
+            now = datetime(2026, 7, 3, tzinfo=timezone.utc)
+            with mock.patch("codex_batch_runner.doctor.utc_now", return_value=now):
+                code, output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "policy-proposals",
+                        "apply",
+                        str(approval_path),
+                        "--preview",
+                        str(preview_path),
+                        "--config-target",
+                        str(config_path),
+                        "--dry-run",
+                        "--json",
+                    ]
+                )
+            report = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertFalse(report["valid"])
+            self.assertEqual(["approval validation failed"], report["errors"])
+
+    def test_policy_proposal_apply_rejects_nonexistent_and_unparseable_config_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            preview_path = write_stale_policy_preview(root)
+            approval_path = write_approved_stale_policy_approval(root, stale_policy_preview())
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "policy-proposals",
+                    "apply",
+                    str(approval_path),
+                    "--preview",
+                    str(preview_path),
+                    "--config-target",
+                    str(root / "missing-config.json"),
+                    "--dry-run",
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertEqual(["config target does not exist"], report["errors"])
+
+            bad_config_path = root / "bad-config.json"
+            bad_config_path.write_text("{", encoding="utf-8")
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "policy-proposals",
+                    "apply",
+                    str(approval_path),
+                    "--preview",
+                    str(preview_path),
+                    "--config-target",
+                    str(bad_config_path),
+                    "--dry-run",
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertTrue(report["errors"][0].startswith("failed to parse config target JSON"))
+
+    def test_policy_proposal_apply_rejects_unknown_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(
+                tmp,
+                {
+                    "execution_targets": {
+                        "balanced_current": {
+                            "model": "gpt-5",
+                            "freshness": {
+                                "owner": "previous",
+                                "last_reviewed_at": "2026-06-19",
+                                "review_after_days": 14,
+                            },
+                        }
+                    },
+                    "default_execution_config": {"execution_target": "balanced_current"},
+                },
+            )
+            preview = stale_policy_preview()
+            preview["items"][0]["recommended_action"] = "replace_execution_target_model"
+            preview_path = root / "preview.json"
+            preview_path.write_text(json.dumps(preview, sort_keys=True), encoding="utf-8")
+            approval_path = write_approved_stale_policy_approval(root, preview)
+
+            now = datetime(2026, 7, 3, tzinfo=timezone.utc)
+            with mock.patch("codex_batch_runner.doctor.utc_now", return_value=now):
+                code, output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "policy-proposals",
+                        "apply",
+                        str(approval_path),
+                        "--preview",
+                        str(preview_path),
+                        "--config-target",
+                        str(config_path),
+                        "--dry-run",
+                        "--json",
+                    ]
+                )
+            report = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertFalse(report["valid"])
+            self.assertEqual(["unsupported recommended_action"], report["items"][0]["errors"])

@@ -26,11 +26,13 @@ from .planned_execution import planned_execution_compact_note
 from .policy_proposals import (
     build_policy_proposal_approval_template,
     build_policy_proposal_approval_validation,
+    build_policy_proposal_apply_report,
     build_policy_proposal_preview,
     build_execution_target_freshness_proposal_report,
     render_execution_target_freshness_proposal_report,
     render_policy_proposal_approval_template,
     render_policy_proposal_approval_validation,
+    render_policy_proposal_apply_report,
     render_policy_proposal_preview,
 )
 from .evidence import list_rate_limit_evidence
@@ -433,7 +435,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", action="store_true", help="print JSON")
     doctor.set_defaults(func=cmd_doctor)
 
-    policy_proposals = sub.add_parser("policy-proposals", help="generate read-only policy proposals")
+    policy_proposals = sub.add_parser("policy-proposals", help="manage guarded policy proposals")
     policy_proposals_sub = policy_proposals.add_subparsers(dest="policy_proposal_command", required=True)
     execution_target_freshness = policy_proposals_sub.add_parser(
         "execution-target-freshness",
@@ -463,6 +465,19 @@ def build_parser() -> argparse.ArgumentParser:
     validate_approval.add_argument("--preview", required=True, help="path to the source policy proposal preview JSON file")
     validate_approval.add_argument("--json", action="store_true", help="print JSON")
     validate_approval.set_defaults(func=cmd_policy_proposals_validate_approval)
+    apply_policy = policy_proposals_sub.add_parser(
+        "apply",
+        help="guardedly apply an approved policy proposal to an explicit local config JSON target",
+    )
+    apply_policy.add_argument("approval_path", help="path to a policy proposal approval JSON file")
+    apply_policy.add_argument("--preview", required=True, help="path to the source policy proposal preview JSON file")
+    apply_policy.add_argument("--config-target", required=True, help="explicit local/private config JSON file to update")
+    apply_mode = apply_policy.add_mutually_exclusive_group(required=True)
+    apply_mode.add_argument("--dry-run", action="store_true", help="report apply eligibility without mutating config")
+    apply_mode.add_argument("--apply", action="store_true", help="apply eligible freshness metadata updates")
+    apply_policy.add_argument("--approve", action="store_true", help="required with --apply")
+    apply_policy.add_argument("--json", action="store_true", help="print JSON")
+    apply_policy.set_defaults(func=cmd_policy_proposals_apply)
 
     maintenance = sub.add_parser("maintenance", help="run guarded local maintenance workflows")
     maintenance_sub = maintenance.add_subparsers(dest="maintenance_command", required=True)
@@ -3977,6 +3992,36 @@ def cmd_policy_proposals_validate_approval(config: Config, args: argparse.Namesp
     else:
         print(render_policy_proposal_approval_validation(validation), end="")
     return 0 if validation.get("valid") else 1
+
+
+def cmd_policy_proposals_apply(config: Config, args: argparse.Namespace) -> int:
+    approval, approval_errors = read_json_file(args.approval_path, "policy proposal approval")
+    preview, preview_errors = read_json_file(args.preview, "policy proposal preview")
+    report = build_policy_proposal_apply_report(
+        approval,
+        preview,
+        args.config_target,
+        apply=args.apply,
+        approve=args.approve,
+        repo_root=Path.cwd(),
+    )
+    load_errors = approval_errors + preview_errors
+    if load_errors:
+        report["errors"] = load_errors
+        report["valid"] = False
+    if report.get("mutation", {}).get("applied"):
+        write_event_nonfatal(
+            config,
+            "policy_proposal_applied",
+            source="policy-proposals apply",
+            summary="policy proposal apply updated execution target freshness metadata",
+            payload=report.get("audit") if isinstance(report.get("audit"), dict) else {},
+        )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_policy_proposal_apply_report(report), end="")
+    return 0 if report.get("valid") else 1
 
 
 def read_json_file(path_text: str, label: str) -> tuple[object | None, list[str]]:
