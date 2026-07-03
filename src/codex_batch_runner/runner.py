@@ -1195,6 +1195,7 @@ def record_last_run(task: dict, result: CodexResult, *, execution_settings: Reso
             "selection_reason": execution_settings.selection_reason,
             "model": execution_settings.model,
             "model_source": execution_settings.model_source,
+            "execution_target": execution_settings.execution_target,
             "codex_profile": execution_settings.codex_profile,
             "config_override_keys": sorted((execution_settings.config_overrides or {}).keys()),
             "budget_hint": execution_settings.budget_hint,
@@ -1210,6 +1211,7 @@ def execution_settings_has_metadata(settings: ResolvedExecutionConfig) -> bool:
         for value in (
             settings.model,
             settings.model_source if settings.model_source != "unknown" else None,
+            settings.execution_target,
             settings.codex_profile,
             settings.config_overrides,
             settings.budget_hint,

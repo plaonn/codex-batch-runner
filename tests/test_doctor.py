@@ -192,7 +192,7 @@ class DoctorTests(unittest.TestCase):
             self.assertTrue(provenance["default_execution_config"]["has_explicit_model_pin"])
             self.assertEqual("absent", provenance["default_execution_config"]["freshness_metadata"]["status"])
             self.assertEqual(
-                "execution_targets_not_available",
+                "direct_model_pin_without_execution_target",
                 provenance["default_execution_config"]["freshness_metadata"]["reason"],
             )
             self.assertEqual("explicit_model", provenance["rules"]["low-cost-docs"]["model_source"])
@@ -204,7 +204,7 @@ class DoctorTests(unittest.TestCase):
                 {
                     "name": "model_requirement_model_selection_default_execution_config_freshness",
                     "level": "warning",
-                    "message": "default_execution_config has an explicit model pin but no freshness metadata; execution_targets do not exist yet",
+                    "message": "default_execution_config has an explicit model pin without execution_target freshness metadata",
                 },
                 report["checks"],
             )
@@ -212,22 +212,83 @@ class DoctorTests(unittest.TestCase):
                 {
                     "name": "model_requirement_model_selection_rule_low-cost-docs_freshness",
                     "level": "warning",
-                    "message": "model_selection_rule has an explicit model pin but no freshness metadata; execution_targets do not exist yet",
+                    "message": "model_selection_rule has an explicit model pin without execution_target freshness metadata",
                 },
                 report["checks"],
             )
             self.assertEqual(0, human_code)
             self.assertIn("model_requirements:", human_output)
-            self.assertIn("low-cost-docs: model=true codex_profile=true config_overrides=model_reasoning_effort", human_output)
+            self.assertIn(
+                "low-cost-docs: model=true target=- codex_profile=true "
+                "config_overrides=model_reasoning_effort",
+                human_output,
+            )
             self.assertIn("model_selection_provenance:", human_output)
             self.assertIn(
-                "default_execution_config: model_source=explicit_model explicit_pin=true "
-                "freshness=absent(execution_targets_not_available)",
+                "default_execution_config: model_source=explicit_model target=- explicit_pin=true "
+                "freshness=absent(direct_model_pin_without_execution_target)",
                 human_output,
             )
             self.assertIn(
-                "low-cost-docs: model_source=explicit_model explicit_pin=true "
-                "freshness=absent(execution_targets_not_available)",
+                "low-cost-docs: model_source=explicit_model target=- explicit_pin=true "
+                "freshness=absent(direct_model_pin_without_execution_target)",
+                human_output,
+            )
+
+    def test_doctor_reports_execution_target_alias_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(
+                tmp,
+                [str(executable), "exec", "--json"],
+                extra={
+                    "execution_targets": {
+                        "low_cost_current": {
+                            "model": "gpt-5.3-codex-spark",
+                            "config_overrides": {"model_reasoning_effort": "low"},
+                            "freshness": {
+                                "owner": "operator",
+                                "last_reviewed_at": "2026-07-03",
+                                "review_after_days": 14,
+                            },
+                        }
+                    },
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "execution_target": "low_cost_current",
+                        },
+                    ],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            self.assertEqual(["low_cost_current"], report["model_requirements"]["execution_targets"])
+            rule = report["model_requirements"]["model_selection_provenance"]["rules"]["low-cost-docs"]
+            self.assertEqual("target_alias", rule["model_source"])
+            self.assertEqual("low_cost_current", rule["execution_target"])
+            self.assertEqual("configured", rule["freshness_metadata"]["status"])
+            self.assertNotIn("gpt-5.3-codex-spark", json.dumps(report["model_requirements"], sort_keys=True))
+            self.assertNotIn(
+                {
+                    "name": "model_requirement_model_selection_rule_low-cost-docs_target_freshness",
+                    "level": "warning",
+                    "message": "model_selection_rule execution_target has no freshness metadata",
+                },
+                report["checks"],
+            )
+            self.assertEqual(0, human_code)
+            self.assertIn("execution_targets: low_cost_current", human_output)
+            self.assertIn(
+                "low-cost-docs: model_source=target_alias target=low_cost_current explicit_pin=false "
+                "freshness=configured(execution_target)",
                 human_output,
             )
 
@@ -278,7 +339,7 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(0, human_code)
             self.assertIn(
                 "reviewer_selected: selection_rule=high-effort-default-model "
-                "model_source=cli_default explicit_pin=false "
+                "model_source=cli_default target=- explicit_pin=false "
                 "freshness=not_applicable(no_explicit_model_pin)",
                 human_output,
             )

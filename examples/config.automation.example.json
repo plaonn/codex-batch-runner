@@ -29,9 +29,49 @@
       "review_strictness": "high"
     }
   },
+  "execution_targets": {
+    "balanced_current": {
+      "model": "gpt-5",
+      "codex_profile": "batch-normal",
+      "freshness": {
+        "owner": "operator",
+        "last_reviewed_at": "2026-07-03",
+        "review_after_days": 14
+      }
+    },
+    "low_cost_current": {
+      "model": "gpt-5-small",
+      "codex_profile": "batch-small",
+      "config_overrides": {
+        "model_reasoning_effort": "low"
+      },
+      "freshness": {
+        "owner": "operator",
+        "last_reviewed_at": "2026-07-03",
+        "review_after_days": 14
+      }
+    },
+    "high_capability_current": {
+      "model": "gpt-5",
+      "codex_profile": "batch-deep",
+      "freshness": {
+        "owner": "operator",
+        "last_reviewed_at": "2026-07-03",
+        "review_after_days": 14
+      }
+    },
+    "strict_review_current": {
+      "model": "gpt-5",
+      "codex_profile": "batch-review",
+      "freshness": {
+        "owner": "operator",
+        "last_reviewed_at": "2026-07-03",
+        "review_after_days": 14
+      }
+    }
+  },
   "default_execution_config": {
-    "model": "gpt-5",
-    "codex_profile": "batch-normal"
+    "execution_target": "balanced_current"
   },
   "model_selection_rules": [
     {
@@ -40,28 +80,21 @@
         "reasoning_depth": "low",
         "cost_sensitivity": "high"
       },
-      "model": "gpt-5-small",
-      "codex_profile": "batch-small",
-      "config_overrides": {
-        "model_reasoning_effort": "low"
-      },
-      "budget_hint": "small documentation or test-only task"
+      "execution_target": "low_cost_current"
     },
     {
       "name": "strict-review",
       "when": {
         "review_strictness": "high"
       },
-      "model": "gpt-5",
-      "codex_profile": "batch-review"
+      "execution_target": "strict_review_current"
     },
     {
       "name": "high-capability",
       "when": {
         "reasoning_depth": "high"
       },
-      "model": "gpt-5",
-      "codex_profile": "batch-deep"
+      "execution_target": "high_capability_current"
     }
   ],
   "manual_cooldown_wake_scheduler": "disabled",

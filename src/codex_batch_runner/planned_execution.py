@@ -41,7 +41,7 @@ def planned_execution_fields(config: Any, task: dict[str, Any]) -> dict[str, str
     fields = {
         "model_source": settings.model_source or "unknown",
         "selection_rule": settings.selection_rule or "unresolved",
-        "execution_target": PLANNED_EXECUTION_TARGET,
+        "execution_target": settings.execution_target or PLANNED_EXECUTION_TARGET,
     }
     if settings.config_overrides:
         fields["config_override_keys"] = ",".join(sorted(str(key) for key in settings.config_overrides))

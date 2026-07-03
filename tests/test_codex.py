@@ -246,6 +246,59 @@ class CodexParserTests(unittest.TestCase):
             self.assertEqual("cli_default", resolved.model_source)
             self.assertIsNone(resolved.model)
 
+    def test_model_selection_rule_can_resolve_execution_target_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            config = Config(
+                **{
+                    **config.__dict__,
+                    "execution_targets": {
+                        "low_cost_current": {
+                            "model": "gpt-5.3-codex-spark",
+                            "codex_profile": "batch-small",
+                            "config_overrides": {"model_reasoning_effort": "low"},
+                            "budget_hint": "low-cost",
+                        }
+                    },
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "execution_target": "low_cost_current",
+                        }
+                    ],
+                }
+            )
+
+            command = format_command_with_resolved_config(
+                ["codex", "exec"],
+                {"id": "task-1", "model_requirement_vector": {"dimensions": {"reasoning_depth": "low"}}},
+                "prompt",
+                config,
+            )
+            resolved = resolve_execution_config(
+                config,
+                {"id": "task-1", "model_requirement_vector": {"dimensions": {"reasoning_depth": "low"}}},
+            )
+
+            self.assertEqual(
+                [
+                    "codex",
+                    "exec",
+                    "--model",
+                    "gpt-5.3-codex-spark",
+                    "--profile",
+                    "batch-small",
+                    "-c",
+                    "model_reasoning_effort=low",
+                    "prompt",
+                ],
+                command,
+            )
+            self.assertEqual("target_alias", resolved.model_source)
+            self.assertEqual("low_cost_current", resolved.execution_target)
+            self.assertEqual("gpt-5.3-codex-spark", resolved.model)
+
     def test_high_risk_metadata_derives_high_requirement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))

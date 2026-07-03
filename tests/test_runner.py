@@ -1366,6 +1366,44 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("cli_default", resolved["model_source"])
             self.assertIsNone(resolved["model"])
 
+    def test_run_next_records_execution_target_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            config = replace(
+                config,
+                execution_targets={
+                    "high_capability_current": {
+                        "model": "gpt-5",
+                        "config_overrides": {"model_reasoning_effort": "high"},
+                    }
+                },
+                model_selection_rules=[
+                    {
+                        "name": "high-capability",
+                        "when": {"reasoning_depth": "high"},
+                        "execution_target": "high_capability_current",
+                    }
+                ],
+            )
+            create_task(
+                config,
+                "do it",
+                tmp,
+                task_id="task-critical-worktree",
+                labels=["worktree-apply"],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "task-critical-worktree")
+
+            self.assertEqual("completed", outcome.status)
+            resolved = task["last_run"]["resolved_execution_config"]
+            self.assertEqual("high-capability", resolved["selection_rule"])
+            self.assertEqual("target_alias", resolved["model_source"])
+            self.assertEqual("high_capability_current", resolved["execution_target"])
+            self.assertEqual("gpt-5", resolved["model"])
+            self.assertEqual(["model_reasoning_effort"], resolved["config_override_keys"])
+
     def test_run_next_worktree_disabled_uses_original_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")

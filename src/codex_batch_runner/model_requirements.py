@@ -42,6 +42,7 @@ class ResolvedExecutionConfig:
     selection_reason: str | None = None
     model: str | None = None
     model_source: str = "unknown"
+    execution_target: str | None = None
     codex_profile: str | None = None
     config_overrides: dict[str, str] | None = None
     budget_hint: str | None = None
@@ -112,6 +113,8 @@ def execution_config_value(key: str, value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{key} must be an object")
     config: dict[str, Any] = {}
+    if "execution_target" in value:
+        config["execution_target"] = optional_string_value(f"{key}.execution_target", value.get("execution_target"))
     if "model" in value:
         config["model"] = optional_string_value(f"{key}.model", value.get("model"))
     if "codex_profile" in value:
@@ -122,7 +125,69 @@ def execution_config_value(key: str, value: object) -> dict[str, Any]:
         config["config_overrides"] = overrides
     if "budget_hint" in value:
         config["budget_hint"] = optional_string_value(f"{key}.budget_hint", value.get("budget_hint"))
+    if config.get("execution_target"):
+        direct = [name for name in ("model", "codex_profile", "config_overrides", "budget_hint") if config.get(name)]
+        if direct:
+            raise ValueError(f"{key}.execution_target cannot be combined with direct execution config: {', '.join(direct)}")
     return {item_key: item for item_key, item in config.items() if item not in (None, {}, "")}
+
+
+def execution_targets_value(value: object) -> dict[str, dict[str, Any]]:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("execution_targets must be an object")
+    targets: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_config in value.items():
+        name = string_value("execution_targets key", raw_name)
+        targets[name] = execution_target_definition_value(f"execution_targets.{name}", raw_config)
+    return targets
+
+
+def execution_target_definition_value(key: str, value: object) -> dict[str, Any]:
+    config = execution_config_value(key, value)
+    if config.get("execution_target"):
+        raise ValueError(f"{key}.execution_target is not allowed inside an execution target definition")
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    if "model_source" in value:
+        model_source = optional_string_value(f"{key}.model_source", value.get("model_source"))
+        if model_source != "cli_default":
+            raise ValueError(f"{key}.model_source must be cli_default")
+        if config.get("model"):
+            raise ValueError(f"{key}.model_source cannot be combined with model")
+        if model_source:
+            config["model_source"] = model_source
+    if "freshness" in value:
+        freshness = freshness_metadata_value(f"{key}.freshness", value.get("freshness"))
+        if freshness:
+            config["freshness"] = freshness
+    return config
+
+
+def freshness_metadata_value(key: str, value: object) -> dict[str, Any]:
+    if value in (None, "", {}):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    metadata: dict[str, Any] = {}
+    if "owner" in value:
+        metadata["owner"] = optional_string_value(f"{key}.owner", value.get("owner"))
+    if "last_reviewed_at" in value:
+        metadata["last_reviewed_at"] = optional_string_value(f"{key}.last_reviewed_at", value.get("last_reviewed_at"))
+    if "review_after_days" in value:
+        metadata["review_after_days"] = positive_int_value(f"{key}.review_after_days", value.get("review_after_days"))
+    return {item_key: item for item_key, item in metadata.items() if item not in (None, "", {})}
+
+
+def positive_int_value(key: str, value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{key} must be a positive integer")
+    return parsed
 
 
 def task_requirement_metadata(*, model_requirement_vector: object = None) -> dict[str, Any]:
@@ -134,15 +199,17 @@ def resolve_execution_config(config: Any, task: dict[str, Any], *, reviewer: boo
     worker_role = "reviewer" if reviewer else "implementer"
     vector = resolve_model_requirement_vector(config, task, reviewer=reviewer)
     selection = select_execution_config(config, vector)
+    resolved_selection = resolve_execution_target(config, selection)
     return ResolvedExecutionConfig(
         requirement_vector=vector,
-        selection_rule=selection.get("selection_rule"),
-        selection_reason=selection.get("selection_reason"),
-        model=selection.get("model"),
-        model_source=model_source_for_selection(selection),
-        codex_profile=selection.get("codex_profile"),
-        config_overrides=selection.get("config_overrides") or None,
-        budget_hint=selection.get("budget_hint"),
+        selection_rule=resolved_selection.get("selection_rule"),
+        selection_reason=resolved_selection.get("selection_reason"),
+        model=resolved_selection.get("model"),
+        model_source=model_source_for_selection(resolved_selection),
+        execution_target=resolved_selection.get("execution_target"),
+        codex_profile=resolved_selection.get("codex_profile"),
+        config_overrides=resolved_selection.get("config_overrides") or None,
+        budget_hint=resolved_selection.get("budget_hint"),
         worker_role=worker_role,
     )
 
@@ -203,7 +270,30 @@ def select_execution_config(config: Any, vector: dict[str, Any]) -> dict[str, An
     return default
 
 
+def resolve_execution_target(config: Any, selection: dict[str, Any]) -> dict[str, Any]:
+    alias = selection.get("execution_target")
+    if not alias:
+        return selection
+    targets = getattr(config, "execution_targets", {}) or {}
+    target = targets.get(alias)
+    if target is None:
+        raise ValueError(f"execution_target {alias!r} is not configured")
+    resolved = {
+        key: value
+        for key, value in target.items()
+        if key in {"model", "codex_profile", "config_overrides", "budget_hint"}
+    }
+    resolved["execution_target"] = alias
+    if selection.get("selection_rule"):
+        resolved["selection_rule"] = selection.get("selection_rule")
+    if selection.get("selection_reason"):
+        resolved["selection_reason"] = selection.get("selection_reason")
+    return resolved
+
+
 def model_source_for_selection(selection: dict[str, Any]) -> str:
+    if selection.get("execution_target"):
+        return "target_alias"
     if selection.get("model"):
         return "explicit_model"
     return "cli_default"

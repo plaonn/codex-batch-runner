@@ -338,6 +338,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual({}, default_config.default_model_requirement_vector)
             self.assertEqual({}, default_config.review_model_requirement_vector)
             self.assertEqual({}, default_config.default_execution_config)
+            self.assertEqual({}, default_config.execution_targets)
             self.assertEqual([], default_config.model_selection_rules)
 
             config_path = Path(tmp) / "config.json"
@@ -355,14 +356,22 @@ class ConfigTests(unittest.TestCase):
                             "dimensions": {"review_strictness": "high"},
                         },
                         "default_execution_config": {"model": "gpt-5"},
+                        "execution_targets": {
+                            "low_cost_current": {
+                                "model": "gpt-5-small",
+                                "config_overrides": {"model_reasoning_effort": "low"},
+                                "freshness": {
+                                    "owner": "operator",
+                                    "last_reviewed_at": "2026-07-03",
+                                    "review_after_days": 14,
+                                },
+                            }
+                        },
                         "model_selection_rules": [
                             {
                                 "name": "low-cost-docs",
                                 "when": {"reasoning_depth": "low"},
-                                "model": "gpt-5-small",
-                                "codex_profile": "batch-small",
-                                "config_overrides": {"model_reasoning_effort": "low"},
-                                "budget_hint": "small",
+                                "execution_target": "low_cost_current",
                             },
                         ],
                     }
@@ -375,8 +384,51 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual("medium", config.default_model_requirement_vector["dimensions"]["reasoning_depth"])
             self.assertEqual("high", config.review_model_requirement_vector["dimensions"]["review_strictness"])
             self.assertEqual("gpt-5", config.default_execution_config["model"])
-            self.assertEqual("gpt-5-small", config.model_selection_rules[0]["model"])
-            self.assertEqual({"model_reasoning_effort": "low"}, config.model_selection_rules[0]["config_overrides"])
+            self.assertEqual("gpt-5-small", config.execution_targets["low_cost_current"]["model"])
+            self.assertEqual({"model_reasoning_effort": "low"}, config.execution_targets["low_cost_current"]["config_overrides"])
+            self.assertEqual("2026-07-03", config.execution_targets["low_cost_current"]["freshness"]["last_reviewed_at"])
+            self.assertEqual("low_cost_current", config.model_selection_rules[0]["execution_target"])
+
+    def test_execution_target_selection_cannot_be_mixed_with_direct_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "model_selection_rules": [
+                            {
+                                "name": "mixed",
+                                "execution_target": "low_cost_current",
+                                "model": "gpt-5-small",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "execution_target cannot be combined"):
+                Config.load(str(config_path), root=Path(tmp))
+
+    def test_execution_target_references_must_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "model_selection_rules": [
+                            {
+                                "name": "missing-target",
+                                "execution_target": "not_configured",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "references unknown execution_target"):
+                Config.load(str(config_path), root=Path(tmp))
 
     def test_removed_execution_profile_config_keys_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -10,8 +10,9 @@ Task JSON은 provider/model/profile 이름이 아니라 `model_requirement_vecto
 
 Task JSON은 `model_requirement_vector`만 저장하며 provider/model/profile 식별자는 저장하지 않습니다. 즉, 작업 자체가 "무엇을 써야 한다"가 아니라 "어떤 성능/안전 특성이 필요한지"만 정의합니다.
 
-- 로컬 config는 `model_selection_rules`에서 `model`/`codex_profile`를 명시적으로 고정할 수 있거나, 이를 생략하고 Codex CLI 기본 동작에 의존할 수 있습니다.
-- 명시적 모델 핀(`model: ...`)은 새 모델 출시 시 자동 갱신되지 않습니다. 새 모델이 추가되면 운영자가 최신 CLI/provider 동향을 보고 규칙을 검토·갱신해야 합니다.
+- 로컬 config는 `execution_targets`에서 안정적인 target alias를 정의하고, `default_execution_config` 또는 `model_selection_rules`가 그 alias를 선택할 수 있습니다.
+- `model_selection_rules`와 `default_execution_config`는 호환을 위해 `model`/`codex_profile`를 직접 고정할 수도 있지만, direct model pin은 freshness metadata를 담을 수 없으므로 `cbr doctor`가 경고합니다.
+- 명시적 모델 핀(`model: ...`)과 target alias 안의 concrete model은 새 모델 출시 시 자동 갱신되지 않습니다. 새 모델이 추가되면 운영자가 최신 CLI/provider 동향을 보고 target을 검토·갱신해야 합니다.
 - CLI 기본 경로는 설치된 Codex/프로바이더 기본값을 따르지만, cbr는 이를 실행 전에는 실제 모델 정체를 알 수 없습니다.
 - cbr가 실제 사용 모델을 명시적으로 알 수 있는 경우는 config에 명시되었거나, 실행 결과에서 `last_run.resolved_execution_config`로 신뢰성 있게 관측될 때에 한정됩니다.
 - `routing-report`/`cbr doctor`는 진단/자문용 증거 surface로, 모델 자동 발견(auto-discover), 자동 롤아웃(auto-rollout), 정책 자동 변경(auto-mutate) 기능을 수행하지 않습니다.
@@ -21,7 +22,8 @@ Config는 선택적으로 아래 field를 가질 수 있습니다.
 - `default_model_requirement_vector`: task에 explicit vector가 없을 때 사용할 기본 요구 벡터
 - `review_model_requirement_vector`: reviewer Codex 호출에 사용할 요구 벡터
 - `default_execution_config`: selection rule이 match되지 않을 때 사용할 local Codex 실행 설정
-- `model_selection_rules`: requirement dimension match 조건과 local Codex `model`, `codex_profile`, allowlisted `config_overrides`, `budget_hint` mapping
+- `execution_targets`: stable local alias와 concrete Codex `model`, `codex_profile`, allowlisted `config_overrides`, optional freshness metadata mapping
+- `model_selection_rules`: requirement dimension match 조건과 direct 실행 설정 또는 `execution_target` alias mapping
 
 Task는 `model_requirement_vector`를 저장할 수 있습니다. 없으면 enqueue 단계에서 routing metadata를 기반으로 deterministic vector를 생성합니다. 직접 model/profile/config override를 task에 저장하지 않습니다.
 
@@ -44,7 +46,7 @@ High-risk category/label에는 보수적 vector derivation을 적용합니다. c
 
 Low-risk docs-only routing metadata에는 낮은 reasoning depth와 높은 cost sensitivity vector를 적용합니다. Unit, integration, build, e2e처럼 검증 범위가 넓은 작업은 이 low-cost candidate 대상이 아닙니다.
 
-`cbr list`와 `cbr summary`는 explicit `model_requirement_vector`를 표시할 수 있습니다. `cbr summary`와 `review-bundle`은 routing decision metadata도 sanitized task metadata로 표시해 review outcome과 original routing decision을 대조할 수 있게 합니다. Runner는 각 Codex 실행의 `last_run.resolved_execution_config`에 worker role, selection rule, model/profile 존재 여부, override key 이름, 사용한 requirement vector를 기록합니다. `cbr doctor`는 configured model selection rule 이름과 override key 이름만 표시하고 override 값은 출력하지 않습니다.
+`cbr list`와 `cbr summary`는 explicit `model_requirement_vector`를 표시할 수 있습니다. `cbr summary`와 `review-bundle`은 routing decision metadata도 sanitized task metadata로 표시해 review outcome과 original routing decision을 대조할 수 있게 합니다. Runner는 각 Codex 실행의 `last_run.resolved_execution_config`에 worker role, selection rule, `model_source`, `execution_target`, model/profile 존재 여부, override key 이름, 사용한 requirement vector를 기록합니다. `cbr doctor`는 configured model selection rule 이름, target alias, override key 이름만 표시하고 override 값은 출력하지 않습니다.
 
 `cbr routing-report`는 model requirement와 selection rule을 조정하기 위한 read-only evidence surface입니다. 명령은 queue task를 model requirement, model selection rule, category, label, requirement/category 조합, routing experiment, routing size, routing risk, routing risk factor, verification scope, routing decision tuple, requirement/routing decision tuple, selection/routing decision tuple, low-cost candidate 신호, requirement/experiment 조합, provider resource evidence로 집계하고 accepted count, first-pass accepted count, needs-fix/rejected rate, reviewer decision count, auto-fix task frequency, attempts, run count, duration 기반 cost proxy를 출력합니다. Provider resource evidence는 현재 Codex provider 불확실성을 명시하기 위해 기본적으로 `provider_id=codex`, `quota_boundary=unknown`, `sharing_assumption=not_independent`를 사용합니다. 이 evidence는 local `capacity_pool`, worker/reviewer role, legacy profile name과 분리되며 provider quota bucket을 추론하지 않습니다. Report는 task JSON, event log, review status를 변경하지 않고 Codex 또는 reviewer Codex를 호출하지 않습니다. 운영자는 이 결과를 보고 requirement derivation 또는 selection rule 변경을 별도 policy change로 반영합니다.
 
@@ -435,9 +437,40 @@ codex exec --sandbox workspace-write resume "<session_id>" --json "<wrapped prom
       "review_strictness": "medium"
     }
   },
+  "execution_targets": {
+    "balanced_current": {
+      "model": "gpt-5",
+      "codex_profile": "batch-normal",
+      "freshness": {
+        "owner": "operator",
+        "last_reviewed_at": "2026-07-03",
+        "review_after_days": 14
+      }
+    },
+    "low_cost_current": {
+      "model": "gpt-5-small",
+      "codex_profile": "batch-small",
+      "config_overrides": {
+        "model_reasoning_effort": "low"
+      },
+      "freshness": {
+        "owner": "operator",
+        "last_reviewed_at": "2026-07-03",
+        "review_after_days": 14
+      }
+    },
+    "high_capability_current": {
+      "model": "gpt-5",
+      "codex_profile": "batch-deep",
+      "freshness": {
+        "owner": "operator",
+        "last_reviewed_at": "2026-07-03",
+        "review_after_days": 14
+      }
+    }
+  },
   "default_execution_config": {
-    "model": "gpt-5",
-    "codex_profile": "batch-normal"
+    "execution_target": "balanced_current"
   },
   "model_selection_rules": [
     {
@@ -446,18 +479,12 @@ codex exec --sandbox workspace-write resume "<session_id>" --json "<wrapped prom
         "reasoning_depth": "low",
         "cost_sensitivity": "high"
       },
-      "model": "gpt-5-small",
-      "codex_profile": "batch-small",
-      "config_overrides": {
-        "model_reasoning_effort": "low"
-      },
-      "budget_hint": "small documentation or test-only task"
+      "execution_target": "low_cost_current"
     },
     {
       "name": "high-capability",
       "when": {"reasoning_depth": "high"},
-      "model": "gpt-5",
-      "codex_profile": "batch-deep"
+      "execution_target": "high_capability_current"
     }
   ],
   "post_mutation_trigger_command": []

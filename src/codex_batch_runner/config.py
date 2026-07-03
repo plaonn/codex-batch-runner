@@ -8,6 +8,7 @@ from typing import Any
 from .fs import read_json
 from .model_requirements import (
     execution_config_value,
+    execution_targets_value,
     model_requirement_vector_value,
     model_selection_rules_value,
 )
@@ -62,6 +63,7 @@ class Config:
     default_model_requirement_vector: dict[str, Any] = field(default_factory=dict)
     review_model_requirement_vector: dict[str, Any] = field(default_factory=dict)
     default_execution_config: dict[str, Any] = field(default_factory=dict)
+    execution_targets: dict[str, dict[str, Any]] = field(default_factory=dict)
     model_selection_rules: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
@@ -84,6 +86,14 @@ class Config:
         event_dir = path_value("event_dir", str(log_dir.parent / "events"))
         notifier_cursor_state_paths = path_list_value("notifier_cursor_state_paths", data, base)
         reject_removed_config_keys(data)
+
+        default_execution_config = execution_config_value(
+            "default_execution_config",
+            data.get("default_execution_config"),
+        )
+        execution_targets = execution_targets_value(data.get("execution_targets"))
+        model_selection_rules = model_selection_rules_value(data.get("model_selection_rules"))
+        validate_execution_target_references(default_execution_config, model_selection_rules, execution_targets)
 
         return cls(
             root=base,
@@ -205,11 +215,9 @@ class Config:
                 "review_model_requirement_vector",
                 data.get("review_model_requirement_vector"),
             ),
-            default_execution_config=execution_config_value(
-                "default_execution_config",
-                data.get("default_execution_config"),
-            ),
-            model_selection_rules=model_selection_rules_value(data.get("model_selection_rules")),
+            default_execution_config=default_execution_config,
+            execution_targets=execution_targets,
+            model_selection_rules=model_selection_rules,
         )
 
 
@@ -233,6 +241,28 @@ def reject_removed_config_keys(data: dict[str, Any]) -> None:
             + ", ".join(removed)
             + "; use model_requirement_vector and model_selection_rules instead"
         )
+
+
+def validate_execution_target_references(
+    default_execution_config: dict[str, Any],
+    model_selection_rules: list[dict[str, Any]],
+    execution_targets: dict[str, dict[str, Any]],
+) -> None:
+    references: list[tuple[str, str]] = []
+    if default_execution_config.get("execution_target"):
+        references.append(("default_execution_config.execution_target", str(default_execution_config["execution_target"])))
+    for rule in model_selection_rules:
+        if rule.get("execution_target"):
+            references.append(
+                (
+                    f"model_selection_rules.{rule.get('name')}.execution_target",
+                    str(rule["execution_target"]),
+                )
+            )
+    missing = [(key, alias) for key, alias in references if alias not in execution_targets]
+    if missing:
+        key, alias = missing[0]
+        raise ValueError(f"{key} references unknown execution_target: {alias}")
 
 
 def path_list_value(key: str, data: dict[str, Any], base: Path) -> list[Path]:
