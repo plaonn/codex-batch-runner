@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter
 from typing import Any
 
@@ -11,6 +13,7 @@ from .transcript import sanitize
 SCHEMA_VERSION = 1
 REPORT_KIND = "policy_proposal_report"
 PREVIEW_KIND = "policy_proposal_preview"
+APPROVAL_TEMPLATE_KIND = "policy_proposal_approval_template"
 EXECUTION_TARGET_FRESHNESS_CLASS = "execution_target_freshness"
 READ_ONLY_MODE = "read_only"
 PROHIBITED_STATE_CHANGES = [
@@ -167,6 +170,108 @@ def build_policy_proposal_preview(source: Any) -> dict[str, Any]:
     }
 
 
+def build_policy_proposal_approval_template(source: Any) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return empty_policy_proposal_approval_template(errors=["policy proposal preview must be a JSON object"])
+
+    warnings: list[str] = []
+    errors: list[str] = []
+    source_schema_version = source.get("schema_version")
+    source_kind = source.get("kind")
+    proposal_class = source.get("proposal_class")
+    if source_schema_version != SCHEMA_VERSION:
+        errors.append("unsupported policy proposal preview schema_version")
+    if source_kind != PREVIEW_KIND:
+        errors.append("unsupported policy proposal preview kind")
+    if proposal_class != EXECUTION_TARGET_FRESHNESS_CLASS:
+        errors.append("unsupported proposal_class")
+    if source.get("errors"):
+        errors.append("policy proposal preview contains errors")
+
+    raw_items = source.get("items")
+    if not isinstance(raw_items, list):
+        errors.append("policy proposal preview items must be a list")
+        raw_items = []
+
+    approvals = []
+    if not errors:
+        for index, item in enumerate(raw_items):
+            if not isinstance(item, dict):
+                warnings.append(f"skipped non-object preview item at index {index}")
+                continue
+            approvals.append(approval_template_item_from_preview_item(item))
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": APPROVAL_TEMPLATE_KIND,
+        "source_schema_version": source_schema_version,
+        "source_kind": source_kind,
+        "source_preview_sha256": canonical_json_sha256(source),
+        "proposal_class": proposal_class,
+        "mode": READ_ONLY_MODE,
+        "created_at": utc_now().isoformat(),
+        "mutation": {
+            "allowed": False,
+            "applied": False,
+            "prohibited_state_changes": PROHIBITED_STATE_CHANGES,
+        },
+        "summary": {
+            "proposal_count": len(approvals),
+            "approved_count": 0,
+            "pending_count": len(approvals),
+        },
+        "approvals": approvals,
+        "warnings": warnings,
+        "errors": errors,
+    }
+
+
+def empty_policy_proposal_approval_template(*, errors: list[str]) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": APPROVAL_TEMPLATE_KIND,
+        "source_schema_version": None,
+        "source_kind": None,
+        "source_preview_sha256": None,
+        "proposal_class": None,
+        "mode": READ_ONLY_MODE,
+        "created_at": utc_now().isoformat(),
+        "mutation": {
+            "allowed": False,
+            "applied": False,
+            "prohibited_state_changes": PROHIBITED_STATE_CHANGES,
+        },
+        "summary": {
+            "proposal_count": 0,
+            "approved_count": 0,
+            "pending_count": 0,
+        },
+        "approvals": [],
+        "warnings": [],
+        "errors": errors,
+    }
+
+
+def approval_template_item_from_preview_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "proposal_id": sanitize(item.get("proposal_id")),
+        "proposal_class": sanitize(item.get("proposal_class")),
+        "target_alias": sanitize(item.get("target_alias")),
+        "target": sanitize(item.get("target")),
+        "recommended_action": sanitize(item.get("recommended_action")),
+        "source_item_sha256": canonical_json_sha256(item),
+        "approved": False,
+        "reviewer": None,
+        "reviewed_at": None,
+        "decision_note": None,
+    }
+
+
+def canonical_json_sha256(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def empty_policy_proposal_preview(*, errors: list[str]) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -291,6 +396,40 @@ def render_policy_proposal_preview(preview: dict[str, Any]) -> str:
                     f"     would_change: {item.get('would_change')}",
                     f"     apply_ready: {str(item.get('apply_ready')).lower()}",
                     f"     reason: {item.get('reason')}",
+                ]
+            )
+    return "\n".join(lines) + "\n"
+
+
+def render_policy_proposal_approval_template(template: dict[str, Any]) -> str:
+    summary = template.get("summary") or {}
+    lines = [
+        "cbr policy-proposals approval-template",
+        f"schema_version: {template.get('schema_version')}",
+        f"source_schema_version: {template.get('source_schema_version')}",
+        f"source_preview_sha256: {template.get('source_preview_sha256')}",
+        f"proposal_class: {template.get('proposal_class')}",
+        f"mode: {template.get('mode')}",
+        f"proposal_count: {summary.get('proposal_count')}",
+        f"approved_count: {summary.get('approved_count')}",
+        "mutation: allowed=false applied=false",
+    ]
+    errors = template.get("errors") or []
+    if errors:
+        lines.append("errors:")
+        for error in errors:
+            lines.append(f"  - {error}")
+    approvals = template.get("approvals") or []
+    if approvals:
+        lines.append("approvals:")
+        for index, approval in enumerate(approvals, start=1):
+            lines.extend(
+                [
+                    f"  {index}. {approval.get('proposal_id')}",
+                    f"     action: {approval.get('recommended_action')}",
+                    f"     target: {approval.get('target')}",
+                    f"     approved: {str(approval.get('approved')).lower()}",
+                    f"     source_item_sha256: {approval.get('source_item_sha256')}",
                 ]
             )
     return "\n".join(lines) + "\n"

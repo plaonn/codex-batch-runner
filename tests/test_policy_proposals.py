@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import tempfile
@@ -33,6 +34,11 @@ def run_cli(args: list[str]) -> tuple[int, str]:
     with contextlib.redirect_stdout(stdout):
         code = main(args)
     return code, stdout.getvalue()
+
+
+def canonical_json_sha256(value: object) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def write_stale_proposal_report(root: Path) -> Path:
@@ -92,6 +98,58 @@ def write_stale_proposal_report(root: Path) -> Path:
         encoding="utf-8",
     )
     return proposal_path
+
+
+def write_stale_policy_preview(root: Path) -> Path:
+    preview_path = root / "preview.json"
+    preview_path.write_text(json.dumps(stale_policy_preview(), sort_keys=True), encoding="utf-8")
+    return preview_path
+
+
+def stale_policy_preview() -> dict:
+    return {
+        "schema_version": 1,
+        "kind": "policy_proposal_preview",
+        "source_schema_version": 1,
+        "source_kind": "policy_proposal_report",
+        "proposal_class": "execution_target_freshness",
+        "mode": "read_only",
+        "mutation": {
+            "allowed": False,
+            "applied": False,
+            "prohibited_state_changes": [
+                "apply",
+                "config_rewrite",
+                "task_mutation",
+                "model_replacement",
+                "rule_replacement",
+            ],
+        },
+        "summary": {
+            "proposal_count": 1,
+            "apply_ready": 0,
+            "blocked": 1,
+            "would_change": "none",
+        },
+        "items": [
+            {
+                "proposal_id": "execution_target_freshness:balanced_current",
+                "proposal_class": "execution_target_freshness",
+                "target_alias": "balanced_current",
+                "status": "open",
+                "severity": "warning",
+                "reason": "review_after_days_elapsed",
+                "recommended_action": "review_execution_target_freshness",
+                "target": "execution_targets.balanced_current.freshness",
+                "would_change": "none",
+                "apply_ready": False,
+                "blocked_reason": "preview_only_no_apply_target",
+                "selection_refs": [{"scope": "default_execution_config", "name": None}],
+            }
+        ],
+        "warnings": [],
+        "errors": [],
+    }
 
 
 class PolicyProposalTests(unittest.TestCase):
@@ -419,6 +477,127 @@ class PolicyProposalTests(unittest.TestCase):
 
             code, _ = run_cli(
                 ["--config", str(config_path), "policy-proposals", "preview", str(proposal_path), "--json"]
+            )
+
+            after_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+            after_contents = {name: (root / name).read_text(encoding="utf-8") for name in after_files}
+            self.assertEqual(0, code)
+            self.assertEqual(before_files, after_files)
+            self.assertEqual(before_contents, after_contents)
+            self.assertFalse((root / "logs").exists())
+            self.assertFalse((root / "events").exists())
+            self.assertFalse((root / "runner.lock").exists())
+
+    def test_policy_proposal_approval_template_shape_for_stale_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            preview = stale_policy_preview()
+            preview_path = root / "preview.json"
+            preview_path.write_text(json.dumps(preview, sort_keys=True), encoding="utf-8")
+
+            now = datetime(2026, 7, 3, tzinfo=timezone.utc)
+            with mock.patch("codex_batch_runner.policy_proposals.utc_now", return_value=now):
+                code, output = run_cli(
+                    ["--config", str(config_path), "policy-proposals", "approval-template", str(preview_path), "--json"]
+                )
+            template = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(
+                {
+                    "schema_version": 1,
+                    "kind": "policy_proposal_approval_template",
+                    "source_schema_version": 1,
+                    "source_kind": "policy_proposal_preview",
+                    "source_preview_sha256": canonical_json_sha256(preview),
+                    "proposal_class": "execution_target_freshness",
+                    "mode": "read_only",
+                    "created_at": "2026-07-03T00:00:00+00:00",
+                    "mutation": {
+                        "allowed": False,
+                        "applied": False,
+                        "prohibited_state_changes": [
+                            "apply",
+                            "config_rewrite",
+                            "task_mutation",
+                            "model_replacement",
+                            "rule_replacement",
+                        ],
+                    },
+                    "summary": {
+                        "proposal_count": 1,
+                        "approved_count": 0,
+                        "pending_count": 1,
+                    },
+                    "approvals": [
+                        {
+                            "proposal_id": "execution_target_freshness:balanced_current",
+                            "proposal_class": "execution_target_freshness",
+                            "target_alias": "balanced_current",
+                            "target": "execution_targets.balanced_current.freshness",
+                            "recommended_action": "review_execution_target_freshness",
+                            "source_item_sha256": canonical_json_sha256(preview["items"][0]),
+                            "approved": False,
+                            "reviewer": None,
+                            "reviewed_at": None,
+                            "decision_note": None,
+                        }
+                    ],
+                    "warnings": [],
+                    "errors": [],
+                },
+                template,
+            )
+
+    def test_policy_proposal_approval_template_human_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            preview_path = write_stale_policy_preview(root)
+
+            code, output = run_cli(
+                ["--config", str(config_path), "policy-proposals", "approval-template", str(preview_path)]
+            )
+
+            self.assertEqual(0, code)
+            self.assertIn("cbr policy-proposals approval-template", output)
+            self.assertIn("proposal_count: 1", output)
+            self.assertIn("approved_count: 0", output)
+            self.assertIn("target: execution_targets.balanced_current.freshness", output)
+            self.assertIn("approved: false", output)
+
+    def test_policy_proposal_approval_template_rejects_report_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            proposal_path = write_stale_proposal_report(root)
+
+            code, output = run_cli(
+                ["--config", str(config_path), "policy-proposals", "approval-template", str(proposal_path), "--json"]
+            )
+            template = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertEqual(["unsupported policy proposal preview kind"], template["errors"])
+            self.assertEqual([], template["approvals"])
+
+    def test_policy_proposal_approval_template_does_not_mutate_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            preview_path = write_stale_policy_preview(root)
+            tasks = root / "tasks"
+            tasks.mkdir()
+            task_path = tasks / "task-1.json"
+            task_path.write_text(json.dumps({"id": "task-1", "status": "runnable"}, sort_keys=True), encoding="utf-8")
+            state_path = root / "state.json"
+            state_path.write_text(json.dumps({"runner_pause": {"active": False}}, sort_keys=True), encoding="utf-8")
+            before_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+            before_contents = {name: (root / name).read_text(encoding="utf-8") for name in before_files}
+
+            code, _ = run_cli(
+                ["--config", str(config_path), "policy-proposals", "approval-template", str(preview_path), "--json"]
             )
 
             after_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
