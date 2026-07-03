@@ -1559,7 +1559,9 @@ class CliTests(unittest.TestCase):
             task["attempts"] = 1
             save_task(config, task)
 
-            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
+            code, output = run_cli(
+                ["--config", str(config_path), "routing-report", "--project", "project-a", "--limit", "0", "--json"]
+            )
             report = json.loads(output)
             experiments = {entry["key"]: entry for entry in report["groups"]["routing_experiment"]}
             sizes = {entry["key"]: entry for entry in report["groups"]["routing_size"]}
@@ -2021,6 +2023,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(3, small_bucket["clean_samples"])
             self.assertTrue(small_bucket["policy_review_candidate"])
             self.assertEqual("advisory_read_only", small_bucket["policy_review_note"])
+            self.assertEqual("insufficient_sample", small_bucket["threshold_advisory_status"])
+            self.assertEqual(5, small_bucket["threshold_advisory"]["thresholds"]["min_accepted_count"])
+            self.assertIn("accepted_count_below_min", small_bucket["threshold_advisory_reasons"])
             self.assertEqual(
                 3,
                 worker_cells[
@@ -2038,6 +2043,120 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, exclusions["review_process_failed"]["rows"])
             self.assertEqual(1, exclusions["reviewer_unusable"]["rows"])
             self.assertIn("objective_unavailable", exclusions)
+
+    def test_routing_report_task_bucket_threshold_advisory_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+
+            def save_completed(
+                task_id: str,
+                *,
+                routing_size: str,
+                routing_risk: str,
+                verification_scope: list[str],
+                review_status: str = "accepted",
+                reviewer_decision: str = "pass",
+                required_human_checks: list[str] | None = None,
+            ) -> None:
+                task = create_task(
+                    config,
+                    "work",
+                    tmp,
+                    task_id=task_id,
+                    project_id="project-a",
+                    category="implementation",
+                    routing_size=routing_size,
+                    routing_risk=routing_risk,
+                    verification_scope=verification_scope,
+                )
+                task["status"] = "completed"
+                task["review_status"] = review_status
+                task["attempts"] = 1
+                task["last_result"] = {
+                    "task_id": task_id,
+                    "status": "completed",
+                    "verification": ["unit"],
+                }
+                task["reviewer_codex"] = {
+                    "decision": reviewer_decision,
+                    "confidence": "high",
+                }
+                if required_human_checks is not None:
+                    task["reviewer_codex"]["required_human_checks"] = required_human_checks
+                save_task(config, task)
+
+            for index in range(5):
+                save_completed(
+                    f"reviewable-{index}",
+                    routing_size="small",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+            save_completed(
+                "insufficient",
+                routing_size="small",
+                routing_risk="medium",
+                verification_scope=["unit"],
+            )
+            for index in range(5):
+                save_completed(
+                    f"below-accepted-{index}",
+                    routing_size="medium",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+            save_completed(
+                "below-human",
+                routing_size="medium",
+                routing_risk="low",
+                verification_scope=["unit"],
+                review_status="needs_followup",
+                reviewer_decision="needs_human",
+                required_human_checks=["manual verification"],
+            )
+            for index in range(48):
+                save_completed(
+                    f"repeated-fix-accepted-{index}",
+                    routing_size="large",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+            for index in range(2):
+                save_completed(
+                    f"repeated-fix-{index}",
+                    routing_size="large",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                    review_status="needs_followup",
+                    reviewer_decision="needs_fix",
+                )
+
+            code, output = run_cli(
+                ["--config", str(config_path), "routing-report", "--project", "project-a", "--limit", "0", "--json"]
+            )
+            report = json.loads(output)
+            buckets = {entry["key"]: entry for entry in report["evaluation_diagnostics"]["task_buckets"]}
+            reviewable = buckets["size=small risk=low verify=unit"]
+            insufficient = buckets["size=small risk=medium verify=unit"]
+            below = buckets["size=medium risk=low verify=unit"]
+            repeated_fix = buckets["size=large risk=low verify=unit"]
+
+            self.assertEqual(0, code)
+            self.assertEqual("reviewable", reviewable["threshold_advisory_status"])
+            self.assertEqual([], reviewable["threshold_advisory_reasons"])
+            self.assertTrue(reviewable["threshold_advisory"]["read_only"])
+            self.assertEqual(5, reviewable["accepted"])
+            self.assertEqual(1.0, reviewable["first_pass_accept_rate"])
+            self.assertEqual("insufficient_sample", insufficient["threshold_advisory_status"])
+            self.assertIn("accepted_count_below_min", insufficient["threshold_advisory_reasons"])
+            self.assertEqual("below_threshold", below["threshold_advisory_status"])
+            self.assertIn("reviewer_needs_human_present", below["threshold_advisory_reasons"])
+            self.assertIn("required_human_checks_present", below["threshold_advisory_reasons"])
+            self.assertIn("needs_fix_or_rejected_rate_above_max", below["threshold_advisory_reasons"])
+            self.assertEqual("below_threshold", repeated_fix["threshold_advisory_status"])
+            self.assertEqual(0.04, repeated_fix["needs_fix_or_rejected_rate"])
+            self.assertIn("reviewer_needs_fix_repeated", repeated_fix["threshold_advisory_reasons"])
 
     def test_routing_report_includes_request_fingerprint_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2121,6 +2240,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("policy_exclusions", output)
             self.assertIn("task_buckets", output)
             self.assertIn("## request_fingerprint_candidates", output)
+            self.assertIn("ADVISORY", output)
+            self.assertIn("insufficient_sample", output)
             self.assertIn("HUMAN", output)
             self.assertIn("size=small risk=medium verify=manual", output)
 

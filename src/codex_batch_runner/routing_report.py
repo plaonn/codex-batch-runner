@@ -15,6 +15,14 @@ from .transcript import sanitize
 
 DEFAULT_ROUTING_REPORT_LIMIT = 50
 POLICY_REVIEW_CLEAN_SAMPLE_THRESHOLD = 3
+TASK_BUCKET_ADVISORY_MIN_ACCEPTED_COUNT = 5
+TASK_BUCKET_ADVISORY_MIN_FIRST_PASS_ACCEPT_RATE = 0.90
+TASK_BUCKET_ADVISORY_MAX_NEEDS_FIX_OR_REJECTED_RATE = 0.05
+TASK_BUCKET_ADVISORY_THRESHOLDS = {
+    "min_accepted_count": TASK_BUCKET_ADVISORY_MIN_ACCEPTED_COUNT,
+    "min_first_pass_accept_rate": TASK_BUCKET_ADVISORY_MIN_FIRST_PASS_ACCEPT_RATE,
+    "max_needs_fix_or_rejected_rate": TASK_BUCKET_ADVISORY_MAX_NEEDS_FIX_OR_REJECTED_RATE,
+}
 
 
 def build_routing_report(
@@ -347,6 +355,7 @@ def summarize_evaluation_diagnostics(rows: list[dict[str, Any]]) -> dict[str, An
         "task_buckets": summarize_evaluation_groups(group_evaluation_rows(rows, task_bucket_key), summarize_task_bucket),
         "advisory": {
             "policy_review_clean_sample_threshold": POLICY_REVIEW_CLEAN_SAMPLE_THRESHOLD,
+            "task_bucket_thresholds": TASK_BUCKET_ADVISORY_THRESHOLDS,
             "read_only": True,
         },
     }
@@ -520,9 +529,38 @@ def policy_exclusion_reasons(row: dict[str, Any]) -> list[str]:
 def summarize_task_bucket(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     clean_samples = count(rows, clean_worker_policy_sample)
     usable_samples = count(rows, usable_for_worker_policy)
-    return {
+    completed = count(rows, lambda row: outcomes(row).get("worker_terminal_status") == "completed")
+    accepted = count(rows, lambda row: bool(outcomes(row).get("accepted")))
+    first_pass_accepted = count(rows, first_pass_accepted_sample)
+    needs_fix_or_rejected = count(rows, needs_fix_or_rejected_sample)
+    reviewer_needs_fix = count(rows, lambda row: reviewer(row).get("reviewer_decision") == "needs_fix")
+    reviewer_needs_human = count(rows, lambda row: reviewer(row).get("reviewer_decision") == "needs_human")
+    reviewer_failed_review = count(rows, lambda row: reviewer(row).get("reviewer_decision") == "failed_review")
+    required_human_checks = sum(int(reviewer(row).get("required_human_check_count") or 0) for row in rows)
+    first_pass_accept_rate = ratio(first_pass_accepted, completed)
+    needs_fix_or_rejected_rate = ratio(needs_fix_or_rejected, completed)
+    advisory_status, advisory_reasons = task_bucket_threshold_advisory(
+        accepted=accepted,
+        first_pass_accept_rate=first_pass_accept_rate,
+        needs_fix_or_rejected_rate=needs_fix_or_rejected_rate,
+        reviewer_needs_fix=reviewer_needs_fix,
+        reviewer_needs_human=reviewer_needs_human,
+        reviewer_failed_review=reviewer_failed_review,
+        required_human_checks=required_human_checks,
+    )
+    bucket = {
         "key": key,
         "tasks": len(rows),
+        "completed": completed,
+        "accepted": accepted,
+        "first_pass_accepted": first_pass_accepted,
+        "first_pass_accept_rate": first_pass_accept_rate,
+        "needs_fix_or_rejected": needs_fix_or_rejected,
+        "needs_fix_or_rejected_rate": needs_fix_or_rejected_rate,
+        "reviewer_needs_fix": reviewer_needs_fix,
+        "reviewer_needs_human": reviewer_needs_human,
+        "reviewer_failed_review": reviewer_failed_review,
+        "required_human_checks": required_human_checks,
         "usable_for_worker_policy": usable_samples,
         "clean_samples": clean_samples,
         "accepted_pass_clean_samples": count(rows, lambda row: clean_worker_policy_sample(row) and is_accepted_pass_sample(row)),
@@ -530,7 +568,48 @@ def summarize_task_bucket(key: str, rows: list[dict[str, Any]]) -> dict[str, Any
         "reviewer_cells": sorted({reviewer_cell_key(row) for row in rows}),
         "policy_review_candidate": clean_samples >= POLICY_REVIEW_CLEAN_SAMPLE_THRESHOLD,
         "policy_review_note": "advisory_read_only" if clean_samples >= POLICY_REVIEW_CLEAN_SAMPLE_THRESHOLD else "",
+        "threshold_advisory_status": advisory_status,
+        "threshold_advisory_reasons": advisory_reasons,
+        "threshold_advisory": {
+            "status": advisory_status,
+            "reasons": advisory_reasons,
+            "thresholds": TASK_BUCKET_ADVISORY_THRESHOLDS,
+            "read_only": True,
+        },
     }
+    return bucket
+
+
+def task_bucket_threshold_advisory(
+    *,
+    accepted: int,
+    first_pass_accept_rate: float,
+    needs_fix_or_rejected_rate: float,
+    reviewer_needs_fix: int,
+    reviewer_needs_human: int,
+    reviewer_failed_review: int,
+    required_human_checks: int,
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    if accepted < TASK_BUCKET_ADVISORY_MIN_ACCEPTED_COUNT:
+        reasons.append("accepted_count_below_min")
+    if first_pass_accept_rate < TASK_BUCKET_ADVISORY_MIN_FIRST_PASS_ACCEPT_RATE:
+        reasons.append("first_pass_accept_rate_below_min")
+    if needs_fix_or_rejected_rate > TASK_BUCKET_ADVISORY_MAX_NEEDS_FIX_OR_REJECTED_RATE:
+        reasons.append("needs_fix_or_rejected_rate_above_max")
+    if reviewer_needs_fix > 1:
+        reasons.append("reviewer_needs_fix_repeated")
+    if reviewer_needs_human:
+        reasons.append("reviewer_needs_human_present")
+    if reviewer_failed_review:
+        reasons.append("reviewer_failed_review_present")
+    if required_human_checks:
+        reasons.append("required_human_checks_present")
+    if accepted < TASK_BUCKET_ADVISORY_MIN_ACCEPTED_COUNT:
+        return "insufficient_sample", reasons
+    if reasons:
+        return "below_threshold", reasons
+    return "reviewable", []
 
 
 def worker_cell_key(row: dict[str, Any]) -> str:
@@ -610,6 +689,22 @@ def is_accepted_pass_sample(row: dict[str, Any]) -> bool:
 
 def clean_worker_policy_sample(row: dict[str, Any]) -> bool:
     return usable_for_worker_policy(row) and is_accepted_pass_sample(row) and required_checks_passed(row)
+
+
+def first_pass_accepted_sample(row: dict[str, Any]) -> bool:
+    return (
+        bool(outcomes(row).get("accepted"))
+        and reviewer(row).get("reviewer_decision") == "pass"
+        and int(worker(row).get("attempts") or 0) <= 1
+        and int(reviewer(row).get("fix_attempts") or 0) == 0
+        and required_checks_passed(row)
+    )
+
+
+def needs_fix_or_rejected_sample(row: dict[str, Any]) -> bool:
+    return bool(outcomes(row).get("rejected")) or bool(outcomes(row).get("needs_followup")) or reviewer(
+        row
+    ).get("reviewer_decision") == "needs_fix"
 
 
 def count(rows: list[dict[str, Any]], predicate: Any) -> int:
@@ -880,11 +975,15 @@ def render_policy_exclusion_table(entries: list[dict[str, Any]]) -> str:
 
 
 def render_task_bucket_table(entries: list[dict[str, Any]]) -> str:
-    header = ["TASK_BUCKET", "TASKS", "USABLE", "CLEAN", "CANDIDATE"]
+    header = ["TASK_BUCKET", "TASKS", "ACCEPT", "1PASS", "FIX/REJ", "ADVISORY", "USABLE", "CLEAN", "CANDIDATE"]
     rows = [
         [
             str(entry.get("key") or "-"),
             str(entry.get("tasks") or 0),
+            str(entry.get("accepted") or 0),
+            percent_cell(entry.get("first_pass_accept_rate")),
+            percent_cell(entry.get("needs_fix_or_rejected_rate")),
+            str(entry.get("threshold_advisory_status") or "-"),
             str(entry.get("usable_for_worker_policy") or 0),
             str(entry.get("clean_samples") or 0),
             "yes" if entry.get("policy_review_candidate") else "no",
