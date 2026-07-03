@@ -35,6 +35,65 @@ def run_cli(args: list[str]) -> tuple[int, str]:
     return code, stdout.getvalue()
 
 
+def write_stale_proposal_report(root: Path) -> Path:
+    proposal_path = root / "proposal.json"
+    proposal_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "policy_proposal_report",
+                "proposal_class": "execution_target_freshness",
+                "mode": "read_only",
+                "generated_at": "2026-07-03T00:00:00+00:00",
+                "mutation": {
+                    "allowed": False,
+                    "applied": False,
+                    "prohibited_state_changes": [
+                        "apply",
+                        "config_rewrite",
+                        "task_mutation",
+                        "model_replacement",
+                        "rule_replacement",
+                    ],
+                },
+                "summary": {
+                    "targets_checked": 1,
+                    "fresh": 0,
+                    "stale": 1,
+                    "missing": 0,
+                    "proposal_count": 1,
+                },
+                "items": [],
+                "proposals": [
+                    {
+                        "proposal_id": "execution_target_freshness:balanced_current",
+                        "proposal_class": "execution_target_freshness",
+                        "target_alias": "balanced_current",
+                        "status": "open",
+                        "severity": "warning",
+                        "reason": "review_after_days_elapsed",
+                        "recommended_action": "review_execution_target_freshness",
+                        "allowed_state_changes": ["none"],
+                        "prohibited_state_changes": [
+                            "apply",
+                            "config_rewrite",
+                            "task_mutation",
+                            "model_replacement",
+                            "rule_replacement",
+                        ],
+                        "selection_refs": [{"scope": "default_execution_config", "name": None}],
+                    }
+                ],
+                "warnings": [],
+                "errors": [],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return proposal_path
+
+
 class PolicyProposalTests(unittest.TestCase):
     def test_execution_target_freshness_proposal_shape_for_stale_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -234,6 +293,133 @@ class PolicyProposalTests(unittest.TestCase):
             before_contents = {name: (root / name).read_text(encoding="utf-8") for name in before_files}
 
             code, _ = run_cli(["--config", str(config_path), "policy-proposals", "execution-target-freshness", "--json"])
+
+            after_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+            after_contents = {name: (root / name).read_text(encoding="utf-8") for name in after_files}
+            self.assertEqual(0, code)
+            self.assertEqual(before_files, after_files)
+            self.assertEqual(before_contents, after_contents)
+            self.assertFalse((root / "logs").exists())
+            self.assertFalse((root / "events").exists())
+            self.assertFalse((root / "runner.lock").exists())
+
+    def test_policy_proposal_preview_shape_for_stale_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            proposal_path = write_stale_proposal_report(root)
+
+            code, output = run_cli(
+                ["--config", str(config_path), "policy-proposals", "preview", str(proposal_path), "--json"]
+            )
+            preview = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(
+                {
+                    "schema_version": 1,
+                    "kind": "policy_proposal_preview",
+                    "source_schema_version": 1,
+                    "source_kind": "policy_proposal_report",
+                    "proposal_class": "execution_target_freshness",
+                    "mode": "read_only",
+                    "mutation": {
+                        "allowed": False,
+                        "applied": False,
+                        "prohibited_state_changes": [
+                            "apply",
+                            "config_rewrite",
+                            "task_mutation",
+                            "model_replacement",
+                            "rule_replacement",
+                        ],
+                    },
+                    "summary": {
+                        "proposal_count": 1,
+                        "apply_ready": 0,
+                        "blocked": 1,
+                        "would_change": "none",
+                    },
+                    "items": [
+                        {
+                            "proposal_id": "execution_target_freshness:balanced_current",
+                            "proposal_class": "execution_target_freshness",
+                            "target_alias": "balanced_current",
+                            "status": "open",
+                            "severity": "warning",
+                            "reason": "review_after_days_elapsed",
+                            "recommended_action": "review_execution_target_freshness",
+                            "target": "execution_targets.balanced_current.freshness",
+                            "would_change": "none",
+                            "apply_ready": False,
+                            "blocked_reason": "preview_only_no_apply_target",
+                            "selection_refs": [{"scope": "default_execution_config", "name": None}],
+                        }
+                    ],
+                    "warnings": [],
+                    "errors": [],
+                },
+                preview,
+            )
+
+    def test_policy_proposal_preview_human_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            proposal_path = write_stale_proposal_report(root)
+
+            code, output = run_cli(["--config", str(config_path), "policy-proposals", "preview", str(proposal_path)])
+
+            self.assertEqual(0, code)
+            self.assertIn("cbr policy-proposals preview", output)
+            self.assertIn("proposal_count: 1", output)
+            self.assertIn("target: execution_targets.balanced_current.freshness", output)
+            self.assertIn("would_change: none", output)
+            self.assertIn("apply_ready: false", output)
+
+    def test_policy_proposal_preview_rejects_unsupported_class(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            proposal_path = root / "proposal.json"
+            proposal_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "kind": "policy_proposal_report",
+                        "proposal_class": "model_replacement",
+                        "proposals": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(
+                ["--config", str(config_path), "policy-proposals", "preview", str(proposal_path), "--json"]
+            )
+            preview = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertEqual(["unsupported proposal_class"], preview["errors"])
+            self.assertEqual([], preview["items"])
+
+    def test_policy_proposal_preview_does_not_mutate_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            proposal_path = write_stale_proposal_report(root)
+            tasks = root / "tasks"
+            tasks.mkdir()
+            task_path = tasks / "task-1.json"
+            task_path.write_text(json.dumps({"id": "task-1", "status": "runnable"}, sort_keys=True), encoding="utf-8")
+            state_path = root / "state.json"
+            state_path.write_text(json.dumps({"runner_pause": {"active": False}}, sort_keys=True), encoding="utf-8")
+            before_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+            before_contents = {name: (root / name).read_text(encoding="utf-8") for name in before_files}
+
+            code, _ = run_cli(
+                ["--config", str(config_path), "policy-proposals", "preview", str(proposal_path), "--json"]
+            )
 
             after_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
             after_contents = {name: (root / name).read_text(encoding="utf-8") for name in after_files}

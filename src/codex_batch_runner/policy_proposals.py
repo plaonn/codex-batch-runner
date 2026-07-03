@@ -10,6 +10,7 @@ from .transcript import sanitize
 
 SCHEMA_VERSION = 1
 REPORT_KIND = "policy_proposal_report"
+PREVIEW_KIND = "policy_proposal_preview"
 EXECUTION_TARGET_FRESHNESS_CLASS = "execution_target_freshness"
 READ_ONLY_MODE = "read_only"
 PROHIBITED_STATE_CHANGES = [
@@ -19,6 +20,7 @@ PROHIBITED_STATE_CHANGES = [
     "model_replacement",
     "rule_replacement",
 ]
+PREVIEW_BLOCKED_REASON = "preview_only_no_apply_target"
 
 
 def build_execution_target_freshness_proposal_report(config: Config) -> dict[str, Any]:
@@ -112,6 +114,118 @@ def proposal_from_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_policy_proposal_preview(source: Any) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return empty_policy_proposal_preview(errors=["proposal report must be a JSON object"])
+
+    warnings: list[str] = []
+    errors: list[str] = []
+    source_schema_version = source.get("schema_version")
+    source_kind = source.get("kind")
+    proposal_class = source.get("proposal_class")
+    if source_schema_version != SCHEMA_VERSION:
+        errors.append("unsupported proposal report schema_version")
+    if source_kind != REPORT_KIND:
+        errors.append("unsupported proposal report kind")
+    if proposal_class != EXECUTION_TARGET_FRESHNESS_CLASS:
+        errors.append("unsupported proposal_class")
+
+    raw_proposals = source.get("proposals")
+    if not isinstance(raw_proposals, list):
+        errors.append("proposal report proposals must be a list")
+        raw_proposals = []
+
+    items = []
+    if not errors:
+        for index, proposal in enumerate(raw_proposals):
+            if not isinstance(proposal, dict):
+                warnings.append(f"skipped non-object proposal at index {index}")
+                continue
+            items.append(preview_item_from_proposal(proposal))
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": PREVIEW_KIND,
+        "source_schema_version": source_schema_version,
+        "source_kind": source_kind,
+        "proposal_class": proposal_class,
+        "mode": READ_ONLY_MODE,
+        "mutation": {
+            "allowed": False,
+            "applied": False,
+            "prohibited_state_changes": PROHIBITED_STATE_CHANGES,
+        },
+        "summary": {
+            "proposal_count": len(items),
+            "apply_ready": 0,
+            "blocked": len(items),
+            "would_change": "none",
+        },
+        "items": items,
+        "warnings": warnings,
+        "errors": errors,
+    }
+
+
+def empty_policy_proposal_preview(*, errors: list[str]) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": PREVIEW_KIND,
+        "source_schema_version": None,
+        "source_kind": None,
+        "proposal_class": None,
+        "mode": READ_ONLY_MODE,
+        "mutation": {
+            "allowed": False,
+            "applied": False,
+            "prohibited_state_changes": PROHIBITED_STATE_CHANGES,
+        },
+        "summary": {
+            "proposal_count": 0,
+            "apply_ready": 0,
+            "blocked": 0,
+            "would_change": "none",
+        },
+        "items": [],
+        "warnings": [],
+        "errors": errors,
+    }
+
+
+def preview_item_from_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    target_alias = sanitize(proposal.get("target_alias"))
+    selection_refs = proposal.get("selection_refs")
+    return {
+        "proposal_id": sanitize(proposal.get("proposal_id")),
+        "proposal_class": sanitize(proposal.get("proposal_class")),
+        "target_alias": target_alias,
+        "status": sanitize(proposal.get("status")),
+        "severity": sanitize(proposal.get("severity")),
+        "reason": sanitize(proposal.get("reason")),
+        "recommended_action": sanitize(proposal.get("recommended_action")),
+        "target": f"execution_targets.{target_alias}.freshness",
+        "would_change": "none",
+        "apply_ready": False,
+        "blocked_reason": PREVIEW_BLOCKED_REASON,
+        "selection_refs": sanitize_selection_refs(selection_refs) if isinstance(selection_refs, list) else [],
+    }
+
+
+def sanitize_selection_refs(refs: list[Any]) -> list[dict[str, str | None]]:
+    sanitized_refs: list[dict[str, str | None]] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        name = ref.get("name")
+        sanitized_refs.append(
+            {
+                "scope": sanitize(ref.get("scope")),
+                "name": sanitize(name) if name is not None else None,
+            }
+        )
+    return sanitized_refs
+
+
 def render_execution_target_freshness_proposal_report(report: dict[str, Any]) -> str:
     summary = report.get("summary") or {}
     lines = [
@@ -145,6 +259,39 @@ def render_execution_target_freshness_proposal_report(report: dict[str, Any]) ->
                 f"{proposal.get('proposal_id')} "
                 f"action={proposal.get('recommended_action')} "
                 f"state_changes=none"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def render_policy_proposal_preview(preview: dict[str, Any]) -> str:
+    summary = preview.get("summary") or {}
+    lines = [
+        "cbr policy-proposals preview",
+        f"schema_version: {preview.get('schema_version')}",
+        f"source_schema_version: {preview.get('source_schema_version')}",
+        f"proposal_class: {preview.get('proposal_class')}",
+        f"mode: {preview.get('mode')}",
+        f"proposal_count: {summary.get('proposal_count')}",
+        "mutation: allowed=false applied=false",
+    ]
+    errors = preview.get("errors") or []
+    if errors:
+        lines.append("errors:")
+        for error in errors:
+            lines.append(f"  - {error}")
+    items = preview.get("items") or []
+    if items:
+        lines.append("items:")
+        for index, item in enumerate(items, start=1):
+            lines.extend(
+                [
+                    f"  {index}. {item.get('proposal_id')}",
+                    f"     action: {item.get('recommended_action')}",
+                    f"     target: {item.get('target')}",
+                    f"     would_change: {item.get('would_change')}",
+                    f"     apply_ready: {str(item.get('apply_ready')).lower()}",
+                    f"     reason: {item.get('reason')}",
+                ]
             )
     return "\n".join(lines) + "\n"
 

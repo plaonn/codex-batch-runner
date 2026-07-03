@@ -199,6 +199,8 @@ Index warning behavior: SQLite read index가 없거나 schema mismatch, stale so
 
 `cbr policy-proposals execution-target-freshness`는 configured `execution_targets`의 freshness metadata를 읽고 read-only policy proposal report를 생성합니다. 이 command는 apply mode, config rewrite, task mutation, model replacement, rule replacement를 지원하지 않습니다. JSON report는 `schema_version`, `kind`, `proposal_class`, `mode`, `generated_at`, `mutation`, `summary`, `items`, `proposals`, `warnings`, `errors`를 포함합니다. Fresh target은 `items`에만 표시되고 proposal을 만들지 않으며, stale 또는 missing freshness metadata target만 `proposals`에 `review_execution_target_freshness` 또는 `add_execution_target_freshness_metadata` action으로 표시됩니다.
 
+`cbr policy-proposals preview PROPOSAL_JSON`은 기존 `policy_proposal_report` JSON을 읽어 read-only preview report 또는 human summary로 렌더링합니다. 현재 지원 proposal class는 `execution_target_freshness`뿐이며, preview item은 `target`, `recommended_action`, `would_change: none`, `apply_ready: false`, `blocked_reason: preview_only_no_apply_target`을 표시합니다. 이 command도 config rewrite, task mutation, model replacement, rule replacement, apply를 수행하지 않습니다.
+
 Runner lock recovery treats a lock as recoverable immediately when metadata contains a pid for the same hostname and that pid is no longer alive. Unknown host, missing/invalid pid, invalid metadata, and cross-host locks fall back to the age-based stale threshold.
 
 Doctor는 기본적으로 Codex application bundle 안의 별도 executable과 configured CLI를 비교하지 않음. macOS나 특정 app install layout을 가정하지 않기 위함임. 운영자가 app-bundled CLI와 standalone CLI 차이를 확인해야 하는 환경에서는 별도 수동 조사로 처리함. Routine doctor는 대형 binary hash를 계산하지 않음. Hash는 향후 `--verbose` 또는 deep diagnostic check에서 명시적으로 요청할 때만 고려함.

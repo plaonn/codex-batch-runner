@@ -24,8 +24,10 @@ from .execution_evidence import ExecutionEvidenceError, load_execution_evidence_
 from .model_requirements import REQUIREMENT_DIMENSIONS, REQUIREMENT_LEVELS, model_requirement_vector_value
 from .planned_execution import planned_execution_compact_note
 from .policy_proposals import (
+    build_policy_proposal_preview,
     build_execution_target_freshness_proposal_report,
     render_execution_target_freshness_proposal_report,
+    render_policy_proposal_preview,
 )
 from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
@@ -434,6 +436,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     execution_target_freshness.add_argument("--json", action="store_true", help="print JSON")
     execution_target_freshness.set_defaults(func=cmd_policy_proposals_execution_target_freshness)
+    policy_preview = policy_proposals_sub.add_parser(
+        "preview",
+        help="render a read-only proposal preview from a proposal JSON report",
+    )
+    policy_preview.add_argument("proposal_path", help="path to a policy proposal report JSON file")
+    policy_preview.add_argument("--json", action="store_true", help="print JSON")
+    policy_preview.set_defaults(func=cmd_policy_proposals_preview)
 
     maintenance = sub.add_parser("maintenance", help="run guarded local maintenance workflows")
     maintenance_sub = maintenance.add_subparsers(dest="maintenance_command", required=True)
@@ -3875,6 +3884,26 @@ def cmd_policy_proposals_execution_target_freshness(config: Config, args: argpar
     else:
         print(render_execution_target_freshness_proposal_report(report), end="")
     return 0
+
+
+def cmd_policy_proposals_preview(config: Config, args: argparse.Namespace) -> int:
+    load_errors: list[str] = []
+    try:
+        source = json.loads(Path(args.proposal_path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        source = None
+        load_errors.append(f"failed to read proposal report: {exc}")
+    except json.JSONDecodeError as exc:
+        source = None
+        load_errors.append(f"failed to parse proposal report JSON: {exc}")
+    preview = build_policy_proposal_preview(source)
+    if load_errors:
+        preview["errors"] = load_errors
+    if args.json:
+        print(json.dumps(preview, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_policy_proposal_preview(preview), end="")
+    return 0 if not preview.get("errors") else 1
 
 
 def cmd_maintenance_codex_cli(config: Config, args: argparse.Namespace) -> int:
