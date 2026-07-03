@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 from collections import Counter
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -183,11 +184,25 @@ def selection_freshness_metadata(
 def execution_target_freshness_metadata(config: Config, target_alias: str) -> dict[str, Any]:
     target = config.execution_targets.get(target_alias) if isinstance(config.execution_targets, dict) else None
     freshness = target.get("freshness") if isinstance(target, dict) and isinstance(target.get("freshness"), dict) else {}
-    if freshness:
-        metadata = {"status": "configured", "reason": "execution_target"}
-        metadata.update(freshness)
+    if not freshness:
+        return {"status": "absent", "reason": "target_freshness_not_configured"}
+    metadata = {"status": "fresh", "reason": "execution_target"}
+    metadata.update(freshness)
+    reviewed = parse_time(str(freshness.get("last_reviewed_at") or ""))
+    review_after_days = freshness.get("review_after_days")
+    if reviewed is None or not isinstance(review_after_days, int):
+        metadata["status"] = "absent"
+        metadata["reason"] = "target_freshness_review_window_not_configured"
         return metadata
-    return {"status": "absent", "reason": "target_freshness_not_configured"}
+    review_due_date = reviewed.date() + timedelta(days=review_after_days)
+    checked_date = utc_now().date()
+    metadata["checked_at"] = checked_date.isoformat()
+    metadata["review_due_at"] = review_due_date.isoformat()
+    metadata["stale"] = checked_date >= review_due_date
+    if metadata["stale"]:
+        metadata["status"] = "stale"
+        metadata["reason"] = "review_after_days_elapsed"
+    return metadata
 
 
 def model_pin_freshness_metadata(has_pin: bool) -> dict[str, str | None]:
@@ -214,20 +229,19 @@ def model_selection_provenance_checks(provenance: dict[str, Any]) -> list[dict[s
     default = provenance.get("default_execution_config")
     if isinstance(default, dict) and default.get("has_explicit_model_pin"):
         checks.append(
-                {
-                    "kind": "model_selection_default_execution_config_freshness",
-                    "level": "warning",
-                    "message": "default_execution_config has an explicit model pin without execution_target freshness metadata",
-                }
-            )
-        if default.get("model_source") == "target_alias" and default.get("freshness_metadata", {}).get("status") == "absent":
-            checks.append(
-                {
-                    "kind": "model_selection_default_execution_config_target_freshness",
-                    "level": "warning",
-                    "message": "default_execution_config execution_target has no freshness metadata",
-                }
-            )
+            {
+                "kind": "model_selection_default_execution_config_freshness",
+                "level": "warning",
+                "message": "default_execution_config has an explicit model pin without execution_target freshness metadata",
+            }
+        )
+    checks.extend(
+        target_freshness_checks(
+            default if isinstance(default, dict) else {},
+            kind="model_selection_default_execution_config_target_freshness",
+            label="default_execution_config",
+        )
+    )
     rules = provenance.get("rules") if isinstance(provenance.get("rules"), dict) else {}
     for name, rule in rules.items():
         if isinstance(rule, dict) and rule.get("has_explicit_model_pin"):
@@ -238,19 +252,37 @@ def model_selection_provenance_checks(provenance: dict[str, Any]) -> list[dict[s
                     "message": "model_selection_rule has an explicit model pin without execution_target freshness metadata",
                 }
             )
-        if (
-            isinstance(rule, dict)
-            and rule.get("model_source") == "target_alias"
-            and rule.get("freshness_metadata", {}).get("status") == "absent"
-        ):
-            checks.append(
-                {
-                    "kind": f"model_selection_rule_{name}_target_freshness",
-                    "level": "warning",
-                    "message": "model_selection_rule execution_target has no freshness metadata",
-                }
+        checks.extend(
+            target_freshness_checks(
+                rule if isinstance(rule, dict) else {},
+                kind=f"model_selection_rule_{name}_target_freshness",
+                label="model_selection_rule",
             )
+        )
     return checks
+
+
+def target_freshness_checks(selection: dict[str, Any], *, kind: str, label: str) -> list[dict[str, str]]:
+    if selection.get("model_source") != "target_alias":
+        return []
+    status = selection.get("freshness_metadata", {}).get("status")
+    if status == "absent":
+        return [
+            {
+                "kind": kind,
+                "level": "warning",
+                "message": f"{label} execution_target has no freshness metadata",
+            }
+        ]
+    if status == "stale":
+        return [
+            {
+                "kind": f"{kind}_stale",
+                "level": "warning",
+                "message": f"{label} execution_target freshness metadata is stale",
+            }
+        ]
+    return []
 
 
 def load_tasks_for_doctor(queue_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:

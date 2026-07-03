@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 from pathlib import Path
 
@@ -265,16 +266,22 @@ class DoctorTests(unittest.TestCase):
                 },
             )
 
-            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
-            report = json.loads(output)
-            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+            with mock.patch(
+                "codex_batch_runner.doctor.utc_now",
+                return_value=datetime(2026, 7, 3, tzinfo=timezone.utc),
+            ):
+                code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+                report = json.loads(output)
+                human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
 
             self.assertEqual(0, code)
             self.assertEqual(["low_cost_current"], report["model_requirements"]["execution_targets"])
             rule = report["model_requirements"]["model_selection_provenance"]["rules"]["low-cost-docs"]
             self.assertEqual("target_alias", rule["model_source"])
             self.assertEqual("low_cost_current", rule["execution_target"])
-            self.assertEqual("configured", rule["freshness_metadata"]["status"])
+            self.assertEqual("fresh", rule["freshness_metadata"]["status"])
+            self.assertFalse(rule["freshness_metadata"]["stale"])
+            self.assertEqual("2026-07-17", rule["freshness_metadata"]["review_due_at"])
             self.assertNotIn("gpt-5.3-codex-spark", json.dumps(report["model_requirements"], sort_keys=True))
             self.assertNotIn(
                 {
@@ -288,7 +295,112 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("execution_targets: low_cost_current", human_output)
             self.assertIn(
                 "low-cost-docs: model_source=target_alias target=low_cost_current explicit_pin=false "
-                "freshness=configured(execution_target)",
+                "freshness=fresh(execution_target)",
+                human_output,
+            )
+
+    def test_doctor_warns_when_execution_target_freshness_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(
+                tmp,
+                [str(executable), "exec", "--json"],
+                extra={
+                    "execution_targets": {
+                        "low_cost_current": {
+                            "model": "gpt-5.3-codex-spark",
+                            "freshness": {
+                                "last_reviewed_at": "2026-06-19",
+                                "review_after_days": 14,
+                            },
+                        }
+                    },
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "execution_target": "low_cost_current",
+                        },
+                    ],
+                },
+            )
+
+            with mock.patch(
+                "codex_batch_runner.doctor.utc_now",
+                return_value=datetime(2026, 7, 3, tzinfo=timezone.utc),
+            ):
+                code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+                report = json.loads(output)
+                human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            rule = report["model_requirements"]["model_selection_provenance"]["rules"]["low-cost-docs"]
+            self.assertEqual("stale", rule["freshness_metadata"]["status"])
+            self.assertTrue(rule["freshness_metadata"]["stale"])
+            self.assertEqual("2026-07-03", rule["freshness_metadata"]["checked_at"])
+            self.assertEqual("2026-07-03", rule["freshness_metadata"]["review_due_at"])
+            self.assertIn(
+                {
+                    "name": "model_requirement_model_selection_rule_low-cost-docs_target_freshness_stale",
+                    "level": "warning",
+                    "message": "model_selection_rule execution_target freshness metadata is stale",
+                },
+                report["checks"],
+            )
+            self.assertEqual(0, human_code)
+            self.assertIn(
+                "low-cost-docs: model_source=target_alias target=low_cost_current explicit_pin=false "
+                "freshness=stale(review_after_days_elapsed)",
+                human_output,
+            )
+
+    def test_doctor_warns_when_execution_target_freshness_metadata_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(
+                tmp,
+                [str(executable), "exec", "--json"],
+                extra={
+                    "execution_targets": {
+                        "balanced_current": {
+                            "model": "gpt-5.3-codex",
+                        }
+                    },
+                    "default_execution_config": {
+                        "execution_target": "balanced_current",
+                    },
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            provenance = report["model_requirements"]["model_selection_provenance"]["default_execution_config"]
+            self.assertEqual("target_alias", provenance["model_source"])
+            self.assertEqual("balanced_current", provenance["execution_target"])
+            self.assertEqual("absent", provenance["freshness_metadata"]["status"])
+            self.assertEqual(
+                {
+                    "name": "model_requirement_model_selection_default_execution_config_target_freshness",
+                    "level": "warning",
+                    "message": "default_execution_config execution_target has no freshness metadata",
+                },
+                next(
+                    check
+                    for check in report["checks"]
+                    if check["name"] == "model_requirement_model_selection_default_execution_config_target_freshness"
+                ),
+            )
+            self.assertEqual(0, human_code)
+            self.assertIn(
+                "default_execution_config: model_source=target_alias target=balanced_current explicit_pin=false "
+                "freshness=absent(target_freshness_not_configured)",
                 human_output,
             )
 
