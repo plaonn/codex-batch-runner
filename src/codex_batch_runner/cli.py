@@ -85,6 +85,10 @@ from .routing_evaluation_report import (
     build_routing_evaluation_report,
     render_routing_evaluation_report,
 )
+from .routing_policy_candidates import (
+    build_routing_policy_candidate_report,
+    render_routing_policy_candidate_report,
+)
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, build_routing_report, render_routing_report
 from .runner import RunOutcome, run_next
 from .state import (
@@ -299,6 +303,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     routing_report.add_argument("--json", action="store_true", help="print JSON")
     routing_report.set_defaults(func=cmd_routing_report)
+
+    routing_policy_candidates = sub.add_parser(
+        "routing-policy-candidates",
+        help="show read-only routing policy-change candidate buckets without mutating policy",
+    )
+    routing_policy_candidates.add_argument("--project", dest="project_id", help="filter by project id")
+    routing_policy_candidates.add_argument("--project-root", help="filter by project root")
+    routing_policy_candidates.add_argument("--category", help="filter by category")
+    routing_policy_candidates.add_argument("--label", help="filter by label")
+    routing_policy_candidates.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_ROUTING_REPORT_LIMIT,
+        help=f"maximum recent tasks to include after filtering; 0 means no limit (default: {DEFAULT_ROUTING_REPORT_LIMIT})",
+    )
+    routing_policy_candidates.add_argument("--include-archived", action="store_true", help="include archived tasks")
+    routing_policy_candidates.add_argument(
+        "--execution-evidence-json",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="include sanitized supplemental execution evidence rows from JSON without mutating queue tasks",
+    )
+    routing_policy_candidates.add_argument(
+        "--include-non-reviewable",
+        action="store_true",
+        help="also emit insufficient/below-threshold buckets with blocked reasons",
+    )
+    routing_policy_candidates.add_argument("--json", action="store_true", help="print JSON")
+    routing_policy_candidates.set_defaults(func=cmd_routing_policy_candidates)
 
     routing_eval_report = sub.add_parser(
         "routing-eval-report",
@@ -3568,6 +3602,33 @@ def cmd_routing_report(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_routing_report(report), end="")
+    return 0
+
+
+def cmd_routing_policy_candidates(config: Config, args: argparse.Namespace) -> int:
+    if args.limit < 0:
+        print("error: --limit must be non-negative", file=sys.stderr)
+        return 1
+    try:
+        execution_evidence_records = load_execution_evidence_records(args.execution_evidence_json)
+    except ExecutionEvidenceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    report = build_routing_policy_candidate_report(
+        config,
+        project_id=args.project_id,
+        project_root=normalized_path(args.project_root) if args.project_root else None,
+        category=args.category,
+        label=args.label,
+        limit=args.limit,
+        include_archived=args.include_archived,
+        execution_evidence_records=execution_evidence_records,
+        include_non_reviewable=args.include_non_reviewable,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_routing_policy_candidate_report(report), end="")
     return 0
 
 

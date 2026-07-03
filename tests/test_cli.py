@@ -2158,6 +2158,270 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0.04, repeated_fix["needs_fix_or_rejected_rate"])
             self.assertIn("reviewer_needs_fix_repeated", repeated_fix["threshold_advisory_reasons"])
 
+    def test_routing_policy_candidates_json_is_reviewable_only_and_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+
+            def save_completed(
+                task_id: str,
+                *,
+                routing_size: str,
+                routing_risk: str,
+                verification_scope: list[str],
+                project_id: str = "project-a",
+                labels: list[str] | None = None,
+                review_status: str = "accepted",
+                reviewer_decision: str = "pass",
+            ) -> None:
+                task = create_task(
+                    config,
+                    "work",
+                    tmp,
+                    task_id=task_id,
+                    project_id=project_id,
+                    category="implementation",
+                    labels=labels or ["routing"],
+                    routing_size=routing_size,
+                    routing_risk=routing_risk,
+                    verification_scope=verification_scope,
+                )
+                task["status"] = "completed"
+                task["review_status"] = review_status
+                task["attempts"] = 1
+                task["last_result"] = {"task_id": task_id, "status": "completed", "verification": ["unit"]}
+                task["reviewer_codex"] = {"decision": reviewer_decision, "confidence": "high"}
+                save_task(config, task)
+
+            for index in range(5):
+                save_completed(
+                    f"reviewable-{index}",
+                    routing_size="small",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+            save_completed(
+                "insufficient",
+                routing_size="small",
+                routing_risk="medium",
+                verification_scope=["unit"],
+            )
+            for index in range(5):
+                save_completed(
+                    f"below-accepted-{index}",
+                    routing_size="medium",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+            save_completed(
+                "below-fix",
+                routing_size="medium",
+                routing_risk="low",
+                verification_scope=["unit"],
+                review_status="needs_followup",
+                reviewer_decision="needs_fix",
+            )
+            for index in range(5):
+                save_completed(
+                    f"other-project-{index}",
+                    routing_size="large",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                    project_id="project-b",
+                    labels=["routing"],
+                )
+            task_path = config.queue_dir / "reviewable-0.json"
+            before = task_path.read_text(encoding="utf-8")
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "routing-policy-candidates",
+                    "--project",
+                    "project-a",
+                    "--label",
+                    "routing",
+                    "--limit",
+                    "0",
+                    "--json",
+                ]
+            )
+            after = task_path.read_text(encoding="utf-8")
+            report = json.loads(output)
+            candidate = report["candidates"][0]
+
+            self.assertEqual(0, code)
+            self.assertEqual(before, after)
+            self.assertTrue(report["read_only"])
+            self.assertFalse(report["mutation_allowed"])
+            self.assertEqual("routing-report", report["source_report"]["kind"])
+            self.assertEqual(1, report["summary"]["candidate_count"])
+            self.assertEqual(1, report["summary"]["insufficient_sample"])
+            self.assertEqual(1, report["summary"]["below_threshold"])
+            self.assertEqual([], report["non_reviewable_buckets"])
+            self.assertEqual("size=small risk=low verify=unit", candidate["task_bucket_key"])
+            self.assertEqual("reviewable", candidate["advisory_status"])
+            self.assertEqual([], candidate["advisory_reasons"])
+            self.assertEqual("operator_review", candidate["recommended_next_step"])
+            self.assertEqual(5, candidate["evidence"]["accepted"])
+            self.assertEqual(1.0, candidate["evidence"]["first_pass_accept_rate"])
+            self.assertEqual(0.0, candidate["evidence"]["needs_fix_or_rejected_rate"])
+            self.assertFalse(candidate["mutation_allowed"])
+            self.assertEqual(5, candidate["thresholds"]["min_accepted_count"])
+
+    def test_routing_policy_candidates_human_output_can_include_non_reviewable_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            for index in range(5):
+                task = create_task(
+                    config,
+                    "work",
+                    tmp,
+                    task_id=f"accepted-{index}",
+                    project_id="project-a",
+                    category="implementation",
+                    routing_size="small",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+                task["status"] = "completed"
+                task["review_status"] = "accepted"
+                task["attempts"] = 1
+                task["last_result"] = {"task_id": task["id"], "status": "completed", "verification": ["unit"]}
+                task["reviewer_codex"] = {"decision": "pass", "confidence": "high"}
+                save_task(config, task)
+            task = create_task(
+                config,
+                "manual follow-up",
+                tmp,
+                task_id="needs-human",
+                project_id="project-a",
+                category="implementation",
+                routing_size="small",
+                routing_risk="low",
+                verification_scope=["unit"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "needs_followup"
+            task["attempts"] = 1
+            task["last_result"] = {"task_id": "needs-human", "status": "completed", "verification": ["unit"]}
+            task["reviewer_codex"] = {
+                "decision": "needs_human",
+                "confidence": "high",
+                "required_human_checks": ["manual check"],
+            }
+            save_task(config, task)
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "routing-policy-candidates",
+                    "--project",
+                    "project-a",
+                    "--limit",
+                    "0",
+                    "--include-non-reviewable",
+                ]
+            )
+
+            self.assertEqual(0, code)
+            self.assertIn("# routing policy candidates", output)
+            self.assertIn("read_only: yes", output)
+            self.assertIn("mutation_allowed: no", output)
+            self.assertIn("## non_reviewable_buckets", output)
+            self.assertIn("below_threshold", output)
+            self.assertIn("needs_fix_or_rejected_rate_above_max", output)
+            self.assertIn("reviewer_needs_human_present", output)
+            self.assertIn("keep_current_policy", output)
+
+    def test_routing_policy_candidates_combines_supplemental_execution_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            for index in range(4):
+                task = create_task(
+                    config,
+                    "queue work",
+                    tmp,
+                    task_id=f"queue-{index}",
+                    project_id="project-a",
+                    category="implementation",
+                    routing_size="small",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+                task["status"] = "completed"
+                task["review_status"] = "accepted"
+                task["attempts"] = 1
+                task["last_result"] = {"task_id": task["id"], "status": "completed", "verification": ["unit"]}
+                task["reviewer_codex"] = {"decision": "pass", "confidence": "high"}
+                save_task(config, task)
+            task_path = config.queue_dir / "queue-0.json"
+            before = task_path.read_text(encoding="utf-8")
+            evidence_path = Path(tmp) / "subagent-evidence.json"
+            evidence_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "record_kind": "codex_subagent_execution",
+                            "work_id": "supplemental-reviewable",
+                            "project_id": "project-a",
+                            "category": "implementation",
+                            "routing_size": "small",
+                            "routing_risk": "low",
+                            "verification_scope": ["unit"],
+                            "review_status": "accepted",
+                            "attempts": 1,
+                            "last_result": {"status": "completed", "verification": ["unit"]},
+                            "reviewer_codex": {"decision": "pass", "confidence": "high"},
+                        },
+                        {
+                            "record_kind": "codex_subagent_execution",
+                            "work_id": "supplemental-other-project",
+                            "project_id": "project-b",
+                            "category": "implementation",
+                            "routing_size": "small",
+                            "routing_risk": "low",
+                            "verification_scope": ["unit"],
+                            "review_status": "accepted",
+                            "attempts": 1,
+                            "last_result": {"status": "completed", "verification": ["unit"]},
+                            "reviewer_codex": {"decision": "pass", "confidence": "high"},
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "routing-policy-candidates",
+                    "--project",
+                    "project-a",
+                    "--execution-evidence-json",
+                    str(evidence_path),
+                    "--limit",
+                    "0",
+                    "--json",
+                ]
+            )
+            after = task_path.read_text(encoding="utf-8")
+            report = json.loads(output)
+            candidate = report["candidates"][0]
+
+            self.assertEqual(0, code)
+            self.assertEqual(before, after)
+            self.assertEqual(1, report["summary"]["candidate_count"])
+            self.assertEqual(4, candidate["evidence"]["evidence_sources"]["queue"]["rows"])
+            self.assertEqual(1, candidate["evidence"]["evidence_sources"]["supplemental_execution_evidence"]["rows"])
+            self.assertEqual(5, candidate["evidence"]["accepted"])
+            self.assertEqual("operator_review", candidate["recommended_next_step"])
+
     def test_routing_report_includes_request_fingerprint_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
