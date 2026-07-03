@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from datetime import datetime
 from typing import Any
 
 from .config import Config
@@ -14,6 +15,7 @@ SCHEMA_VERSION = 1
 REPORT_KIND = "policy_proposal_report"
 PREVIEW_KIND = "policy_proposal_preview"
 APPROVAL_TEMPLATE_KIND = "policy_proposal_approval_template"
+APPROVAL_VALIDATION_KIND = "policy_proposal_approval_validation"
 EXECUTION_TARGET_FRESHNESS_CLASS = "execution_target_freshness"
 READ_ONLY_MODE = "read_only"
 PROHIBITED_STATE_CHANGES = [
@@ -226,6 +228,196 @@ def build_policy_proposal_approval_template(source: Any) -> dict[str, Any]:
     }
 
 
+def build_policy_proposal_approval_validation(approval: Any, preview: Any) -> dict[str, Any]:
+    if not isinstance(approval, dict):
+        return empty_policy_proposal_approval_validation(errors=["policy proposal approval must be a JSON object"])
+    if not isinstance(preview, dict):
+        return empty_policy_proposal_approval_validation(errors=["policy proposal preview must be a JSON object"])
+
+    warnings: list[str] = []
+    errors: list[str] = []
+    approval_schema_version = approval.get("schema_version")
+    approval_kind = approval.get("kind")
+    preview_schema_version = preview.get("schema_version")
+    preview_kind = preview.get("kind")
+    proposal_class = approval.get("proposal_class")
+    if approval_schema_version != SCHEMA_VERSION:
+        errors.append("unsupported approval schema_version")
+    if approval_kind != APPROVAL_TEMPLATE_KIND:
+        errors.append("unsupported approval kind")
+    if preview_schema_version != SCHEMA_VERSION:
+        errors.append("unsupported preview schema_version")
+    if preview_kind != PREVIEW_KIND:
+        errors.append("unsupported preview kind")
+    if proposal_class != EXECUTION_TARGET_FRESHNESS_CLASS:
+        errors.append("unsupported proposal_class")
+    if preview.get("proposal_class") != proposal_class:
+        errors.append("approval proposal_class does not match preview")
+    if approval.get("source_preview_sha256") != canonical_json_sha256(preview):
+        errors.append("source_preview_sha256 mismatch")
+    if approval.get("errors"):
+        errors.append("approval contains errors")
+    if preview.get("errors"):
+        errors.append("preview contains errors")
+
+    preview_items = preview.get("items")
+    if not isinstance(preview_items, list):
+        errors.append("preview items must be a list")
+        preview_items = []
+    approvals = approval.get("approvals")
+    if not isinstance(approvals, list):
+        errors.append("approval approvals must be a list")
+        approvals = []
+
+    preview_by_proposal_id, duplicate_preview_ids = preview_items_by_proposal_id(preview_items)
+    for proposal_id in duplicate_preview_ids:
+        errors.append(f"duplicate preview proposal_id: {proposal_id}")
+
+    items = []
+    if not errors:
+        for index, approval_item in enumerate(approvals):
+            if not isinstance(approval_item, dict):
+                warnings.append(f"skipped non-object approval at index {index}")
+                continue
+            items.append(validate_approval_item(approval_item, preview_by_proposal_id))
+
+    item_error_count = sum(1 for item in items if item.get("errors"))
+    approved_count = sum(1 for item in items if item.get("approved") is True)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": APPROVAL_VALIDATION_KIND,
+        "approval_schema_version": approval_schema_version,
+        "approval_kind": approval_kind,
+        "preview_schema_version": preview_schema_version,
+        "preview_kind": preview_kind,
+        "proposal_class": proposal_class,
+        "mode": READ_ONLY_MODE,
+        "valid": not errors and item_error_count == 0,
+        "mutation": {
+            "allowed": False,
+            "applied": False,
+            "prohibited_state_changes": PROHIBITED_STATE_CHANGES,
+        },
+        "summary": {
+            "approval_count": len(items),
+            "approved_count": approved_count,
+            "pending_count": len(items) - approved_count,
+            "valid_approved_count": sum(
+                1 for item in items if item.get("approved") is True and not item.get("errors")
+            ),
+            "invalid_count": item_error_count,
+        },
+        "items": items,
+        "warnings": warnings,
+        "errors": errors,
+    }
+
+
+def empty_policy_proposal_approval_validation(*, errors: list[str]) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": APPROVAL_VALIDATION_KIND,
+        "approval_schema_version": None,
+        "approval_kind": None,
+        "preview_schema_version": None,
+        "preview_kind": None,
+        "proposal_class": None,
+        "mode": READ_ONLY_MODE,
+        "valid": False,
+        "mutation": {
+            "allowed": False,
+            "applied": False,
+            "prohibited_state_changes": PROHIBITED_STATE_CHANGES,
+        },
+        "summary": {
+            "approval_count": 0,
+            "approved_count": 0,
+            "pending_count": 0,
+            "valid_approved_count": 0,
+            "invalid_count": 0,
+        },
+        "items": [],
+        "warnings": [],
+        "errors": errors,
+    }
+
+
+def preview_items_by_proposal_id(items: list[Any]) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    duplicates: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        proposal_id = sanitize(item.get("proposal_id"))
+        if not proposal_id:
+            continue
+        if proposal_id in by_id:
+            duplicates.append(proposal_id)
+            continue
+        by_id[proposal_id] = item
+    return by_id, duplicates
+
+
+def validate_approval_item(
+    approval_item: dict[str, Any], preview_by_proposal_id: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    proposal_id = sanitize(approval_item.get("proposal_id"))
+    preview_item = preview_by_proposal_id.get(proposal_id)
+    approved = approval_item.get("approved")
+    item_errors: list[str] = []
+    if not isinstance(approved, bool):
+        item_errors.append("approved must be boolean")
+        approved = False
+    if preview_item is None:
+        item_errors.append("proposal_id not found in preview")
+    expected_item_hash = canonical_json_sha256(preview_item) if preview_item is not None else None
+    source_item_hash = approval_item.get("source_item_sha256")
+    if source_item_hash != expected_item_hash:
+        item_errors.append("source_item_sha256 mismatch")
+    if preview_item is not None:
+        for field in ("proposal_class", "target_alias", "target", "recommended_action"):
+            if sanitize(approval_item.get(field)) != sanitize(preview_item.get(field)):
+                item_errors.append(f"{field} does not match preview")
+
+    reviewer = approval_item.get("reviewer")
+    reviewed_at = approval_item.get("reviewed_at")
+    decision_note = approval_item.get("decision_note")
+    reviewer_present = isinstance(reviewer, str) and bool(reviewer.strip())
+    reviewed_at_valid = isinstance(reviewed_at, str) and iso_datetime_is_valid(reviewed_at)
+    decision_note_present = isinstance(decision_note, str) and bool(decision_note.strip())
+    if approved:
+        if not reviewer_present:
+            item_errors.append("approved item requires reviewer")
+        if not reviewed_at_valid:
+            item_errors.append("approved item requires reviewed_at ISO datetime")
+        if not decision_note_present:
+            item_errors.append("approved item requires decision_note")
+
+    return {
+        "proposal_id": proposal_id,
+        "proposal_class": sanitize(approval_item.get("proposal_class")),
+        "target_alias": sanitize(approval_item.get("target_alias")),
+        "target": sanitize(approval_item.get("target")),
+        "recommended_action": sanitize(approval_item.get("recommended_action")),
+        "approved": approved,
+        "validation_status": "invalid" if item_errors else ("approved" if approved else "pending"),
+        "preview_item_found": preview_item is not None,
+        "source_item_sha256_matches": source_item_hash == expected_item_hash,
+        "reviewer_present": reviewer_present,
+        "reviewed_at_valid": reviewed_at_valid,
+        "decision_note_present": decision_note_present,
+        "errors": item_errors,
+    }
+
+
+def iso_datetime_is_valid(value: str) -> bool:
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
 def empty_policy_proposal_approval_template(*, errors: list[str]) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -432,6 +624,43 @@ def render_policy_proposal_approval_template(template: dict[str, Any]) -> str:
                     f"     source_item_sha256: {approval.get('source_item_sha256')}",
                 ]
             )
+    return "\n".join(lines) + "\n"
+
+
+def render_policy_proposal_approval_validation(validation: dict[str, Any]) -> str:
+    summary = validation.get("summary") or {}
+    lines = [
+        "cbr policy-proposals validate-approval",
+        f"schema_version: {validation.get('schema_version')}",
+        f"proposal_class: {validation.get('proposal_class')}",
+        f"mode: {validation.get('mode')}",
+        f"valid: {str(validation.get('valid')).lower()}",
+        f"approval_count: {summary.get('approval_count')}",
+        f"approved_count: {summary.get('approved_count')}",
+        f"valid_approved_count: {summary.get('valid_approved_count')}",
+        f"invalid_count: {summary.get('invalid_count')}",
+        "mutation: allowed=false applied=false",
+    ]
+    errors = validation.get("errors") or []
+    if errors:
+        lines.append("errors:")
+        for error in errors:
+            lines.append(f"  - {error}")
+    items = validation.get("items") or []
+    if items:
+        lines.append("items:")
+        for index, item in enumerate(items, start=1):
+            lines.extend(
+                [
+                    f"  {index}. {item.get('proposal_id')}",
+                    f"     status: {item.get('validation_status')}",
+                    f"     approved: {str(item.get('approved')).lower()}",
+                    f"     target: {item.get('target')}",
+                    f"     source_item_sha256_matches: {str(item.get('source_item_sha256_matches')).lower()}",
+                ]
+            )
+            for error in item.get("errors") or []:
+                lines.append(f"     error: {error}")
     return "\n".join(lines) + "\n"
 
 

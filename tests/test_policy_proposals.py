@@ -106,6 +106,15 @@ def write_stale_policy_preview(root: Path) -> Path:
     return preview_path
 
 
+def write_approved_stale_policy_approval(root: Path, preview: dict | None = None) -> Path:
+    approval_path = root / "approval.json"
+    approval_path.write_text(
+        json.dumps(approved_stale_policy_approval(preview or stale_policy_preview()), sort_keys=True),
+        encoding="utf-8",
+    )
+    return approval_path
+
+
 def stale_policy_preview() -> dict:
     return {
         "schema_version": 1,
@@ -145,6 +154,51 @@ def stale_policy_preview() -> dict:
                 "apply_ready": False,
                 "blocked_reason": "preview_only_no_apply_target",
                 "selection_refs": [{"scope": "default_execution_config", "name": None}],
+            }
+        ],
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def approved_stale_policy_approval(preview: dict) -> dict:
+    return {
+        "schema_version": 1,
+        "kind": "policy_proposal_approval_template",
+        "source_schema_version": 1,
+        "source_kind": "policy_proposal_preview",
+        "source_preview_sha256": canonical_json_sha256(preview),
+        "proposal_class": "execution_target_freshness",
+        "mode": "read_only",
+        "created_at": "2026-07-03T00:00:00+00:00",
+        "mutation": {
+            "allowed": False,
+            "applied": False,
+            "prohibited_state_changes": [
+                "apply",
+                "config_rewrite",
+                "task_mutation",
+                "model_replacement",
+                "rule_replacement",
+            ],
+        },
+        "summary": {
+            "proposal_count": 1,
+            "approved_count": 0,
+            "pending_count": 1,
+        },
+        "approvals": [
+            {
+                "proposal_id": "execution_target_freshness:balanced_current",
+                "proposal_class": "execution_target_freshness",
+                "target_alias": "balanced_current",
+                "target": "execution_targets.balanced_current.freshness",
+                "recommended_action": "review_execution_target_freshness",
+                "source_item_sha256": canonical_json_sha256(preview["items"][0]),
+                "approved": True,
+                "reviewer": "operator",
+                "reviewed_at": "2026-07-03T00:00:00+00:00",
+                "decision_note": "freshness reviewed",
             }
         ],
         "warnings": [],
@@ -598,6 +652,253 @@ class PolicyProposalTests(unittest.TestCase):
 
             code, _ = run_cli(
                 ["--config", str(config_path), "policy-proposals", "approval-template", str(preview_path), "--json"]
+            )
+
+            after_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+            after_contents = {name: (root / name).read_text(encoding="utf-8") for name in after_files}
+            self.assertEqual(0, code)
+            self.assertEqual(before_files, after_files)
+            self.assertEqual(before_contents, after_contents)
+            self.assertFalse((root / "logs").exists())
+            self.assertFalse((root / "events").exists())
+            self.assertFalse((root / "runner.lock").exists())
+
+    def test_policy_proposal_validate_approval_shape_for_approved_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            preview = stale_policy_preview()
+            preview_path = root / "preview.json"
+            preview_path.write_text(json.dumps(preview, sort_keys=True), encoding="utf-8")
+            approval_path = root / "approval.json"
+            approval_path.write_text(
+                json.dumps(approved_stale_policy_approval(preview), sort_keys=True),
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "policy-proposals",
+                    "validate-approval",
+                    str(approval_path),
+                    "--preview",
+                    str(preview_path),
+                    "--json",
+                ]
+            )
+            validation = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(
+                {
+                    "schema_version": 1,
+                    "kind": "policy_proposal_approval_validation",
+                    "approval_schema_version": 1,
+                    "approval_kind": "policy_proposal_approval_template",
+                    "preview_schema_version": 1,
+                    "preview_kind": "policy_proposal_preview",
+                    "proposal_class": "execution_target_freshness",
+                    "mode": "read_only",
+                    "valid": True,
+                    "mutation": {
+                        "allowed": False,
+                        "applied": False,
+                        "prohibited_state_changes": [
+                            "apply",
+                            "config_rewrite",
+                            "task_mutation",
+                            "model_replacement",
+                            "rule_replacement",
+                        ],
+                    },
+                    "summary": {
+                        "approval_count": 1,
+                        "approved_count": 1,
+                        "pending_count": 0,
+                        "valid_approved_count": 1,
+                        "invalid_count": 0,
+                    },
+                    "items": [
+                        {
+                            "proposal_id": "execution_target_freshness:balanced_current",
+                            "proposal_class": "execution_target_freshness",
+                            "target_alias": "balanced_current",
+                            "target": "execution_targets.balanced_current.freshness",
+                            "recommended_action": "review_execution_target_freshness",
+                            "approved": True,
+                            "validation_status": "approved",
+                            "preview_item_found": True,
+                            "source_item_sha256_matches": True,
+                            "reviewer_present": True,
+                            "reviewed_at_valid": True,
+                            "decision_note_present": True,
+                            "errors": [],
+                        }
+                    ],
+                    "warnings": [],
+                    "errors": [],
+                },
+                validation,
+            )
+
+    def test_policy_proposal_validate_approval_human_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            preview = stale_policy_preview()
+            preview_path = root / "preview.json"
+            preview_path.write_text(json.dumps(preview, sort_keys=True), encoding="utf-8")
+            approval_path = write_approved_stale_policy_approval(root, preview)
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "policy-proposals",
+                    "validate-approval",
+                    str(approval_path),
+                    "--preview",
+                    str(preview_path),
+                ]
+            )
+
+            self.assertEqual(0, code)
+            self.assertIn("cbr policy-proposals validate-approval", output)
+            self.assertIn("valid: true", output)
+            self.assertIn("approved_count: 1", output)
+            self.assertIn("source_item_sha256_matches: true", output)
+
+    def test_policy_proposal_validate_approval_rejects_preview_hash_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            preview = stale_policy_preview()
+            approval = approved_stale_policy_approval(preview)
+            approval["source_preview_sha256"] = "0" * 64
+            preview_path = root / "preview.json"
+            approval_path = root / "approval.json"
+            preview_path.write_text(json.dumps(preview, sort_keys=True), encoding="utf-8")
+            approval_path.write_text(json.dumps(approval, sort_keys=True), encoding="utf-8")
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "policy-proposals",
+                    "validate-approval",
+                    str(approval_path),
+                    "--preview",
+                    str(preview_path),
+                    "--json",
+                ]
+            )
+            validation = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertFalse(validation["valid"])
+            self.assertEqual(["source_preview_sha256 mismatch"], validation["errors"])
+            self.assertEqual([], validation["items"])
+
+    def test_policy_proposal_validate_approval_rejects_missing_approved_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            preview = stale_policy_preview()
+            approval = approved_stale_policy_approval(preview)
+            approval["approvals"][0]["reviewer"] = ""
+            approval["approvals"][0]["reviewed_at"] = "not-a-date"
+            approval["approvals"][0]["decision_note"] = ""
+            preview_path = root / "preview.json"
+            approval_path = root / "approval.json"
+            preview_path.write_text(json.dumps(preview, sort_keys=True), encoding="utf-8")
+            approval_path.write_text(json.dumps(approval, sort_keys=True), encoding="utf-8")
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "policy-proposals",
+                    "validate-approval",
+                    str(approval_path),
+                    "--preview",
+                    str(preview_path),
+                    "--json",
+                ]
+            )
+            validation = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertFalse(validation["valid"])
+            self.assertEqual(1, validation["summary"]["invalid_count"])
+            self.assertEqual(
+                [
+                    "approved item requires reviewer",
+                    "approved item requires reviewed_at ISO datetime",
+                    "approved item requires decision_note",
+                ],
+                validation["items"][0]["errors"],
+            )
+
+    def test_policy_proposal_validate_approval_rejects_target_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            preview = stale_policy_preview()
+            approval = approved_stale_policy_approval(preview)
+            approval["approvals"][0]["target"] = "execution_targets.other.freshness"
+            preview_path = root / "preview.json"
+            approval_path = root / "approval.json"
+            preview_path.write_text(json.dumps(preview, sort_keys=True), encoding="utf-8")
+            approval_path.write_text(json.dumps(approval, sort_keys=True), encoding="utf-8")
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "policy-proposals",
+                    "validate-approval",
+                    str(approval_path),
+                    "--preview",
+                    str(preview_path),
+                    "--json",
+                ]
+            )
+            validation = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertFalse(validation["valid"])
+            self.assertEqual(["target does not match preview"], validation["items"][0]["errors"])
+
+    def test_policy_proposal_validate_approval_does_not_mutate_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(tmp, {})
+            preview = stale_policy_preview()
+            preview_path = root / "preview.json"
+            preview_path.write_text(json.dumps(preview, sort_keys=True), encoding="utf-8")
+            approval_path = write_approved_stale_policy_approval(root, preview)
+            tasks = root / "tasks"
+            tasks.mkdir()
+            task_path = tasks / "task-1.json"
+            task_path.write_text(json.dumps({"id": "task-1", "status": "runnable"}, sort_keys=True), encoding="utf-8")
+            state_path = root / "state.json"
+            state_path.write_text(json.dumps({"runner_pause": {"active": False}}, sort_keys=True), encoding="utf-8")
+            before_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+            before_contents = {name: (root / name).read_text(encoding="utf-8") for name in before_files}
+
+            code, _ = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "policy-proposals",
+                    "validate-approval",
+                    str(approval_path),
+                    "--preview",
+                    str(preview_path),
+                    "--json",
+                ]
             )
 
             after_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())

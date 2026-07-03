@@ -25,10 +25,12 @@ from .model_requirements import REQUIREMENT_DIMENSIONS, REQUIREMENT_LEVELS, mode
 from .planned_execution import planned_execution_compact_note
 from .policy_proposals import (
     build_policy_proposal_approval_template,
+    build_policy_proposal_approval_validation,
     build_policy_proposal_preview,
     build_execution_target_freshness_proposal_report,
     render_execution_target_freshness_proposal_report,
     render_policy_proposal_approval_template,
+    render_policy_proposal_approval_validation,
     render_policy_proposal_preview,
 )
 from .evidence import list_rate_limit_evidence
@@ -452,6 +454,14 @@ def build_parser() -> argparse.ArgumentParser:
     approval_template.add_argument("preview_path", help="path to a policy proposal preview JSON file")
     approval_template.add_argument("--json", action="store_true", help="print JSON")
     approval_template.set_defaults(func=cmd_policy_proposals_approval_template)
+    validate_approval = policy_proposals_sub.add_parser(
+        "validate-approval",
+        help="validate a policy proposal approval against its preview JSON file",
+    )
+    validate_approval.add_argument("approval_path", help="path to a policy proposal approval JSON file")
+    validate_approval.add_argument("--preview", required=True, help="path to the source policy proposal preview JSON file")
+    validate_approval.add_argument("--json", action="store_true", help="print JSON")
+    validate_approval.set_defaults(func=cmd_policy_proposals_validate_approval)
 
     maintenance = sub.add_parser("maintenance", help="run guarded local maintenance workflows")
     maintenance_sub = maintenance.add_subparsers(dest="maintenance_command", required=True)
@@ -3933,6 +3943,30 @@ def cmd_policy_proposals_approval_template(config: Config, args: argparse.Namesp
     else:
         print(render_policy_proposal_approval_template(template), end="")
     return 0 if not template.get("errors") else 1
+
+
+def cmd_policy_proposals_validate_approval(config: Config, args: argparse.Namespace) -> int:
+    approval, approval_errors = read_json_file(args.approval_path, "policy proposal approval")
+    preview, preview_errors = read_json_file(args.preview, "policy proposal preview")
+    validation = build_policy_proposal_approval_validation(approval, preview)
+    load_errors = approval_errors + preview_errors
+    if load_errors:
+        validation["errors"] = load_errors
+        validation["valid"] = False
+    if args.json:
+        print(json.dumps(validation, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_policy_proposal_approval_validation(validation), end="")
+    return 0 if validation.get("valid") else 1
+
+
+def read_json_file(path_text: str, label: str) -> tuple[object | None, list[str]]:
+    try:
+        return json.loads(Path(path_text).read_text(encoding="utf-8")), []
+    except OSError as exc:
+        return None, [f"failed to read {label}: {exc}"]
+    except json.JSONDecodeError as exc:
+        return None, [f"failed to parse {label} JSON: {exc}"]
 
 
 def cmd_maintenance_codex_cli(config: Config, args: argparse.Namespace) -> int:

@@ -203,6 +203,8 @@ Index warning behavior: SQLite read index가 없거나 schema mismatch, stale so
 
 `cbr policy-proposals approval-template PREVIEW_JSON`은 기존 `policy_proposal_preview` JSON을 읽어 사람이 편집할 수 있는 approval template를 stdout으로 렌더링합니다. Template는 `source_preview_sha256`, 각 approval의 `source_item_sha256`, `proposal_id`, `target`, `recommended_action`, `approved: false`, `reviewer`, `reviewed_at`, `decision_note`를 포함합니다. 이 command는 approval file을 저장하지 않고, config rewrite, task mutation, model replacement, rule replacement, apply도 수행하지 않습니다.
 
+`cbr policy-proposals validate-approval APPROVAL_JSON --preview PREVIEW_JSON`은 사람이 편집한 approval JSON을 source preview JSON과 대조합니다. Validator는 approval/preview schema, `source_preview_sha256`, 각 approval의 `source_item_sha256`, approved item의 `reviewer`, ISO datetime `reviewed_at`, `decision_note`를 검사하고 `policy_proposal_approval_validation` report를 출력합니다. 이 command는 approval/config/task를 변경하지 않고 apply도 수행하지 않습니다.
+
 Runner lock recovery treats a lock as recoverable immediately when metadata contains a pid for the same hostname and that pid is no longer alive. Unknown host, missing/invalid pid, invalid metadata, and cross-host locks fall back to the age-based stale threshold.
 
 Doctor는 기본적으로 Codex application bundle 안의 별도 executable과 configured CLI를 비교하지 않음. macOS나 특정 app install layout을 가정하지 않기 위함임. 운영자가 app-bundled CLI와 standalone CLI 차이를 확인해야 하는 환경에서는 별도 수동 조사로 처리함. Routine doctor는 대형 binary hash를 계산하지 않음. Hash는 향후 `--verbose` 또는 deep diagnostic check에서 명시적으로 요청할 때만 고려함.
