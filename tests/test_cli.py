@@ -1685,6 +1685,63 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, selection_decisions["selection_rule=low-cost-docs size=small risk=low verify=docs"]["tasks"])
             self.assertEqual(1, low_cost_candidates["candidate"]["tasks"])
 
+    def test_routing_report_keeps_execution_target_alias_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="target-alias-sample",
+                project_id="project-a",
+                category="docs",
+                labels=["docs"],
+                routing_size="small",
+                routing_risk="low",
+                verification_scope=["docs"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            task["attempts"] = 1
+            task["last_run"] = {
+                "execution_backend": "codex",
+                "resolved_execution_config": {
+                    "selection_rule": "low-cost-docs",
+                    "model_source": "target_alias",
+                    "execution_target": "low_cost_current",
+                },
+                "duration_seconds": 10,
+            }
+            task["last_result"] = {
+                "task_id": "target-alias-sample",
+                "status": "completed",
+                "verification": ["docs"],
+            }
+            task["reviewer_codex"] = {"decision": "pass", "confidence": "high"}
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "routing-report", "--project", "project-a", "--json"])
+            report = json.loads(output)
+            execution_targets = {entry["key"]: entry for entry in report["groups"]["execution_target"]}
+            source_targets = {entry["key"]: entry for entry in report["groups"]["model_source_execution_target"]}
+            diagnostics = report["evaluation_diagnostics"]
+            diagnostic_targets = {entry["key"]: entry for entry in diagnostics["execution_targets"]}
+            diagnostic_source_targets = {
+                entry["key"]: entry for entry in diagnostics["model_source_execution_targets"]
+            }
+            row = report["task_rows"][0]
+            source_target_key = "model_source=target_alias execution_target=low_cost_current"
+
+            self.assertEqual(0, code)
+            self.assertEqual("target_alias", row["model_source"])
+            self.assertEqual("low_cost_current", row["execution_target"])
+            self.assertEqual(source_target_key, row["model_source_execution_target"])
+            self.assertEqual(1, execution_targets["low_cost_current"]["tasks"])
+            self.assertEqual(1, source_targets[source_target_key]["tasks"])
+            self.assertEqual(1, diagnostic_targets["low_cost_current"]["target_recorded"])
+            self.assertEqual(1, diagnostic_source_targets[source_target_key]["usable_for_worker_policy"])
+
     def test_routing_report_uses_last_run_requirement_for_outcome_attribution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -2294,6 +2351,49 @@ class CliTests(unittest.TestCase):
             self.assertFalse(report["privacy"]["raw_paths_included"])
             self.assertFalse(row["privacy"]["raw_prompt_included"])
             self.assertFalse(row["task_vector_evaluation"]["privacy"]["raw_changed_files_included"])
+
+    def test_routing_eval_report_keeps_execution_target_alias_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "alias routed work",
+                tmp,
+                task_id="eval-target-alias",
+                project_id="project-a",
+                category="implementation",
+                labels=["routing", "eval"],
+                routing_size="small",
+                routing_risk="low",
+                verification_scope=["unit"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            task["last_run"] = {
+                "execution_backend": "codex",
+                "resolved_execution_config": {
+                    "selection_rule": "high-capability",
+                    "model_source": "target_alias",
+                    "execution_target": "high_capability_current",
+                },
+            }
+            task["last_result"] = {
+                "task_id": "eval-target-alias",
+                "status": "completed",
+                "changed_files": ["src/example.py"],
+                "verification": ["unit"],
+            }
+            task["reviewer_codex"] = {"decision": "pass", "confidence": "high"}
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "routing-eval-report", "--json"])
+            report = json.loads(output)
+            row = report["evaluation_rows"][0]
+
+            self.assertEqual(0, code)
+            self.assertEqual("target_alias", row["worker"]["model_source"])
+            self.assertEqual("high_capability_current", row["worker"]["execution_target"])
 
     def test_routing_eval_report_filters_limit_and_hashes_project_root_filter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
