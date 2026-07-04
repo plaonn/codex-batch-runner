@@ -202,7 +202,7 @@ def render_decision_card_table(cards: list[dict[str, Any]]) -> str:
         "EXECUTION_STATUS",
         "USER_STATUS",
         "RECOMMENDATION",
-        "BLOCKED_REASON",
+        "BLOCKED",
         "TARGET",
     ]
     rows = [

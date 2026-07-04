@@ -2711,7 +2711,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("next_action: review_decision_cards", output)
             self.assertIn("recommendations:", output)
             self.assertIn("collect_more_evidence: 1", output)
-            self.assertIn("BLOCKED_REASON", output)
+            self.assertIn("BLOCKED", output)
+            self.assertIn("insufficient_sample", output)
             self.assertRegex(
                 output,
                 r"routing-policy-candidates\s+[^\n]*\s+insufficient_sample\s+size=small risk=low verify=unit",
