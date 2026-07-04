@@ -101,6 +101,7 @@ def build_decision_card_inventory(
             "source_filter": requested_sources,
             "decision_axis_filter": requested_axes,
             "user_decision_status_filter": requested_statuses,
+            "next_action": decision_card_next_action(len(cards)),
             "by_status": dict(sorted(status_counts.items())),
             "by_axis": dict(sorted(axis_counts.items())),
             "by_source": dict(sorted(source_counts.items())),
@@ -170,9 +171,15 @@ def render_decision_card_inventory(report: dict[str, Any]) -> str:
         lines.extend(summary_lines)
         lines.append("")
     if summary.get("card_count", 0) == 0:
-        lines.extend(["open_decisions: none", ""])
+        lines.extend(["open_decisions: none", f"next_action: {summary.get('next_action') or 'none'}", ""])
+    else:
+        lines.extend([f"next_action: {summary.get('next_action') or 'review_decision_cards'}", ""])
     lines.append(render_decision_card_table(_list_value(report.get("decision_cards"))))
     return "\n".join(lines) + "\n"
+
+
+def decision_card_next_action(card_count: int) -> str:
+    return "none" if card_count == 0 else "review_decision_cards"
 
 
 def render_summary_groups(summary: dict[str, Any]) -> list[str]:

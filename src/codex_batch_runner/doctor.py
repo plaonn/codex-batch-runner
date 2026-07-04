@@ -730,17 +730,19 @@ def capacity_project_key(task: dict[str, Any]) -> str:
 
 
 def decision_card_summary(config: Config) -> dict[str, Any]:
-    from .decision_cards import build_decision_card_inventory
+    from .decision_cards import build_decision_card_inventory, decision_card_next_action
 
     inventory = build_decision_card_inventory(config)
     summary = inventory.get("summary") if isinstance(inventory.get("summary"), dict) else {}
+    card_count = int(summary.get("card_count") or 0)
     return {
         "read_only": True,
         "mutation_allowed": False,
-        "card_count": summary.get("card_count", 0),
+        "card_count": card_count,
         "decision_required": summary.get("decision_required", 0),
         "approval_blocked": summary.get("approval_blocked", 0),
         "not_ready": summary.get("not_ready", 0),
+        "next_action": summary.get("next_action") or decision_card_next_action(card_count),
         "by_source": summary.get("by_source") if isinstance(summary.get("by_source"), dict) else {},
         "by_recommendation": (
             summary.get("by_recommendation") if isinstance(summary.get("by_recommendation"), dict) else {}
@@ -1004,6 +1006,7 @@ def render_doctor_report(report: dict[str, Any]) -> str:
             f"  approval_blocked: {decision_cards.get('approval_blocked')}",
             f"  not_ready: {decision_cards.get('not_ready')}",
             "  open_decisions: " + ("none" if decision_cards.get("card_count") == 0 else "present"),
+            f"  next_action: {decision_cards.get('next_action') or 'none'}",
         ]
     )
     for label, key in (

@@ -2599,6 +2599,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(2, report["summary"]["card_count"])
             self.assertEqual(2, report["summary"]["decision_required"])
             self.assertEqual(0, report["summary"]["not_ready"])
+            self.assertEqual("review_decision_cards", report["summary"]["next_action"])
             self.assertEqual({"execution_target_freshness": 1, "routing_policy_change": 1}, report["summary"]["by_axis"])
             self.assertEqual(
                 {"policy-proposals execution-target-freshness": 1, "routing-policy-candidates": 1},
@@ -2707,6 +2708,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("read_only: yes", output)
             self.assertIn("routing-policy-candidates", output)
             self.assertIn("not_ready", output)
+            self.assertIn("next_action: review_decision_cards", output)
             self.assertIn("recommendations:", output)
             self.assertIn("collect_more_evidence: 1", output)
 
@@ -2730,6 +2732,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual(["not_ready"], report["summary"]["user_decision_status_filter"])
             self.assertEqual(1, report["summary"]["card_count"])
+            self.assertEqual("review_decision_cards", report["summary"]["next_action"])
             self.assertEqual({"not_ready": 1}, report["summary"]["by_status"])
             self.assertEqual("not_ready", report["decision_cards"][0]["user_decision_status"])
 
@@ -2742,6 +2745,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertIn("summary: cards=0 decision_required=0 approval_blocked=0 not_ready=0", output)
             self.assertIn("open_decisions: none", output)
+            self.assertIn("next_action: none", output)
 
     def test_decision_cards_inventory_summarizes_blocked_reasons(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
