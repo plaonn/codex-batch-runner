@@ -42,6 +42,7 @@ SUPPORTED_APPLY_ACTIONS = {
 def build_execution_target_freshness_proposal_report(config: Config) -> dict[str, Any]:
     items = execution_target_freshness_items(config)
     proposals = [proposal_from_item(item) for item in items if item.get("proposal_id")]
+    decision_cards = [decision_card_from_policy_proposal(proposal) for proposal in proposals]
     counts = Counter(item["freshness_status"] for item in items)
     target_count = sum(1 for item in items if item.get("target_kind") == "execution_target")
     direct_pin_count = sum(1 for item in items if item.get("target_kind") == "direct_model_pin")
@@ -64,9 +65,14 @@ def build_execution_target_freshness_proposal_report(config: Config) -> dict[str
             "stale": counts.get("stale", 0),
             "missing": counts.get("missing", 0),
             "proposal_count": len(proposals),
+            "decision_card_count": len(decision_cards),
+            "decision_required_count": sum(
+                1 for card in decision_cards if card.get("user_decision_status") == "decision_required"
+            ),
         },
         "items": items,
         "proposals": proposals,
+        "decision_cards": decision_cards,
         "warnings": [],
         "errors": [],
     }
@@ -218,6 +224,7 @@ def build_policy_proposal_preview(source: Any) -> dict[str, Any]:
                 warnings.append(f"skipped non-object proposal at index {index}")
                 continue
             items.append(preview_item_from_proposal(proposal))
+    decision_cards = [decision_card_from_policy_preview_item(item) for item in items]
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -236,8 +243,13 @@ def build_policy_proposal_preview(source: Any) -> dict[str, Any]:
             "apply_ready": 0,
             "blocked": len(items),
             "would_change": "none",
+            "decision_card_count": len(decision_cards),
+            "decision_required_count": sum(
+                1 for card in decision_cards if card.get("user_decision_status") == "decision_required"
+            ),
         },
         "items": items,
+        "decision_cards": decision_cards,
         "warnings": warnings,
         "errors": errors,
     }
@@ -894,6 +906,65 @@ def preview_item_from_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def decision_card_from_policy_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    target_kind = sanitize(proposal.get("target_kind")) or "execution_target"
+    blocked_reason = None
+    if target_kind == "direct_model_pin":
+        user_decision_status = "approval_blocked"
+        recommendation = "create_bounded_migration_proposal"
+        question = "Decide whether to draft a separate bounded migration proposal for this direct model pin."
+        explanation = (
+            "The source uses a direct model pin, so freshness metadata cannot be applied safely to this target. "
+            "A separate operator-approved migration proposal is required before any model or rule change."
+        )
+        allowed_decisions = ["draft_migration_proposal", "continue_observing", "reject_candidate"]
+        blocked_reason = "direct_model_pin_requires_separate_migration_approval"
+    else:
+        user_decision_status = "decision_required"
+        recommendation = "operator_review"
+        question = "Review whether to approve this execution target freshness metadata update."
+        explanation = (
+            "The proposal is ready for human review of local/private freshness metadata only. "
+            "Approval does not change models, routing rules, providers, task state, or central runner config."
+        )
+        allowed_decisions = ["approve_freshness_metadata_update", "continue_observing", "reject_candidate"]
+    return {
+        "card_id": "decision-card:" + sanitize(proposal.get("proposal_id")),
+        "proposal_id": sanitize(proposal.get("proposal_id")),
+        "proposal_class": EXECUTION_TARGET_FRESHNESS_CLASS,
+        "decision_axis": "execution_target_freshness",
+        "execution_task_status": "proposal_reported",
+        "user_decision_status": user_decision_status,
+        "target_kind": target_kind,
+        "target_alias": sanitize(proposal.get("target_alias")),
+        "target": sanitize(proposal.get("target")),
+        "question": question,
+        "recommendation": recommendation,
+        "explanation": explanation,
+        "recommended_action": sanitize(proposal.get("recommended_action")),
+        "reason": sanitize(proposal.get("reason")),
+        "allowed_decisions": allowed_decisions,
+        "prohibited_actions": [
+            "auto_apply_policy",
+            "change_model",
+            "change_model_selection_rule",
+            "change_provider",
+            "change_central_runner_config",
+            "mutate_task_state",
+        ],
+        "read_only": True,
+        "mutation_allowed": False,
+    } | ({"blocked_reason": blocked_reason} if blocked_reason else {})
+
+
+def decision_card_from_policy_preview_item(item: dict[str, Any]) -> dict[str, Any]:
+    card = decision_card_from_policy_proposal(item)
+    if item.get("apply_ready") is False:
+        card["preview_apply_ready"] = False
+        card["preview_blocked_reason"] = sanitize(item.get("blocked_reason"))
+    return card
+
+
 def sanitize_selection_refs(refs: list[Any]) -> list[dict[str, str | None]]:
     sanitized_refs: list[dict[str, str | None]] = []
     for ref in refs:
@@ -944,6 +1015,10 @@ def render_execution_target_freshness_proposal_report(report: dict[str, Any]) ->
                 f"action={proposal.get('recommended_action')} "
                 f"state_changes=none"
             )
+    decision_cards = report.get("decision_cards") or []
+    if decision_cards:
+        lines.append("decision_cards:")
+        lines.extend(render_policy_decision_cards(decision_cards))
     return "\n".join(lines) + "\n"
 
 
@@ -977,7 +1052,33 @@ def render_policy_proposal_preview(preview: dict[str, Any]) -> str:
                     f"     reason: {item.get('reason')}",
                 ]
             )
+    decision_cards = preview.get("decision_cards") or []
+    if decision_cards:
+        lines.append("decision_cards:")
+        lines.extend(render_policy_decision_cards(decision_cards))
     return "\n".join(lines) + "\n"
+
+
+def render_policy_decision_cards(cards: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for card in cards:
+        lines.extend(
+            [
+                f"  - {card.get('card_id')}",
+                f"     decision_axis: {card.get('decision_axis')}",
+                f"     execution_task_status: {card.get('execution_task_status')}",
+                f"     user_decision_status: {card.get('user_decision_status')}",
+                f"     target: {card.get('target')}",
+                f"     question: {card.get('question')}",
+                f"     recommendation: {card.get('recommendation')}",
+                f"     explanation: {card.get('explanation')}",
+            ]
+        )
+        if card.get("blocked_reason"):
+            lines.append(f"     blocked_reason: {card.get('blocked_reason')}")
+        if card.get("preview_blocked_reason"):
+            lines.append(f"     preview_blocked_reason: {card.get('preview_blocked_reason')}")
+    return lines
 
 
 def render_policy_proposal_approval_template(template: dict[str, Any]) -> str:

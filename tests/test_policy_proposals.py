@@ -273,6 +273,8 @@ class PolicyProposalTests(unittest.TestCase):
                         "stale": 1,
                         "missing": 0,
                         "proposal_count": 1,
+                        "decision_card_count": 1,
+                        "decision_required_count": 1,
                     },
                     "items": [
                         {
@@ -309,6 +311,42 @@ class PolicyProposalTests(unittest.TestCase):
                                 "rule_replacement",
                             ],
                             "selection_refs": [{"scope": "model_selection_rule", "name": "low-cost-docs"}],
+                        }
+                    ],
+                    "decision_cards": [
+                        {
+                            "card_id": "decision-card:execution_target_freshness:low_cost_current",
+                            "proposal_id": "execution_target_freshness:low_cost_current",
+                            "proposal_class": "execution_target_freshness",
+                            "decision_axis": "execution_target_freshness",
+                            "execution_task_status": "proposal_reported",
+                            "user_decision_status": "decision_required",
+                            "target_kind": "execution_target",
+                            "target_alias": "low_cost_current",
+                            "target": "execution_targets.low_cost_current.freshness",
+                            "question": "Review whether to approve this execution target freshness metadata update.",
+                            "recommendation": "operator_review",
+                            "explanation": (
+                                "The proposal is ready for human review of local/private freshness metadata only. "
+                                "Approval does not change models, routing rules, providers, task state, or central runner config."
+                            ),
+                            "recommended_action": "review_execution_target_freshness",
+                            "reason": "review_after_days_elapsed",
+                            "allowed_decisions": [
+                                "approve_freshness_metadata_update",
+                                "continue_observing",
+                                "reject_candidate",
+                            ],
+                            "prohibited_actions": [
+                                "auto_apply_policy",
+                                "change_model",
+                                "change_model_selection_rule",
+                                "change_provider",
+                                "change_central_runner_config",
+                                "mutate_task_state",
+                            ],
+                            "read_only": True,
+                            "mutation_allowed": False,
                         }
                     ],
                     "warnings": [],
@@ -356,6 +394,8 @@ class PolicyProposalTests(unittest.TestCase):
                     "stale": 0,
                     "missing": 0,
                     "proposal_count": 0,
+                    "decision_card_count": 0,
+                    "decision_required_count": 0,
                 },
                 report["summary"],
             )
@@ -423,6 +463,8 @@ class PolicyProposalTests(unittest.TestCase):
                     "stale": 0,
                     "missing": 1,
                     "proposal_count": 1,
+                    "decision_card_count": 1,
+                    "decision_required_count": 0,
                 },
                 report["summary"],
             )
@@ -445,6 +487,11 @@ class PolicyProposalTests(unittest.TestCase):
             self.assertEqual("migrate_direct_model_pin_to_execution_target", report["proposals"][0]["recommended_action"])
             self.assertEqual("direct_model_pin", report["proposals"][0]["target_kind"])
             self.assertEqual("model_selection_rules.low-cost-docs.model", report["proposals"][0]["target"])
+            self.assertEqual("approval_blocked", report["decision_cards"][0]["user_decision_status"])
+            self.assertEqual(
+                "direct_model_pin_requires_separate_migration_approval",
+                report["decision_cards"][0]["blocked_reason"],
+            )
             self.assertNotIn("gpt-5-small", output)
 
     def test_execution_target_freshness_proposal_does_not_mutate_files(self) -> None:
@@ -517,6 +564,8 @@ class PolicyProposalTests(unittest.TestCase):
                         "apply_ready": 0,
                         "blocked": 1,
                         "would_change": "none",
+                        "decision_card_count": 1,
+                        "decision_required_count": 1,
                     },
                     "items": [
                         {
@@ -533,6 +582,44 @@ class PolicyProposalTests(unittest.TestCase):
                             "apply_ready": False,
                             "blocked_reason": "preview_only_no_apply_target",
                             "selection_refs": [{"scope": "default_execution_config", "name": None}],
+                        }
+                    ],
+                    "decision_cards": [
+                        {
+                            "card_id": "decision-card:execution_target_freshness:balanced_current",
+                            "proposal_id": "execution_target_freshness:balanced_current",
+                            "proposal_class": "execution_target_freshness",
+                            "decision_axis": "execution_target_freshness",
+                            "execution_task_status": "proposal_reported",
+                            "user_decision_status": "decision_required",
+                            "target_kind": "execution_target",
+                            "target_alias": "balanced_current",
+                            "target": "execution_targets.balanced_current.freshness",
+                            "question": "Review whether to approve this execution target freshness metadata update.",
+                            "recommendation": "operator_review",
+                            "explanation": (
+                                "The proposal is ready for human review of local/private freshness metadata only. "
+                                "Approval does not change models, routing rules, providers, task state, or central runner config."
+                            ),
+                            "recommended_action": "review_execution_target_freshness",
+                            "reason": "review_after_days_elapsed",
+                            "allowed_decisions": [
+                                "approve_freshness_metadata_update",
+                                "continue_observing",
+                                "reject_candidate",
+                            ],
+                            "prohibited_actions": [
+                                "auto_apply_policy",
+                                "change_model",
+                                "change_model_selection_rule",
+                                "change_provider",
+                                "change_central_runner_config",
+                                "mutate_task_state",
+                            ],
+                            "read_only": True,
+                            "mutation_allowed": False,
+                            "preview_apply_ready": False,
+                            "preview_blocked_reason": "preview_only_no_apply_target",
                         }
                     ],
                     "warnings": [],
@@ -555,6 +642,9 @@ class PolicyProposalTests(unittest.TestCase):
             self.assertIn("target: execution_targets.balanced_current.freshness", output)
             self.assertIn("would_change: none", output)
             self.assertIn("apply_ready: false", output)
+            self.assertIn("decision_cards:", output)
+            self.assertIn("user_decision_status: decision_required", output)
+            self.assertIn("preview_blocked_reason: preview_only_no_apply_target", output)
 
     def test_policy_proposal_preview_rejects_unsupported_class(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
