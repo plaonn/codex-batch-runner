@@ -2611,6 +2611,49 @@ class CliTests(unittest.TestCase):
             self.assertIn("routing-policy-candidates", output)
             self.assertIn("not_ready", output)
 
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "decision-cards",
+                    "--project",
+                    "project-a",
+                    "--include-observations",
+                    "--user-decision-status",
+                    "not_ready",
+                    "--limit",
+                    "0",
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(["not_ready"], report["summary"]["user_decision_status_filter"])
+            self.assertEqual(1, report["summary"]["card_count"])
+            self.assertEqual({"not_ready": 1}, report["summary"]["by_status"])
+            self.assertEqual("not_ready", report["decision_cards"][0]["user_decision_status"])
+
+    def test_decision_cards_rejects_unknown_user_decision_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "decision-cards",
+                        "--user-decision-status",
+                        "surprise",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(2, raised.exception.code)
+            self.assertIn("invalid choice", stderr.getvalue())
+
     def test_routing_report_includes_request_fingerprint_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

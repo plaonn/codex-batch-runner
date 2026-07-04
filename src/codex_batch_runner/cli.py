@@ -21,6 +21,7 @@ from .direct_worktrees import build_direct_worktrees_report, render_direct_workt
 from .dashboard import DEFAULT_DASHBOARD_HOST, DEFAULT_DASHBOARD_PORT, serve_dashboard
 from .decision_cards import (
     DEFAULT_DECISION_CARD_LIMIT,
+    DECISION_CARD_USER_STATUSES,
     build_decision_card_inventory,
     render_decision_card_inventory,
 )
@@ -365,6 +366,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-observations",
         action="store_true",
         help="also include not-ready/observation cards",
+    )
+    decision_cards.add_argument(
+        "--user-decision-status",
+        action="append",
+        choices=sorted(DECISION_CARD_USER_STATUSES),
+        default=[],
+        help="only include cards with this user decision status; repeatable",
     )
     decision_cards.add_argument("--json", action="store_true", help="print JSON")
     decision_cards.set_defaults(func=cmd_decision_cards)
@@ -3686,6 +3694,7 @@ def cmd_decision_cards(config: Config, args: argparse.Namespace) -> int:
         include_archived=args.include_archived,
         execution_evidence_records=execution_evidence_records,
         include_observations=args.include_observations,
+        user_decision_statuses=args.user_decision_status,
     )
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))

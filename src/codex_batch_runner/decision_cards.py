@@ -10,6 +10,15 @@ from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, render_table
 
 
 DEFAULT_DECISION_CARD_LIMIT = DEFAULT_ROUTING_REPORT_LIMIT
+DECISION_CARD_USER_STATUSES = {
+    "approval_blocked",
+    "approved",
+    "decision_pending",
+    "decision_required",
+    "invalid",
+    "not_approved",
+    "not_ready",
+}
 
 
 def build_decision_card_inventory(
@@ -23,6 +32,7 @@ def build_decision_card_inventory(
     include_archived: bool = False,
     execution_evidence_records: list[dict[str, Any]] | None = None,
     include_observations: bool = False,
+    user_decision_statuses: list[str] | None = None,
 ) -> dict[str, Any]:
     policy_report = build_execution_target_freshness_proposal_report(config)
     routing_report = build_routing_policy_candidate_report(
@@ -44,6 +54,9 @@ def build_decision_card_inventory(
             for card in cards
             if card.get("user_decision_status") in {"decision_required", "approval_blocked"}
         ]
+    requested_statuses = sorted(set(user_decision_statuses or []))
+    if requested_statuses:
+        cards = [card for card in cards if card.get("user_decision_status") in requested_statuses]
     status_counts = Counter(str(card.get("user_decision_status") or "unknown") for card in cards)
     axis_counts = Counter(str(card.get("decision_axis") or "unknown") for card in cards)
     return {
@@ -60,6 +73,7 @@ def build_decision_card_inventory(
             "not_ready": status_counts.get("not_ready", 0),
             "invalid": status_counts.get("invalid", 0),
             "include_observations": include_observations,
+            "user_decision_status_filter": requested_statuses,
             "by_status": dict(sorted(status_counts.items())),
             "by_axis": dict(sorted(axis_counts.items())),
         },
