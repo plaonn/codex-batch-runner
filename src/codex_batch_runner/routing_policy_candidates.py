@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from typing import Any
 
 from .config import Config
@@ -55,6 +56,10 @@ def build_routing_policy_candidate_report(
     decision_required_count = sum(
         1 for card in decision_cards if card.get("user_decision_status") == "decision_required"
     )
+    recommendation_counts = Counter(str(card.get("recommendation") or "unknown") for card in decision_cards)
+    blocked_reason_counts = Counter(
+        str(card.get("blocked_reason") or "unknown") for card in decision_cards if card.get("blocked_reason")
+    )
     return {
         "generated_at": routing_report.get("generated_at"),
         "read_only": True,
@@ -82,6 +87,8 @@ def build_routing_policy_candidate_report(
             "non_reviewable_emitted": len(emitted_non_reviewable),
             "decision_card_count": len(decision_cards),
             "decision_required_count": decision_required_count,
+            "by_recommendation": dict(sorted(recommendation_counts.items())),
+            "by_blocked_reason": dict(sorted(blocked_reason_counts.items())),
         },
         "candidates": candidates,
         "non_reviewable_buckets": non_reviewable_buckets,
@@ -358,12 +365,17 @@ def render_routing_policy_candidate_report(report: dict[str, Any]) -> str:
             f"candidates={summary.get('candidate_count', 0)} "
             f"reviewable={summary.get('reviewable', 0)} "
             f"insufficient_sample={summary.get('insufficient_sample', 0)} "
-            f"below_threshold={summary.get('below_threshold', 0)}"
+            f"below_threshold={summary.get('below_threshold', 0)} "
+            f"non_reviewable_included={str(bool(summary.get('non_reviewable_included'))).lower()} "
+            f"non_reviewable_emitted={summary.get('non_reviewable_emitted', 0)} "
+            f"decision_cards={summary.get('decision_card_count', 0)} "
+            f"decision_required={summary.get('decision_required_count', 0)}"
         ),
-        "",
-        "## candidates",
-        render_candidate_table(_list_value(report.get("candidates"))),
     ]
+    summary_groups = _render_summary_groups(summary)
+    if summary_groups:
+        lines.extend(summary_groups)
+    lines.extend(["", "## candidates", render_candidate_table(_list_value(report.get("candidates")))])
     non_reviewable = _list_value(report.get("non_reviewable_buckets"))
     if non_reviewable:
         lines.extend(["", "## non_reviewable_buckets", render_candidate_table(non_reviewable)])
@@ -371,6 +383,18 @@ def render_routing_policy_candidate_report(report: dict[str, Any]) -> str:
     if decision_cards:
         lines.extend(["", "## decision_cards", render_decision_cards(decision_cards)])
     return "\n".join(lines) + "\n"
+
+
+def _render_summary_groups(summary: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for title, key in (("recommendations", "by_recommendation"), ("blocked_reasons", "by_blocked_reason")):
+        values = summary.get(key)
+        if not isinstance(values, dict) or not values:
+            continue
+        lines.append(f"{title}:")
+        for name, count in sorted(values.items()):
+            lines.append(f"  - {name}: {count}")
+    return lines
 
 
 def render_candidate_table(entries: list[dict[str, Any]]) -> str:
