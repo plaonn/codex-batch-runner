@@ -22,6 +22,7 @@ from .dashboard import DEFAULT_DASHBOARD_HOST, DEFAULT_DASHBOARD_PORT, serve_das
 from .decision_cards import (
     DECISION_CARD_AXES,
     DEFAULT_DECISION_CARD_LIMIT,
+    DECISION_CARD_SOURCES,
     DECISION_CARD_USER_STATUSES,
     build_decision_card_inventory,
     render_decision_card_inventory,
@@ -369,6 +370,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-observations",
         action="store_true",
         help="also include not-ready/observation cards",
+    )
+    decision_cards.add_argument(
+        "--source",
+        action="append",
+        choices=sorted(DECISION_CARD_SOURCES),
+        default=[],
+        help="only include cards from this source report; repeatable",
     )
     decision_cards.add_argument(
         "--decision-axis",
@@ -3710,6 +3718,7 @@ def cmd_decision_cards(config: Config, args: argparse.Namespace) -> int:
         include_archived=args.include_archived,
         execution_evidence_records=execution_evidence_records,
         include_observations=args.include_observations,
+        sources=args.source,
         decision_axes=args.decision_axis,
         user_decision_statuses=args.user_decision_status,
     )

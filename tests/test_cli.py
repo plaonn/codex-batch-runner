@@ -2591,6 +2591,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, report["summary"]["not_ready"])
             self.assertEqual({"execution_target_freshness": 1, "routing_policy_change": 1}, report["summary"]["by_axis"])
             self.assertEqual(
+                {"policy-proposals execution-target-freshness": 1, "routing-policy-candidates": 1},
+                report["summary"]["by_source"],
+            )
+            self.assertEqual(
                 {"operator_review": 2},
                 report["summary"]["by_recommendation"],
             )
@@ -2623,6 +2627,34 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, report["summary"]["card_count"])
             self.assertEqual({"routing_policy_change": 1}, report["summary"]["by_axis"])
             self.assertEqual("routing_policy_change", report["decision_cards"][0]["decision_axis"])
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "decision-cards",
+                    "--project",
+                    "project-a",
+                    "--label",
+                    "routing",
+                    "--source",
+                    "policy-proposals execution-target-freshness",
+                    "--limit",
+                    "0",
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(["policy-proposals execution-target-freshness"], report["summary"]["source_filter"])
+            self.assertEqual(1, report["summary"]["card_count"])
+            self.assertEqual({"policy-proposals execution-target-freshness": 1}, report["summary"]["by_source"])
+            self.assertEqual(
+                ["policy-proposals execution-target-freshness"],
+                [source_report["source"] for source_report in report["source_reports"]],
+            )
+            self.assertEqual("policy-proposals execution-target-freshness", report["decision_cards"][0]["source"])
 
     def test_decision_cards_inventory_human_output_and_observations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2767,6 +2799,26 @@ class CliTests(unittest.TestCase):
                         "decision-cards",
                         "--decision-axis",
                         "unknown_axis",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(2, raised.exception.code)
+            self.assertIn("invalid choice", stderr.getvalue())
+
+    def test_decision_cards_rejects_unknown_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "decision-cards",
+                        "--source",
+                        "unknown-source",
                         "--json",
                     ]
                 )

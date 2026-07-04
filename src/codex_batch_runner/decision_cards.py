@@ -15,6 +15,10 @@ DECISION_CARD_AXES = {
     "execution_target_freshness",
     "routing_policy_change",
 }
+DECISION_CARD_SOURCES = {
+    "policy-proposals execution-target-freshness",
+    "routing-policy-candidates",
+}
 DECISION_CARD_USER_STATUSES = {
     "approval_blocked",
     "approved",
@@ -37,6 +41,7 @@ def build_decision_card_inventory(
     include_archived: bool = False,
     execution_evidence_records: list[dict[str, Any]] | None = None,
     include_observations: bool = False,
+    sources: list[str] | None = None,
     decision_axes: list[str] | None = None,
     user_decision_statuses: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -54,6 +59,9 @@ def build_decision_card_inventory(
     )
     cards = _inventory_cards("policy-proposals execution-target-freshness", policy_report)
     cards.extend(_inventory_cards("routing-policy-candidates", routing_report))
+    requested_sources = sorted(set(sources or []))
+    if requested_sources:
+        cards = [card for card in cards if card.get("source") in requested_sources]
     if not include_observations:
         cards = [
             card
@@ -68,6 +76,7 @@ def build_decision_card_inventory(
         cards = [card for card in cards if card.get("user_decision_status") in requested_statuses]
     status_counts = Counter(str(card.get("user_decision_status") or "unknown") for card in cards)
     axis_counts = Counter(str(card.get("decision_axis") or "unknown") for card in cards)
+    source_counts = Counter(str(card.get("source") or "unknown") for card in cards)
     recommendation_counts = Counter(str(card.get("recommendation") or "unknown") for card in cards)
     blocked_reason_counts = Counter(
         str(card.get("blocked_reason"))
@@ -89,31 +98,42 @@ def build_decision_card_inventory(
             "not_ready": status_counts.get("not_ready", 0),
             "invalid": status_counts.get("invalid", 0),
             "include_observations": include_observations,
+            "source_filter": requested_sources,
             "decision_axis_filter": requested_axes,
             "user_decision_status_filter": requested_statuses,
             "by_status": dict(sorted(status_counts.items())),
             "by_axis": dict(sorted(axis_counts.items())),
+            "by_source": dict(sorted(source_counts.items())),
             "by_recommendation": dict(sorted(recommendation_counts.items())),
             "by_blocked_reason": dict(sorted(blocked_reason_counts.items())),
         },
-        "source_reports": [
-            {
-                "source": "policy-proposals execution-target-freshness",
-                "generated_at": policy_report.get("generated_at"),
-                "card_count": len(_list_value(policy_report.get("decision_cards"))),
-                "read_only": True,
-                "mutation_allowed": False,
-            },
-            {
-                "source": "routing-policy-candidates",
-                "generated_at": routing_report.get("generated_at"),
-                "card_count": len(_list_value(routing_report.get("decision_cards"))),
-                "read_only": True,
-                "mutation_allowed": False,
-            },
-        ],
+        "source_reports": _filter_source_reports(
+            [
+                {
+                    "source": "policy-proposals execution-target-freshness",
+                    "generated_at": policy_report.get("generated_at"),
+                    "card_count": len(_list_value(policy_report.get("decision_cards"))),
+                    "read_only": True,
+                    "mutation_allowed": False,
+                },
+                {
+                    "source": "routing-policy-candidates",
+                    "generated_at": routing_report.get("generated_at"),
+                    "card_count": len(_list_value(routing_report.get("decision_cards"))),
+                    "read_only": True,
+                    "mutation_allowed": False,
+                },
+            ],
+            requested_sources,
+        ),
         "decision_cards": cards,
     }
+
+
+def _filter_source_reports(source_reports: list[dict[str, Any]], requested_sources: list[str]) -> list[dict[str, Any]]:
+    if not requested_sources:
+        return source_reports
+    return [report for report in source_reports if report.get("source") in requested_sources]
 
 
 def _inventory_cards(source: str, report: dict[str, Any]) -> list[dict[str, Any]]:
