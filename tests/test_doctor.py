@@ -121,6 +121,11 @@ class DoctorTests(unittest.TestCase):
             self.assertIn(f"resolved_executable: {executable.resolve()}", output)
             self.assertIn("available: true", output)
             self.assertIn("version_output: codex-cli 2.0.0", output)
+            self.assertIn("checks:", output)
+            self.assertIn("ok_count: 6", output)
+            self.assertIn("warning_count: 3", output)
+            self.assertIn("error_count: 0", output)
+            self.assertNotIn("ok: queue_dir:", output)
 
     def test_doctor_reports_runner_pause_state_in_json_and_human_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -642,6 +647,8 @@ class DoctorTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "doctor"])
 
             self.assertEqual(1, code)
+            self.assertIn("error_count: 1", output)
+            self.assertIn("details:", output)
             self.assertIn("error: codex_command", output)
             self.assertIn("executable not available", output)
 

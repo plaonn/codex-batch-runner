@@ -806,9 +806,21 @@ def render_doctor_report(report: dict[str, Any]) -> str:
     )
     if codex.get("version_error"):
         lines.append(f"  version_warning: {codex.get('version_error')}")
-    lines.extend(["", "checks:"])
-    for check in report["checks"]:
-        lines.append(f"  {check['level']}: {check['name']}: {check['message']}")
+    check_counts = Counter(str(check.get("level") or "unknown") for check in report["checks"])
+    actionable_checks = [check for check in report["checks"] if check.get("level") != "ok"]
+    lines.extend(
+        [
+            "",
+            "checks:",
+            f"  ok_count: {check_counts.get('ok', 0)}",
+            f"  warning_count: {check_counts.get('warning', 0)}",
+            f"  error_count: {check_counts.get('error', 0)}",
+        ]
+    )
+    if actionable_checks:
+        lines.append("  details:")
+        for check in actionable_checks:
+            lines.append(f"    {check['level']}: {check['name']}: {check['message']}")
     state = report["state"]
     lines.extend(
         [
