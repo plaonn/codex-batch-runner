@@ -144,9 +144,25 @@ def render_decision_card_inventory(report: dict[str, Any]) -> str:
             f"not_ready={summary.get('not_ready', 0)}"
         ),
         "",
-        render_decision_card_table(_list_value(report.get("decision_cards"))),
     ]
+    summary_lines = render_summary_groups(summary)
+    if summary_lines:
+        lines.extend(summary_lines)
+        lines.append("")
+    lines.append(render_decision_card_table(_list_value(report.get("decision_cards"))))
     return "\n".join(lines) + "\n"
+
+
+def render_summary_groups(summary: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for title, key in (("recommendations", "by_recommendation"), ("blocked_reasons", "by_blocked_reason")):
+        group = summary.get(key) if isinstance(summary.get(key), dict) else {}
+        if not group:
+            continue
+        lines.append(title + ":")
+        for name, count in sorted(group.items()):
+            lines.append(f"  - {name}: {count}")
+    return lines
 
 
 def render_decision_card_table(cards: list[dict[str, Any]]) -> str:

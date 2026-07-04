@@ -2665,6 +2665,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("read_only: yes", output)
             self.assertIn("routing-policy-candidates", output)
             self.assertIn("not_ready", output)
+            self.assertIn("recommendations:", output)
+            self.assertIn("collect_more_evidence: 1", output)
 
             code, output = run_cli(
                 [
@@ -2725,6 +2727,12 @@ class CliTests(unittest.TestCase):
                 report["summary"]["by_blocked_reason"],
             )
             self.assertNotIn("gpt-5-small", output)
+
+            code, output = run_cli(["--config", str(config_path), "decision-cards"])
+
+            self.assertEqual(0, code)
+            self.assertIn("blocked_reasons:", output)
+            self.assertIn("direct_model_pin_requires_separate_migration_approval: 1", output)
 
     def test_decision_cards_rejects_unknown_user_decision_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
