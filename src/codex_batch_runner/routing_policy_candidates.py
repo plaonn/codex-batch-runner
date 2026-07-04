@@ -47,6 +47,14 @@ def build_routing_policy_candidate_report(
     reviewable = [bucket for bucket in buckets if bucket.get("threshold_advisory_status") == "reviewable"]
     non_reviewable = [bucket for bucket in buckets if bucket.get("threshold_advisory_status") != "reviewable"]
     emitted_non_reviewable = non_reviewable if include_non_reviewable else []
+    candidates = [_candidate_entry(bucket, reviewable=True) for bucket in reviewable]
+    non_reviewable_buckets = [_candidate_entry(bucket, reviewable=False) for bucket in emitted_non_reviewable]
+    decision_cards = [_decision_card(entry, decision_required=True) for entry in candidates] + [
+        _decision_card(entry, decision_required=False) for entry in non_reviewable_buckets
+    ]
+    decision_required_count = sum(
+        1 for card in decision_cards if card.get("user_decision_status") == "decision_required"
+    )
     return {
         "generated_at": routing_report.get("generated_at"),
         "read_only": True,
@@ -72,9 +80,12 @@ def build_routing_policy_candidate_report(
             "below_threshold": _count_status(buckets, "below_threshold"),
             "non_reviewable_included": include_non_reviewable,
             "non_reviewable_emitted": len(emitted_non_reviewable),
+            "decision_card_count": len(decision_cards),
+            "decision_required_count": decision_required_count,
         },
-        "candidates": [_candidate_entry(bucket, reviewable=True) for bucket in reviewable],
-        "non_reviewable_buckets": [_candidate_entry(bucket, reviewable=False) for bucket in emitted_non_reviewable],
+        "candidates": candidates,
+        "non_reviewable_buckets": non_reviewable_buckets,
+        "decision_cards": decision_cards,
     }
 
 
@@ -250,6 +261,65 @@ def _candidate_entry(bucket: dict[str, Any], *, reviewable: bool) -> dict[str, A
     return entry
 
 
+def _decision_card(entry: dict[str, Any], *, decision_required: bool) -> dict[str, Any]:
+    evidence = entry.get("evidence") if isinstance(entry.get("evidence"), dict) else {}
+    status = str(entry.get("advisory_status") or "unknown")
+    reasons = [str(reason) for reason in _list_value(entry.get("advisory_reasons"))]
+    if decision_required:
+        user_decision_status = "decision_required"
+        question = "Review whether this routing evidence justifies a bounded policy-change proposal."
+        recommendation = "operator_review"
+        explanation = (
+            "The bucket meets the configured sample and outcome thresholds, so it is ready for human review. "
+            "This card does not approve or apply a model, routing, provider, or runner config change."
+        )
+        allowed_decisions = ["approve_followup_proposal", "continue_observing", "reject_candidate"]
+        blocked_reason = None
+    else:
+        user_decision_status = "not_ready"
+        question = "No policy decision is requested for this bucket yet."
+        recommendation = str(entry.get("recommended_next_step") or "keep_current_policy")
+        explanation = (
+            "The bucket does not meet the configured review threshold, so it is reported as observation context only. "
+            "Collect more evidence or keep the current policy according to the blocked reason."
+        )
+        allowed_decisions = ["continue_observing", "dismiss_observation"]
+        blocked_reason = str(entry.get("blocked_reason") or status)
+    card = {
+        "card_id": "decision-card:" + str(entry.get("candidate_id") or "unknown"),
+        "candidate_id": str(entry.get("candidate_id") or "unknown"),
+        "decision_axis": "routing_policy_change",
+        "execution_task_status": "candidate_reported" if decision_required else "observation_reported",
+        "user_decision_status": user_decision_status,
+        "task_bucket_key": str(entry.get("task_bucket_key") or "unknown"),
+        "question": question,
+        "recommendation": recommendation,
+        "explanation": explanation,
+        "evidence_summary": {
+            "accepted": int(evidence.get("accepted") or 0),
+            "first_pass_accept_rate": evidence.get("first_pass_accept_rate"),
+            "needs_fix_or_rejected_rate": evidence.get("needs_fix_or_rejected_rate"),
+            "reviewer_needs_human": int(evidence.get("reviewer_needs_human") or 0),
+            "required_human_checks": int(evidence.get("required_human_checks") or 0),
+            "evidence_sources": evidence.get("evidence_sources"),
+        },
+        "advisory_status": status,
+        "advisory_reasons": reasons,
+        "allowed_decisions": allowed_decisions,
+        "prohibited_actions": [
+            "auto_apply_policy",
+            "change_model_selection_rule",
+            "change_provider",
+            "change_central_runner_config",
+        ],
+        "read_only": True,
+        "mutation_allowed": False,
+    }
+    if blocked_reason:
+        card["blocked_reason"] = blocked_reason
+    return card
+
+
 def _candidate_id(task_bucket_key: str) -> str:
     digest = hashlib.sha256(task_bucket_key.encode("utf-8")).hexdigest()[:12]
     return f"routing-policy-candidate-{digest}"
@@ -297,6 +367,9 @@ def render_routing_policy_candidate_report(report: dict[str, Any]) -> str:
     non_reviewable = _list_value(report.get("non_reviewable_buckets"))
     if non_reviewable:
         lines.extend(["", "## non_reviewable_buckets", render_candidate_table(non_reviewable)])
+    decision_cards = _list_value(report.get("decision_cards"))
+    if decision_cards:
+        lines.extend(["", "## decision_cards", render_decision_cards(decision_cards)])
     return "\n".join(lines) + "\n"
 
 
@@ -324,3 +397,30 @@ def render_candidate_table(entries: list[dict[str, Any]]) -> str:
         for entry in entries
     ]
     return render_table(header, rows)
+
+
+def render_decision_cards(cards: list[dict[str, Any]]) -> str:
+    rendered: list[str] = []
+    for card in cards:
+        evidence = card.get("evidence_summary") if isinstance(card.get("evidence_summary"), dict) else {}
+        rendered.extend(
+            [
+                f"- {card.get('card_id')}",
+                f"  decision_axis: {card.get('decision_axis')}",
+                f"  execution_task_status: {card.get('execution_task_status')}",
+                f"  user_decision_status: {card.get('user_decision_status')}",
+                f"  task_bucket: {card.get('task_bucket_key')}",
+                f"  question: {card.get('question')}",
+                f"  recommendation: {card.get('recommendation')}",
+                f"  explanation: {card.get('explanation')}",
+                (
+                    "  evidence: "
+                    f"accepted={evidence.get('accepted', 0)} "
+                    f"first_pass={percent_cell(evidence.get('first_pass_accept_rate'))} "
+                    f"fix_or_reject={percent_cell(evidence.get('needs_fix_or_rejected_rate'))}"
+                ),
+            ]
+        )
+        if card.get("blocked_reason"):
+            rendered.append(f"  blocked_reason: {card.get('blocked_reason')}")
+    return "\n".join(rendered)

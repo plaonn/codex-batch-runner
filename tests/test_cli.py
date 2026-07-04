@@ -2311,6 +2311,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, report["summary"]["candidate_count"])
             self.assertEqual(1, report["summary"]["insufficient_sample"])
             self.assertEqual(1, report["summary"]["below_threshold"])
+            self.assertEqual(1, report["summary"]["decision_card_count"])
+            self.assertEqual(1, report["summary"]["decision_required_count"])
             self.assertEqual([], report["non_reviewable_buckets"])
             self.assertEqual("size=small risk=low verify=unit", candidate["task_bucket_key"])
             self.assertEqual("reviewable", candidate["advisory_status"])
@@ -2321,6 +2323,16 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0.0, candidate["evidence"]["needs_fix_or_rejected_rate"])
             self.assertFalse(candidate["mutation_allowed"])
             self.assertEqual(5, candidate["thresholds"]["min_accepted_count"])
+            decision_card = report["decision_cards"][0]
+            self.assertEqual("routing_policy_change", decision_card["decision_axis"])
+            self.assertEqual("candidate_reported", decision_card["execution_task_status"])
+            self.assertEqual("decision_required", decision_card["user_decision_status"])
+            self.assertEqual(candidate["candidate_id"], decision_card["candidate_id"])
+            self.assertEqual("operator_review", decision_card["recommendation"])
+            self.assertEqual(5, decision_card["evidence_summary"]["accepted"])
+            self.assertIn("approve_followup_proposal", decision_card["allowed_decisions"])
+            self.assertIn("change_model_selection_rule", decision_card["prohibited_actions"])
+            self.assertFalse(decision_card["mutation_allowed"])
 
     def test_routing_policy_candidates_human_output_can_include_non_reviewable_reasons(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2388,6 +2400,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("needs_fix_or_rejected_rate_above_max", output)
             self.assertIn("reviewer_needs_human_present", output)
             self.assertIn("keep_current_policy", output)
+            self.assertIn("## decision_cards", output)
+            self.assertIn("execution_task_status: observation_reported", output)
+            self.assertIn("user_decision_status: not_ready", output)
+            self.assertIn("question: No policy decision is requested for this bucket yet.", output)
 
     def test_routing_policy_candidates_combines_supplemental_execution_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
