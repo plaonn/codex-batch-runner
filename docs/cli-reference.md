@@ -130,6 +130,8 @@ Successful queue mutations run the optional `post_mutation_trigger_command` afte
 
 `--execution-evidence-json PATH`는 repeatable option입니다. JSON object, `{"records": [...]}` object, 또는 object list를 받을 수 있으며 현재 public contract는 `record_kind="codex_subagent_execution"`입니다. 이 record는 queue task로 등록되지 않고 `execution_evidence_rows`에만 나타납니다. `task_count`, `task_rows`, queue task group 집계는 변하지 않습니다. Evidence row는 `execution_surface=codex_subagent`, `subject.queue_task=false`, hashed work id를 포함하고, Codex app actual model identity를 확정할 수 없으면 `model_source=codex_app_default` 또는 `unknown`을 사용합니다. Evaluation diagnostics의 `execution_surfaces` group은 queue task와 supplemental evidence를 surface별로 분리해 보여줍니다. 입력 파일에는 structured metadata와 sanitized `last_run`/`last_result`/reviewer result만 넣고 raw prompt, transcript/log body, session id, thread id, credential, private absolute path를 넣지 않습니다.
 
+`cbr routing-eval-report --json`은 bounded row-level evaluation data와 함께 `evaluation_diagnostics.probe_lanes`와 `execution_evidence_diagnostics.probe_lanes`를 출력합니다. Queue task diagnostics는 `evaluation_rows`에서만 계산하고, supplemental diagnostics는 `execution_evidence_rows`에서만 계산합니다. 두 diagnostics 모두 `read_only=true`, `mutation_allowed=false`이며, baseline/probe/guard/manual/unspecified/other lane family, raw experiment, task bucket lane, model requirement lane별 outcome을 표시합니다.
+
 Producer-facing example은 [subagent-execution-evidence.example.json](../examples/subagent-execution-evidence.example.json)을 참고합니다. 세부 contract는 [execution.md](execution.md#supplemental-codex-subagent-execution-evidence)에 유지합니다.
 
 운영자용 범위/제외:

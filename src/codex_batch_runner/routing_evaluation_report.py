@@ -7,6 +7,12 @@ from .config import Config
 from .evaluation import derive_evaluation_row
 from .execution_evidence import derive_execution_evidence_rows
 from .queue import list_tasks, task_labels, task_project_id, task_project_root
+from .routing_report import (
+    group_evaluation_rows,
+    render_probe_lanes,
+    summarize_evaluation_groups,
+    summarize_task_bucket,
+)
 from .timeutil import iso_now
 
 DEFAULT_ROUTING_EVAL_REPORT_LIMIT = 50
@@ -54,8 +60,23 @@ def build_routing_evaluation_report(
         "filtered_count": filtered_count,
         "row_count": len(rows),
         "evaluation_rows": rows,
+        "evaluation_diagnostics": {
+            "probe_lanes": summarize_probe_lanes(rows),
+            "advisory": {
+                "read_only": True,
+                "mutation_allowed": False,
+            },
+        },
         "execution_evidence_count": len(execution_evidence_rows),
         "execution_evidence_rows": execution_evidence_rows,
+        "execution_evidence_diagnostics": {
+            "probe_lanes": summarize_probe_lanes(execution_evidence_rows),
+            "advisory": {
+                "read_only": True,
+                "mutation_allowed": False,
+                "queue_rows_included": False,
+            },
+        },
         "privacy": {
             "raw_prompts_included": False,
             "raw_transcripts_included": False,
@@ -93,6 +114,62 @@ def safe_hash(value: str) -> str:
     return "sha256:" + sha256(value.encode("utf-8")).hexdigest()
 
 
+def summarize_probe_lanes(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "advisory": {
+            "read_only": True,
+            "mutation_allowed": False,
+            "baseline_label": "baseline",
+            "probe_lane_families": ["probe", "guard"],
+        },
+        "by_lane_family": summarize_evaluation_groups(
+            group_evaluation_rows(rows, probe_lane_key),
+            summarize_task_bucket,
+        ),
+        "by_experiment": summarize_evaluation_groups(
+            group_evaluation_rows(rows, routing_experiment_key),
+            summarize_task_bucket,
+        ),
+        "by_task_bucket_lane": summarize_evaluation_groups(
+            group_evaluation_rows(rows, task_bucket_lane_key),
+            summarize_task_bucket,
+        ),
+        "by_model_requirement_lane": summarize_evaluation_groups(
+            group_evaluation_rows(rows, model_requirement_lane_key),
+            summarize_task_bucket,
+        ),
+    }
+
+
+def routing_experiment_key(row: dict[str, Any]) -> str:
+    routing = row.get("routing") if isinstance(row.get("routing"), dict) else {}
+    return str(routing.get("routing_experiment") or "unknown")
+
+
+def probe_lane_key(row: dict[str, Any]) -> str:
+    experiment = routing_experiment_key(row).lower()
+    if experiment in {"", "unspecified", "unknown", "none"}:
+        return "unspecified"
+    if experiment == "baseline":
+        return "baseline"
+    if experiment == "manual":
+        return "manual"
+    if experiment.endswith("_probe") or "probe" in experiment:
+        return "probe"
+    if experiment.endswith("_guard") or "guard" in experiment:
+        return "guard"
+    return "other"
+
+
+def task_bucket_lane_key(row: dict[str, Any]) -> str:
+    return f"{row.get('task_bucket_key') or 'unknown'} lane={probe_lane_key(row)}"
+
+
+def model_requirement_lane_key(row: dict[str, Any]) -> str:
+    worker = row.get("worker") if isinstance(row.get("worker"), dict) else {}
+    return f"{worker.get('model_requirement_key') or 'unknown'}/lane={probe_lane_key(row)}"
+
+
 def render_routing_evaluation_report(report: dict[str, Any]) -> str:
     lines = [
         "# routing evaluation report",
@@ -112,6 +189,12 @@ def render_routing_evaluation_report(report: dict[str, Any]) -> str:
         active_filters.append("project_root=filtered")
     if active_filters:
         lines.append("filters: " + " ".join(active_filters))
+    diagnostics = report.get("evaluation_diagnostics") if isinstance(report.get("evaluation_diagnostics"), dict) else {}
+    probe_lanes = diagnostics.get("probe_lanes") if isinstance(diagnostics.get("probe_lanes"), dict) else {}
+    if probe_lanes:
+        lines.append("")
+        lines.append("probe_lanes")
+        lines.append(render_probe_lanes(probe_lanes))
     lines.append("")
     lines.append("JSON output includes row-level derived evaluation sections; use --json for inspection.")
     return "\n".join(lines) + "\n"

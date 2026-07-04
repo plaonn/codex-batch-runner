@@ -2833,6 +2833,56 @@ class CliTests(unittest.TestCase):
             self.assertEqual("target_alias", row["worker"]["model_source"])
             self.assertEqual("high_capability_current", row["worker"]["execution_target"])
 
+    def test_routing_eval_report_stratifies_probe_lanes_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+
+            def save_routed(task_id: str, experiment: str, *, review_status: str = "accepted") -> None:
+                task = create_task(
+                    config,
+                    "eval work",
+                    tmp,
+                    task_id=task_id,
+                    project_id="project-a",
+                    category="implementation",
+                    model_requirement_vector=requirement_vector(reasoning_depth="low", cost_sensitivity="high"),
+                    routing_experiment=experiment,
+                    routing_size="small",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+                task["status"] = "completed"
+                task["review_status"] = review_status
+                task["attempts"] = 1
+                task["last_result"] = {"task_id": task_id, "status": "completed", "verification": ["unit"]}
+                task["reviewer_codex"] = {"decision": "pass" if review_status == "accepted" else "needs_fix"}
+                save_task(config, task)
+
+            save_routed("eval-baseline", "baseline")
+            save_routed("eval-probe", "downshift_probe", review_status="needs_followup")
+            save_routed("eval-guard", "upshift_guard")
+
+            code, output = run_cli(
+                ["--config", str(config_path), "routing-eval-report", "--project", "project-a", "--limit", "0", "--json"]
+            )
+            report = json.loads(output)
+            probe_lanes = report["evaluation_diagnostics"]["probe_lanes"]
+            family_groups = {entry["key"]: entry for entry in probe_lanes["by_lane_family"]}
+            bucket_lanes = {entry["key"]: entry for entry in probe_lanes["by_task_bucket_lane"]}
+            req_lanes = {entry["key"]: entry for entry in probe_lanes["by_model_requirement_lane"]}
+            req_key = report["evaluation_rows"][0]["worker"]["model_requirement_key"]
+
+            self.assertEqual(0, code)
+            self.assertTrue(probe_lanes["advisory"]["read_only"])
+            self.assertFalse(probe_lanes["advisory"]["mutation_allowed"])
+            self.assertEqual(1, family_groups["baseline"]["accepted"])
+            self.assertEqual(1, family_groups["probe"]["needs_fix_or_rejected"])
+            self.assertEqual(1, family_groups["guard"]["first_pass_accepted"])
+            self.assertEqual(1, bucket_lanes["size=small risk=low verify=unit lane=probe"]["needs_fix_or_rejected"])
+            self.assertEqual(1, req_lanes[f"{req_key}/lane=guard"]["accepted"])
+            self.assertEqual([], report["execution_evidence_diagnostics"]["probe_lanes"]["by_lane_family"])
+
     def test_routing_eval_report_filters_limit_and_hashes_project_root_filter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -2909,6 +2959,7 @@ class CliTests(unittest.TestCase):
                                 "project_id": "project-a",
                                 "category": "docs",
                                 "labels": ["eval"],
+                                "routing_experiment": "downshift_probe",
                                 "routing_size": "small",
                                 "routing_risk": "low",
                                 "verification_scope": ["manual"],
@@ -2937,6 +2988,8 @@ class CliTests(unittest.TestCase):
             report = json.loads(output)
             row = report["execution_evidence_rows"][0]
             serialized = json.dumps(report, sort_keys=True)
+            evidence_lanes = report["execution_evidence_diagnostics"]["probe_lanes"]
+            evidence_lane_groups = {entry["key"]: entry for entry in evidence_lanes["by_lane_family"]}
 
             self.assertEqual(0, code)
             self.assertEqual(0, report["row_count"])
@@ -2945,6 +2998,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual("codex_subagent", row["execution_surface"])
             self.assertEqual("supplemental_execution_evidence", row["subject"]["kind"])
             self.assertEqual("codex_app_default", row["worker"]["model_source"])
+            self.assertEqual("downshift_probe", row["routing"]["routing_experiment"])
+            self.assertTrue(evidence_lanes["advisory"]["read_only"])
+            self.assertFalse(evidence_lanes["advisory"]["mutation_allowed"])
+            self.assertEqual(1, evidence_lane_groups["probe"]["tasks"])
             self.assertNotIn("codex-thread-not-for-output-123456789", serialized)
 
     def test_list_filters_by_project_metadata(self) -> None:

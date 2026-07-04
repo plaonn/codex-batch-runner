@@ -68,6 +68,7 @@ def execution_evidence_task_projection(record: dict[str, Any], *, index: int = 0
         "labels": _list_value(record.get("labels")),
         "routing_size": record.get("routing_size"),
         "routing_risk": record.get("routing_risk"),
+        "routing_experiment": record.get("routing_experiment"),
         "verification_scope": _list_value(record.get("verification_scope")),
         "routing_risk_factors": _list_value(record.get("routing_risk_factors")),
         "execution_backend": record.get("execution_backend") or "codex_app",
