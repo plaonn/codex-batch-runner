@@ -2490,6 +2490,127 @@ class CliTests(unittest.TestCase):
             self.assertEqual(5, candidate["evidence"]["accepted"])
             self.assertEqual("operator_review", candidate["recommended_next_step"])
 
+    def test_decision_cards_inventory_combines_policy_and_routing_cards_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                extra={
+                    "execution_targets": {
+                        "low_cost_current": {
+                            "model": "gpt-5-small",
+                            "freshness": {
+                                "owner": "operator",
+                                "last_reviewed_at": "2000-01-01",
+                                "review_after_days": 14,
+                            },
+                        }
+                    },
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "execution_target": "low_cost_current",
+                        }
+                    ],
+                },
+            )
+            config = Config.load(str(config_path))
+            for index in range(5):
+                task = create_task(
+                    config,
+                    "work",
+                    tmp,
+                    task_id=f"routing-{index}",
+                    project_id="project-a",
+                    category="implementation",
+                    labels=["routing"],
+                    routing_size="small",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+                task["status"] = "completed"
+                task["review_status"] = "accepted"
+                task["attempts"] = 1
+                task["last_result"] = {"task_id": task["id"], "status": "completed", "verification": ["unit"]}
+                task["reviewer_codex"] = {"decision": "pass", "confidence": "high"}
+                save_task(config, task)
+            task_path = config.queue_dir / "routing-0.json"
+            before = task_path.read_text(encoding="utf-8")
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "decision-cards",
+                    "--project",
+                    "project-a",
+                    "--label",
+                    "routing",
+                    "--limit",
+                    "0",
+                    "--json",
+                ]
+            )
+            after = task_path.read_text(encoding="utf-8")
+            report = json.loads(output)
+            cards = {card["source"]: card for card in report["decision_cards"]}
+
+            self.assertEqual(0, code)
+            self.assertEqual(before, after)
+            self.assertEqual("decision_card_inventory", report["kind"])
+            self.assertTrue(report["read_only"])
+            self.assertFalse(report["mutation_allowed"])
+            self.assertEqual(2, report["summary"]["card_count"])
+            self.assertEqual(2, report["summary"]["decision_required"])
+            self.assertEqual(0, report["summary"]["not_ready"])
+            self.assertEqual({"execution_target_freshness": 1, "routing_policy_change": 1}, report["summary"]["by_axis"])
+            self.assertEqual("decision_required", cards["policy-proposals execution-target-freshness"]["user_decision_status"])
+            self.assertEqual("decision_required", cards["routing-policy-candidates"]["user_decision_status"])
+            self.assertFalse(cards["routing-policy-candidates"]["mutation_allowed"])
+            self.assertNotIn("gpt-5-small", output)
+
+    def test_decision_cards_inventory_human_output_and_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="insufficient",
+                project_id="project-a",
+                category="implementation",
+                labels=["routing"],
+                routing_size="small",
+                routing_risk="low",
+                verification_scope=["unit"],
+            )
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            task["attempts"] = 1
+            task["last_result"] = {"task_id": task["id"], "status": "completed", "verification": ["unit"]}
+            task["reviewer_codex"] = {"decision": "pass", "confidence": "high"}
+            save_task(config, task)
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "decision-cards",
+                    "--project",
+                    "project-a",
+                    "--include-observations",
+                    "--limit",
+                    "0",
+                ]
+            )
+
+            self.assertEqual(0, code)
+            self.assertIn("# decision cards", output)
+            self.assertIn("read_only: yes", output)
+            self.assertIn("routing-policy-candidates", output)
+            self.assertIn("not_ready", output)
+
     def test_routing_report_includes_request_fingerprint_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

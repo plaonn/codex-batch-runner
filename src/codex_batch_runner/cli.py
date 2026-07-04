@@ -19,6 +19,11 @@ from .cooldown import MANUAL_COOLDOWN_SAFETY_OFFSET_SECONDS, cooldown_status, fo
 from .doctor import build_doctor_report, render_doctor_report
 from .direct_worktrees import build_direct_worktrees_report, render_direct_worktrees_report
 from .dashboard import DEFAULT_DASHBOARD_HOST, DEFAULT_DASHBOARD_PORT, serve_dashboard
+from .decision_cards import (
+    DEFAULT_DECISION_CARD_LIMIT,
+    build_decision_card_inventory,
+    render_decision_card_inventory,
+)
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write_event_nonfatal
 from .execution_evidence import ExecutionEvidenceError, load_execution_evidence_records
 from .model_requirements import REQUIREMENT_DIMENSIONS, REQUIREMENT_LEVELS, model_requirement_vector_value
@@ -333,6 +338,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     routing_policy_candidates.add_argument("--json", action="store_true", help="print JSON")
     routing_policy_candidates.set_defaults(func=cmd_routing_policy_candidates)
+
+    decision_cards = sub.add_parser(
+        "decision-cards",
+        help="show read-only policy and routing decision cards without mutating state",
+    )
+    decision_cards.add_argument("--project", dest="project_id", help="filter routing cards by project id")
+    decision_cards.add_argument("--project-root", help="filter routing cards by project root")
+    decision_cards.add_argument("--category", help="filter routing cards by category")
+    decision_cards.add_argument("--label", help="filter routing cards by label")
+    decision_cards.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_DECISION_CARD_LIMIT,
+        help=f"maximum recent routing tasks to include after filtering; 0 means no limit (default: {DEFAULT_DECISION_CARD_LIMIT})",
+    )
+    decision_cards.add_argument("--include-archived", action="store_true", help="include archived routing tasks")
+    decision_cards.add_argument(
+        "--execution-evidence-json",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="include sanitized supplemental execution evidence rows for routing cards without mutating queue tasks",
+    )
+    decision_cards.add_argument(
+        "--include-observations",
+        action="store_true",
+        help="also include not-ready/observation cards",
+    )
+    decision_cards.add_argument("--json", action="store_true", help="print JSON")
+    decision_cards.set_defaults(func=cmd_decision_cards)
 
     routing_eval_report = sub.add_parser(
         "routing-eval-report",
@@ -3629,6 +3664,33 @@ def cmd_routing_policy_candidates(config: Config, args: argparse.Namespace) -> i
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_routing_policy_candidate_report(report), end="")
+    return 0
+
+
+def cmd_decision_cards(config: Config, args: argparse.Namespace) -> int:
+    if args.limit < 0:
+        print("error: --limit must be non-negative", file=sys.stderr)
+        return 1
+    try:
+        execution_evidence_records = load_execution_evidence_records(args.execution_evidence_json)
+    except ExecutionEvidenceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    report = build_decision_card_inventory(
+        config,
+        project_id=args.project_id,
+        project_root=normalized_path(args.project_root) if args.project_root else None,
+        category=args.category,
+        label=args.label,
+        limit=args.limit,
+        include_archived=args.include_archived,
+        execution_evidence_records=execution_evidence_records,
+        include_observations=args.include_observations,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_decision_card_inventory(report), end="")
     return 0
 
 
