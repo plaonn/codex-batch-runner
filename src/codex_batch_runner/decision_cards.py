@@ -195,7 +195,16 @@ def render_summary_groups(summary: dict[str, Any]) -> list[str]:
 
 
 def render_decision_card_table(cards: list[dict[str, Any]]) -> str:
-    header = ["SOURCE", "CARD_ID", "AXIS", "EXECUTION_STATUS", "USER_STATUS", "RECOMMENDATION", "TARGET"]
+    header = [
+        "SOURCE",
+        "CARD_ID",
+        "AXIS",
+        "EXECUTION_STATUS",
+        "USER_STATUS",
+        "RECOMMENDATION",
+        "BLOCKED_REASON",
+        "TARGET",
+    ]
     rows = [
         [
             str(card.get("source") or "-"),
@@ -204,6 +213,7 @@ def render_decision_card_table(cards: list[dict[str, Any]]) -> str:
             str(card.get("execution_task_status") or "-"),
             str(card.get("user_decision_status") or "-"),
             str(card.get("recommendation") or "-"),
+            str(card.get("blocked_reason") or "-"),
             str(card.get("target") or card.get("task_bucket_key") or "-"),
         ]
         for card in cards
