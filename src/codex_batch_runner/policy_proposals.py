@@ -43,6 +43,8 @@ def build_execution_target_freshness_proposal_report(config: Config) -> dict[str
     items = execution_target_freshness_items(config)
     proposals = [proposal_from_item(item) for item in items if item.get("proposal_id")]
     counts = Counter(item["freshness_status"] for item in items)
+    target_count = sum(1 for item in items if item.get("target_kind") == "execution_target")
+    direct_pin_count = sum(1 for item in items if item.get("target_kind") == "direct_model_pin")
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": REPORT_KIND,
@@ -55,7 +57,9 @@ def build_execution_target_freshness_proposal_report(config: Config) -> dict[str
             "prohibited_state_changes": PROHIBITED_STATE_CHANGES,
         },
         "summary": {
-            "targets_checked": len(items),
+            "targets_checked": target_count,
+            "execution_targets_checked": target_count,
+            "direct_model_pins": direct_pin_count,
             "fresh": counts.get("fresh", 0),
             "stale": counts.get("stale", 0),
             "missing": counts.get("missing", 0),
@@ -76,7 +80,9 @@ def execution_target_freshness_items(config: Config) -> list[dict[str, Any]]:
         status = proposal_status(metadata)
         proposal_id = f"{EXECUTION_TARGET_FRESHNESS_CLASS}:{sanitize(alias)}" if status in {"missing", "stale"} else None
         item = {
+            "target_kind": "execution_target",
             "target_alias": sanitize(alias),
+            "target": f"execution_targets.{sanitize(alias)}.freshness",
             "selection_refs": refs.get(alias, []),
             "freshness_status": status,
             "freshness_reason": metadata.get("reason"),
@@ -87,7 +93,56 @@ def execution_target_freshness_items(config: Config) -> list[dict[str, Any]]:
             "proposal_id": proposal_id,
         }
         items.append(item)
+    items.extend(direct_model_pin_freshness_items(config))
     return items
+
+
+def direct_model_pin_freshness_items(config: Config) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    default_item = direct_model_pin_item(
+        config.default_execution_config,
+        scope="default_execution_config",
+        name=None,
+        target="default_execution_config.model",
+    )
+    if default_item:
+        items.append(default_item)
+    for rule in config.model_selection_rules:
+        name = sanitize(rule.get("name"))
+        item = direct_model_pin_item(
+            rule,
+            scope="model_selection_rule",
+            name=name,
+            target=f"model_selection_rules.{name}.model",
+        )
+        if item:
+            items.append(item)
+    return items
+
+
+def direct_model_pin_item(
+    selection: dict[str, Any],
+    *,
+    scope: str,
+    name: str | None,
+    target: str,
+) -> dict[str, Any] | None:
+    if selection.get("execution_target") or not selection.get("model"):
+        return None
+    selection_id = scope if name is None else f"{scope}.{name}"
+    return {
+        "target_kind": "direct_model_pin",
+        "target_alias": selection_id,
+        "target": target,
+        "selection_refs": [{"scope": scope, "name": name}],
+        "freshness_status": "missing",
+        "freshness_reason": "direct_model_pin_without_execution_target",
+        "last_reviewed_at": None,
+        "review_after_days": None,
+        "review_due_at": None,
+        "checked_at": None,
+        "proposal_id": f"{EXECUTION_TARGET_FRESHNESS_CLASS}:direct_model_pin:{sanitize(selection_id)}",
+    }
 
 
 def selection_refs_by_target(config: Config) -> dict[str, list[dict[str, str | None]]]:
@@ -114,12 +169,17 @@ def proposal_status(metadata: dict[str, Any]) -> str:
 
 def proposal_from_item(item: dict[str, Any]) -> dict[str, Any]:
     freshness_status = str(item["freshness_status"])
-    action = "review_execution_target_freshness" if freshness_status == "stale" else "add_execution_target_freshness_metadata"
+    if item.get("target_kind") == "direct_model_pin":
+        action = "migrate_direct_model_pin_to_execution_target"
+    else:
+        action = "review_execution_target_freshness" if freshness_status == "stale" else "add_execution_target_freshness_metadata"
     severity = "warning" if freshness_status == "stale" else "info"
     return {
         "proposal_id": item["proposal_id"],
         "proposal_class": EXECUTION_TARGET_FRESHNESS_CLASS,
+        "target_kind": item.get("target_kind") or "execution_target",
         "target_alias": item["target_alias"],
+        "target": item.get("target") or f"execution_targets.{item['target_alias']}.freshness",
         "status": "open",
         "severity": severity,
         "reason": item.get("freshness_reason"),
@@ -820,12 +880,13 @@ def preview_item_from_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
     return {
         "proposal_id": sanitize(proposal.get("proposal_id")),
         "proposal_class": sanitize(proposal.get("proposal_class")),
+        "target_kind": sanitize(proposal.get("target_kind")) or "execution_target",
         "target_alias": target_alias,
         "status": sanitize(proposal.get("status")),
         "severity": sanitize(proposal.get("severity")),
         "reason": sanitize(proposal.get("reason")),
         "recommended_action": sanitize(proposal.get("recommended_action")),
-        "target": f"execution_targets.{target_alias}.freshness",
+        "target": sanitize(proposal.get("target")) or f"execution_targets.{target_alias}.freshness",
         "would_change": "none",
         "apply_ready": False,
         "blocked_reason": PREVIEW_BLOCKED_REASON,
@@ -866,7 +927,8 @@ def render_execution_target_freshness_proposal_report(report: dict[str, Any]) ->
             refs = format_selection_refs(item.get("selection_refs") or [])
             lines.append(
                 "  - "
-                f"target={item.get('target_alias')} "
+                f"target={item.get('target')} "
+                f"kind={item.get('target_kind') or 'execution_target'} "
                 f"freshness={item.get('freshness_status')}({item.get('freshness_reason')}) "
                 f"due={item.get('review_due_at') or '-'} "
                 f"refs={refs} "

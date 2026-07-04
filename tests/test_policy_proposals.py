@@ -146,6 +146,7 @@ def stale_policy_preview() -> dict:
             {
                 "proposal_id": "execution_target_freshness:balanced_current",
                 "proposal_class": "execution_target_freshness",
+                "target_kind": "execution_target",
                 "target_alias": "balanced_current",
                 "status": "open",
                 "severity": "warning",
@@ -266,6 +267,8 @@ class PolicyProposalTests(unittest.TestCase):
                     },
                     "summary": {
                         "targets_checked": 1,
+                        "execution_targets_checked": 1,
+                        "direct_model_pins": 0,
                         "fresh": 0,
                         "stale": 1,
                         "missing": 0,
@@ -273,7 +276,9 @@ class PolicyProposalTests(unittest.TestCase):
                     },
                     "items": [
                         {
+                            "target_kind": "execution_target",
                             "target_alias": "low_cost_current",
+                            "target": "execution_targets.low_cost_current.freshness",
                             "selection_refs": [{"scope": "model_selection_rule", "name": "low-cost-docs"}],
                             "freshness_status": "stale",
                             "freshness_reason": "review_after_days_elapsed",
@@ -288,7 +293,9 @@ class PolicyProposalTests(unittest.TestCase):
                         {
                             "proposal_id": "execution_target_freshness:low_cost_current",
                             "proposal_class": "execution_target_freshness",
+                            "target_kind": "execution_target",
                             "target_alias": "low_cost_current",
+                            "target": "execution_targets.low_cost_current.freshness",
                             "status": "open",
                             "severity": "warning",
                             "reason": "review_after_days_elapsed",
@@ -343,6 +350,8 @@ class PolicyProposalTests(unittest.TestCase):
             self.assertEqual(
                 {
                     "targets_checked": 1,
+                    "execution_targets_checked": 1,
+                    "direct_model_pins": 0,
                     "fresh": 1,
                     "stale": 0,
                     "missing": 0,
@@ -383,6 +392,60 @@ class PolicyProposalTests(unittest.TestCase):
             self.assertEqual("target_freshness_not_configured", report["items"][0]["freshness_reason"])
             self.assertEqual("add_execution_target_freshness_metadata", report["proposals"][0]["recommended_action"])
             self.assertEqual(["none"], report["proposals"][0]["allowed_state_changes"])
+
+    def test_execution_target_freshness_proposal_reports_direct_model_pin_as_blocked_read_only_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                {
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "model": "gpt-5-small",
+                        }
+                    ],
+                },
+            )
+
+            code, output = run_cli(
+                ["--config", str(config_path), "policy-proposals", "execution-target-freshness", "--json"]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(
+                {
+                    "targets_checked": 0,
+                    "execution_targets_checked": 0,
+                    "direct_model_pins": 1,
+                    "fresh": 0,
+                    "stale": 0,
+                    "missing": 1,
+                    "proposal_count": 1,
+                },
+                report["summary"],
+            )
+            self.assertEqual(
+                {
+                    "target_kind": "direct_model_pin",
+                    "target_alias": "model_selection_rule.low-cost-docs",
+                    "target": "model_selection_rules.low-cost-docs.model",
+                    "selection_refs": [{"scope": "model_selection_rule", "name": "low-cost-docs"}],
+                    "freshness_status": "missing",
+                    "freshness_reason": "direct_model_pin_without_execution_target",
+                    "last_reviewed_at": None,
+                    "review_after_days": None,
+                    "review_due_at": None,
+                    "checked_at": None,
+                    "proposal_id": "execution_target_freshness:direct_model_pin:model_selection_rule.low-cost-docs",
+                },
+                report["items"][0],
+            )
+            self.assertEqual("migrate_direct_model_pin_to_execution_target", report["proposals"][0]["recommended_action"])
+            self.assertEqual("direct_model_pin", report["proposals"][0]["target_kind"])
+            self.assertEqual("model_selection_rules.low-cost-docs.model", report["proposals"][0]["target"])
+            self.assertNotIn("gpt-5-small", output)
 
     def test_execution_target_freshness_proposal_does_not_mutate_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -459,6 +522,7 @@ class PolicyProposalTests(unittest.TestCase):
                         {
                             "proposal_id": "execution_target_freshness:balanced_current",
                             "proposal_class": "execution_target_freshness",
+                            "target_kind": "execution_target",
                             "target_alias": "balanced_current",
                             "status": "open",
                             "severity": "warning",
