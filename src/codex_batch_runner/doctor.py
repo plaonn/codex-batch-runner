@@ -64,6 +64,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
         "worktree": worktree_summary(config, tasks),
         "capacity": capacity_summary(config, tasks),
         "model_requirements": model_config,
+        "decision_cards": decision_card_summary(config),
         "auto_review": auto_review_summary(tasks, config),
         "tasks": task_summary(tasks, by_id, config),
         "checks": checks,
@@ -727,6 +728,29 @@ def capacity_project_key(task: dict[str, Any]) -> str:
     return str(task.get("id") or "unknown")
 
 
+def decision_card_summary(config: Config) -> dict[str, Any]:
+    from .decision_cards import build_decision_card_inventory
+
+    inventory = build_decision_card_inventory(config)
+    summary = inventory.get("summary") if isinstance(inventory.get("summary"), dict) else {}
+    return {
+        "read_only": True,
+        "mutation_allowed": False,
+        "card_count": summary.get("card_count", 0),
+        "decision_required": summary.get("decision_required", 0),
+        "approval_blocked": summary.get("approval_blocked", 0),
+        "not_ready": summary.get("not_ready", 0),
+        "by_source": summary.get("by_source") if isinstance(summary.get("by_source"), dict) else {},
+        "by_recommendation": (
+            summary.get("by_recommendation") if isinstance(summary.get("by_recommendation"), dict) else {}
+        ),
+        "by_blocked_reason": (
+            summary.get("by_blocked_reason") if isinstance(summary.get("by_blocked_reason"), dict) else {}
+        ),
+        "source_reports": inventory.get("source_reports") if isinstance(inventory.get("source_reports"), list) else [],
+    }
+
+
 def startup_watchdog_progress(task: dict[str, Any]) -> bool:
     progress = task.get("last_progress")
     return isinstance(progress, dict) and bool(progress.get("watchdog_reason"))
@@ -961,6 +985,30 @@ def render_doctor_report(report: dict[str, Any]) -> str:
                 f"explicit_pin={str(bool(rule.get('has_explicit_model_pin'))).lower()} "
                 f"freshness={freshness_status(rule)}"
             )
+    decision_cards = report["decision_cards"]
+    lines.extend(
+        [
+            "",
+            "decision_cards:",
+            f"  read_only: {str(decision_cards.get('read_only')).lower()}",
+            f"  mutation_allowed: {str(decision_cards.get('mutation_allowed')).lower()}",
+            f"  card_count: {decision_cards.get('card_count')}",
+            f"  decision_required: {decision_cards.get('decision_required')}",
+            f"  approval_blocked: {decision_cards.get('approval_blocked')}",
+            f"  not_ready: {decision_cards.get('not_ready')}",
+        ]
+    )
+    for label, key in (
+        ("by_source", "by_source"),
+        ("by_recommendation", "by_recommendation"),
+        ("by_blocked_reason", "by_blocked_reason"),
+    ):
+        group = decision_cards.get(key) if isinstance(decision_cards.get(key), dict) else {}
+        if not group:
+            continue
+        lines.append(f"  {label}:")
+        for name, count in group.items():
+            lines.append(f"    {name}: {count}")
     lines.extend(
         [
             "",

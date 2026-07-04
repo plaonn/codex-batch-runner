@@ -299,6 +299,52 @@ class DoctorTests(unittest.TestCase):
                 human_output,
             )
 
+    def test_doctor_reports_decision_card_summary_without_raw_model_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(
+                tmp,
+                [str(executable), "exec", "--json"],
+                extra={
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "model": "gpt-5-small",
+                        }
+                    ],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            self.assertEqual(
+                {
+                    "policy-proposals execution-target-freshness": 1,
+                },
+                report["decision_cards"]["by_source"],
+            )
+            self.assertEqual(1, report["decision_cards"]["card_count"])
+            self.assertEqual(0, report["decision_cards"]["decision_required"])
+            self.assertEqual(1, report["decision_cards"]["approval_blocked"])
+            self.assertEqual({"create_bounded_migration_proposal": 1}, report["decision_cards"]["by_recommendation"])
+            self.assertEqual(
+                {"direct_model_pin_requires_separate_migration_approval": 1},
+                report["decision_cards"]["by_blocked_reason"],
+            )
+            self.assertNotIn("gpt-5-small", output)
+            self.assertEqual(0, human_code)
+            self.assertIn("decision_cards:", human_output)
+            self.assertIn("card_count: 1", human_output)
+            self.assertIn("approval_blocked: 1", human_output)
+            self.assertIn("direct_model_pin_requires_separate_migration_approval: 1", human_output)
+            self.assertNotIn("gpt-5-small", human_output)
+
     def test_doctor_warns_when_execution_target_freshness_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executable = Path(tmp) / "codex"
