@@ -80,6 +80,7 @@ def build_routing_report(
             "label": summarize_groups(group_rows_by_label(rows)),
             "model_requirement_category": summarize_groups(group_rows(rows, "model_requirement_category")),
             "routing_experiment": summarize_groups(group_rows(rows, "routing_experiment")),
+            "routing_experiment_lane": summarize_groups(group_rows(rows, "routing_experiment_lane")),
             "routing_size": summarize_groups(group_rows(rows, "routing_size")),
             "routing_risk": summarize_groups(group_rows(rows, "routing_risk")),
             "routing_risk_factor": summarize_groups(group_rows_by_risk_factor(rows)),
@@ -95,7 +96,7 @@ def build_routing_report(
             "model_requirement_experiment": summarize_groups(group_rows(rows, "model_requirement_experiment")),
             "provider_resource": summarize_groups(group_rows(rows, "provider_resource_key")),
         },
-        "evaluation_diagnostics": summarize_evaluation_diagnostics(evaluation_rows),
+        "evaluation_diagnostics": summarize_evaluation_diagnostics(evaluation_rows, routing_rows=rows),
         "request_fingerprint_candidates": find_request_fingerprint_candidates(tasks),
     }
 
@@ -132,6 +133,7 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
     execution_target = execution_target_value(resolved_config)
     category = str(task.get("category") or "uncategorized")
     routing_experiment = str(task.get("routing_experiment") or "unspecified")
+    experiment_lane = routing_experiment_lane(routing_experiment)
     routing_size = str(task.get("routing_size") or "unspecified")
     routing_risk = str(task.get("routing_risk") or "unspecified")
     scopes = verification_scope(task)
@@ -156,14 +158,17 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
         "routing_reason": sanitize(task.get("routing_reason")) if task.get("routing_reason") else "",
         "routing_risk_factors": routing_risk_factors(task),
         "routing_experiment": sanitize(routing_experiment),
+        "routing_experiment_lane": experiment_lane,
         "routing_size": sanitize(routing_size),
         "routing_risk": sanitize(routing_risk),
         "verification_scope": scopes,
         "routing_decision": decision_key,
+        "routing_decision_lane": f"{decision_key} lane={experiment_lane}",
         "model_requirement_routing_decision": f"requirement={sanitize(requirement)} {decision_key}",
         "model_selection_routing_decision": f"selection_rule={sanitize(selection_rule)} {decision_key}",
         "low_cost_candidate": "candidate" if candidate else "not_candidate",
         "model_requirement_experiment": f"{requirement}/{sanitize(routing_experiment)}",
+        "model_requirement_lane": f"{requirement}/lane={experiment_lane}",
         "provider_resource": provider_resource,
         "provider_resource_key": provider_resource_key(provider_resource),
         "status": str(task.get("status") or ""),
@@ -256,6 +261,21 @@ def routing_risk_factors(task: dict[str, Any]) -> list[str]:
     return cleaned or ["none"]
 
 
+def routing_experiment_lane(value: str) -> str:
+    experiment = sanitize(value).lower()
+    if experiment in {"", "unspecified", "unknown", "none"}:
+        return "unspecified"
+    if experiment == "baseline":
+        return "baseline"
+    if experiment == "manual":
+        return "manual"
+    if experiment.endswith("_probe") or "probe" in experiment:
+        return "probe"
+    if experiment.endswith("_guard") or "guard" in experiment:
+        return "guard"
+    return "other"
+
+
 def verification_scope(task: dict[str, Any]) -> list[str]:
     scopes = task.get("verification_scope")
     if not isinstance(scopes, list):
@@ -325,7 +345,26 @@ def summarize_group(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def summarize_evaluation_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_probe_lanes(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "advisory": {
+            "read_only": True,
+            "mutation_allowed": False,
+            "baseline_label": "baseline",
+            "probe_lane_families": ["probe", "guard"],
+        },
+        "by_lane_family": summarize_groups(group_rows(rows, "routing_experiment_lane")),
+        "by_experiment": summarize_groups(group_rows(rows, "routing_experiment")),
+        "by_routing_decision_lane": summarize_groups(group_rows(rows, "routing_decision_lane")),
+        "by_model_requirement_lane": summarize_groups(group_rows(rows, "model_requirement_lane")),
+    }
+
+
+def summarize_evaluation_diagnostics(
+    rows: list[dict[str, Any]],
+    *,
+    routing_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "row_count": len(rows),
         "policy_usage": summarize_policy_usage(rows),
@@ -353,6 +392,7 @@ def summarize_evaluation_diagnostics(rows: list[dict[str, Any]]) -> dict[str, An
         "reviewer_cells": summarize_evaluation_groups(group_evaluation_rows(rows, reviewer_cell_key), summarize_reviewer_cell),
         "policy_exclusions": summarize_exclusion_reasons(rows),
         "task_buckets": summarize_evaluation_groups(group_evaluation_rows(rows, task_bucket_key), summarize_task_bucket),
+        "probe_lanes": summarize_probe_lanes(routing_rows or []),
         "advisory": {
             "policy_review_clean_sample_threshold": POLICY_REVIEW_CLEAN_SAMPLE_THRESHOLD,
             "task_bucket_thresholds": TASK_BUCKET_ADVISORY_THRESHOLDS,
@@ -743,6 +783,7 @@ def render_routing_report(report: dict[str, Any]) -> str:
         "label",
         "model_requirement_category",
         "routing_experiment",
+        "routing_experiment_lane",
         "routing_size",
         "routing_risk",
         "routing_risk_factor",
@@ -838,6 +879,10 @@ def render_evaluation_diagnostics(diagnostics: dict[str, Any]) -> str:
     lines.append("")
     lines.append("task_buckets")
     lines.append(render_task_bucket_table(list_value(diagnostics.get("task_buckets"))[:10]))
+    lines.append("")
+    lines.append("probe_lanes")
+    probe_lanes = diagnostics.get("probe_lanes") if isinstance(diagnostics.get("probe_lanes"), dict) else {}
+    lines.append(render_probe_lanes(probe_lanes))
     return "\n".join(lines)
 
 
@@ -991,6 +1036,23 @@ def render_task_bucket_table(entries: list[dict[str, Any]]) -> str:
         for entry in entries
     ]
     return render_table(header, rows)
+
+
+def render_probe_lanes(report: dict[str, Any]) -> str:
+    lines: list[str] = []
+    advisory = report.get("advisory") if isinstance(report.get("advisory"), dict) else {}
+    lines.append(
+        "advisory: "
+        f"read_only={str(bool(advisory.get('read_only'))).lower()} "
+        f"mutation_allowed={str(bool(advisory.get('mutation_allowed'))).lower()}"
+    )
+    lines.append("")
+    lines.append("lane_families")
+    lines.append(render_group_table(list_value(report.get("by_lane_family"))[:10]))
+    lines.append("")
+    lines.append("routing_decision_lanes")
+    lines.append(render_group_table(list_value(report.get("by_routing_decision_lane"))[:10]))
+    return "\n".join(lines)
 
 
 def render_request_fingerprint_candidates(report: dict[str, Any]) -> str:

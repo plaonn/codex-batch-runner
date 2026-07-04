@@ -1607,6 +1607,58 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, requirement_decisions[requirement_decision_key]["tasks"])
             self.assertEqual(1, requirement_experiments[f"{req_key}/downshift_probe"]["first_pass_accepted"])
 
+    def test_routing_report_stratifies_probe_lanes_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+
+            def save_routed(task_id: str, experiment: str, *, review_status: str = "accepted") -> None:
+                task = create_task(
+                    config,
+                    "work",
+                    tmp,
+                    task_id=task_id,
+                    project_id="project-a",
+                    category="docs",
+                    model_requirement_vector=requirement_vector(reasoning_depth="low", cost_sensitivity="high"),
+                    routing_experiment=experiment,
+                    routing_size="small",
+                    routing_risk="low",
+                    verification_scope=["unit"],
+                )
+                task["status"] = "completed"
+                task["review_status"] = review_status
+                task["attempts"] = 1
+                task["last_result"] = {"task_id": task_id, "status": "completed", "verification": ["unit"]}
+                task["reviewer_codex"] = {"decision": "pass" if review_status == "accepted" else "needs_fix"}
+                save_task(config, task)
+
+            save_routed("baseline", "baseline")
+            save_routed("probe", "downshift_probe", review_status="needs_followup")
+            save_routed("guard", "upshift_guard")
+
+            code, output = run_cli(
+                ["--config", str(config_path), "routing-report", "--project", "project-a", "--limit", "0", "--json"]
+            )
+            report = json.loads(output)
+            lane_groups = {entry["key"]: entry for entry in report["groups"]["routing_experiment_lane"]}
+            probe_lanes = report["evaluation_diagnostics"]["probe_lanes"]
+            family_groups = {entry["key"]: entry for entry in probe_lanes["by_lane_family"]}
+            decision_lanes = {entry["key"]: entry for entry in probe_lanes["by_routing_decision_lane"]}
+            req_lanes = {entry["key"]: entry for entry in probe_lanes["by_model_requirement_lane"]}
+            decision_key = "size=small risk=low verify=unit"
+            req_key = requirement_key(reasoning_depth="low", cost_sensitivity="high")
+
+            self.assertEqual(0, code)
+            self.assertTrue(probe_lanes["advisory"]["read_only"])
+            self.assertFalse(probe_lanes["advisory"]["mutation_allowed"])
+            self.assertEqual(1, lane_groups["baseline"]["tasks"])
+            self.assertEqual(1, lane_groups["probe"]["needs_fix_or_rejected"])
+            self.assertEqual(1, family_groups["guard"]["accepted"])
+            self.assertEqual(1, decision_lanes[f"{decision_key} lane=baseline"]["first_pass_accepted"])
+            self.assertEqual(1, decision_lanes[f"{decision_key} lane=probe"]["needs_fix_or_rejected"])
+            self.assertEqual(1, req_lanes[f"{req_key}/lane=guard"]["accepted"])
+
     def test_routing_report_exposes_selection_rule_and_low_cost_candidate_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(
@@ -2503,6 +2555,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("reviewer_cells", output)
             self.assertIn("policy_exclusions", output)
             self.assertIn("task_buckets", output)
+            self.assertIn("probe_lanes", output)
             self.assertIn("## request_fingerprint_candidates", output)
             self.assertIn("ADVISORY", output)
             self.assertIn("insufficient_sample", output)
