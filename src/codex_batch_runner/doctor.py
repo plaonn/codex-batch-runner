@@ -1051,23 +1051,26 @@ def render_doctor_report(report: dict[str, Any]) -> str:
         ]
     )
     tasks = report["tasks"]
-    lines.extend(["", "tasks:", f"  total: {tasks['total']}", "  by_status:"])
+    lines.extend(
+        [
+            "",
+            "tasks:",
+            f"  total: {tasks['total']}",
+            f"  needs_review_completed: {tasks['needs_review_completed']}",
+            f"  runnable: {tasks['runnable']}",
+            f"  cooldown: {tasks['cooldown']}",
+            f"  startup_stalled: {tasks['startup_stalled']}",
+            f"  running_no_progress: {len(tasks['running_no_progress'])}",
+            f"  resolved_failed_or_blocked: {tasks['resolved_failed_or_blocked']}",
+            f"  resolved_review_completed: {tasks['resolved_review_completed']}",
+            "  by_status:",
+        ]
+    )
     if tasks["by_status"]:
         for status, count in tasks["by_status"].items():
             lines.append(f"    {status}: {count}")
     else:
         lines.append("    none: 0")
-    lines.extend(
-        [
-            f"  needs_review_completed: {tasks['needs_review_completed']}",
-            f"  resolved_failed_or_blocked: {tasks['resolved_failed_or_blocked']}",
-            f"  resolved_review_completed: {tasks['resolved_review_completed']}",
-            f"  runnable: {tasks['runnable']}",
-            f"  cooldown: {tasks['cooldown']}",
-            f"  startup_stalled: {tasks['startup_stalled']}",
-            f"  running_no_progress: {len(tasks['running_no_progress'])}",
-        ]
-    )
     if tasks["recently_stalled"]:
         lines.append("  recently_stalled:")
         for item in tasks["recently_stalled"]:

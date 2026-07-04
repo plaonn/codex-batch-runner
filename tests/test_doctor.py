@@ -697,6 +697,23 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("reviewable_completed: 1", human_output)
             self.assertIn("worktree:", human_output)
             self.assertIn("mode: disabled", human_output)
+            task_section = human_output[human_output.index("\ntasks:\n") :]
+            task_lines = task_section.splitlines()
+            expected_task_order = [
+                "  total: 4",
+                "  needs_review_completed: 1",
+                "  runnable: 1",
+                "  cooldown: 1",
+                "  startup_stalled: 0",
+                "  running_no_progress: 0",
+                "  resolved_failed_or_blocked: 1",
+                "  resolved_review_completed: 0",
+                "  by_status:",
+            ]
+            self.assertEqual(
+                sorted(task_lines.index(line) for line in expected_task_order),
+                [task_lines.index(line) for line in expected_task_order],
+            )
 
     def test_doctor_reports_capacity_config_and_running_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
