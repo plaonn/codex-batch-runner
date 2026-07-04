@@ -68,6 +68,12 @@ def build_decision_card_inventory(
         cards = [card for card in cards if card.get("user_decision_status") in requested_statuses]
     status_counts = Counter(str(card.get("user_decision_status") or "unknown") for card in cards)
     axis_counts = Counter(str(card.get("decision_axis") or "unknown") for card in cards)
+    recommendation_counts = Counter(str(card.get("recommendation") or "unknown") for card in cards)
+    blocked_reason_counts = Counter(
+        str(card.get("blocked_reason"))
+        for card in cards
+        if card.get("blocked_reason")
+    )
     return {
         "kind": "decision_card_inventory",
         "generated_at": utc_now().isoformat(),
@@ -87,6 +93,8 @@ def build_decision_card_inventory(
             "user_decision_status_filter": requested_statuses,
             "by_status": dict(sorted(status_counts.items())),
             "by_axis": dict(sorted(axis_counts.items())),
+            "by_recommendation": dict(sorted(recommendation_counts.items())),
+            "by_blocked_reason": dict(sorted(blocked_reason_counts.items())),
         },
         "source_reports": [
             {

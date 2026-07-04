@@ -2590,6 +2590,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(2, report["summary"]["decision_required"])
             self.assertEqual(0, report["summary"]["not_ready"])
             self.assertEqual({"execution_target_freshness": 1, "routing_policy_change": 1}, report["summary"]["by_axis"])
+            self.assertEqual(
+                {"operator_review": 2},
+                report["summary"]["by_recommendation"],
+            )
+            self.assertEqual({}, report["summary"]["by_blocked_reason"])
             self.assertEqual("decision_required", cards["policy-proposals execution-target-freshness"]["user_decision_status"])
             self.assertEqual("decision_required", cards["routing-policy-candidates"]["user_decision_status"])
             self.assertFalse(cards["routing-policy-candidates"]["mutation_allowed"])
@@ -2683,6 +2688,43 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, report["summary"]["card_count"])
             self.assertEqual({"not_ready": 1}, report["summary"]["by_status"])
             self.assertEqual("not_ready", report["decision_cards"][0]["user_decision_status"])
+
+    def test_decision_cards_inventory_summarizes_blocked_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                extra={
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "model": "gpt-5-small",
+                        }
+                    ],
+                },
+            )
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "decision-cards",
+                    "--decision-axis",
+                    "execution_target_freshness",
+                    "--user-decision-status",
+                    "approval_blocked",
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual({"create_bounded_migration_proposal": 1}, report["summary"]["by_recommendation"])
+            self.assertEqual(
+                {"direct_model_pin_requires_separate_migration_approval": 1},
+                report["summary"]["by_blocked_reason"],
+            )
+            self.assertNotIn("gpt-5-small", output)
 
     def test_decision_cards_rejects_unknown_user_decision_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
