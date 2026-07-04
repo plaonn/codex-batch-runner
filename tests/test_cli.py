@@ -2569,6 +2569,30 @@ class CliTests(unittest.TestCase):
             self.assertFalse(cards["routing-policy-candidates"]["mutation_allowed"])
             self.assertNotIn("gpt-5-small", output)
 
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "decision-cards",
+                    "--project",
+                    "project-a",
+                    "--label",
+                    "routing",
+                    "--decision-axis",
+                    "routing_policy_change",
+                    "--limit",
+                    "0",
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(["routing_policy_change"], report["summary"]["decision_axis_filter"])
+            self.assertEqual(1, report["summary"]["card_count"])
+            self.assertEqual({"routing_policy_change": 1}, report["summary"]["by_axis"])
+            self.assertEqual("routing_policy_change", report["decision_cards"][0]["decision_axis"])
+
     def test_decision_cards_inventory_human_output_and_observations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
@@ -2647,6 +2671,26 @@ class CliTests(unittest.TestCase):
                         "decision-cards",
                         "--user-decision-status",
                         "surprise",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(2, raised.exception.code)
+            self.assertIn("invalid choice", stderr.getvalue())
+
+    def test_decision_cards_rejects_unknown_decision_axis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "decision-cards",
+                        "--decision-axis",
+                        "unknown_axis",
                         "--json",
                     ]
                 )
