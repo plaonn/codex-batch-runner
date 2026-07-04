@@ -101,7 +101,7 @@ def build_decision_card_inventory(
             "source_filter": requested_sources,
             "decision_axis_filter": requested_axes,
             "user_decision_status_filter": requested_statuses,
-            "next_action": decision_card_next_action(len(cards)),
+            "next_action": decision_card_next_action(cards),
             "by_status": dict(sorted(status_counts.items())),
             "by_axis": dict(sorted(axis_counts.items())),
             "by_source": dict(sorted(source_counts.items())),
@@ -178,8 +178,12 @@ def render_decision_card_inventory(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def decision_card_next_action(card_count: int) -> str:
-    return "none" if card_count == 0 else "review_decision_cards"
+def decision_card_next_action(cards: list[dict[str, Any]]) -> str:
+    if not cards:
+        return "none"
+    if all(card.get("user_decision_status") == "not_ready" for card in cards):
+        return "continue_observing"
+    return "review_decision_cards"
 
 
 def render_summary_groups(summary: dict[str, Any]) -> list[str]:

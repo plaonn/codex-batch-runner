@@ -2708,7 +2708,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("read_only: yes", output)
             self.assertIn("routing-policy-candidates", output)
             self.assertIn("not_ready", output)
-            self.assertIn("next_action: review_decision_cards", output)
+            self.assertIn("next_action: continue_observing", output)
             self.assertIn("recommendations:", output)
             self.assertIn("collect_more_evidence: 1", output)
             self.assertIn("BLOCKED", output)
@@ -2738,7 +2738,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual(["not_ready"], report["summary"]["user_decision_status_filter"])
             self.assertEqual(1, report["summary"]["card_count"])
-            self.assertEqual("review_decision_cards", report["summary"]["next_action"])
+            self.assertEqual("continue_observing", report["summary"]["next_action"])
             self.assertEqual({"not_ready": 1}, report["summary"]["by_status"])
             self.assertEqual("not_ready", report["decision_cards"][0]["user_decision_status"])
 

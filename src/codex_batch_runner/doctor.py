@@ -730,7 +730,7 @@ def capacity_project_key(task: dict[str, Any]) -> str:
 
 
 def decision_card_summary(config: Config) -> dict[str, Any]:
-    from .decision_cards import build_decision_card_inventory, decision_card_next_action
+    from .decision_cards import build_decision_card_inventory
 
     inventory = build_decision_card_inventory(config)
     summary = inventory.get("summary") if isinstance(inventory.get("summary"), dict) else {}
@@ -742,7 +742,7 @@ def decision_card_summary(config: Config) -> dict[str, Any]:
         "decision_required": summary.get("decision_required", 0),
         "approval_blocked": summary.get("approval_blocked", 0),
         "not_ready": summary.get("not_ready", 0),
-        "next_action": summary.get("next_action") or decision_card_next_action(card_count),
+        "next_action": summary.get("next_action") or "none",
         "by_source": summary.get("by_source") if isinstance(summary.get("by_source"), dict) else {},
         "by_recommendation": (
             summary.get("by_recommendation") if isinstance(summary.get("by_recommendation"), dict) else {}
