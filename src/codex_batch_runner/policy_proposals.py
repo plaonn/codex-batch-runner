@@ -21,6 +21,7 @@ APPROVAL_TEMPLATE_KIND = "policy_proposal_approval_template"
 APPROVAL_VALIDATION_KIND = "policy_proposal_approval_validation"
 APPLY_KIND = "policy_proposal_apply"
 EXECUTION_TARGET_FRESHNESS_CLASS = "execution_target_freshness"
+DIRECT_MODEL_PIN_MIGRATION_CLASS = "direct_model_pin_migration"
 READ_ONLY_MODE = "read_only"
 DRY_RUN_MODE = "dry_run"
 APPLY_MODE = "apply"
@@ -66,6 +67,40 @@ def build_execution_target_freshness_proposal_report(config: Config) -> dict[str
             "missing": counts.get("missing", 0),
             "proposal_count": len(proposals),
             "decision_card_count": len(decision_cards),
+            "decision_required_count": sum(
+                1 for card in decision_cards if card.get("user_decision_status") == "decision_required"
+            ),
+        },
+        "items": items,
+        "proposals": proposals,
+        "decision_cards": decision_cards,
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def build_direct_model_pin_migration_proposal_report(config: Config) -> dict[str, Any]:
+    items = direct_model_pin_freshness_items(config)
+    proposals = [direct_model_pin_migration_proposal_from_item(item) for item in items]
+    decision_cards = [decision_card_from_policy_proposal(proposal) for proposal in proposals]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": REPORT_KIND,
+        "proposal_class": DIRECT_MODEL_PIN_MIGRATION_CLASS,
+        "mode": READ_ONLY_MODE,
+        "generated_at": utc_now().isoformat(),
+        "mutation": {
+            "allowed": False,
+            "applied": False,
+            "prohibited_state_changes": PROHIBITED_STATE_CHANGES,
+        },
+        "summary": {
+            "direct_model_pins": len(items),
+            "proposal_count": len(proposals),
+            "decision_card_count": len(decision_cards),
+            "approval_blocked_count": sum(
+                1 for card in decision_cards if card.get("user_decision_status") == "approval_blocked"
+            ),
             "decision_required_count": sum(
                 1 for card in decision_cards if card.get("user_decision_status") == "decision_required"
             ),
@@ -190,6 +225,28 @@ def proposal_from_item(item: dict[str, Any]) -> dict[str, Any]:
         "severity": severity,
         "reason": item.get("freshness_reason"),
         "recommended_action": action,
+        "allowed_state_changes": ["none"],
+        "prohibited_state_changes": PROHIBITED_STATE_CHANGES,
+        "selection_refs": item.get("selection_refs") or [],
+    }
+
+
+def direct_model_pin_migration_proposal_from_item(item: dict[str, Any]) -> dict[str, Any]:
+    target_alias = sanitize(item.get("target_alias"))
+    return {
+        "proposal_id": f"{DIRECT_MODEL_PIN_MIGRATION_CLASS}:{target_alias}",
+        "proposal_class": DIRECT_MODEL_PIN_MIGRATION_CLASS,
+        "target_kind": "direct_model_pin",
+        "target_alias": target_alias,
+        "target": sanitize(item.get("target")),
+        "status": "open",
+        "severity": "info",
+        "reason": sanitize(item.get("freshness_reason")),
+        "recommended_action": "draft_execution_target_migration_proposal",
+        "approval_required": True,
+        "apply_ready": False,
+        "blocked_reason": "direct_model_pin_requires_separate_migration_approval",
+        "would_change": "none",
         "allowed_state_changes": ["none"],
         "prohibited_state_changes": PROHIBITED_STATE_CHANGES,
         "selection_refs": item.get("selection_refs") or [],
@@ -920,6 +977,12 @@ def preview_item_from_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
 
 
 def decision_card_from_policy_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    proposal_class = sanitize(proposal.get("proposal_class")) or EXECUTION_TARGET_FRESHNESS_CLASS
+    decision_axis = (
+        "direct_model_pin_migration"
+        if proposal_class == DIRECT_MODEL_PIN_MIGRATION_CLASS
+        else "execution_target_freshness"
+    )
     target_kind = sanitize(proposal.get("target_kind")) or "execution_target"
     blocked_reason = None
     if target_kind == "direct_model_pin":
@@ -944,8 +1007,8 @@ def decision_card_from_policy_proposal(proposal: dict[str, Any]) -> dict[str, An
     return {
         "card_id": "decision-card:" + sanitize(proposal.get("proposal_id")),
         "proposal_id": sanitize(proposal.get("proposal_id")),
-        "proposal_class": EXECUTION_TARGET_FRESHNESS_CLASS,
-        "decision_axis": "execution_target_freshness",
+        "proposal_class": proposal_class,
+        "decision_axis": decision_axis,
         "execution_task_status": "proposal_reported",
         "user_decision_status": user_decision_status,
         "target_kind": target_kind,
@@ -1108,6 +1171,48 @@ def render_execution_target_freshness_proposal_report(report: dict[str, Any]) ->
                 "  - "
                 f"{proposal.get('proposal_id')} "
                 f"action={proposal.get('recommended_action')} "
+                f"state_changes=none"
+            )
+    decision_cards = report.get("decision_cards") or []
+    if decision_cards:
+        lines.append("decision_cards:")
+        lines.extend(render_policy_decision_cards(decision_cards))
+    return "\n".join(lines) + "\n"
+
+
+def render_direct_model_pin_migration_proposal_report(report: dict[str, Any]) -> str:
+    summary = report.get("summary") or {}
+    lines = [
+        "cbr policy-proposals direct-model-pin-migration",
+        f"mode: {report.get('mode')}",
+        f"proposal_class: {report.get('proposal_class')}",
+        f"direct_model_pins: {summary.get('direct_model_pins')}",
+        f"proposal_count: {summary.get('proposal_count')}",
+        f"approval_blocked_count: {summary.get('approval_blocked_count')}",
+        "mutation: allowed=false applied=false",
+    ]
+    items = report.get("items") or []
+    if items:
+        lines.append("items:")
+        for item in items:
+            refs = format_selection_refs(item.get("selection_refs") or [])
+            lines.append(
+                "  - "
+                f"target={item.get('target')} "
+                f"kind={item.get('target_kind')} "
+                f"reason={item.get('freshness_reason')} "
+                f"refs={refs} "
+                f"proposal={item.get('proposal_id') or '-'}"
+            )
+    proposals = report.get("proposals") or []
+    if proposals:
+        lines.append("proposals:")
+        for proposal in proposals:
+            lines.append(
+                "  - "
+                f"{proposal.get('proposal_id')} "
+                f"action={proposal.get('recommended_action')} "
+                f"blocked_reason={proposal.get('blocked_reason')} "
                 f"state_changes=none"
             )
     decision_cards = report.get("decision_cards") or []

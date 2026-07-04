@@ -494,6 +494,151 @@ class PolicyProposalTests(unittest.TestCase):
             )
             self.assertNotIn("gpt-5-small", output)
 
+    def test_direct_model_pin_migration_proposal_reports_only_direct_pins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                {
+                    "execution_targets": {
+                        "balanced_current": {
+                            "model": "gpt-5",
+                            "freshness": {
+                                "owner": "operator",
+                                "last_reviewed_at": "2026-07-03",
+                                "review_after_days": 14,
+                            },
+                        }
+                    },
+                    "default_execution_config": {"model": "gpt-5-default"},
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "model": "gpt-5-small",
+                        },
+                        {
+                            "name": "balanced",
+                            "when": {"reasoning_depth": "medium"},
+                            "execution_target": "balanced_current",
+                        },
+                    ],
+                },
+            )
+
+            now = datetime(2026, 7, 3, tzinfo=timezone.utc)
+            with mock.patch("codex_batch_runner.policy_proposals.utc_now", return_value=now):
+                code, output = run_cli(
+                    ["--config", str(config_path), "policy-proposals", "direct-model-pin-migration", "--json"]
+                )
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual("policy_proposal_report", report["kind"])
+            self.assertEqual("direct_model_pin_migration", report["proposal_class"])
+            self.assertEqual("read_only", report["mode"])
+            self.assertEqual("2026-07-03T00:00:00+00:00", report["generated_at"])
+            self.assertEqual(
+                {
+                    "direct_model_pins": 2,
+                    "proposal_count": 2,
+                    "decision_card_count": 2,
+                    "approval_blocked_count": 2,
+                    "decision_required_count": 0,
+                },
+                report["summary"],
+            )
+            self.assertEqual({"allowed": False, "applied": False}, {
+                "allowed": report["mutation"]["allowed"],
+                "applied": report["mutation"]["applied"],
+            })
+            self.assertEqual(
+                ["default_execution_config.model", "model_selection_rules.low-cost-docs.model"],
+                [item["target"] for item in report["items"]],
+            )
+            self.assertEqual(
+                [
+                    "direct_model_pin_migration:default_execution_config",
+                    "direct_model_pin_migration:model_selection_rule.low-cost-docs",
+                ],
+                [proposal["proposal_id"] for proposal in report["proposals"]],
+            )
+            self.assertEqual(
+                ["draft_execution_target_migration_proposal", "draft_execution_target_migration_proposal"],
+                [proposal["recommended_action"] for proposal in report["proposals"]],
+            )
+            self.assertEqual(
+                ["approval_blocked", "approval_blocked"],
+                [card["user_decision_status"] for card in report["decision_cards"]],
+            )
+            self.assertEqual(
+                ["direct_model_pin_migration", "direct_model_pin_migration"],
+                [card["decision_axis"] for card in report["decision_cards"]],
+            )
+            self.assertNotIn("execution_targets.balanced_current.freshness", output)
+            self.assertNotIn("gpt-5-default", output)
+            self.assertNotIn("gpt-5-small", output)
+            self.assertNotIn("gpt-5", output)
+
+    def test_direct_model_pin_migration_proposal_human_output_marks_approval_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                {
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "model": "gpt-5-small",
+                        }
+                    ],
+                },
+            )
+
+            code, output = run_cli(["--config", str(config_path), "policy-proposals", "direct-model-pin-migration"])
+
+            self.assertEqual(0, code)
+            self.assertIn("cbr policy-proposals direct-model-pin-migration", output)
+            self.assertIn("proposal_class: direct_model_pin_migration", output)
+            self.assertIn("proposal_count: 1", output)
+            self.assertIn("approval_blocked_count: 1", output)
+            self.assertIn("user_decision_status: approval_blocked", output)
+            self.assertIn("blocked_reason: direct_model_pin_requires_separate_migration_approval", output)
+            self.assertNotIn("gpt-5-small", output)
+
+    def test_direct_model_pin_migration_proposal_does_not_mutate_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(
+                tmp,
+                {
+                    "model_selection_rules": [
+                        {
+                            "name": "low-cost-docs",
+                            "when": {"reasoning_depth": "low"},
+                            "model": "gpt-5-small",
+                        }
+                    ],
+                },
+            )
+            tasks = root / "tasks"
+            tasks.mkdir()
+            task_path = tasks / "task-1.json"
+            task_path.write_text(json.dumps({"id": "task-1", "status": "runnable"}, sort_keys=True), encoding="utf-8")
+            state_path = root / "state.json"
+            state_path.write_text(json.dumps({"runner_pause": {"active": False}}, sort_keys=True), encoding="utf-8")
+            before_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+            before_contents = {name: (root / name).read_text(encoding="utf-8") for name in before_files}
+
+            code, _ = run_cli(
+                ["--config", str(config_path), "policy-proposals", "direct-model-pin-migration", "--json"]
+            )
+
+            after_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+            after_contents = {name: (root / name).read_text(encoding="utf-8") for name in after_files}
+            self.assertEqual(0, code)
+            self.assertEqual(before_files, after_files)
+            self.assertEqual(before_contents, after_contents)
+
     def test_execution_target_freshness_proposal_does_not_mutate_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

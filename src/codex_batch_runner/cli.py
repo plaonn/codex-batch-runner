@@ -31,11 +31,13 @@ from .execution_evidence import ExecutionEvidenceError, load_execution_evidence_
 from .model_requirements import REQUIREMENT_DIMENSIONS, REQUIREMENT_LEVELS, model_requirement_vector_value
 from .planned_execution import planned_execution_compact_note
 from .policy_proposals import (
+    build_direct_model_pin_migration_proposal_report,
     build_policy_proposal_approval_template,
     build_policy_proposal_approval_validation,
     build_policy_proposal_apply_report,
     build_policy_proposal_preview,
     build_execution_target_freshness_proposal_report,
+    render_direct_model_pin_migration_proposal_report,
     render_execution_target_freshness_proposal_report,
     render_policy_proposal_approval_template,
     render_policy_proposal_approval_validation,
@@ -528,6 +530,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     execution_target_freshness.add_argument("--json", action="store_true", help="print JSON")
     execution_target_freshness.set_defaults(func=cmd_policy_proposals_execution_target_freshness)
+    direct_model_pin_migration = policy_proposals_sub.add_parser(
+        "direct-model-pin-migration",
+        help="generate read-only direct model pin migration proposals",
+    )
+    direct_model_pin_migration.add_argument("--json", action="store_true", help="print JSON")
+    direct_model_pin_migration.set_defaults(func=cmd_policy_proposals_direct_model_pin_migration)
     policy_preview = policy_proposals_sub.add_parser(
         "preview",
         help="render a read-only proposal preview from a proposal JSON report",
@@ -4077,6 +4085,15 @@ def cmd_policy_proposals_execution_target_freshness(config: Config, args: argpar
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_execution_target_freshness_proposal_report(report), end="")
+    return 0
+
+
+def cmd_policy_proposals_direct_model_pin_migration(config: Config, args: argparse.Namespace) -> int:
+    report = build_direct_model_pin_migration_proposal_report(config)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_direct_model_pin_migration_proposal_report(report), end="")
     return 0
 
 
