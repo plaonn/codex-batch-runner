@@ -740,6 +740,8 @@ class PolicyProposalTests(unittest.TestCase):
                         "proposal_count": 1,
                         "approved_count": 0,
                         "pending_count": 1,
+                        "decision_card_count": 1,
+                        "decision_pending_count": 1,
                     },
                     "approvals": [
                         {
@@ -753,6 +755,40 @@ class PolicyProposalTests(unittest.TestCase):
                             "reviewer": None,
                             "reviewed_at": None,
                             "decision_note": None,
+                        }
+                    ],
+                    "decision_cards": [
+                        {
+                            "card_id": "decision-card:execution_target_freshness:balanced_current",
+                            "proposal_id": "execution_target_freshness:balanced_current",
+                            "proposal_class": "execution_target_freshness",
+                            "decision_axis": "execution_target_freshness",
+                            "execution_task_status": "approval_template_created",
+                            "user_decision_status": "decision_pending",
+                            "target_alias": "balanced_current",
+                            "target": "execution_targets.balanced_current.freshness",
+                            "question": "Decide whether to approve this freshness metadata update in the approval template.",
+                            "recommendation": "operator_review",
+                            "explanation": (
+                                "This template records the operator decision fields only. "
+                                "It does not apply the proposal or change model, routing, provider, task, or runner config state."
+                            ),
+                            "recommended_action": "review_execution_target_freshness",
+                            "allowed_decisions": [
+                                "approve_with_reviewer_metadata",
+                                "leave_pending",
+                                "reject_candidate",
+                            ],
+                            "prohibited_actions": [
+                                "auto_apply_policy",
+                                "change_model",
+                                "change_model_selection_rule",
+                                "change_provider",
+                                "change_central_runner_config",
+                                "mutate_task_state",
+                            ],
+                            "read_only": True,
+                            "mutation_allowed": False,
                         }
                     ],
                     "warnings": [],
@@ -777,6 +813,9 @@ class PolicyProposalTests(unittest.TestCase):
             self.assertIn("approved_count: 0", output)
             self.assertIn("target: execution_targets.balanced_current.freshness", output)
             self.assertIn("approved: false", output)
+            self.assertIn("decision_cards:", output)
+            self.assertIn("execution_task_status: approval_template_created", output)
+            self.assertIn("user_decision_status: decision_pending", output)
 
     def test_policy_proposal_approval_template_rejects_report_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -876,6 +915,9 @@ class PolicyProposalTests(unittest.TestCase):
                         "pending_count": 0,
                         "valid_approved_count": 1,
                         "invalid_count": 0,
+                        "decision_card_count": 1,
+                        "decision_approved_count": 1,
+                        "decision_invalid_count": 0,
                     },
                     "items": [
                         {
@@ -892,6 +934,37 @@ class PolicyProposalTests(unittest.TestCase):
                             "reviewed_at_valid": True,
                             "decision_note_present": True,
                             "errors": [],
+                        }
+                    ],
+                    "decision_cards": [
+                        {
+                            "card_id": "decision-card:execution_target_freshness:balanced_current",
+                            "proposal_id": "execution_target_freshness:balanced_current",
+                            "proposal_class": "execution_target_freshness",
+                            "decision_axis": "execution_target_freshness",
+                            "execution_task_status": "approval_validated",
+                            "user_decision_status": "approved",
+                            "target_alias": "balanced_current",
+                            "target": "execution_targets.balanced_current.freshness",
+                            "question": "Review the validated approval status for this freshness metadata proposal.",
+                            "recommendation": "eligible_for_guarded_apply_dry_run",
+                            "explanation": (
+                                "The approval entry is valid and may be used by the separate guarded apply dry-run/apply command. "
+                                "Validation itself remains read-only and does not change config or tasks."
+                            ),
+                            "recommended_action": "review_execution_target_freshness",
+                            "validation_status": "approved",
+                            "validation_errors": [],
+                            "prohibited_actions": [
+                                "auto_apply_policy",
+                                "change_model",
+                                "change_model_selection_rule",
+                                "change_provider",
+                                "change_central_runner_config",
+                                "mutate_task_state",
+                            ],
+                            "read_only": True,
+                            "mutation_allowed": False,
                         }
                     ],
                     "warnings": [],
@@ -926,6 +999,9 @@ class PolicyProposalTests(unittest.TestCase):
             self.assertIn("valid: true", output)
             self.assertIn("approved_count: 1", output)
             self.assertIn("source_item_sha256_matches: true", output)
+            self.assertIn("decision_cards:", output)
+            self.assertIn("execution_task_status: approval_validated", output)
+            self.assertIn("user_decision_status: approved", output)
 
     def test_policy_proposal_validate_approval_rejects_preview_hash_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -285,6 +285,7 @@ def build_policy_proposal_approval_template(source: Any) -> dict[str, Any]:
                 warnings.append(f"skipped non-object preview item at index {index}")
                 continue
             approvals.append(approval_template_item_from_preview_item(item))
+    decision_cards = [decision_card_from_approval_template_item(item) for item in approvals]
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -304,8 +305,11 @@ def build_policy_proposal_approval_template(source: Any) -> dict[str, Any]:
             "proposal_count": len(approvals),
             "approved_count": 0,
             "pending_count": len(approvals),
+            "decision_card_count": len(decision_cards),
+            "decision_pending_count": len(decision_cards),
         },
         "approvals": approvals,
+        "decision_cards": decision_cards,
         "warnings": warnings,
         "errors": errors,
     }
@@ -366,6 +370,7 @@ def build_policy_proposal_approval_validation(approval: Any, preview: Any) -> di
 
     item_error_count = sum(1 for item in items if item.get("errors"))
     approved_count = sum(1 for item in items if item.get("approved") is True)
+    decision_cards = [decision_card_from_approval_validation_item(item) for item in items]
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": APPROVAL_VALIDATION_KIND,
@@ -389,8 +394,16 @@ def build_policy_proposal_approval_validation(approval: Any, preview: Any) -> di
                 1 for item in items if item.get("approved") is True and not item.get("errors")
             ),
             "invalid_count": item_error_count,
+            "decision_card_count": len(decision_cards),
+            "decision_approved_count": sum(
+                1 for card in decision_cards if card.get("user_decision_status") == "approved"
+            ),
+            "decision_invalid_count": sum(
+                1 for card in decision_cards if card.get("user_decision_status") == "invalid"
+            ),
         },
         "items": items,
+        "decision_cards": decision_cards,
         "warnings": warnings,
         "errors": errors,
     }
@@ -965,6 +978,88 @@ def decision_card_from_policy_preview_item(item: dict[str, Any]) -> dict[str, An
     return card
 
 
+def decision_card_from_approval_template_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "card_id": "decision-card:" + sanitize(item.get("proposal_id")),
+        "proposal_id": sanitize(item.get("proposal_id")),
+        "proposal_class": EXECUTION_TARGET_FRESHNESS_CLASS,
+        "decision_axis": "execution_target_freshness",
+        "execution_task_status": "approval_template_created",
+        "user_decision_status": "decision_pending",
+        "target_alias": sanitize(item.get("target_alias")),
+        "target": sanitize(item.get("target")),
+        "question": "Decide whether to approve this freshness metadata update in the approval template.",
+        "recommendation": "operator_review",
+        "explanation": (
+            "This template records the operator decision fields only. "
+            "It does not apply the proposal or change model, routing, provider, task, or runner config state."
+        ),
+        "recommended_action": sanitize(item.get("recommended_action")),
+        "allowed_decisions": ["approve_with_reviewer_metadata", "leave_pending", "reject_candidate"],
+        "prohibited_actions": [
+            "auto_apply_policy",
+            "change_model",
+            "change_model_selection_rule",
+            "change_provider",
+            "change_central_runner_config",
+            "mutate_task_state",
+        ],
+        "read_only": True,
+        "mutation_allowed": False,
+    }
+
+
+def decision_card_from_approval_validation_item(item: dict[str, Any]) -> dict[str, Any]:
+    errors = item.get("errors") if isinstance(item.get("errors"), list) else []
+    if errors:
+        user_decision_status = "invalid"
+        recommendation = "fix_approval_metadata"
+        explanation = (
+            "The approval entry is not valid for guarded apply. "
+            "Fix the approval metadata before using apply dry-run or apply."
+        )
+    elif item.get("approved") is True:
+        user_decision_status = "approved"
+        recommendation = "eligible_for_guarded_apply_dry_run"
+        explanation = (
+            "The approval entry is valid and may be used by the separate guarded apply dry-run/apply command. "
+            "Validation itself remains read-only and does not change config or tasks."
+        )
+    else:
+        user_decision_status = "not_approved"
+        recommendation = "leave_unapplied"
+        explanation = (
+            "The approval entry is valid but not approved. "
+            "No guarded apply item should be produced for this proposal."
+        )
+    return {
+        "card_id": "decision-card:" + sanitize(item.get("proposal_id")),
+        "proposal_id": sanitize(item.get("proposal_id")),
+        "proposal_class": EXECUTION_TARGET_FRESHNESS_CLASS,
+        "decision_axis": "execution_target_freshness",
+        "execution_task_status": "approval_validated" if not errors else "approval_invalid",
+        "user_decision_status": user_decision_status,
+        "target_alias": sanitize(item.get("target_alias")),
+        "target": sanitize(item.get("target")),
+        "question": "Review the validated approval status for this freshness metadata proposal.",
+        "recommendation": recommendation,
+        "explanation": explanation,
+        "recommended_action": sanitize(item.get("recommended_action")),
+        "validation_status": sanitize(item.get("validation_status")),
+        "validation_errors": [sanitize(error) for error in errors],
+        "prohibited_actions": [
+            "auto_apply_policy",
+            "change_model",
+            "change_model_selection_rule",
+            "change_provider",
+            "change_central_runner_config",
+            "mutate_task_state",
+        ],
+        "read_only": True,
+        "mutation_allowed": False,
+    }
+
+
 def sanitize_selection_refs(refs: list[Any]) -> list[dict[str, str | None]]:
     sanitized_refs: list[dict[str, str | None]] = []
     for ref in refs:
@@ -1112,6 +1207,10 @@ def render_policy_proposal_approval_template(template: dict[str, Any]) -> str:
                     f"     source_item_sha256: {approval.get('source_item_sha256')}",
                 ]
             )
+    decision_cards = template.get("decision_cards") or []
+    if decision_cards:
+        lines.append("decision_cards:")
+        lines.extend(render_policy_decision_cards(decision_cards))
     return "\n".join(lines) + "\n"
 
 
@@ -1149,6 +1248,10 @@ def render_policy_proposal_approval_validation(validation: dict[str, Any]) -> st
             )
             for error in item.get("errors") or []:
                 lines.append(f"     error: {error}")
+    decision_cards = validation.get("decision_cards") or []
+    if decision_cards:
+        lines.append("decision_cards:")
+        lines.extend(render_policy_decision_cards(decision_cards))
     return "\n".join(lines) + "\n"
 
 
