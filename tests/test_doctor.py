@@ -913,6 +913,53 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("remote_known=true", human_output)
             self.assertIn("pruned branch=cbr/pruned", human_output)
 
+    def test_doctor_human_output_limits_task_branch_lifecycle_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = root / "codex"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config_path = write_config(tmp, [str(executable)], worktree_mode="task")
+            config = Config.load(str(config_path))
+            head = git_output(repo, ["rev-parse", "HEAD"])
+            for index in range(25):
+                task_id = f"branch-{index:02d}"
+                task = create_task(config, "work", str(repo), task_id=task_id)
+                task.update(
+                    {
+                        "status": "completed",
+                        "review_status": "accepted",
+                        "execution_mode": "git_worktree",
+                        "execution_branch": f"cbr/{task_id}",
+                        "execution_repo_root": str(repo),
+                        "execution_base_ref": "HEAD",
+                        "execution_base_head": head,
+                        "execution_worktree_status": "cleaned",
+                        "execution_apply_status": "applied",
+                        "execution_applied_head": head,
+                        "execution_cleanup_kind": "applied",
+                    }
+                )
+                save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            self.assertEqual(25, len(report["worktree"]["task_branches"]))
+            self.assertEqual(0, human_code)
+            self.assertIn("task_branches_total: 25", human_output)
+            self.assertIn("task_branches_displayed: 20", human_output)
+            self.assertIn("task_branches_omitted: 5", human_output)
+            self.assertIn("branch-00 branch=cbr/branch-00", human_output)
+            self.assertIn("branch-19 branch=cbr/branch-19", human_output)
+            self.assertNotIn("branch-20 branch=cbr/branch-20", human_output)
+            self.assertNotIn("branch-24 branch=cbr/branch-24", human_output)
+
     def test_doctor_reports_startup_stall_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executable = Path(tmp) / "codex"

@@ -20,6 +20,7 @@ from .transcript import sanitize
 from .worktree import WORKTREE_RETAINED_STATUSES, sanitize_report_value, task_worktree_report, worktree_task_counts
 
 CODEX_VERSION_TIMEOUT_SECONDS = 2.0
+DOCTOR_TASK_BRANCH_HUMAN_DETAIL_LIMIT = 20
 
 
 def build_doctor_report(config: Config) -> dict[str, Any]:
@@ -873,8 +874,14 @@ def render_doctor_report(report: dict[str, Any]) -> str:
             lines.append(f"    {status}: {count}")
     task_branches = worktree.get("task_branches") or []
     if task_branches:
+        displayed_task_branches = task_branches[:DOCTOR_TASK_BRANCH_HUMAN_DETAIL_LIMIT]
+        omitted_task_branch_count = max(0, len(task_branches) - len(displayed_task_branches))
+        lines.append(f"  task_branches_total: {len(task_branches)}")
+        lines.append(f"  task_branches_displayed: {len(displayed_task_branches)}")
+        if omitted_task_branch_count:
+            lines.append(f"  task_branches_omitted: {omitted_task_branch_count}")
         lines.append("  task_branches:")
-        for item in task_branches:
+        for item in displayed_task_branches:
             remote = item.get("remote_task_branch") if isinstance(item.get("remote_task_branch"), dict) else {}
             remote_known = str(bool(remote.get("known"))).lower()
             upstream = remote.get("configured_upstream") or "-"
