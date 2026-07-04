@@ -345,6 +345,20 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("direct_model_pin_requires_separate_migration_approval: 1", human_output)
             self.assertNotIn("gpt-5-small", human_output)
 
+    def test_doctor_human_output_marks_no_open_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(tmp, [str(executable), "exec", "--json"])
+
+            code, output = run_cli(["--config", str(config_path), "doctor"])
+
+            self.assertEqual(0, code)
+            self.assertIn("decision_cards:", output)
+            self.assertIn("card_count: 0", output)
+            self.assertIn("open_decisions: none", output)
+
     def test_doctor_warns_when_execution_target_freshness_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executable = Path(tmp) / "codex"

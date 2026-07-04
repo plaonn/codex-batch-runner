@@ -996,6 +996,7 @@ def render_doctor_report(report: dict[str, Any]) -> str:
             f"  decision_required: {decision_cards.get('decision_required')}",
             f"  approval_blocked: {decision_cards.get('approval_blocked')}",
             f"  not_ready: {decision_cards.get('not_ready')}",
+            "  open_decisions: " + ("none" if decision_cards.get("card_count") == 0 else "present"),
         ]
     )
     for label, key in (

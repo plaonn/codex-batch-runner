@@ -2723,6 +2723,16 @@ class CliTests(unittest.TestCase):
             self.assertEqual({"not_ready": 1}, report["summary"]["by_status"])
             self.assertEqual("not_ready", report["decision_cards"][0]["user_decision_status"])
 
+    def test_decision_cards_human_output_marks_no_open_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output = run_cli(["--config", str(config_path), "decision-cards"])
+
+            self.assertEqual(0, code)
+            self.assertIn("summary: cards=0 decision_required=0 approval_blocked=0 not_ready=0", output)
+            self.assertIn("open_decisions: none", output)
+
     def test_decision_cards_inventory_summarizes_blocked_reasons(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(

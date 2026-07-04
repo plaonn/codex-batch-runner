@@ -169,6 +169,8 @@ def render_decision_card_inventory(report: dict[str, Any]) -> str:
     if summary_lines:
         lines.extend(summary_lines)
         lines.append("")
+    if summary.get("card_count", 0) == 0:
+        lines.extend(["open_decisions: none", ""])
     lines.append(render_decision_card_table(_list_value(report.get("decision_cards"))))
     return "\n".join(lines) + "\n"
 
