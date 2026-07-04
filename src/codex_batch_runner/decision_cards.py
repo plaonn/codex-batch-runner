@@ -7,6 +7,7 @@ from .config import Config
 from .policy_proposals import build_execution_target_freshness_proposal_report
 from .routing_policy_candidates import build_routing_policy_candidate_report
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, render_table
+from .timeutil import utc_now
 
 
 DEFAULT_DECISION_CARD_LIMIT = DEFAULT_ROUTING_REPORT_LIMIT
@@ -69,6 +70,7 @@ def build_decision_card_inventory(
     axis_counts = Counter(str(card.get("decision_axis") or "unknown") for card in cards)
     return {
         "kind": "decision_card_inventory",
+        "generated_at": utc_now().isoformat(),
         "read_only": True,
         "mutation_allowed": False,
         "filters": routing_report.get("filters"),
@@ -89,12 +91,16 @@ def build_decision_card_inventory(
         "source_reports": [
             {
                 "source": "policy-proposals execution-target-freshness",
+                "generated_at": policy_report.get("generated_at"),
                 "card_count": len(_list_value(policy_report.get("decision_cards"))),
+                "read_only": True,
                 "mutation_allowed": False,
             },
             {
                 "source": "routing-policy-candidates",
+                "generated_at": routing_report.get("generated_at"),
                 "card_count": len(_list_value(routing_report.get("decision_cards"))),
+                "read_only": True,
                 "mutation_allowed": False,
             },
         ],

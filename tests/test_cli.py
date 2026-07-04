@@ -2536,21 +2536,27 @@ class CliTests(unittest.TestCase):
                 save_task(config, task)
             task_path = config.queue_dir / "routing-0.json"
             before = task_path.read_text(encoding="utf-8")
+            now = datetime(2026, 7, 4, tzinfo=timezone.utc)
 
-            code, output = run_cli(
-                [
-                    "--config",
-                    str(config_path),
-                    "decision-cards",
-                    "--project",
-                    "project-a",
-                    "--label",
-                    "routing",
-                    "--limit",
-                    "0",
-                    "--json",
-                ]
-            )
+            with (
+                patch("codex_batch_runner.decision_cards.utc_now", return_value=now),
+                patch("codex_batch_runner.policy_proposals.utc_now", return_value=now),
+                patch("codex_batch_runner.routing_report.iso_now", return_value="2026-07-04T00:00:00+00:00"),
+            ):
+                code, output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "decision-cards",
+                        "--project",
+                        "project-a",
+                        "--label",
+                        "routing",
+                        "--limit",
+                        "0",
+                        "--json",
+                    ]
+                )
             after = task_path.read_text(encoding="utf-8")
             report = json.loads(output)
             cards = {card["source"]: card for card in report["decision_cards"]}
@@ -2560,6 +2566,26 @@ class CliTests(unittest.TestCase):
             self.assertEqual("decision_card_inventory", report["kind"])
             self.assertTrue(report["read_only"])
             self.assertFalse(report["mutation_allowed"])
+            self.assertEqual("2026-07-04T00:00:00+00:00", report["generated_at"])
+            self.assertEqual(
+                [
+                    {
+                        "card_count": 1,
+                        "generated_at": "2026-07-04T00:00:00+00:00",
+                        "mutation_allowed": False,
+                        "read_only": True,
+                        "source": "policy-proposals execution-target-freshness",
+                    },
+                    {
+                        "card_count": 1,
+                        "generated_at": "2026-07-04T00:00:00+00:00",
+                        "mutation_allowed": False,
+                        "read_only": True,
+                        "source": "routing-policy-candidates",
+                    },
+                ],
+                report["source_reports"],
+            )
             self.assertEqual(2, report["summary"]["card_count"])
             self.assertEqual(2, report["summary"]["decision_required"])
             self.assertEqual(0, report["summary"]["not_ready"])
