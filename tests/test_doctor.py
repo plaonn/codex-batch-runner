@@ -739,8 +739,12 @@ class DoctorTests(unittest.TestCase):
             self.assertFalse(report["capacity"]["over_capacity"])
             self.assertEqual(0, human_code)
             self.assertIn("capacity:", human_output)
-            self.assertIn("codex: max_running=1 running=1", human_output)
-            self.assertIn("codex-spark: max_running=1 running=1", human_output)
+            self.assertIn(
+                "summary: running=2/2 projects=2 max_project_running=1/1 admissible=0 blocked=0 over_capacity=false",
+                human_output,
+            )
+            self.assertIn("pools: codex=1/1, codex-spark=1/1", human_output)
+            self.assertNotIn("pool_details:", human_output)
 
     def test_doctor_reports_capacity_overages_without_mutating_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -759,6 +763,7 @@ class DoctorTests(unittest.TestCase):
             save_task(config, second)
 
             report = build_doctor_report(config)
+            human_code, human_output = run_cli(["--config", str(config_path), "doctor"])
             reloaded = json.loads((config.queue_dir / "second.json").read_text(encoding="utf-8"))
 
             self.assertTrue(report["capacity"]["over_total_capacity"])
@@ -766,6 +771,10 @@ class DoctorTests(unittest.TestCase):
             self.assertTrue(report["capacity"]["over_pool_capacity"])
             self.assertTrue(report["capacity"]["over_capacity"])
             self.assertEqual("running", reloaded["status"])
+            self.assertEqual(0, human_code)
+            self.assertIn("over_capacity=true", human_output)
+            self.assertIn("pool_details:", human_output)
+            self.assertIn("codex: max_running=1 running=2", human_output)
 
     def test_doctor_reports_worktree_mode_and_recovery_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

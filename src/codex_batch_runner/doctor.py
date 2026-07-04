@@ -915,18 +915,22 @@ def render_doctor_report(report: dict[str, Any]) -> str:
                 f"remote_refs={remote_refs}"
             )
     capacity = report["capacity"]
+    running_by_pool = capacity.get("running_by_pool") or {}
+    capacity_pools = capacity.get("capacity_pools") or {}
+    unknown_pools = capacity.get("unknown_pools") or []
     lines.extend(
         [
             "",
             "capacity:",
-            f"  max_total_running: {capacity.get('max_total_running')}",
-            f"  max_running_per_project: {capacity.get('max_running_per_project')}",
-            f"  running_total: {capacity.get('running_total')}",
-            f"  running_projects: {capacity.get('running_projects')}",
-            f"  max_running_single_project: {capacity.get('max_running_single_project')}",
-            f"  admissible_runnable: {capacity.get('admissible_runnable')}",
-            f"  capacity_blocked_runnable: {capacity.get('capacity_blocked_runnable')}",
-            f"  over_capacity: {str(capacity.get('over_capacity')).lower()}",
+            (
+                "  summary: "
+                f"running={capacity.get('running_total')}/{capacity.get('max_total_running')} "
+                f"projects={capacity.get('running_projects')} "
+                f"max_project_running={capacity.get('max_running_single_project')}/{capacity.get('max_running_per_project')} "
+                f"admissible={capacity.get('admissible_runnable')} "
+                f"blocked={capacity.get('capacity_blocked_runnable')} "
+                f"over_capacity={str(capacity.get('over_capacity')).lower()}"
+            ),
         ]
     )
     blocked_reasons = capacity.get("capacity_blocked_reasons") or {}
@@ -934,13 +938,18 @@ def render_doctor_report(report: dict[str, Any]) -> str:
         lines.append("  blocked_reasons:")
         for reason, count in blocked_reasons.items():
             lines.append(f"    {reason}: {count}")
-    running_by_pool = capacity.get("running_by_pool") or {}
-    capacity_pools = capacity.get("capacity_pools") or {}
-    lines.append("  pools:")
-    for name, pool in capacity_pools.items():
-        lines.append(f"    {name}: max_running={pool.get('max_running')} running={running_by_pool.get(name, 0)}")
-    for name in capacity.get("unknown_pools") or []:
-        lines.append(f"    {name}: max_running=None running={running_by_pool.get(name, 0)}")
+    pool_summaries = [
+        f"{name}={running_by_pool.get(name, 0)}/{pool.get('max_running')}" for name, pool in capacity_pools.items()
+    ]
+    pool_summaries.extend(f"{name}={running_by_pool.get(name, 0)}/unknown" for name in unknown_pools)
+    if pool_summaries:
+        lines.append("  pools: " + ", ".join(pool_summaries))
+    if capacity.get("over_capacity") or unknown_pools:
+        lines.append("  pool_details:")
+        for name, pool in capacity_pools.items():
+            lines.append(f"    {name}: max_running={pool.get('max_running')} running={running_by_pool.get(name, 0)}")
+        for name in unknown_pools:
+            lines.append(f"    {name}: max_running=None running={running_by_pool.get(name, 0)}")
     auto_review = report["auto_review"]
     model_requirements = report["model_requirements"]
     lines.extend(
