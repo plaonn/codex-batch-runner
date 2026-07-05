@@ -368,6 +368,7 @@ def add_codex_version_info(info: dict[str, Any]) -> None:
     resolved = info.get("resolved_executable")
     if not resolved:
         return
+    version_command = doctor_version_command_label(info)
     try:
         result = subprocess.run(
             [str(resolved), "--version"],
@@ -378,23 +379,29 @@ def add_codex_version_info(info: dict[str, Any]) -> None:
             timeout=CODEX_VERSION_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        info["version_error"] = f"codex --version timed out after {CODEX_VERSION_TIMEOUT_SECONDS:g}s"
+        info["version_error"] = f"{version_command} timed out after {CODEX_VERSION_TIMEOUT_SECONDS:g}s"
         return
     except OSError as exc:
-        info["version_error"] = f"cannot run codex --version: {exc}"
+        info["version_error"] = f"cannot run {version_command}: {exc}"
         return
     if result.returncode == 0:
         output = (result.stdout or result.stderr or "").strip()
         info["version_output"] = output if output else None
         if not output:
-            info["version_error"] = "codex --version produced no output"
+            info["version_error"] = f"{version_command} produced no output"
         return
     message = (result.stderr or result.stdout or "").strip()
     if message:
         message = message.splitlines()[-1]
     else:
         message = f"exited with {result.returncode}"
-    info["version_error"] = f"codex --version failed: {message}"
+    info["version_error"] = f"{version_command} failed: {message}"
+
+
+def doctor_version_command_label(info: dict[str, Any]) -> str:
+    executable = str(info.get("configured_executable") or info.get("resolved_executable") or "codex")
+    name = Path(executable).name or executable
+    return f"{name} --version"
 
 
 def codex_command_checks(info: dict[str, Any]) -> list[dict[str, str]]:

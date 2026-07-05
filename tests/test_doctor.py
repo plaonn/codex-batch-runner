@@ -545,6 +545,36 @@ class DoctorTests(unittest.TestCase):
                 report["checks"],
             )
 
+    def test_doctor_warns_with_configured_executable_name_when_wrapper_version_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "agy-cbr-wrapper.py"
+            executable.write_text(
+                "#!/bin/sh\n"
+                "printf 'usage: wrapper\\n' >&2\n"
+                "printf 'agy-cbr-wrapper.py: error: unrecognized arguments: --version\\n' >&2\n"
+                "exit 2\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            config_path = write_config(tmp, [str(executable)])
+
+            code, output = run_cli(["--config", str(config_path), "doctor", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertTrue(report["ok"])
+            self.assertTrue(report["codex_command"]["available"])
+            self.assertIsNone(report["codex_command"]["version_output"])
+            self.assertIn(
+                "agy-cbr-wrapper.py --version failed: agy-cbr-wrapper.py: error: unrecognized arguments: --version",
+                report["codex_command"]["version_error"],
+            )
+            self.assertNotIn("codex --version failed", report["codex_command"]["version_error"])
+            self.assertIn(
+                {"name": "codex_command_version", "level": "warning", "message": report["codex_command"]["version_error"]},
+                report["checks"],
+            )
+
     def test_doctor_warns_when_codex_version_times_out_without_failing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executable = Path(tmp) / "codex"
