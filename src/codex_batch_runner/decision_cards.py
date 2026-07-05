@@ -39,6 +39,10 @@ DECISION_CARD_TERMINAL_STATUSES = {
     "approved",
     "not_approved",
 }
+DECISION_CARD_OPEN_NEXT_ACTIONS = {
+    "fix_invalid_decision_cards",
+    "review_decision_cards",
+}
 
 
 def build_decision_card_inventory(
@@ -181,10 +185,8 @@ def render_decision_card_inventory(report: dict[str, Any]) -> str:
     if summary_lines:
         lines.extend(summary_lines)
         lines.append("")
-    if summary.get("card_count", 0) == 0:
-        lines.extend(["open_decisions: none", f"next_action: {summary.get('next_action') or 'none'}", ""])
-    else:
-        lines.extend([f"next_action: {summary.get('next_action') or 'review_decision_cards'}", ""])
+    next_action = str(summary.get("next_action") or "none")
+    lines.extend([f"open_decisions: {decision_card_open_decisions(next_action)}", f"next_action: {next_action}", ""])
     lines.append(render_decision_card_table(_list_value(report.get("decision_cards"))))
     return "\n".join(lines) + "\n"
 
@@ -202,6 +204,10 @@ def decision_card_next_action(cards: list[dict[str, Any]]) -> str:
     if statuses <= DECISION_CARD_TERMINAL_STATUSES:
         return "none"
     return "review_decision_cards"
+
+
+def decision_card_open_decisions(next_action: str) -> str:
+    return "present" if next_action in DECISION_CARD_OPEN_NEXT_ACTIONS else "none"
 
 
 def render_summary_groups(summary: dict[str, Any]) -> list[str]:

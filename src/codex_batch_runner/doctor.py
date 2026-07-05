@@ -21,6 +21,10 @@ from .worktree import WORKTREE_RETAINED_STATUSES, sanitize_report_value, task_wo
 
 CODEX_VERSION_TIMEOUT_SECONDS = 2.0
 DOCTOR_TASK_BRANCH_HUMAN_DETAIL_LIMIT = 20
+DECISION_CARD_OPEN_NEXT_ACTIONS = {
+    "fix_invalid_decision_cards",
+    "review_decision_cards",
+}
 
 
 def build_doctor_report(config: Config) -> dict[str, Any]:
@@ -1016,6 +1020,10 @@ def render_doctor_report(report: dict[str, Any]) -> str:
                 f"freshness={freshness_status(rule)}"
             )
     decision_cards = report["decision_cards"]
+    decision_cards_next_action = str(decision_cards.get("next_action") or "none")
+    decision_cards_open_decisions = (
+        "present" if decision_cards_next_action in DECISION_CARD_OPEN_NEXT_ACTIONS else "none"
+    )
     lines.extend(
         [
             "",
@@ -1026,8 +1034,8 @@ def render_doctor_report(report: dict[str, Any]) -> str:
             f"  decision_required: {decision_cards.get('decision_required')}",
             f"  approval_blocked: {decision_cards.get('approval_blocked')}",
             f"  not_ready: {decision_cards.get('not_ready')}",
-            "  open_decisions: " + ("none" if decision_cards.get("card_count") == 0 else "present"),
-            f"  next_action: {decision_cards.get('next_action') or 'none'}",
+            f"  open_decisions: {decision_cards_open_decisions}",
+            f"  next_action: {decision_cards_next_action}",
         ]
     )
     for label, key in (

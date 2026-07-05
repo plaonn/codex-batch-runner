@@ -2740,6 +2740,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("read_only: yes", output)
             self.assertIn("routing-policy-candidates", output)
             self.assertIn("not_ready", output)
+            self.assertIn("open_decisions: none", output)
             self.assertIn("next_action: continue_observing", output)
             self.assertIn("recommendations:", output)
             self.assertIn("collect_more_evidence: 1", output)
@@ -2826,6 +2827,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertIn("blocked_reasons:", output)
+            self.assertIn("open_decisions: present", output)
             self.assertIn("direct_model_pin_requires_separate_migration_approval: 1", output)
 
     def test_decision_cards_rejects_unknown_user_decision_status(self) -> None:

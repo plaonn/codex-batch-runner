@@ -348,6 +348,7 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("decision_cards:", human_output)
             self.assertIn("card_count: 1", human_output)
             self.assertIn("approval_blocked: 1", human_output)
+            self.assertIn("open_decisions: present", human_output)
             self.assertIn("next_action: review_decision_cards", human_output)
             self.assertIn("direct_model_pin_requires_separate_migration_approval: 1", human_output)
             self.assertNotIn("gpt-5-small", human_output)
