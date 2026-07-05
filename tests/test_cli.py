@@ -19,6 +19,7 @@ from pathlib import Path
 
 from codex_batch_runner.cli import ListColor, main
 from codex_batch_runner.config import Config
+from codex_batch_runner.decision_cards import decision_card_next_action
 from codex_batch_runner.evidence import rate_limit_dir
 from codex_batch_runner.events import list_events
 from codex_batch_runner.fs import write_json_atomic
@@ -424,6 +425,33 @@ def write_plan(tmp: str, data: dict) -> Path:
 
 
 class CliTests(unittest.TestCase):
+    def test_decision_card_next_action_classifies_terminal_observation_and_actionable_cards(self) -> None:
+        self.assertEqual("none", decision_card_next_action([]))
+        self.assertEqual(
+            "none",
+            decision_card_next_action(
+                [
+                    {"user_decision_status": "approved"},
+                    {"user_decision_status": "not_approved"},
+                ]
+            ),
+        )
+        self.assertEqual(
+            "continue_observing",
+            decision_card_next_action(
+                [
+                    {"user_decision_status": "not_ready"},
+                    {"user_decision_status": "approved"},
+                ]
+            ),
+        )
+        for status in ("decision_required", "approval_blocked", "decision_pending", "invalid"):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    "review_decision_cards",
+                    decision_card_next_action([{"user_decision_status": status}]),
+                )
+
     def test_missing_config_reports_error_without_traceback(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             code, output, stderr = run_cli_with_stderr(["list"])

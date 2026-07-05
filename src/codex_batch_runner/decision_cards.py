@@ -28,6 +28,17 @@ DECISION_CARD_USER_STATUSES = {
     "not_approved",
     "not_ready",
 }
+DECISION_CARD_ACTIONABLE_STATUSES = {
+    "approval_blocked",
+    "decision_pending",
+    "decision_required",
+    "invalid",
+}
+DECISION_CARD_OBSERVATION_STATUSES = {"not_ready"}
+DECISION_CARD_TERMINAL_STATUSES = {
+    "approved",
+    "not_approved",
+}
 
 
 def build_decision_card_inventory(
@@ -181,8 +192,13 @@ def render_decision_card_inventory(report: dict[str, Any]) -> str:
 def decision_card_next_action(cards: list[dict[str, Any]]) -> str:
     if not cards:
         return "none"
-    if all(card.get("user_decision_status") == "not_ready" for card in cards):
+    statuses = {str(card.get("user_decision_status") or "unknown") for card in cards}
+    if statuses & DECISION_CARD_ACTIONABLE_STATUSES:
+        return "review_decision_cards"
+    if statuses & DECISION_CARD_OBSERVATION_STATUSES:
         return "continue_observing"
+    if statuses <= DECISION_CARD_TERMINAL_STATUSES:
+        return "none"
     return "review_decision_cards"
 
 
