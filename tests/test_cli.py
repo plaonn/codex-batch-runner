@@ -7904,6 +7904,12 @@ class CliTests(unittest.TestCase):
             self.assertIn("verification_present", report["auto_review"]["failing_gates"])
             self.assertEqual("unreviewed", load_task(config, "gate-fail")["review_status"])
 
+            human_code, human_output = run_cli(
+                ["--config", str(config_path), "review-next", "--apply", "--mechanical-auto-accept"]
+            )
+            self.assertEqual(0, human_code)
+            self.assertIn("- accept_deferred: mechanical gates failed (failing_gates=verification_present)", human_output)
+
     def test_review_next_apply_is_stale_safe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"

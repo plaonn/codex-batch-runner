@@ -1792,9 +1792,14 @@ def render_review_next_report(report: dict[str, Any]) -> str:
         lines.append(f"- {item['name']}: {status} ({item['detail']})")
     auto_review = report.get("auto_review") or {}
     if auto_review:
+        lines.append("auto_review:")
+        reason = auto_review.get("reason")
+        failing_gates = auto_review.get("failing_gates")
+        if reason == "mechanical gates failed" and failing_gates:
+            gates_str = ",".join(str(gate) for gate in failing_gates)
+            lines.append(f"- accept_deferred: mechanical gates failed (failing_gates={gates_str})")
         lines.extend(
             [
-                "auto_review:",
                 f"- decision: {auto_review.get('decision')}",
                 f"- reason: {auto_review.get('reason')}",
                 f"- reviewer_codex_invoked: {str(bool(auto_review.get('reviewer_codex_invoked'))).lower()}",
