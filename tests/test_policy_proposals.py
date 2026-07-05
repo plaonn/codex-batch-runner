@@ -1705,6 +1705,75 @@ class PolicyProposalTests(unittest.TestCase):
             self.assertFalse(report["valid"])
             self.assertEqual(["approval validation failed"], report["errors"])
 
+            with mock.patch("codex_batch_runner.doctor.utc_now", return_value=now):
+                human_code, human_output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "policy-proposals",
+                        "apply",
+                        str(approval_path),
+                        "--preview",
+                        str(preview_path),
+                        "--config-target",
+                        str(config_path),
+                        "--dry-run",
+                    ]
+                )
+
+            self.assertEqual(1, human_code)
+            self.assertIn("validation_errors:", human_output)
+            self.assertIn("  - source_preview_sha256 mismatch", human_output)
+
+    def test_policy_proposal_apply_human_output_includes_validation_item_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(
+                tmp,
+                {
+                    "execution_targets": {
+                        "balanced_current": {
+                            "model": "gpt-5",
+                            "freshness": {
+                                "owner": "previous",
+                                "last_reviewed_at": "2026-06-19",
+                                "review_after_days": 14,
+                            },
+                        }
+                    },
+                    "default_execution_config": {"execution_target": "balanced_current"},
+                },
+            )
+            preview = stale_policy_preview()
+            approval = approved_stale_policy_approval(preview)
+            approval["approvals"][0]["target"] = "execution_targets.other.freshness"
+            preview_path = write_stale_policy_preview(root)
+            approval_path = root / "approval.json"
+            approval_path.write_text(json.dumps(approval, sort_keys=True), encoding="utf-8")
+
+            now = datetime(2026, 7, 3, tzinfo=timezone.utc)
+            with mock.patch("codex_batch_runner.doctor.utc_now", return_value=now):
+                code, output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "policy-proposals",
+                        "apply",
+                        str(approval_path),
+                        "--preview",
+                        str(preview_path),
+                        "--config-target",
+                        str(config_path),
+                        "--dry-run",
+                    ]
+                )
+
+            self.assertEqual(1, code)
+            self.assertIn("validation_items:", output)
+            self.assertIn("  1. execution_target_freshness:balanced_current", output)
+            self.assertIn("     status: invalid", output)
+            self.assertIn("     error: target does not match preview", output)
+
     def test_policy_proposal_apply_rejects_nonexistent_and_unparseable_config_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

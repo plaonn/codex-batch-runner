@@ -1384,6 +1384,8 @@ def render_policy_proposal_apply_report(report: dict[str, Any]) -> str:
         lines.append("errors:")
         for error in errors:
             lines.append(f"  - {error}")
+    validation = report.get("validation") if isinstance(report.get("validation"), dict) else {}
+    lines.extend(render_policy_apply_validation_error_lines(validation))
     items = report.get("items") or []
     if items:
         lines.append("items:")
@@ -1405,6 +1407,30 @@ def render_policy_proposal_apply_report(report: dict[str, Any]) -> str:
             for error in item.get("errors") or []:
                 lines.append(f"     error: {error}")
     return "\n".join(lines) + "\n"
+
+
+def render_policy_apply_validation_error_lines(validation: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    errors = validation.get("errors") or []
+    if errors:
+        lines.append("validation_errors:")
+        for error in errors:
+            lines.append(f"  - {error}")
+    items = validation.get("items") or []
+    invalid_items = [item for item in items if isinstance(item, dict) and item.get("errors")]
+    if invalid_items:
+        lines.append("validation_items:")
+        for index, item in enumerate(invalid_items, start=1):
+            lines.extend(
+                [
+                    f"  {index}. {item.get('proposal_id')}",
+                    f"     status: {item.get('validation_status')}",
+                    f"     target: {item.get('target')}",
+                ]
+            )
+            for error in item.get("errors") or []:
+                lines.append(f"     error: {error}")
+    return lines
 
 
 def format_selection_refs(refs: list[dict[str, Any]]) -> str:
