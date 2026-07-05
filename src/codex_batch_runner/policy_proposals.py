@@ -1374,6 +1374,7 @@ def render_policy_proposal_apply_report(report: dict[str, Any]) -> str:
         f"eligible_count: {summary.get('eligible_count')}",
         f"applied_count: {summary.get('applied_count')}",
         f"mutation: allowed={str(mutation.get('allowed')).lower()} applied={str(mutation.get('applied')).lower()}",
+        f"source_preview_sha256: {report.get('source_preview_sha256') or '-'}",
         f"config_target_supported: {str(config_target.get('supported')).lower()}",
         f"config_target_sha256_before: {config_target.get('sha256_before') or '-'}",
         f"config_target_sha256_after: {config_target.get('sha256_after') or '-'}",

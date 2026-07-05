@@ -1364,6 +1364,7 @@ class PolicyProposalTests(unittest.TestCase):
                 )
 
             self.assertEqual(0, human_code)
+            self.assertIn(f"source_preview_sha256: {report['source_preview_sha256']}", human_output)
             self.assertIn(f"config_target_sha256_before: {report['config_target']['sha256_before']}", human_output)
             self.assertIn(f"config_target_sha256_after: {report['config_target']['sha256_after']}", human_output)
             self.assertIn("reviewer: operator", human_output)
