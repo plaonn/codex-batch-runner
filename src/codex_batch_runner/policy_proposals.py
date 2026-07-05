@@ -1375,6 +1375,8 @@ def render_policy_proposal_apply_report(report: dict[str, Any]) -> str:
         f"applied_count: {summary.get('applied_count')}",
         f"mutation: allowed={str(mutation.get('allowed')).lower()} applied={str(mutation.get('applied')).lower()}",
         f"config_target_supported: {str(config_target.get('supported')).lower()}",
+        f"config_target_sha256_before: {config_target.get('sha256_before') or '-'}",
+        f"config_target_sha256_after: {config_target.get('sha256_after') or '-'}",
     ]
     errors = report.get("errors") or []
     if errors:
@@ -1386,6 +1388,7 @@ def render_policy_proposal_apply_report(report: dict[str, Any]) -> str:
         lines.append("items:")
         for index, item in enumerate(items, start=1):
             changed_keys = ",".join(item.get("diff", {}).get("changed_keys") or []) or "-"
+            approved_metadata = item.get("approved_metadata") if isinstance(item.get("approved_metadata"), dict) else {}
             lines.extend(
                 [
                     f"  {index}. {item.get('proposal_id')}",
@@ -1394,6 +1397,8 @@ def render_policy_proposal_apply_report(report: dict[str, Any]) -> str:
                     f"     eligible: {str(item.get('eligible')).lower()}",
                     f"     applied: {str(item.get('applied')).lower()}",
                     f"     changed_keys: {changed_keys}",
+                    f"     reviewer: {approved_metadata.get('reviewer') or '-'}",
+                    f"     reviewed_at: {approved_metadata.get('reviewed_at') or '-'}",
                 ]
             )
             for error in item.get("errors") or []:

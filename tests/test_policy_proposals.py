@@ -1347,6 +1347,29 @@ class PolicyProposalTests(unittest.TestCase):
             self.assertEqual(before, config_path.read_text(encoding="utf-8"))
             self.assertFalse((root / "events").exists())
 
+            with mock.patch("codex_batch_runner.doctor.utc_now", return_value=now):
+                human_code, human_output = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "policy-proposals",
+                        "apply",
+                        str(approval_path),
+                        "--preview",
+                        str(preview_path),
+                        "--config-target",
+                        str(config_path),
+                        "--dry-run",
+                    ]
+                )
+
+            self.assertEqual(0, human_code)
+            self.assertIn(f"config_target_sha256_before: {report['config_target']['sha256_before']}", human_output)
+            self.assertIn(f"config_target_sha256_after: {report['config_target']['sha256_after']}", human_output)
+            self.assertIn("reviewer: operator", human_output)
+            self.assertIn("reviewed_at: 2026-07-03T00:00:00+00:00", human_output)
+            self.assertEqual(before, config_path.read_text(encoding="utf-8"))
+
     def test_policy_proposal_apply_requires_approve_for_apply_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
