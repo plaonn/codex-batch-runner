@@ -538,7 +538,7 @@ def build_policy_proposal_apply_report(
             "allowed": eligible,
             "applied": applied,
             "requires_approve": apply,
-            "approved": bool(approve),
+            "approve_flag": bool(approve),
             "allowed_state_changes": ["execution_target_freshness_metadata"] if eligible else [],
             "prohibited_state_changes": [
                 "task_mutation",

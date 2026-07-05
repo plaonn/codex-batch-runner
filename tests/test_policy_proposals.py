@@ -1335,6 +1335,8 @@ class PolicyProposalTests(unittest.TestCase):
             self.assertTrue(report["valid"])
             self.assertEqual("dry_run", report["mode"])
             self.assertFalse(report["mutation"]["applied"])
+            self.assertFalse(report["mutation"]["approve_flag"])
+            self.assertNotIn("approved", report["mutation"])
             self.assertEqual(1, report["summary"]["eligible_count"])
             self.assertEqual(
                 {"owner": "previous", "last_reviewed_at": "2026-06-19", "review_after_days": 14},
@@ -1472,6 +1474,7 @@ class PolicyProposalTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(report["mutation"]["applied"])
+            self.assertTrue(report["mutation"]["approve_flag"])
             self.assertEqual(1, report["summary"]["applied_count"])
             self.assertEqual(
                 {"owner": "operator", "last_reviewed_at": "2026-07-03", "review_after_days": 14},
