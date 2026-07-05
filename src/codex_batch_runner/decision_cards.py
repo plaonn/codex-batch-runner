@@ -32,8 +32,8 @@ DECISION_CARD_ACTIONABLE_STATUSES = {
     "approval_blocked",
     "decision_pending",
     "decision_required",
-    "invalid",
 }
+DECISION_CARD_INVALID_STATUSES = {"invalid"}
 DECISION_CARD_OBSERVATION_STATUSES = {"not_ready"}
 DECISION_CARD_TERMINAL_STATUSES = {
     "approved",
@@ -193,6 +193,8 @@ def decision_card_next_action(cards: list[dict[str, Any]]) -> str:
     if not cards:
         return "none"
     statuses = {str(card.get("user_decision_status") or "unknown") for card in cards}
+    if statuses & DECISION_CARD_INVALID_STATUSES:
+        return "fix_invalid_decision_cards"
     if statuses & DECISION_CARD_ACTIONABLE_STATUSES:
         return "review_decision_cards"
     if statuses & DECISION_CARD_OBSERVATION_STATUSES:

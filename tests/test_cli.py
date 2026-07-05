@@ -445,7 +445,11 @@ class CliTests(unittest.TestCase):
                 ]
             ),
         )
-        for status in ("decision_required", "approval_blocked", "decision_pending", "invalid"):
+        self.assertEqual(
+            "fix_invalid_decision_cards",
+            decision_card_next_action([{"user_decision_status": "invalid"}]),
+        )
+        for status in ("decision_required", "approval_blocked", "decision_pending"):
             with self.subTest(status=status):
                 self.assertEqual(
                     "review_decision_cards",
