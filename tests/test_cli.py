@@ -27,7 +27,7 @@ from codex_batch_runner.queue import create_task, dependency_status, list_tasks,
 from codex_batch_runner.review_bundle import build_review_bundle
 from codex_batch_runner.review_next import apply_mechanical_accept, detectable_safety_violation, review_fingerprint
 from codex_batch_runner.reviewer_codex import ReviewerCodexOutcome
-from codex_batch_runner.state import load_state
+from codex_batch_runner.state import load_state, set_global_cooldown, set_runner_pause
 
 
 FAKE_CODEX = Path(__file__).parent / "fixtures" / "fake_codex.py"
@@ -1104,6 +1104,7 @@ class CliTests(unittest.TestCase):
                 ["transcript", "task"],
                 ["follow", "task", "--poll-interval", "0", "--max-polls", "1"],
                 ["doctor"],
+                ["status"],
                 ["events"],
                 ["rate-limits"],
                 ["watching-report"],
@@ -1115,6 +1116,85 @@ class CliTests(unittest.TestCase):
                     self.assertIn(code, {0, 1})
 
             self.assertFalse(marker.exists())
+
+    def test_status_command_is_lightweight_and_read_only_without_queue_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+
+            code, output = run_cli(["--config", str(config_path), "status", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertFalse(config.queue_dir.exists())
+            self.assertEqual("cbr_status", report["kind"])
+            self.assertTrue(report["read_only"])
+            self.assertFalse(report["mutation_allowed"])
+            self.assertEqual("available", report["admission"]["status"])
+            self.assertTrue(report["admission"]["can_enqueue"])
+            self.assertTrue(report["admission"]["can_run_next"])
+            self.assertEqual("idle", report["admission"]["recommended_action"])
+            self.assertEqual(0, report["queue"]["task_count"])
+
+            code, output = run_cli(["--config", str(config_path), "status"])
+
+            self.assertEqual(0, code)
+            self.assertIn("# cbr status", output)
+            self.assertIn("read_only: yes", output)
+            self.assertIn("admission", output)
+
+    def test_status_command_reports_admission_cooldown_pause_and_review_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "work", tmp, task_id="runnable")
+            review = create_task(config, "review", tmp, task_id="review")
+            review["status"] = "completed"
+            review["review_status"] = "unreviewed"
+            save_task(config, review)
+            apply = create_task(config, "apply", tmp, task_id="apply")
+            apply["status"] = "completed"
+            apply["review_status"] = "accepted"
+            apply["execution_mode"] = "git_worktree"
+            apply["execution_worktree_status"] = "retained"
+            save_task(config, apply)
+            task_path = config.queue_dir / "runnable.json"
+            before = task_path.read_text(encoding="utf-8")
+            set_global_cooldown(
+                config,
+                (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+            )
+
+            code, output = run_cli(["--config", str(config_path), "status", "--json"])
+            after = task_path.read_text(encoding="utf-8")
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(before, after)
+            self.assertEqual("cooldown", report["admission"]["status"])
+            self.assertTrue(report["admission"]["can_enqueue"])
+            self.assertFalse(report["admission"]["can_run_next"])
+            self.assertEqual("do_not_start_runner", report["admission"]["recommended_action"])
+            self.assertEqual(["global_cooldown"], report["admission"]["blocked_reasons"])
+            self.assertEqual(3, report["queue"]["task_count"])
+            self.assertEqual(1, report["queue"]["admissible_count"])
+            self.assertEqual(1, report["review"]["needs_review_count"])
+            self.assertEqual(1, report["review"]["accepted_unapplied_count"])
+            self.assertTrue(report["cooldowns"]["global"]["active"])
+            self.assertFalse(report["cooldowns"]["reviewer_codex"]["active"])
+            self.assertIn("global_cooldown_until", report["cooldowns"]["global"])
+            self.assertIn("reviewer_codex_cooldown_until", report["cooldowns"]["reviewer_codex"])
+
+            set_runner_pause(config, "maintenance", paused_by="test")
+            code, output = run_cli(["--config", str(config_path), "status", "--json"])
+            paused = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual("paused", paused["admission"]["status"])
+            self.assertFalse(paused["admission"]["can_enqueue"])
+            self.assertFalse(paused["admission"]["can_run_next"])
+            self.assertEqual("do_not_enqueue_or_run", paused["admission"]["recommended_action"])
+            self.assertEqual(["runner_pause", "global_cooldown"], paused["admission"]["blocked_reasons"])
 
     def test_post_mutation_trigger_failure_is_non_fatal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

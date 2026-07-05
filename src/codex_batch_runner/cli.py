@@ -110,6 +110,8 @@ from .state import (
     set_global_cooldown,
     set_runner_pause,
 )
+from .status_report import build_status_report as build_cbr_status_report
+from .status_report import render_status_report as render_cbr_status_report
 from .summary import render_task_summary
 from .timeutil import parse_time, utc_now
 from .transcript import render_task_transcript
@@ -498,6 +500,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     state = sub.add_parser("state", help="show runner state")
     state.set_defaults(func=cmd_state)
+
+    status = sub.add_parser("status", help="show lightweight cbr admission and queue status")
+    status.add_argument("--json", action="store_true", help="print JSON")
+    status.set_defaults(func=cmd_status)
 
     cooldown = sub.add_parser("cooldown", help="show, set, or clear global cooldown")
     cooldown_sub = cooldown.add_subparsers(dest="cooldown_command", required=True)
@@ -3954,6 +3960,15 @@ def cmd_resolve(config: Config, args: argparse.Namespace) -> int:
 
 def cmd_state(config: Config, args: argparse.Namespace) -> int:
     print(json.dumps(load_state(config), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_status(config: Config, args: argparse.Namespace) -> int:
+    report = build_cbr_status_report(config)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_cbr_status_report(report), end="")
     return 0
 
 
