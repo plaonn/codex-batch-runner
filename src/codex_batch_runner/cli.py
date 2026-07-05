@@ -115,6 +115,7 @@ from .timeutil import parse_time, utc_now
 from .transcript import render_task_transcript
 from .triggers import run_post_mutation_trigger
 from .wake import schedule_manual_cooldown_wake
+from .watching_report import build_watching_evidence_report, render_watching_evidence_report
 from .worktree import (
     build_apply_report,
     build_branch_prune_report,
@@ -394,6 +395,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     decision_cards.add_argument("--json", action="store_true", help="print JSON")
     decision_cards.set_defaults(func=cmd_decision_cards)
+
+    watching_report = sub.add_parser(
+        "watching-report",
+        help="summarize read-only evidence for operator observation/watch items",
+    )
+    watching_report.add_argument("--project", dest="project_id", help="filter queue and routing evidence by project id")
+    watching_report.add_argument("--project-root", help="filter queue and routing evidence by project root")
+    watching_report.add_argument("--category", help="filter queue and routing evidence by category")
+    watching_report.add_argument("--label", help="filter queue and routing evidence by label")
+    watching_report.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_DECISION_CARD_LIMIT,
+        help=f"maximum recent routing tasks to include after filtering; 0 means no limit (default: {DEFAULT_DECISION_CARD_LIMIT})",
+    )
+    watching_report.add_argument("--include-archived", action="store_true", help="include archived tasks in evidence")
+    watching_report.add_argument(
+        "--execution-evidence-json",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="include sanitized supplemental execution evidence rows for routing cards without mutating queue tasks",
+    )
+    watching_report.add_argument("--json", action="store_true", help="print JSON")
+    watching_report.set_defaults(func=cmd_watching_report)
 
     routing_eval_report = sub.add_parser(
         "routing-eval-report",
@@ -3726,6 +3752,32 @@ def cmd_decision_cards(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_decision_card_inventory(report), end="")
+    return 0
+
+
+def cmd_watching_report(config: Config, args: argparse.Namespace) -> int:
+    if args.limit < 0:
+        print("error: --limit must be non-negative", file=sys.stderr)
+        return 1
+    try:
+        execution_evidence_records = load_execution_evidence_records(args.execution_evidence_json)
+    except ExecutionEvidenceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    report = build_watching_evidence_report(
+        config,
+        project_id=args.project_id,
+        project_root=normalized_path(args.project_root) if args.project_root else None,
+        category=args.category,
+        label=args.label,
+        limit=args.limit,
+        include_archived=args.include_archived,
+        execution_evidence_records=execution_evidence_records,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_watching_evidence_report(report), end="")
     return 0
 
 

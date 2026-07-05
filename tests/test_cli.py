@@ -1106,6 +1106,7 @@ class CliTests(unittest.TestCase):
                 ["doctor"],
                 ["events"],
                 ["rate-limits"],
+                ["watching-report"],
                 ["prune"],
                 ["run-next"],
             ):
@@ -2785,6 +2786,129 @@ class CliTests(unittest.TestCase):
             self.assertIn("summary: cards=0 decision_required=0 approval_blocked=0 not_ready=0", output)
             self.assertIn("open_decisions: none", output)
             self.assertIn("next_action: none", output)
+
+    def test_watching_report_summarizes_read_only_evidence_areas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            applied = create_task(
+                config,
+                "applied work",
+                tmp,
+                task_id="applied",
+                project_id="project-a",
+                category="implementation",
+                labels=["watching"],
+                routing_size="small",
+                routing_risk="low",
+                verification_scope=["unit"],
+            )
+            applied["status"] = "completed"
+            applied["review_status"] = "accepted"
+            applied["attempts"] = 1
+            applied["last_result"] = {"task_id": "applied", "status": "completed", "verification": ["unit"]}
+            applied["reviewer_codex"] = {"decision": "pass", "confidence": "high"}
+            applied["execution_mode"] = "git_worktree"
+            applied["execution_apply_status"] = "applied"
+            applied["execution_worktree_status"] = "cleaned"
+            save_task(config, applied)
+            unapplied = create_task(
+                config,
+                "unapplied work",
+                tmp,
+                task_id="unapplied",
+                project_id="project-a",
+                category="implementation",
+                labels=["watching"],
+            )
+            unapplied["status"] = "completed"
+            unapplied["review_status"] = "accepted"
+            unapplied["execution_mode"] = "git_worktree"
+            unapplied["execution_worktree_status"] = "retained"
+            save_task(config, unapplied)
+            failed = create_task(
+                config,
+                "failed work",
+                tmp,
+                task_id="failed",
+                project_id="project-a",
+                category="implementation",
+                labels=["watching"],
+            )
+            failed["status"] = "failed"
+            failed["last_error"] = "synthetic failure"
+            save_task(config, failed)
+            write_json_atomic(
+                rate_limit_dir(config) / "event.json",
+                {
+                    "task_id": "applied",
+                    "detected_at": "2026-06-20T12:00:00+00:00",
+                    "attempt": 1,
+                    "matched_markers": ["usage limit"],
+                    "cooldown_until": "2026-06-20T12:30:00+00:00",
+                },
+            )
+            task_path = config.queue_dir / "applied.json"
+            before = task_path.read_text(encoding="utf-8")
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "watching-report",
+                    "--project",
+                    "project-a",
+                    "--label",
+                    "watching",
+                    "--limit",
+                    "0",
+                    "--json",
+                ]
+            )
+            after = task_path.read_text(encoding="utf-8")
+            report = json.loads(output)
+            areas = {area["area"]: area for area in report["areas"]}
+
+            self.assertEqual(0, code)
+            self.assertEqual(before, after)
+            self.assertTrue(report["read_only"])
+            self.assertFalse(report["mutation_allowed"])
+            self.assertEqual("watching_evidence_report", report["kind"])
+            self.assertEqual("resolve_action_required", report["summary"]["next_action"])
+            self.assertEqual(5, report["summary"]["area_count"])
+            self.assertEqual("action_required", areas["queue_execution"]["evidence_status"])
+            self.assertIn("failed_or_blocked=1", areas["queue_execution"]["signals"])
+            self.assertEqual("action_required", areas["review_apply"]["evidence_status"])
+            self.assertEqual(["unapplied"], areas["review_apply"]["evidence"]["accepted_unapplied_task_ids"])
+            self.assertEqual("action_required", areas["worktree_lifecycle"]["evidence_status"])
+            self.assertEqual(["unapplied"], areas["worktree_lifecycle"]["evidence"]["accepted_unapplied_task_ids"])
+            self.assertEqual("ready_for_close_review", areas["cooldown_rate_limits"]["evidence_status"])
+            self.assertIn("rate_limit_events=1", areas["cooldown_rate_limits"]["signals"])
+            self.assertEqual("continue_observing", areas["routing_policy"]["evidence_status"])
+            self.assertIn("next_action=continue_observing", areas["routing_policy"]["signals"])
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "watching-report",
+                    "--project",
+                    "project-a",
+                    "--label",
+                    "watching",
+                    "--limit",
+                    "0",
+                ]
+            )
+
+            self.assertEqual(0, code)
+            self.assertIn("# watching evidence", output)
+            self.assertIn("read_only: yes", output)
+            self.assertIn("mutation_allowed: no", output)
+            self.assertIn("next_action: resolve_action_required", output)
+            self.assertIn("queue_execution", output)
+            self.assertIn("cooldown_rate_limits", output)
+            self.assertIn("ready_for_close_review", output)
 
     def test_decision_cards_inventory_summarizes_blocked_reasons(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
