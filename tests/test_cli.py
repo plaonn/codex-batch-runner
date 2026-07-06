@@ -3324,6 +3324,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, human_code)
             self.assertIn("EXECUTION REPORT", human_output)
+            self.assertNotIn("\t", human_output)
+            self.assertIn("FINISHED             TASK", human_output)
             self.assertIn("total=2120", human_output)
             self.assertIn("claude-gpt", human_output)
 

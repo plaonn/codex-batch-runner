@@ -18,6 +18,17 @@ TOKEN_USAGE_KEYS = (
     "output_tokens",
     "reasoning_output_tokens",
 )
+EXECUTION_REPORT_TABLE_COLUMNS = (
+    ("FINISHED", 19, "left"),
+    ("TASK", 48, "left"),
+    ("WORKER", 11, "left"),
+    ("POOL", 18, "left"),
+    ("MODEL", 20, "left"),
+    ("STATUS", 9, "left"),
+    ("REVIEW", 14, "left"),
+    ("DURATION", 8, "right"),
+    ("TOKENS", 42, "left"),
+)
 
 
 def build_execution_report(
@@ -286,29 +297,64 @@ def render_execution_report(report: dict[str, Any]) -> str:
     if not rows:
         lines.append("No processed task runs found.")
         return "\n".join(lines) + "\n"
-    lines.append("FINISHED\tTASK\tWORKER\tPOOL\tMODEL\tSTATUS\tREVIEW\tDURATION\tTOKENS")
-    for row in rows:
-        execution = row.get("execution") if isinstance(row.get("execution"), dict) else {}
-        model = row.get("model") if isinstance(row.get("model"), dict) else {}
-        usage = row.get("token_usage") if isinstance(row.get("token_usage"), dict) else {}
-        model_value = model.get("model") or model.get("model_group") or model.get("model_source") or "-"
-        token_value = token_cell(usage, str(row.get("token_usage_source") or ""))
-        lines.append(
-            "\t".join(
-                [
-                    short_time(row.get("finished_at")),
-                    str(row.get("title") or row.get("task_id") or "-"),
-                    str(execution.get("worker_family") or "-"),
-                    str(execution.get("capacity_pool") or "-"),
-                    str(model_value),
-                    str(row.get("status") or "-"),
-                    str(row.get("review_status") or "-"),
-                    duration_cell(row.get("duration_seconds")),
-                    token_value,
-                ]
-            )
-        )
+    table_rows = [
+        [
+            short_time(row.get("finished_at")),
+            str(row.get("title") or row.get("task_id") or "-"),
+            execution_display_value(row, "worker_family"),
+            execution_display_value(row, "capacity_pool"),
+            model_display_value(row),
+            str(row.get("status") or "-"),
+            str(row.get("review_status") or "-"),
+            duration_cell(row.get("duration_seconds")),
+            token_cell(
+                row.get("token_usage") if isinstance(row.get("token_usage"), dict) else {},
+                str(row.get("token_usage_source") or ""),
+            ),
+        ]
+        for row in rows
+    ]
+    lines.append(render_fixed_table(EXECUTION_REPORT_TABLE_COLUMNS, table_rows))
     return "\n".join(lines) + "\n"
+
+
+def execution_display_value(row: dict[str, Any], key: str) -> str:
+    execution = row.get("execution") if isinstance(row.get("execution"), dict) else {}
+    return str(execution.get(key) or "-")
+
+
+def model_display_value(row: dict[str, Any]) -> str:
+    model = row.get("model") if isinstance(row.get("model"), dict) else {}
+    return str(model.get("model") or model.get("model_group") or model.get("model_source") or "-")
+
+
+def render_fixed_table(columns: tuple[tuple[str, int, str], ...], rows: list[list[str]]) -> str:
+    header = [column[0] for column in columns]
+    table_rows = [header, *rows]
+    return "\n".join(render_fixed_table_row(columns, row) for row in table_rows)
+
+
+def render_fixed_table_row(columns: tuple[tuple[str, int, str], ...], row: list[str]) -> str:
+    cells = []
+    for index, (_header, width, align) in enumerate(columns):
+        raw_value = row[index] if index < len(row) else ""
+        cells.append(fixed_cell(raw_value, width, align=align))
+    return "  ".join(cells).rstrip()
+
+
+def fixed_cell(value: object, width: int, *, align: str = "left") -> str:
+    text = truncate_display(str(value or "-"), width)
+    if align == "right":
+        return text.rjust(width)
+    return text.ljust(width)
+
+
+def truncate_display(value: str, width: int) -> str:
+    if len(value) <= width:
+        return value
+    if width <= 3:
+        return value[:width]
+    return value[: width - 3].rstrip() + "..."
 
 
 def token_cell(usage: dict[str, Any], source: str) -> str:
