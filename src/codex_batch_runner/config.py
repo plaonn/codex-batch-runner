@@ -7,10 +7,14 @@ from typing import Any
 
 from .fs import read_json
 from .model_requirements import (
+    REQUIREMENT_DIMENSIONS,
     execution_config_value,
     execution_targets_value,
+    level_match_value,
     model_requirement_vector_value,
     model_selection_rules_value,
+    optional_string_value,
+    string_value,
 )
 
 
@@ -65,6 +69,8 @@ class Config:
     default_execution_config: dict[str, Any] = field(default_factory=dict)
     execution_targets: dict[str, dict[str, Any]] = field(default_factory=dict)
     model_selection_rules: list[dict[str, Any]] = field(default_factory=list)
+    worker_targets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    worker_selection_rules: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def load(cls, config_path: str | None = None, root: Path | None = None) -> "Config":
@@ -94,6 +100,10 @@ class Config:
         execution_targets = execution_targets_value(data.get("execution_targets"))
         model_selection_rules = model_selection_rules_value(data.get("model_selection_rules"))
         validate_execution_target_references(default_execution_config, model_selection_rules, execution_targets)
+        capacity_pools = capacity_pools_value(data.get("capacity_pools"))
+        worker_targets = worker_targets_value(data.get("worker_targets"))
+        worker_selection_rules = worker_selection_rules_value(data.get("worker_selection_rules"))
+        validate_worker_target_references(worker_targets, worker_selection_rules, capacity_pools)
 
         return cls(
             root=base,
@@ -179,7 +189,7 @@ class Config:
                 "max_running_per_project",
                 data.get("max_running_per_project", 1),
             ),
-            capacity_pools=capacity_pools_value(data.get("capacity_pools")),
+            capacity_pools=capacity_pools,
             project_priorities=project_priorities_value(data.get("project_priorities", {})),
             default_project_priority=int_value(
                 "default_project_priority",
@@ -218,6 +228,8 @@ class Config:
             default_execution_config=default_execution_config,
             execution_targets=execution_targets,
             model_selection_rules=model_selection_rules,
+            worker_targets=worker_targets,
+            worker_selection_rules=worker_selection_rules,
         )
 
 
@@ -263,6 +275,101 @@ def validate_execution_target_references(
     if missing:
         key, alias = missing[0]
         raise ValueError(f"{key} references unknown execution_target: {alias}")
+
+
+def worker_targets_value(value: object) -> dict[str, dict[str, Any]]:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("worker_targets must be an object")
+    targets: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_target in value.items():
+        name = string_value("worker_targets key", raw_name)
+        targets[name] = worker_target_value(f"worker_targets.{name}", raw_target)
+    return targets
+
+
+def worker_target_value(key: str, value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    backend = (
+        optional_string_value(f"{key}.execution_backend", value.get("execution_backend"))
+        or "external-json-command"
+    )
+    if backend not in {"shell", "external-json-command"}:
+        raise ValueError(f"{key}.execution_backend must be one of: external-json-command, shell")
+    target: dict[str, Any] = {"execution_backend": backend}
+    if "capacity_pool" in value:
+        target["capacity_pool"] = optional_string_value(f"{key}.capacity_pool", value.get("capacity_pool")) or "codex"
+    if backend == "external-json-command":
+        command = argv_list(f"{key}.external_command", value.get("external_command"))
+        if not command:
+            raise ValueError(f"{key}.external_command must be a non-empty list of strings")
+        target["external_command"] = command
+        if "external_timeout_seconds" in value:
+            target["external_timeout_seconds"] = positive_int_value(
+                f"{key}.external_timeout_seconds",
+                value.get("external_timeout_seconds"),
+            )
+    if backend == "shell":
+        command = argv_list(f"{key}.shell_command", value.get("shell_command"))
+        if not command:
+            raise ValueError(f"{key}.shell_command must be a non-empty list of strings")
+        target["shell_command"] = command
+        if "shell_timeout_seconds" in value:
+            target["shell_timeout_seconds"] = positive_int_value(
+                f"{key}.shell_timeout_seconds",
+                value.get("shell_timeout_seconds"),
+            )
+    if "worker_family" in value:
+        target["worker_family"] = optional_string_value(f"{key}.worker_family", value.get("worker_family"))
+    if "model_group" in value:
+        target["model_group"] = optional_string_value(f"{key}.model_group", value.get("model_group"))
+    if "budget_hint" in value:
+        target["budget_hint"] = optional_string_value(f"{key}.budget_hint", value.get("budget_hint"))
+    return {item_key: item for item_key, item in target.items() if item not in (None, "", {})}
+
+
+def worker_selection_rules_value(value: object) -> list[dict[str, Any]]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        raise ValueError("worker_selection_rules must be a list")
+    rules: list[dict[str, Any]] = []
+    for index, raw_rule in enumerate(value):
+        key = f"worker_selection_rules[{index}]"
+        if not isinstance(raw_rule, dict):
+            raise ValueError(f"{key} must be an object")
+        name = optional_string_value(f"{key}.name", raw_rule.get("name")) or f"rule-{index}"
+        raw_when = raw_rule.get("when", {})
+        if not isinstance(raw_when, dict):
+            raise ValueError(f"{key}.when must be an object")
+        when = {dimension: level_match_value(f"{key}.when.{dimension}", raw_when[dimension]) for dimension in raw_when}
+        unknown = sorted(str(name) for name in when if name not in REQUIREMENT_DIMENSIONS)
+        if unknown:
+            raise ValueError(f"{key}.when contains unknown dimensions: {', '.join(unknown)}")
+        worker_target = optional_string_value(f"{key}.worker_target", raw_rule.get("worker_target"))
+        if not worker_target:
+            raise ValueError(f"{key}.worker_target must be a non-empty string")
+        rules.append({"name": name, "when": when, "worker_target": worker_target})
+    return rules
+
+
+def validate_worker_target_references(
+    worker_targets: dict[str, dict[str, Any]],
+    worker_selection_rules: list[dict[str, Any]],
+    capacity_pools: dict[str, dict[str, int]],
+) -> None:
+    for name, target in worker_targets.items():
+        pool = str(target.get("capacity_pool") or "codex")
+        if pool not in capacity_pools:
+            raise ValueError(f"worker_targets.{name}.capacity_pool references unknown capacity_pool: {pool}")
+    for rule in worker_selection_rules:
+        alias = str(rule.get("worker_target") or "")
+        if alias not in worker_targets:
+            raise ValueError(
+                f"worker_selection_rules.{rule.get('name')}.worker_target references unknown worker_target: {alias}"
+            )
 
 
 def path_list_value(key: str, data: dict[str, Any], base: Path) -> list[Path]:

@@ -30,6 +30,7 @@ from .shell import ShellResult, run_shell_task
 from .state import get_runner_pause, in_global_cooldown, is_runner_paused, mark_rate_limit, mark_run, mark_success
 from .timeutil import add_seconds, iso_now, parse_time
 from .triggers import run_post_run_trigger
+from .worker_routing import apply_worker_target, resolve_worker_target
 from .worktree import prepare_task_worktree_for_run_locked
 
 
@@ -183,6 +184,12 @@ def claim_next_implementation_task_locked(
             )
         mark_run(config, None)
         return None, RunOutcome(status="empty", message="no runnable task")
+
+    routing_error = apply_configured_worker_target(config, task)
+    if routing_error:
+        mark_execution_config_failure(config, task, routing_error)
+        mark_run(config, task["id"])
+        return None, RunOutcome(status=task["status"], message=routing_error, task_id=task["id"])
 
     started_at = iso_now()
     execution_backend = task_execution_backend(task)
@@ -389,6 +396,16 @@ def validate_execution_config(config: Config, task: dict[str, Any]) -> tuple[Res
     except ValueError as exc:
         return None, str(exc)
     return settings, None
+
+
+def apply_configured_worker_target(config: Config, task: dict[str, Any]) -> str | None:
+    try:
+        resolved = resolve_worker_target(config, task)
+    except ValueError as exc:
+        return str(exc)
+    if resolved:
+        apply_worker_target(task, resolved)
+    return None
 
 
 def task_execution_backend(task: dict[str, Any]) -> str:
@@ -943,6 +960,21 @@ def record_external_json_command_last_run(task: dict, result: ExternalJsonComman
         "stdout_bytes": result.stdout_bytes,
         "stderr_bytes": result.stderr_bytes,
     }
+    worker_target = resolved_worker_target_metadata(task)
+    if worker_target:
+        task["last_run"]["resolved_worker_target"] = worker_target
+
+
+def resolved_worker_target_metadata(task: dict) -> dict[str, Any]:
+    metadata = {
+        "worker_target": task.get("worker_target"),
+        "selection_rule": task.get("worker_selection_rule"),
+        "selection_reason": task.get("worker_selection_reason"),
+        "worker_family": task.get("worker_family"),
+        "model_group": task.get("worker_model_group"),
+        "budget_hint": task.get("worker_budget_hint"),
+    }
+    return {key: value for key, value in metadata.items() if value not in (None, "", {})}
 
 
 def clear_active_run_metadata(task: dict[str, Any]) -> None:

@@ -104,7 +104,14 @@ def execution_sort_key(task: dict[str, Any]) -> tuple[str, str]:
 
 def task_execution_row(config: Config, task: dict[str, Any]) -> dict[str, Any]:
     last_run = task.get("last_run") if isinstance(task.get("last_run"), dict) else {}
-    resolved_config = last_run.get("resolved_execution_config") if isinstance(last_run.get("resolved_execution_config"), dict) else {}
+    resolved_config = (
+        last_run.get("resolved_execution_config")
+        if isinstance(last_run.get("resolved_execution_config"), dict)
+        else {}
+    )
+    resolved_worker_target = (
+        last_run.get("resolved_worker_target") if isinstance(last_run.get("resolved_worker_target"), dict) else {}
+    )
     backend = sanitize(last_run.get("execution_backend") or "codex")
     capacity_pool = sanitize(task.get("capacity_pool") or "codex")
     command = list_value(last_run.get("command"))
@@ -130,19 +137,29 @@ def task_execution_row(config: Config, task: dict[str, Any]) -> dict[str, Any]:
             "backend": backend,
             "command_kind": sanitize(last_run.get("command_kind") or ""),
             "capacity_pool": capacity_pool,
-            "worker_family": worker_family(backend, capacity_pool, command),
+            "worker_family": sanitize(
+                resolved_worker_target.get("worker_family") or worker_family(backend, capacity_pool, command)
+            ),
             "returncode": int_value(last_run.get("returncode")),
             "timed_out": bool(last_run.get("timed_out")),
         },
         "model": {
             "model": sanitize(resolved_config.get("model") or command_option(command, "--model")),
-            "model_group": sanitize(command_option(command, "--model-group")),
+            "model_group": sanitize(
+                command_option(command, "--model-group") or resolved_worker_target.get("model_group")
+            ),
             "model_source": sanitize(resolved_config.get("model_source") or ""),
-            "selection_rule": sanitize(resolved_config.get("selection_rule") or ""),
-            "selection_reason": sanitize(resolved_config.get("selection_reason") or ""),
-            "execution_target": sanitize(resolved_config.get("execution_target") or ""),
+            "selection_rule": sanitize(
+                resolved_config.get("selection_rule") or resolved_worker_target.get("selection_rule")
+            ),
+            "selection_reason": sanitize(
+                resolved_config.get("selection_reason") or resolved_worker_target.get("selection_reason")
+            ),
+            "execution_target": sanitize(
+                resolved_config.get("execution_target") or resolved_worker_target.get("worker_target")
+            ),
             "codex_profile": sanitize(resolved_config.get("codex_profile") or ""),
-            "budget_hint": sanitize(resolved_config.get("budget_hint") or ""),
+            "budget_hint": sanitize(resolved_config.get("budget_hint") or resolved_worker_target.get("budget_hint")),
         },
         "result": {
             "status": sanitize(last_result_value(task, "status")),

@@ -98,6 +98,26 @@
       "execution_target": "high_capability_current"
     }
   ],
+  "worker_targets": {
+    "external_strict_review": {
+      "execution_backend": "external-json-command",
+      "capacity_pool": "external-review",
+      "external_command": ["path/to/cbr-json-wrapper", "--model-group", "claude-gpt"],
+      "external_timeout_seconds": 900,
+      "worker_family": "external",
+      "model_group": "claude-gpt",
+      "budget_hint": "strict-review"
+    }
+  },
+  "worker_selection_rules": [
+    {
+      "name": "strict-review-external",
+      "when": {
+        "review_strictness": "high"
+      },
+      "worker_target": "external_strict_review"
+    }
+  ],
   "manual_cooldown_wake_scheduler": "disabled",
   "manual_cooldown_wake_command": [],
   "codex_cli_update_command": [],
@@ -117,6 +137,9 @@
   "max_running_per_project": 1,
   "capacity_pools": {
     "codex": {
+      "max_running": 1
+    },
+    "external-review": {
       "max_running": 1
     }
   },

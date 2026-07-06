@@ -10,6 +10,7 @@ from .events import emit_task_event, transition_payload
 from .model_requirements import derive_model_requirement_vector, task_requirement_metadata
 from .fs import ensure_dir, read_json, write_json_atomic
 from .timeutil import iso_now, parse_time, utc_now
+from .worker_routing import planned_worker_capacity_pool
 
 RUNNABLE_STATUSES = {"runnable", "needs_resume"}
 DEFAULT_HIDDEN_LIST_STATUSES = {"completed", "archived"}
@@ -523,6 +524,11 @@ def task_capacity_pool(task: dict) -> str:
     return validate_capacity_pool(task.get("capacity_pool") or "codex")
 
 
+def task_planned_capacity_pool(config: Config, task: dict) -> str:
+    planned = planned_worker_capacity_pool(config, task)
+    return validate_capacity_pool(planned or task.get("capacity_pool") or "codex")
+
+
 def task_priority(task: dict) -> str:
     try:
         return validate_task_priority(task.get("task_priority") or "normal")
@@ -651,7 +657,7 @@ def selection_report(config: Config) -> dict:
                 "task_id": task.get("id"),
                 "project_id": task_project_id(task),
                 "project_root": task_project_root(task),
-                "capacity_pool": task_capacity_pool(task),
+                "capacity_pool": task_planned_capacity_pool(config, task),
                 "task_priority": task_priority(task),
                 "admissible": not reasons,
                 "reasons": reasons,
@@ -694,7 +700,7 @@ def capacity_evidence(config: Config, tasks: list[dict]) -> dict:
 def capacity_blockers(config: Config, task: dict, running: dict[str, Counter[str] | int] | None = None) -> list[str]:
     running = running or running_capacity(list_tasks(config))
     blockers: list[str] = []
-    pool = task_capacity_pool(task)
+    pool = task_planned_capacity_pool(config, task)
     pools = config.capacity_pools
     if pool not in pools:
         blockers.append("unknown_capacity_pool")

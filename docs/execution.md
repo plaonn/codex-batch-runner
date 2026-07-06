@@ -25,7 +25,9 @@ Config는 선택적으로 아래 field를 가질 수 있습니다.
 - `review_model_requirement_vector`: reviewer Codex 호출에 사용할 요구 벡터
 - `default_execution_config`: selection rule이 match되지 않을 때 사용할 local Codex 실행 설정
 - `execution_targets`: stable local alias와 concrete Codex `model`, `codex_profile`, allowlisted `config_overrides`, optional freshness metadata mapping
-- `model_selection_rules`: requirement dimension match 조건과 direct 실행 설정 또는 `execution_target` alias mapping
+- `model_selection_rules`: requirement dimension match 조건과 direct Codex 실행 설정 또는 `execution_target` alias mapping
+- `worker_targets`: requirement rule이 task를 Codex CLI가 아닌 다른 execution backend로 보낼 때 사용할 backend, capacity pool, command, timeout, worker metadata alias mapping
+- `worker_selection_rules`: requirement dimension match 조건과 `worker_target` alias mapping
 
 Task는 `model_requirement_vector`를 저장할 수 있습니다. 없으면 enqueue 단계에서 routing metadata를 기반으로 deterministic vector를 생성합니다. 직접 model/profile/config override를 task에 저장하지 않습니다.
 
@@ -62,7 +64,7 @@ Policy proposal apply JSON shape is fixed at `schema_version: 1` and `kind: poli
 
 `cbr routing-report`는 model requirement와 selection rule을 조정하기 위한 read-only evidence surface입니다. 명령은 queue task를 model requirement, model selection rule, category, label, requirement/category 조합, routing experiment, routing experiment lane family, routing size, routing risk, routing risk factor, verification scope, routing decision tuple, requirement/routing decision tuple, selection/routing decision tuple, low-cost candidate 신호, requirement/experiment 조합, provider resource evidence로 집계하고 accepted count, first-pass accepted count, needs-fix/rejected rate, reviewer decision count, auto-fix task frequency, attempts, run count, duration 기반 cost proxy를 출력합니다. `evaluation_diagnostics.task_buckets`는 같은 기존 evidence에서 threshold-only advisory를 추가로 계산합니다. 고정 기준은 `min_accepted_count=5`, `min_first_pass_accept_rate=0.90`, `max_needs_fix_or_rejected_rate=0.05`이고, reviewer/human-review adverse signal이 있으면 `reviewable`이 되지 않습니다. Advisory status는 `insufficient_sample`, `below_threshold`, `reviewable`이며 read-only입니다. `evaluation_diagnostics.probe_lanes`는 `routing_experiment`를 `baseline`, `probe`, `guard`, `manual`, `unspecified`, `other` lane family로 분류해 baseline/probe/guard outcome을 기존 task bucket과 requirement 축에서 비교할 수 있게 합니다. 이 diagnostic은 policy-candidate `task_buckets` 의미를 바꾸지 않습니다. Provider resource evidence는 현재 Codex provider 불확실성을 명시하기 위해 기본적으로 `provider_id=codex`, `quota_boundary=unknown`, `sharing_assumption=not_independent`를 사용합니다. 이 evidence는 local `capacity_pool`, worker/reviewer role, legacy profile name과 분리되며 provider quota bucket을 추론하지 않습니다. Report는 task JSON, event log, review status를 변경하지 않고 Codex 또는 reviewer Codex를 호출하지 않습니다. 운영자는 이 결과를 보고 requirement derivation 또는 selection rule 변경을 별도 policy change로 반영합니다.
 
-`cbr execution-report`는 enqueue intent가 아니라 실제 처리된 task run을 기준으로 worker/model/cost evidence를 보는 read-only surface입니다. Report row는 task timing, queue wait, duration, execution backend, capacity pool, worker family, return code, timeout, `last_run.resolved_execution_config`의 model source/selection rule/execution target, external command의 `--model-group`, result count, token usage를 포함합니다. Codex token usage는 configured `log_dir` 내부 attempt JSONL의 최신 `usage` object에서만 읽고, shell backend는 token-free로 표시하며, usage를 노출하지 않는 external-json-command/Antigravity worker는 unavailable로 표시합니다. 이 command는 raw prompt, transcript/log body, full command argv, session/thread id, raw log path를 출력하지 않고 task JSON/event log/review status를 변경하지 않습니다.
+`cbr execution-report`는 enqueue intent가 아니라 실제 처리된 task run을 기준으로 worker/model/cost evidence를 보는 read-only surface입니다. Report row는 task timing, queue wait, duration, execution backend, capacity pool, worker family, return code, timeout, `last_run.resolved_execution_config`의 model source/selection rule/execution target, `last_run.resolved_worker_target`의 worker target/model group, external command의 `--model-group`, result count, token usage를 포함합니다. Codex token usage는 configured `log_dir` 내부 attempt JSONL의 최신 `usage` object에서만 읽고, shell backend는 token-free로 표시하며, usage를 노출하지 않는 external-json-command/Antigravity worker는 unavailable로 표시합니다. 이 command는 raw prompt, transcript/log body, full command argv, session/thread id, raw log path를 출력하지 않고 task JSON/event log/review status를 변경하지 않습니다.
 
 `cbr routing-policy-candidates`는 같은 routing-report/evaluation diagnostics의 task bucket threshold advisory를 read-only candidate report로 재구성합니다. 기본적으로 `reviewable` bucket만 candidate로 표시하고, candidate마다 stable `candidate_id`, task bucket key, evidence counts/rates, advisory reasons, thresholds, `recommended_next_step=operator_review`를 제공합니다. `decision_cards`는 실행 후보 보고 상태와 사용자 결정 상태를 분리해 reviewable bucket은 `decision_required`, non-reviewable bucket은 `not_ready`로 표시합니다. `--include-non-reviewable`을 사용하면 insufficient/below-threshold bucket도 별도 section과 observation decision card에 표시하며 blocked/rejection reason을 포함하고, human output은 recommendation/blocker summary groups를 표 위에 표시합니다. 이 report는 operator review 대상 목록을 드러내는 표면일 뿐 candidate approval, routing/model/provider config write, policy apply, task/event/runtime mutation을 수행하지 않습니다.
 
@@ -118,6 +120,43 @@ Invalid JSON, task id mismatch, missing required key, invalid status, executable
 External attempt log는 command, cwd, started/finished time, duration, timeout, return code, timeout flag, sanitized error metadata, stdout, stderr를 task log file에 저장합니다. Task JSON의 `last_run`은 execution backend, command kind, configured argv command without the appended prompt, returncode, timing, timeout flag/seconds, stdout/stderr byte count, log path만 저장합니다. Event payload에는 raw stdout/stderr 또는 prompt text를 넣지 않고 sanitized summary/count/path metadata만 남깁니다.
 
 `external_json_command_timeout_seconds` config 기본값은 `900`입니다. `--external-timeout` 또는 task `external_timeout_seconds`가 있으면 해당 task에만 override합니다.
+
+## Worker target routing
+
+`model_selection_rules`는 Codex CLI model/profile/config option만 선택합니다. External worker, shell worker, Antigravity wrapper처럼 execution backend와 pool 자체를 바꾸려면 `worker_targets`와 `worker_selection_rules`를 사용합니다.
+
+Example:
+
+```json
+{
+  "capacity_pools": {
+    "codex": {"max_running": 1},
+    "external-review": {"max_running": 1}
+  },
+  "worker_targets": {
+    "external_strict_review": {
+      "execution_backend": "external-json-command",
+      "capacity_pool": "external-review",
+      "external_command": ["path/to/cbr-json-wrapper", "--model-group", "claude-gpt"],
+      "external_timeout_seconds": 900,
+      "worker_family": "external",
+      "model_group": "claude-gpt",
+      "budget_hint": "strict-review"
+    }
+  },
+  "worker_selection_rules": [
+    {
+      "name": "strict-review-external",
+      "when": {"review_strictness": "high"},
+      "worker_target": "external_strict_review"
+    }
+  ]
+}
+```
+
+Only default `codex` tasks are eligible for worker target routing. Tasks already enqueued with `execution_backend=shell` or `execution_backend=external-json-command`, tasks with explicit `shell_command` or `external_command`, and `needs_resume` tasks keep their stored execution backend. On claim, cbr applies the selected target to the task JSON by setting `execution_backend`, `capacity_pool`, command, timeout, and sanitized worker metadata before running the worker.
+
+Queue admission uses the planned worker target capacity pool for matching runnable tasks. This means a strict-review task routed to `external-review` is not blocked merely because the default `codex` pool is full, while running capacity still counts the pool stored on already claimed tasks.
 
 
 ## Model requirement routing optimization policy
@@ -193,7 +232,7 @@ Field 의미:
 - `max_total_running`: 전체 queue에서 동시에 `running` 상태일 수 있는 implementation task 수의 상한입니다. 기본값은 `1`입니다.
 - `max_running_per_project`: 같은 `project_id` 또는 같은 normalized `project_root`에 대해 동시에 `running` 상태일 수 있는 implementation task 수의 상한입니다. 기본값은 `1`입니다.
 - `capacity_pools`: scarce execution resource별 capacity mapping입니다. 첫 pool 이름은 `codex`로 고정합니다. 각 pool은 `max_running` positive integer를 가집니다.
-- Task metadata `capacity_pool`: task가 사용할 pool 이름입니다. 없으면 `codex`로 해석합니다. `cbr enqueue --capacity-pool POOL`로 설정할 수 있습니다.
+- Task metadata `capacity_pool`: task가 사용할 pool 이름입니다. 없으면 `codex`로 해석합니다. `cbr enqueue --capacity-pool POOL`로 설정할 수 있습니다. `worker_selection_rules`가 match되는 아직 claim되지 않은 default Codex task는 해당 `worker_target.capacity_pool`을 planned pool로 사용합니다.
 - Task metadata `task_priority`: 같은 project 안의 task 우선순위입니다. 값은 `asap`, `high`, `normal`, `low`, `background`이며 기본값은 `normal`입니다. `cbr enqueue --priority PRIORITY`로 설정할 수 있습니다.
 - `project_priorities`: project id 또는 normalized project root를 integer priority에 매핑합니다. 낮은 숫자가 높은 project priority입니다.
 - `default_project_priority`: `project_priorities`에 없는 project의 raw priority입니다. 기본값은 `100`입니다.

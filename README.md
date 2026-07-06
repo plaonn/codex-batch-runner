@@ -146,7 +146,7 @@ Config discovery order:
 
 If neither is provided, `cbr` exits with an error instead of creating a runtime directory under the current working directory. Example configs are available in [examples/config.example.json](examples/config.example.json) and [examples/config.automation.example.json](examples/config.automation.example.json).
 
-Optional `root` makes relative runtime paths independent of the process current working directory. `worktree_mode=task` enables task-specific git worktrees. `model_requirement_vector`, `model_selection_rules`, and `default_execution_config` keep task intent separate from local Codex model/profile choices.
+Optional `root` makes relative runtime paths independent of the process current working directory. `worktree_mode=task` enables task-specific git worktrees. `model_requirement_vector`, `model_selection_rules`, and `default_execution_config` keep task intent separate from local Codex model/profile choices. `worker_targets` and `worker_selection_rules` can route matching default Codex tasks to a configured shell or external JSON worker before claim.
 
 For launchd/systemd installation, config discovery, and `doctor`, use [docs/operator-installation.md](docs/operator-installation.md). For execution policy and full config contracts, use [docs/execution.md](docs/execution.md).
 

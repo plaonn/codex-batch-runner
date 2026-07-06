@@ -74,6 +74,10 @@
 - `shell_timeout_seconds`: shell backend task-specific timeout. 없으면 config `shell_task_timeout_seconds` 기본값을 사용합니다.
 - `external_command`: external-json-command backend가 실행할 non-empty argv string list. Raw shell string은 저장하지 않습니다. Runner는 정상 cbr prompt wrapper를 마지막 argv argument로 추가합니다.
 - `external_timeout_seconds`: external-json-command task-specific wall-clock timeout. 없으면 config `external_json_command_timeout_seconds` 기본값을 사용합니다.
+- `worker_target`: config `worker_selection_rules`가 claim 시점에 적용한 worker target alias.
+- `worker_selection_rule`: worker target을 선택한 config rule name.
+- `worker_selection_reason`: worker target 선택 이유.
+- `worker_family`, `worker_model_group`, `worker_budget_hint`: worker target에서 복사된 sanitized reporting metadata.
 - bounded review/fix chain metadata:
   - `root_task_id`
   - `parent_task_id`

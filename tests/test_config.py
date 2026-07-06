@@ -247,6 +247,92 @@ class ConfigTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, message):
                         Config.load(str(config_path), root=Path(tmp))
 
+    def test_worker_target_config_can_route_by_requirement_vector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "capacity_pools": {
+                            "codex": {"max_running": 1},
+                            "antigravity-claude-gpt": {"max_running": 1},
+                        },
+                        "worker_targets": {
+                            "antigravity_review": {
+                                "execution_backend": "external-json-command",
+                                "capacity_pool": "antigravity-claude-gpt",
+                                "external_command": ["agy-cbr-wrapper", "--model-group", "claude-gpt"],
+                                "external_timeout_seconds": 900,
+                                "worker_family": "antigravity",
+                                "model_group": "claude-gpt",
+                                "budget_hint": "review",
+                            }
+                        },
+                        "worker_selection_rules": [
+                            {
+                                "name": "strict-review",
+                                "when": {"review_strictness": ["high"]},
+                                "worker_target": "antigravity_review",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertEqual("antigravity-claude-gpt", config.worker_targets["antigravity_review"]["capacity_pool"])
+            self.assertEqual("claude-gpt", config.worker_targets["antigravity_review"]["model_group"])
+            self.assertEqual("strict-review", config.worker_selection_rules[0]["name"])
+
+    def test_worker_target_config_must_be_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            invalid_cases = [
+                ({"worker_targets": []}, "worker_targets must be an object"),
+                (
+                    {
+                        "worker_targets": {
+                            "bad": {
+                                "execution_backend": "external-json-command",
+                                "external_command": ["worker"],
+                                "capacity_pool": "missing",
+                            }
+                        }
+                    },
+                    "worker_targets.bad.capacity_pool references unknown capacity_pool: missing",
+                ),
+                (
+                    {
+                        "worker_targets": {
+                            "bad": {
+                                "execution_backend": "external-json-command",
+                                "external_command": [],
+                            }
+                        }
+                    },
+                    "worker_targets.bad.external_command must be a non-empty list of strings",
+                ),
+                (
+                    {
+                        "worker_targets": {
+                            "ok": {
+                                "execution_backend": "external-json-command",
+                                "external_command": ["worker"],
+                            }
+                        },
+                        "worker_selection_rules": [{"worker_target": "missing"}],
+                    },
+                    "worker_selection_rules.rule-0.worker_target references unknown worker_target: missing",
+                ),
+            ]
+            for data, message in invalid_cases:
+                with self.subTest(data=data):
+                    config_path.write_text(json.dumps(data), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, message):
+                        Config.load(str(config_path), root=Path(tmp))
+
     def test_priority_config_can_be_enabled_explicitly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp) / "project"

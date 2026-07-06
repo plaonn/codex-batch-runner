@@ -1474,6 +1474,122 @@ class CliTests(unittest.TestCase):
             self.assertEqual(120, task["external_timeout_seconds"])
             self.assertEqual("External JSON command task: " + shlex.join(command), task["prompt"])
 
+    def test_worker_selection_rule_routes_codex_task_to_external_json_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worker_script = Path(tmp) / "worker.py"
+            worker_script.write_text(
+                "import json\n"
+                "print(json.dumps({"
+                "'task_id':'routed-task',"
+                "'status':'completed',"
+                "'summary':'worker completed',"
+                "'changed_files':[],"
+                "'verification':['worker route']"
+                "}))\n",
+                encoding="utf-8",
+            )
+            command = [sys.executable, str(worker_script), "--model-group", "claude-gpt"]
+            config_path = write_config(
+                tmp,
+                extra={
+                    "capacity_pools": {
+                        "codex": {"max_running": 1},
+                        "antigravity-claude-gpt": {"max_running": 1},
+                    },
+                    "worker_targets": {
+                        "antigravity_review": {
+                            "execution_backend": "external-json-command",
+                            "capacity_pool": "antigravity-claude-gpt",
+                            "external_command": command,
+                            "external_timeout_seconds": 120,
+                            "worker_family": "antigravity",
+                            "model_group": "claude-gpt",
+                            "budget_hint": "review",
+                        }
+                    },
+                    "worker_selection_rules": [
+                        {
+                            "name": "strict-review",
+                            "when": {"review_strictness": "high"},
+                            "worker_target": "antigravity_review",
+                        }
+                    ],
+                },
+            )
+            config = Config.load(str(config_path))
+            create_task(
+                config,
+                "review this",
+                tmp,
+                task_id="routed-task",
+                title="Routed review task",
+                model_requirement_vector=requirement_vector(review_strictness="high"),
+            )
+
+            code, output = run_cli(["--config", str(config_path), "run-next", "--json"])
+            task = load_task(Config.load(str(config_path)), "routed-task")
+
+            self.assertEqual(0, code)
+            self.assertEqual("completed", json.loads(output)["status"])
+            self.assertEqual("completed", task["status"])
+            self.assertEqual("external-json-command", task["execution_backend"])
+            self.assertEqual("antigravity-claude-gpt", task["capacity_pool"])
+            self.assertEqual(command, task["external_command"])
+            self.assertEqual(120, task["external_timeout_seconds"])
+            self.assertEqual("antigravity_review", task["worker_target"])
+            self.assertEqual("strict-review", task["worker_selection_rule"])
+            self.assertEqual("claude-gpt", task["worker_model_group"])
+            self.assertEqual("worker completed", task["last_result"]["summary"])
+            resolved_target = task["last_run"]["resolved_worker_target"]
+            self.assertEqual("antigravity_review", resolved_target["worker_target"])
+            self.assertEqual("claude-gpt", resolved_target["model_group"])
+
+    def test_worker_selection_rule_uses_planned_capacity_pool_for_admission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                extra={
+                    "max_total_running": 2,
+                    "max_running_per_project": 2,
+                    "capacity_pools": {
+                        "codex": {"max_running": 1},
+                        "antigravity-claude-gpt": {"max_running": 1},
+                    },
+                    "worker_targets": {
+                        "antigravity_review": {
+                            "execution_backend": "external-json-command",
+                            "capacity_pool": "antigravity-claude-gpt",
+                            "external_command": [sys.executable, "-c", "print('{}')"],
+                            "model_group": "claude-gpt",
+                        }
+                    },
+                    "worker_selection_rules": [
+                        {
+                            "name": "strict-review",
+                            "when": {"review_strictness": "high"},
+                            "worker_target": "antigravity_review",
+                        }
+                    ],
+                },
+            )
+            config = Config.load(str(config_path))
+            create_task(config, "already running", tmp, task_id="running-task")
+            running = load_task(config, "running-task")
+            running["status"] = "running"
+            save_task(config, running)
+            create_task(
+                config,
+                "review this",
+                tmp,
+                task_id="routed-task",
+                model_requirement_vector=requirement_vector(review_strictness="high"),
+            )
+
+            selected = select_next_task(Config.load(str(config_path)))
+
+            self.assertIsNotNone(selected)
+            self.assertEqual("routed-task", selected["id"])
+
     def test_enqueue_rejects_empty_external_command_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
