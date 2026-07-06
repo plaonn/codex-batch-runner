@@ -29,6 +29,11 @@ from .decision_cards import (
 )
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write_event_nonfatal
 from .execution_evidence import ExecutionEvidenceError, load_execution_evidence_records
+from .execution_report import (
+    DEFAULT_EXECUTION_REPORT_LIMIT,
+    build_execution_report,
+    render_execution_report,
+)
 from .model_requirements import REQUIREMENT_DIMENSIONS, REQUIREMENT_LEVELS, model_requirement_vector_value
 from .planned_execution import planned_execution_compact_note
 from .policy_proposals import (
@@ -447,6 +452,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     routing_eval_report.add_argument("--json", action="store_true", help="print JSON")
     routing_eval_report.set_defaults(func=cmd_routing_eval_report)
+
+    execution_report = sub.add_parser(
+        "execution-report",
+        help="summarize actual processed task runs, worker selection, and token usage evidence",
+    )
+    execution_report.add_argument("--project", dest="project_id", help="filter by project id")
+    execution_report.add_argument("--project-root", help="filter by project root")
+    execution_report.add_argument("--category", help="filter by category")
+    execution_report.add_argument("--label", help="filter by label")
+    execution_report.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_EXECUTION_REPORT_LIMIT,
+        help=f"maximum recent processed runs to include after filtering; 0 means no limit (default: {DEFAULT_EXECUTION_REPORT_LIMIT})",
+    )
+    execution_report.add_argument("--include-archived", action="store_true", help="include archived tasks")
+    execution_report.add_argument("--json", action="store_true", help="print JSON")
+    execution_report.set_defaults(func=cmd_execution_report)
 
     logs = sub.add_parser("logs", help="show task log paths or log contents")
     logs.add_argument("task_id")
@@ -3810,6 +3833,26 @@ def cmd_routing_eval_report(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_routing_evaluation_report(report), end="")
+    return 0
+
+
+def cmd_execution_report(config: Config, args: argparse.Namespace) -> int:
+    if args.limit < 0:
+        print("error: --limit must be non-negative", file=sys.stderr)
+        return 1
+    report = build_execution_report(
+        config,
+        project_id=args.project_id,
+        project_root=normalized_path(args.project_root) if args.project_root else None,
+        category=args.category,
+        label=args.label,
+        limit=args.limit,
+        include_archived=args.include_archived,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_execution_report(report), end="")
     return 0
 
 

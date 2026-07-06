@@ -3192,6 +3192,151 @@ class CliTests(unittest.TestCase):
             self.assertEqual("", output)
             self.assertIn("--limit must be non-negative", stderr)
 
+    def test_execution_report_json_summarizes_processed_runs_and_token_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            codex_log = config.log_dir / "codex-task" / "attempt-1.jsonl"
+            codex_log.parent.mkdir(parents=True, exist_ok=True)
+            codex_log.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "turn.started"}),
+                        json.dumps(
+                            {
+                                "type": "turn.completed",
+                                "usage": {
+                                    "input_tokens": 2000,
+                                    "cached_input_tokens": 1500,
+                                    "output_tokens": 120,
+                                    "reasoning_output_tokens": 30,
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            codex_task = create_task(
+                config,
+                "work",
+                tmp,
+                task_id="codex-task",
+                project_id="project-a",
+                category="implementation",
+                labels=["usage"],
+                title="Codex token usage",
+            )
+            codex_task["status"] = "completed"
+            codex_task["review_status"] = "accepted"
+            codex_task["created_at"] = "2026-07-01T00:00:00+00:00"
+            codex_task["started_at"] = "2026-07-01T00:01:00+00:00"
+            codex_task["completed_at"] = "2026-07-01T00:03:00+00:00"
+            codex_task["last_run"] = {
+                "command_kind": "exec",
+                "returncode": 0,
+                "started_at": "2026-07-01T00:01:00+00:00",
+                "finished_at": "2026-07-01T00:03:00+00:00",
+                "duration_seconds": 120,
+                "log_path": str(codex_log),
+                "resolved_execution_config": {
+                    "selection_rule": "default_execution_config",
+                    "selection_reason": "fallback",
+                    "model_source": "cli_default",
+                    "execution_target": "codex_cli",
+                },
+            }
+            codex_task["last_result"] = {
+                "status": "completed",
+                "changed_files": ["src/example.py"],
+                "verification": ["python -m unittest"],
+            }
+            save_task(config, codex_task)
+
+            antigravity_task = create_task(
+                config,
+                "external work",
+                tmp,
+                task_id="agy-task",
+                project_id="project-a",
+                category="implementation",
+                labels=["usage"],
+                title="Antigravity model group",
+                execution_backend="external-json-command",
+                external_command=["python", ".private/bin/agy-cbr-wrapper.py"],
+                capacity_pool="antigravity-claude-gpt",
+            )
+            antigravity_task["status"] = "failed"
+            antigravity_task["last_run"] = {
+                "execution_backend": "external-json-command",
+                "command_kind": "external-json-command",
+                "command": ["python", ".private/bin/agy-cbr-wrapper.py", "--model-group", "claude-gpt"],
+                "returncode": 1,
+                "started_at": "2026-07-01T00:04:00+00:00",
+                "finished_at": "2026-07-01T00:05:00+00:00",
+                "duration_seconds": 60,
+            }
+            save_task(config, antigravity_task)
+
+            shell_task = create_task(
+                config,
+                "shell work",
+                tmp,
+                task_id="shell-task",
+                project_id="project-a",
+                category="maintenance",
+                title="Shell token free",
+                execution_backend="shell",
+                shell_command=["true"],
+            )
+            shell_task["status"] = "completed"
+            shell_task["review_status"] = "accepted"
+            shell_task["last_run"] = {
+                "execution_backend": "shell",
+                "command_kind": "shell",
+                "command": ["true"],
+                "returncode": 0,
+                "started_at": "2026-07-01T00:06:00+00:00",
+                "finished_at": "2026-07-01T00:06:01+00:00",
+                "duration_seconds": 1,
+            }
+            save_task(config, shell_task)
+
+            code, output = run_cli(["--config", str(config_path), "execution-report", "--project", "project-a", "--limit", "0", "--json"])
+            report = json.loads(output)
+            rows = {row["task_id"]: row for row in report["rows"]}
+
+            self.assertEqual(0, code)
+            self.assertEqual(3, report["row_count"])
+            self.assertEqual("codex_jsonl", rows["codex-task"]["token_usage_source"])
+            self.assertEqual(2120, rows["codex-task"]["token_usage"]["known_total_tokens"])
+            self.assertEqual(500, rows["codex-task"]["token_usage"]["uncached_input_tokens"])
+            self.assertEqual(60.0, rows["codex-task"]["queue_wait_seconds"])
+            self.assertEqual("antigravity", rows["agy-task"]["execution"]["worker_family"])
+            self.assertEqual("claude-gpt", rows["agy-task"]["model"]["model_group"])
+            self.assertEqual("unavailable", rows["agy-task"]["token_usage_source"])
+            self.assertEqual("token_free", rows["shell-task"]["token_usage_source"])
+            self.assertEqual(1, report["summary"]["token_usage_rows"])
+            self.assertEqual(2120, report["summary"]["token_totals"]["known_total_tokens"])
+
+            human_code, human_output = run_cli(["--config", str(config_path), "execution-report", "--project", "project-a"])
+
+            self.assertEqual(0, human_code)
+            self.assertIn("EXECUTION REPORT", human_output)
+            self.assertIn("total=2120", human_output)
+            self.assertIn("claude-gpt", human_output)
+
+    def test_execution_report_rejects_negative_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+
+            code, output, stderr = run_cli_with_stderr(["--config", str(config_path), "execution-report", "--limit", "-1"])
+
+            self.assertEqual(1, code)
+            self.assertEqual("", output)
+            self.assertIn("--limit must be non-negative", stderr)
+
     def test_routing_report_accepts_supplemental_execution_evidence_without_changing_task_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
