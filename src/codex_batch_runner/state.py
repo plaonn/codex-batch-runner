@@ -21,6 +21,7 @@ DEFAULT_STATE = {
     "last_task_id": None,
     "reviewer_codex_cooldown_until": None,
     "last_reviewer_codex_rate_limit_at": None,
+    "usage_admission_stale_attempt": None,
     "runner_pause": dict(DEFAULT_RUNNER_PAUSE),
 }
 
@@ -100,6 +101,49 @@ def mark_reviewer_codex_rate_limit(config: Config, cooldown_until: str, task_id:
     state["last_reviewer_codex_rate_limit_at"] = iso_now()
     state["last_task_id"] = task_id
     save_state(config, state)
+
+
+def reserve_usage_stale_attempt(config: Config, reset_at: str, task_id: str) -> str:
+    state = load_state(config)
+    current = state.get("usage_admission_stale_attempt")
+    if isinstance(current, dict) and current.get("reset_at") == reset_at:
+        if current.get("status") == "passed":
+            return "passed"
+        if current.get("status") == "in_flight" and usage_attempt_task_is_running(config, current.get("task_id")):
+            return "in_flight"
+    state["usage_admission_stale_attempt"] = {
+        "reset_at": reset_at,
+        "task_id": task_id,
+        "status": "in_flight",
+        "started_at": iso_now(),
+    }
+    save_state(config, state)
+    return "reserved"
+
+
+def finish_usage_stale_attempt(config: Config, reset_at: str, task_id: str) -> None:
+    state = load_state(config)
+    current = state.get("usage_admission_stale_attempt")
+    if not isinstance(current, dict):
+        return
+    if current.get("reset_at") != reset_at or current.get("task_id") != task_id:
+        return
+    current["status"] = "passed"
+    current["finished_at"] = iso_now()
+    state["usage_admission_stale_attempt"] = current
+    save_state(config, state)
+
+
+def usage_attempt_task_is_running(config: Config, task_id: object) -> bool:
+    if not isinstance(task_id, str) or not task_id:
+        return False
+    try:
+        from .queue import load_task
+
+        task = load_task(config, task_id)
+    except (OSError, ValueError):
+        return False
+    return task.get("status") == "running"
 
 
 def set_global_cooldown(config: Config, cooldown_until: str) -> dict:

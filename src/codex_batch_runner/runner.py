@@ -7,6 +7,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path, PurePath
 from typing import Any
 
@@ -33,9 +34,21 @@ from .prompts import build_prompt
 from .queue import is_in_cooldown, recover_stale_running_tasks, save_task, select_next_task
 from .review_next import build_review_next_apply_report_locked, has_actionable_auto_review_candidate
 from .shell import ShellResult, run_shell_task
-from .state import get_runner_pause, in_global_cooldown, is_runner_paused, mark_rate_limit, mark_run, mark_success
+from .state import (
+    finish_usage_stale_attempt,
+    get_runner_pause,
+    in_global_cooldown,
+    is_runner_paused,
+    mark_rate_limit,
+    mark_run,
+    mark_success,
+    reserve_usage_stale_attempt,
+    set_global_cooldown,
+)
 from .timeutil import add_seconds, iso_now, parse_time
 from .triggers import run_post_run_trigger
+from .usage_admission import check_usage_admission
+from .wake import schedule_manual_cooldown_wake
 from .worker_routing import apply_worker_target, resolve_worker_target
 from .worktree import prepare_task_worktree_for_run_locked
 
@@ -68,6 +81,7 @@ class ClaimedRun:
     execution_backend: str
     execution_cwd: Path | None
     execution_settings: ResolvedExecutionConfig | None
+    usage_stale_reset_at: str | None = None
 
 
 def run_next(config: Config, *, suppress_wake_hooks: bool = False) -> RunOutcome:
@@ -83,6 +97,7 @@ def run_next(config: Config, *, suppress_wake_hooks: bool = False) -> RunOutcome
     task: dict[str, Any] | None = None
     outcome: RunOutcome | None = None
     claimed: ClaimedRun | None = None
+    usage_wake_at = None
     try:
         recover_stale_running_tasks(config)
         if is_runner_paused(config):
@@ -128,7 +143,7 @@ def run_next(config: Config, *, suppress_wake_hooks: bool = False) -> RunOutcome
                 )
 
         if outcome is None:
-            claimed, outcome = claim_next_implementation_task_locked(config, review_report)
+            claimed, outcome, usage_wake_at = claim_next_implementation_task_locked(config, review_report)
         if outcome is None and not claimed:
             mark_run(config, None)
             outcome = RunOutcome(status="empty", message="no runnable task")
@@ -136,6 +151,8 @@ def run_next(config: Config, *, suppress_wake_hooks: bool = False) -> RunOutcome
         lock.release()
 
     if not claimed:
+        if usage_wake_at:
+            schedule_manual_cooldown_wake(config, usage_wake_at)
         should_wake = bool(
             outcome
             and outcome.status in {"review_accepted", "review_fix_enqueued"}
@@ -172,11 +189,11 @@ def run_next(config: Config, *, suppress_wake_hooks: bool = False) -> RunOutcome
 def claim_next_implementation_task_locked(
     config: Config,
     review_report: dict[str, Any] | None = None,
-) -> tuple[ClaimedRun | None, RunOutcome | None]:
+) -> tuple[ClaimedRun | None, RunOutcome | None, datetime | None]:
     if is_runner_paused(config):
         pause = get_runner_pause(config)
         mark_run(config, None)
-        return None, RunOutcome(status="paused", message=runner_pause_message(pause))
+        return None, RunOutcome(status="paused", message=runner_pause_message(pause)), None
 
     task = select_next_task(config)
     if not task:
@@ -187,18 +204,40 @@ def claim_next_implementation_task_locked(
                 message="completed task needs human review",
                 task_id=str(review_report.get("task_id") or "") or None,
                 review=review_report,
-            )
+            ), None
         mark_run(config, None)
-        return None, RunOutcome(status="empty", message="no runnable task")
+        return None, RunOutcome(status="empty", message="no runnable task"), None
 
     routing_error = apply_configured_worker_target(config, task)
     if routing_error:
         mark_execution_config_failure(config, task, routing_error)
         mark_run(config, task["id"])
-        return None, RunOutcome(status=task["status"], message=routing_error, task_id=task["id"])
+        return None, RunOutcome(status=task["status"], message=routing_error, task_id=task["id"]), None
+
+    execution_backend = task_execution_backend(task)
+    usage_stale_reset_at: str | None = None
+    if execution_backend == "codex":
+        usage_decision = check_usage_admission(config)
+        if usage_decision.status == "gated" and usage_decision.cooldown_until:
+            set_global_cooldown(config, usage_decision.cooldown_until.isoformat())
+            mark_run(config, None)
+            return (
+                None,
+                RunOutcome(status="cooldown", message="usage-aware global cooldown is active"),
+                usage_decision.cooldown_until,
+            )
+        if usage_decision.reason.endswith("_stale_after_reset_bounded_attempt") and usage_decision.reset_at:
+            usage_stale_reset_at = usage_decision.reset_at.isoformat()
+            reservation = reserve_usage_stale_attempt(config, usage_stale_reset_at, str(task["id"]))
+            if reservation == "in_flight":
+                mark_run(config, None)
+                return (
+                    None,
+                    RunOutcome(status="locked", message="one stale-after-reset usage attempt is already active"),
+                    None,
+                )
 
     started_at = iso_now()
-    execution_backend = task_execution_backend(task)
     resume_requested = execution_backend in {"codex", "external-json-command"} and task.get("status") == "needs_resume"
     execution_cwd: Path | None = None
     if config.worktree_mode == "task":
@@ -207,14 +246,14 @@ def claim_next_implementation_task_locked(
         if worktree_result["report"].get("errors"):
             mark_worktree_prepare_failure(config, task, worktree_result["report"])
             mark_run(config, task["id"])
-            return None, RunOutcome(status=task["status"], message="worktree preparation failed", task_id=task["id"])
+            return None, RunOutcome(status=task["status"], message="worktree preparation failed", task_id=task["id"]), None
         execution_cwd = worktree_result["worktree_path"]
 
     backend_error = validate_task_backend(task)
     if backend_error:
         mark_backend_failure(config, task, backend_error)
         mark_run(config, task["id"])
-        return None, RunOutcome(status=task["status"], message=backend_error, task_id=task["id"])
+        return None, RunOutcome(status=task["status"], message=backend_error, task_id=task["id"]), None
     prompt = ""
     execution_config: ResolvedExecutionConfig | None = None
     resume_unavailable = False
@@ -231,7 +270,7 @@ def claim_next_implementation_task_locked(
         if config_error:
             mark_execution_config_failure(config, task, config_error)
             mark_run(config, task["id"])
-            return None, RunOutcome(status=task["status"], message=config_error, task_id=task["id"])
+            return None, RunOutcome(status=task["status"], message=config_error, task_id=task["id"]), None
 
     active_run_id = uuid.uuid4().hex
     task["status"] = "running"
@@ -281,7 +320,8 @@ def claim_next_implementation_task_locked(
         execution_backend=execution_backend,
         execution_cwd=execution_cwd,
         execution_settings=execution_config,
-    ), None
+        usage_stale_reset_at=usage_stale_reset_at,
+    ), None, None
 
 
 def finalize_codex_run(config: Config, claimed: ClaimedRun, result: CodexResult) -> RunOutcome:
@@ -295,6 +335,8 @@ def finalize_codex_run(config: Config, claimed: ClaimedRun, result: CodexResult)
             task["execution_retained_at"] = iso_now()
             auto_commit_worktree_result(config, task, result, claimed.execution_cwd)
         apply_codex_result(config, task, result, git_status_cwd=claimed.execution_cwd, execution_settings=claimed.execution_settings)
+        if claimed.usage_stale_reset_at:
+            finish_usage_stale_attempt(config, claimed.usage_stale_reset_at, str(task["id"]))
         claimed.task = task
         return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
     finally:

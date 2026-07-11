@@ -134,6 +134,13 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNone(resolve_config_path())
             self.assertEqual("disabled", config.manual_cooldown_wake_scheduler)
             self.assertEqual([], config.manual_cooldown_wake_command)
+            self.assertFalse(config.usage_admission_enabled)
+            self.assertEqual([], config.usage_admission_command)
+            self.assertEqual(5, config.usage_admission_timeout_seconds)
+            self.assertEqual(300, config.usage_admission_max_age_seconds)
+            self.assertIsNone(config.usage_admission_primary_threshold_percent)
+            self.assertIsNone(config.usage_admission_secondary_threshold_percent)
+            self.assertEqual(60, config.usage_admission_reset_grace_seconds)
             self.assertEqual(1, config.max_total_running)
             self.assertEqual(1, config.max_running_per_project)
             self.assertEqual({"codex": {"max_running": 1}}, config.capacity_pools)
@@ -607,6 +614,57 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual("macos_launchd", config.manual_cooldown_wake_scheduler)
             self.assertEqual(["launchctl", "start", "com.example.codex-batch-runner"], config.manual_cooldown_wake_command)
+
+    def test_usage_admission_options_can_be_enabled_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "usage_admission_enabled": True,
+                        "usage_admission_command": ["usage-snapshot", "--json"],
+                        "usage_admission_timeout_seconds": 3,
+                        "usage_admission_max_age_seconds": 120,
+                        "usage_admission_primary_threshold_percent": 12.5,
+                        "usage_admission_secondary_threshold_percent": 8,
+                        "usage_admission_reset_grace_seconds": 90,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = Config.load(str(config_path), root=Path(tmp))
+
+            self.assertTrue(config.usage_admission_enabled)
+            self.assertEqual(["usage-snapshot", "--json"], config.usage_admission_command)
+            self.assertEqual(3, config.usage_admission_timeout_seconds)
+            self.assertEqual(120, config.usage_admission_max_age_seconds)
+            self.assertEqual(12.5, config.usage_admission_primary_threshold_percent)
+            self.assertEqual(8.0, config.usage_admission_secondary_threshold_percent)
+            self.assertEqual(90, config.usage_admission_reset_grace_seconds)
+
+    def test_enabled_usage_admission_requires_command_and_primary_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            invalid_cases = [
+                (
+                    {"usage_admission_enabled": True, "usage_admission_primary_threshold_percent": 10},
+                    "usage_admission_command must be configured",
+                ),
+                (
+                    {"usage_admission_enabled": True, "usage_admission_command": ["usage-snapshot"]},
+                    "usage_admission_primary_threshold_percent must be configured",
+                ),
+                (
+                    {"usage_admission_primary_threshold_percent": 101},
+                    "usage_admission_primary_threshold_percent must be a number from 0 to 100",
+                ),
+            ]
+            for data, message in invalid_cases:
+                with self.subTest(data=data):
+                    config_path.write_text(json.dumps(data), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, message):
+                        Config.load(str(config_path), root=Path(tmp))
 
     def test_codex_cli_maintenance_commands_can_be_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

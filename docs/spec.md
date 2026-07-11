@@ -6,7 +6,7 @@
 
 - [요구사항 계층 (`ROOT-REQ-*`, `REQ-*`)](requirements.md): 토큰 효율/스케줄링·완화·감사·리뷰·격리·안전 경계·모델 요구사항·프로젝트 진실 분리를 의미 기반 stable identifier로 설명.
 - [Task schema and dependency contract](task-schema.md): task JSON fields, task status, review status, project routing metadata, dependency readiness.
-- [Execution contract](execution.md): model requirements, shell and external-json-command backends, capacity and priority, queue mutation, runner execution policy, watchdog, lock, atomic writes, Codex command/prompt wrapper, rate-limit, Codex CLI maintenance.
+- [Execution contract](execution.md): model requirements, opt-in usage-aware Codex admission, shell and external-json-command backends, capacity and priority, queue mutation, runner execution policy, watchdog, lock, atomic writes, Codex command/prompt wrapper, rate-limit, Codex CLI maintenance.
 - [Review contract](review.md): review-bundle, review-next, reviewer Codex safety model, mechanical gates, bounded auto-fix loop.
 - [Worktree isolation and apply contract](worktrees.md): worktree execution isolation, apply/rebase/conflict-fix, cleanup, branch-prune, recovery.
 - [Events, index, and retention contract](events-and-index.md): event log, local SQLite read index, prune/retention behavior.
@@ -22,6 +22,7 @@
 - `run-loop` is the single-worker scheduler command; it repeats the `run-next` path with fresh config/queue checks per iteration, emits JSONL with `--json`, and stops on non-actionable outcomes such as empty queue, pause, cooldown, lock contention, or review-needed state.
 - Worktree-backed tasks become dependency-ready only after accepted results are applied to the integration target.
 - Review automation is explicit opt-in. Default `review-next` behavior is report-only, and reviewer Codex is disabled unless config and command guards allow it.
+- Usage-aware admission is explicit opt-in. It reads one provider-neutral JSON snapshot before a native Codex implementation claim, fails open on adapter errors, and reuses global cooldown plus one-shot wake semantics without probing Codex.
 - Destructive cleanup and branch pruning commands are dry-run by default and require explicit `--apply`.
 
 ## 목표

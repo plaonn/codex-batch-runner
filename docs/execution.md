@@ -118,6 +118,48 @@ Producer는 allowlisted structured field만 넣습니다. 권장 필드는 `reco
 그래서 `routing-report`는 운영자 판단의 입력값으로만 쓰고, policy 변경은 별도 제어면에서 수동으로 수행해야 합니다. 즉 advisory + read-only입니다.
 
 
+## Usage-aware Codex admission
+
+Usage-aware admission은 native `execution_backend=codex` implementation task를 claim하기
+직전에 한 번만 실행되는 opt-in gate입니다. 기본값은 disabled이므로 기존 pause, global
+cooldown, queue lock, capacity, dependency, review/apply, one-task-per-invocation 동작을
+바꾸지 않습니다. Shell 및 external JSON backend에는 적용하지 않습니다.
+
+활성화하면 runner는 configured argv command를 shell 평가 없이 bounded timeout으로 한 번
+실행하고 stdout의 JSON object만 읽습니다. cbr는 특정 provider, account, credential,
+private log, personal path에 의존하지 않으며 command를 설치하거나 인증하거나 별도 Codex
+probe를 실행하지 않습니다. Snapshot command가 cached state를 반환한다면 그 호출 자체가
+새 provider observation을 만든다고 간주하지 않습니다.
+
+지원하는 snapshot field는 다음과 같습니다.
+
+- top-level `available`, `observed_at` 또는 `generated_at`
+- `primary.remaining_percent`
+- `primary.resets_at` 또는 `primary.resets_at_iso`; top-level `resets_at` 또는
+  `resets_at_iso`도 fallback으로 허용
+- optional `secondary.remaining_percent`, with `secondary.resets_at` or
+  `secondary.resets_at_iso` required when the configured secondary threshold triggers
+
+Fresh snapshot에서 primary remaining만 configured threshold 이하이면 global cooldown을
+primary reset + `usage_admission_reset_grace_seconds`까지 설정하고, secondary만 이하면
+secondary reset + grace까지 설정합니다. 둘 다 이하면 두 triggering window reset 중 나중
+시각을 선택하므로 짧은 window reset이 긴 quota gate를 조기에 해제하지 않습니다. Triggering
+window의 reset이 없거나 invalid이면 다른 window reset으로 대체하지 않고 fail open합니다.
+Cooldown state를 먼저 저장한 뒤 기존 manual cooldown one-shot wake
+adapter를 호출하므로 wake scheduling failure는 warning-only이고 polling이 fallback입니다.
+
+낮은 remaining을 담은 snapshot의 reset이 이미 지났고 observation도 그 reset 이전이면,
+runner는 old low value를 근거로 계속 연기하지 않고 정상적인 bounded task attempt 한 건을
+허용합니다. Capacity가 2 이상이어도 이 stale-after-reset 확인 attempt가 끝나기 전에는 같은
+snapshot reset에 대한 두 번째 Codex task를 동시에 시작하지 않습니다. 이 attempt에 provider가 실제 rate limit을 반환하면 기존 Codex rate-limit
+detection이 authoritative하며 새 global cooldown과 evidence를 기록합니다. 성공하거나
+non-rate-limit 결과이면 stale snapshot만으로 추가 cooldown을 만들지 않습니다.
+
+Command failure, nonzero exit, timeout, invalid/non-object JSON, `available=false`, missing or
+invalid required field, future/inconsistent timestamp, reset 전 max-age 초과 snapshot은 sanitized
+warning/event를 남기고 fail open합니다. Raw stdout, stderr, command, credential-like data는
+warning evidence에 복사하지 않습니다.
+
 ## Shell execution backend
 
 `execution_backend=shell` task는 Codex를 호출하지 않고 local argv list command를 실행합니다. 기본값은 backward-compatible `codex`입니다. Shell backend는 simple verification, maintenance, dependency gate용이며 token-free queue task로 동작합니다.

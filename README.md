@@ -148,6 +148,8 @@ If neither is provided, `cbr` exits with an error instead of creating a runtime 
 
 Optional `root` makes relative runtime paths independent of the process current working directory. `worktree_mode=task` enables task-specific git worktrees. `model_requirement_vector`, `model_selection_rules`, and `default_execution_config` keep task intent separate from local Codex model/profile choices. `worker_targets` and `worker_selection_rules` can route matching default Codex tasks to a configured shell or external JSON worker before claim.
 
+`usage_admission_enabled` optionally adds a provider-neutral, read-only JSON snapshot check before a native Codex implementation task is claimed. It is disabled by default, never installs or authenticates a snapshot provider, and fails open to the existing runner path when the configured argv command is unavailable or invalid. See [docs/execution.md](docs/execution.md#usage-aware-codex-admission) and [docs/operator-installation.md](docs/operator-installation.md#usage-aware-admission-설정).
+
 For launchd/systemd installation, config discovery, and `doctor`, use [docs/operator-installation.md](docs/operator-installation.md). For execution policy and full config contracts, use [docs/execution.md](docs/execution.md).
 
 ## Safety model

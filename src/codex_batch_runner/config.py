@@ -33,6 +33,13 @@ class Config:
     stale_lock_seconds: int
     rate_limit_cooldown_seconds: int
     default_max_attempts: int
+    usage_admission_enabled: bool = False
+    usage_admission_command: list[str] = field(default_factory=list)
+    usage_admission_timeout_seconds: int = 5
+    usage_admission_max_age_seconds: int = 300
+    usage_admission_primary_threshold_percent: float | None = None
+    usage_admission_secondary_threshold_percent: float | None = None
+    usage_admission_reset_grace_seconds: int = 60
     manual_cooldown_wake_scheduler: str = "disabled"
     manual_cooldown_wake_command: list[str] = field(default_factory=list)
     codex_cli_update_command: list[str] = field(default_factory=list)
@@ -104,6 +111,27 @@ class Config:
         worker_targets = worker_targets_value(data.get("worker_targets"))
         worker_selection_rules = worker_selection_rules_value(data.get("worker_selection_rules"))
         validate_worker_target_references(worker_targets, worker_selection_rules, capacity_pools)
+        usage_admission_enabled = bool_value(
+            "usage_admission_enabled",
+            data.get("usage_admission_enabled", False),
+        )
+        usage_admission_command = argv_list(
+            "usage_admission_command",
+            data.get("usage_admission_command", []),
+        )
+        usage_admission_primary_threshold_percent = optional_percentage_value(
+            "usage_admission_primary_threshold_percent",
+            data.get("usage_admission_primary_threshold_percent"),
+        )
+        usage_admission_secondary_threshold_percent = optional_percentage_value(
+            "usage_admission_secondary_threshold_percent",
+            data.get("usage_admission_secondary_threshold_percent"),
+        )
+        validate_usage_admission_config(
+            usage_admission_enabled,
+            usage_admission_command,
+            usage_admission_primary_threshold_percent,
+        )
 
         return cls(
             root=base,
@@ -150,6 +178,22 @@ class Config:
             stale_lock_seconds=int(data.get("stale_lock_seconds", 21600)),
             rate_limit_cooldown_seconds=int(data.get("rate_limit_cooldown_seconds", 1800)),
             default_max_attempts=int(data.get("default_max_attempts", 5)),
+            usage_admission_enabled=usage_admission_enabled,
+            usage_admission_command=usage_admission_command,
+            usage_admission_timeout_seconds=positive_int_value(
+                "usage_admission_timeout_seconds",
+                data.get("usage_admission_timeout_seconds", 5),
+            ),
+            usage_admission_max_age_seconds=positive_int_value(
+                "usage_admission_max_age_seconds",
+                data.get("usage_admission_max_age_seconds", 300),
+            ),
+            usage_admission_primary_threshold_percent=usage_admission_primary_threshold_percent,
+            usage_admission_secondary_threshold_percent=usage_admission_secondary_threshold_percent,
+            usage_admission_reset_grace_seconds=non_negative_int_value(
+                "usage_admission_reset_grace_seconds",
+                data.get("usage_admission_reset_grace_seconds", 60),
+            ),
             dependency_requires_accepted_review=bool_value(
                 "dependency_requires_accepted_review",
                 data.get("dependency_requires_accepted_review", False),
@@ -401,6 +445,35 @@ def bool_value(key: str, value: object) -> bool:
     if isinstance(value, bool):
         return value
     raise ValueError(f"{key} must be a boolean")
+
+
+def optional_percentage_value(key: str, value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be a number from 0 to 100")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a number from 0 to 100") from exc
+    if not 0 <= result <= 100:
+        raise ValueError(f"{key} must be a number from 0 to 100")
+    return result
+
+
+def validate_usage_admission_config(
+    enabled: bool,
+    command: list[str],
+    primary_threshold_percent: float | None,
+) -> None:
+    if not enabled:
+        return
+    if not command:
+        raise ValueError("usage_admission_command must be configured when usage_admission_enabled is true")
+    if primary_threshold_percent is None:
+        raise ValueError(
+            "usage_admission_primary_threshold_percent must be configured when usage_admission_enabled is true"
+        )
 
 
 def worktree_mode_value(value: object) -> str:
