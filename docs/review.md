@@ -13,6 +13,31 @@
 
 Reviewer Codex는 선택 기능이며 기본값은 비활성화입니다. 토큰을 소비하고 실행 thread의 전체 대화 context를 갖지 못할 수 있으므로, local mechanical review와 human review fallback이 안정적으로 동작하는 것을 전제로 별도 opt-in해야 합니다. 안전 모델은 “호출하지 않는 것이 기본이며, 호출하더라도 한 번의 runner 실행 안에서 작고 감사 가능한 판단만 수행한다”는 원칙을 따릅니다.
 
+## Review outcome evidence and evaluation boundaries
+
+`review_outcome_evidence_history`는 task의 기존 `review_status`, reviewer metadata,
+또는 `execution_evidence_history`를 재작성하지 않는 append-only supplemental
+history다. 현재 contract는 `review-outcome-evidence-v1`이며, 각 record는 아래를
+분리해 보관한다.
+
+- `acceptance.method`: `mechanical_safe`, `reviewer_pass`, `human_accept`,
+  `external_review`, `none` 중 하나. 서로 다른 method의 acceptance는 합산하거나
+  단일 acceptance rate로 계산하지 않는다.
+- `objective_verification`: deterministic check 결과와 `semantic_review` 판단을
+  별도 field로 둔다. verification 통과만으로 semantic acceptance를 뜻하지 않는다.
+- reviewer `kind`, `role`, `decision_confidence`와 `actual_identity`를 분리한다.
+  actual identity는 provider/wrapper가 관측한 source와 matching confidence가 있을
+  때만 `observed`가 될 수 있다. planned model, role, alias, self-claim에서 identity를
+  추론하지 않으며, 그렇지 않으면 `unknown`이다.
+
+Routing evaluation은 quality sample을 같은 task bucket, execution cohort, outcome
+contract version, review policy version, rubric version, acceptance method, reviewer
+provenance class 안에서만 비교한다. Worker cell마다 matched anchor semantic-review
+coverage를 report하며, anchor가 없거나 cohort가 mismatch이면 quality rate는
+non-comparable로 표시한다. v1은 coverage를 관찰할 뿐 numerical threshold를 적용하지
+않는다. 기존 task metadata만 가진 legacy row는 `legacy-review-unknown`으로 dual-read
+되며 quality-rate 및 anchor-coverage numerator/denominator에서 제외된다.
+
 Review bundle은 특정 task의 결과를 재검토하기 위한 self-contained artifact입니다. 생성 시점의 현재 대화 context, Codex transcript 전체, operator 개인 메모에 의존하지 않고, task JSON과 대상 git repository의 현재 local state에서 다시 만들 수 있어야 합니다. bundle은 기본적으로 report-only 입력이며, 첫 구현은 파일 저장 또는 stdout 출력만 수행하고 review status를 변경하지 않습니다.
 
 필수 입력:

@@ -398,6 +398,8 @@ def summarize_evaluation_diagnostics(
             summarize_provider_resource_cell,
         ),
         "reviewer_cells": summarize_evaluation_groups(group_evaluation_rows(rows, reviewer_cell_key), summarize_reviewer_cell),
+        "review_outcome_strata": summarize_review_outcome_strata(rows),
+        "review_outcome_exclusions": summarize_review_outcome_exclusions(rows),
         "policy_exclusions": summarize_exclusion_reasons(rows),
         "task_buckets": summarize_evaluation_groups(group_evaluation_rows(rows, task_bucket_key), summarize_task_bucket),
         "probe_lanes": summarize_probe_lanes(routing_rows or []),
@@ -407,6 +409,86 @@ def summarize_evaluation_diagnostics(
             "read_only": True,
         },
     }
+
+
+def summarize_review_outcome_strata(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Report quality only inside an exact review-outcome comparability stratum.
+
+    This intentionally does not produce a cross-method acceptance total or rate.
+    Legacy task metadata is represented as a diagnostic exclusion rather than a
+    quality sample.
+    """
+    return summarize_evaluation_groups(
+        group_evaluation_rows(rows, review_outcome_comparability_key),
+        summarize_review_outcome_stratum,
+    )
+
+
+def summarize_review_outcome_stratum(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    sample = review_outcome(rows[0]) if rows else {}
+    acceptance = _dict(sample.get("acceptance"))
+    components = _dict(_dict(sample.get("cohort")).get("components"))
+    worker_groups = group_evaluation_rows(rows, worker_cell_key)
+    return {
+        "key": key,
+        "comparability_components": {
+            "task_bucket_key": components.get("task_bucket_key"),
+            "execution_cohort_id": components.get("execution_cohort_id"),
+            "outcome_contract_version": components.get("outcome_contract_version"),
+            "review_policy_version": components.get("review_policy_version"),
+            "rubric_version": components.get("rubric_version"),
+            "acceptance_method": acceptance.get("method"),
+            "reviewer_provenance_class": _dict(sample.get("reviewer")).get("provenance_class"),
+        },
+        "tasks": len(rows),
+        "legacy_rows": count(rows, review_outcome_legacy),
+        "cross_method_aggregation": False,
+        "quality_rate_defined_only_per_worker_cell": True,
+        "worker_cells": [
+            summarize_review_outcome_worker_cell(worker_key, worker_rows)
+            for worker_key, worker_rows in sorted(worker_groups.items())
+        ],
+    }
+
+
+def summarize_review_outcome_worker_cell(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    eligible = [row for row in rows if review_outcome_quality_eligible(row)]
+    anchors = [row for row in eligible if review_outcome_anchor_semantic_review(row)]
+    reasons = sorted({reason for row in rows for reason in review_outcome_exclusion_reasons(row)})
+    comparable = bool(eligible) and bool(anchors) and not reasons
+    quality_numerator = count(eligible, review_outcome_quality_pass)
+    quality_rate = ratio(quality_numerator, len(eligible)) if comparable else None
+    return {
+        "key": key,
+        "rows": len(rows),
+        "quality_eligible_rows": len(eligible),
+        "accepted_rows": count(eligible, review_outcome_accepted),
+        "objective_verification_passed": count(eligible, review_outcome_objective_passed),
+        "semantic_review_passed": count(eligible, review_outcome_semantic_passed),
+        "matched_anchor_semantic_review_coverage": {
+            "numerator": len(anchors),
+            "denominator": len(eligible),
+            "rate": ratio(len(anchors), len(eligible)) if eligible else None,
+            "numerical_threshold": None,
+            "status": "covered" if anchors else "absent_or_mismatched",
+        },
+        "quality_comparable": comparable,
+        "quality_rate": quality_rate,
+        "quality_rate_numerator": quality_numerator if comparable else None,
+        "quality_rate_denominator": len(eligible) if comparable else None,
+        "exclusion_reasons": reasons,
+    }
+
+
+def summarize_review_outcome_exclusions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        for reason in review_outcome_exclusion_reasons(row):
+            grouped[reason].append(row)
+    return [
+        {"key": key, "rows": len(group), "quality_rate_excluded": len(group)}
+        for key, group in sorted(grouped.items())
+    ]
 
 
 def summarize_policy_usage(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -692,6 +774,67 @@ def evidence_cohort_key(row: dict[str, Any]) -> str:
     return str(cohort.get("cohort_id") or "legacy-v1-non-comparable")
 
 
+def review_outcome_comparability_key(row: dict[str, Any]) -> str:
+    outcome = review_outcome(row)
+    if outcome.get("legacy"):
+        return "legacy-review-unknown"
+    cohort = _dict(outcome.get("cohort"))
+    components = _dict(cohort.get("components"))
+    expected = {
+        "task_bucket_key": task_bucket_key(row),
+        "execution_cohort_id": evidence_cohort_key(row),
+        "outcome_contract_version": outcome.get("evidence_contract_version"),
+        "review_policy_version": components.get("review_policy_version"),
+        "rubric_version": components.get("rubric_version"),
+        "acceptance_method": _dict(outcome.get("acceptance")).get("method"),
+        "reviewer_provenance_class": _dict(outcome.get("reviewer")).get("provenance_class"),
+    }
+    if any(components.get(name) != value for name, value in expected.items()):
+        return "review-outcome-cohort-mismatch"
+    return "|".join(f"{name}={expected[name]}" for name in sorted(expected))
+
+
+def review_outcome_exclusion_reasons(row: dict[str, Any]) -> list[str]:
+    outcome = review_outcome(row)
+    if outcome.get("legacy"):
+        return ["legacy_review_outcome_evidence"]
+    if review_outcome_comparability_key(row) == "review-outcome-cohort-mismatch":
+        return ["review_outcome_cohort_mismatch"]
+    semantic = _dict(outcome.get("semantic_review"))
+    if semantic.get("status") == "not_performed":
+        return ["semantic_review_absent"]
+    return []
+
+
+def review_outcome_quality_eligible(row: dict[str, Any]) -> bool:
+    return not review_outcome_exclusion_reasons(row)
+
+
+def review_outcome_legacy(row: dict[str, Any]) -> bool:
+    return bool(review_outcome(row).get("legacy"))
+
+
+def review_outcome_anchor_semantic_review(row: dict[str, Any]) -> bool:
+    semantic = _dict(review_outcome(row).get("semantic_review"))
+    return semantic.get("status") == "pass" and bool(semantic.get("anchor"))
+
+
+def review_outcome_accepted(row: dict[str, Any]) -> bool:
+    return bool(_dict(review_outcome(row).get("acceptance")).get("accepted"))
+
+
+def review_outcome_objective_passed(row: dict[str, Any]) -> bool:
+    return _dict(review_outcome(row).get("objective_verification")).get("status") == "passed"
+
+
+def review_outcome_semantic_passed(row: dict[str, Any]) -> bool:
+    return _dict(review_outcome(row).get("semantic_review")).get("status") == "pass"
+
+
+def review_outcome_quality_pass(row: dict[str, Any]) -> bool:
+    return review_outcome_accepted(row) and review_outcome_objective_passed(row) and review_outcome_semantic_passed(row)
+
+
 def cohort_comparability(row: dict[str, Any], key: str) -> bool:
     evidence = row.get("execution_evidence") if isinstance(row.get("execution_evidence"), dict) else {}
     cohort = evidence.get("cohort") if isinstance(evidence.get("cohort"), dict) else {}
@@ -736,6 +879,15 @@ def subject(row: dict[str, Any]) -> dict[str, Any]:
 
 def reviewer(row: dict[str, Any]) -> dict[str, Any]:
     value = row.get("reviewer")
+    return value if isinstance(value, dict) else {}
+
+
+def review_outcome(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("review_outcome")
+    return value if isinstance(value, dict) else {"legacy": True}
+
+
+def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 

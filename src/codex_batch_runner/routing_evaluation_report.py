@@ -14,6 +14,8 @@ from .routing_report import (
     render_probe_lanes,
     summarize_evidence_cohort_cell,
     summarize_evaluation_groups,
+    summarize_review_outcome_exclusions,
+    summarize_review_outcome_strata,
     summarize_task_bucket,
 )
 from .timeutil import iso_now
@@ -71,6 +73,8 @@ def build_routing_evaluation_report(
             "evidence_cohorts": summarize_evaluation_groups(
                 group_evaluation_rows(rows, evidence_cohort_key), summarize_evidence_cohort_cell
             ),
+            "review_outcome_strata": summarize_review_outcome_strata(rows),
+            "review_outcome_exclusions": summarize_review_outcome_exclusions(rows),
             "advisory": {
                 "read_only": True,
                 "mutation_allowed": False,
@@ -86,6 +90,8 @@ def build_routing_evaluation_report(
             "evidence_cohorts": summarize_evaluation_groups(
                 group_evaluation_rows(execution_evidence_rows, evidence_cohort_key), summarize_evidence_cohort_cell
             ),
+            "review_outcome_strata": summarize_review_outcome_strata(execution_evidence_rows),
+            "review_outcome_exclusions": summarize_review_outcome_exclusions(execution_evidence_rows),
             "advisory": {
                 "read_only": True,
                 "mutation_allowed": False,

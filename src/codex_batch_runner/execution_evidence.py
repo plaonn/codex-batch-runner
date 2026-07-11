@@ -7,9 +7,10 @@ from typing import Any
 
 from .evaluation import derive_evaluation_row
 from .execution_evidence_v2 import derive_cohort, validate_execution_evidence_v2
+from .review_outcome_evidence import validate_review_outcome_evidence
 from .request_fingerprint import _safe_id_hash, _safe_metadata_value
 
-SUPPORTED_RECORD_KINDS = {"codex_subagent_execution", "execution_evidence_v2"}
+SUPPORTED_RECORD_KINDS = {"codex_subagent_execution", "execution_evidence_v2", "review_outcome_evidence_v1"}
 
 
 class ExecutionEvidenceError(ValueError):
@@ -73,6 +74,8 @@ def execution_evidence_task_projection(record: dict[str, Any], *, index: int = 0
         "routing_experiment": record.get("routing_experiment"),
         "verification_scope": _list_value(record.get("verification_scope")),
         "routing_risk_factors": _list_value(record.get("routing_risk_factors")),
+        "review_policy_version": record.get("review_policy_version"),
+        "review_rubric_version": record.get("review_rubric_version"),
         "execution_backend": record.get("execution_backend") or "codex_app",
         "model_requirement_vector": _dict_value(record.get("model_requirement_vector")),
         "provider_resource": _dict_value(record.get("provider_resource")),
@@ -91,6 +94,9 @@ def execution_evidence_task_projection(record: dict[str, Any], *, index: int = 0
         validate_execution_evidence_v2(evidence)
         task["execution_evidence_history"] = [evidence]
         task["last_run"]["execution_evidence_id"] = evidence.get("evidence_id")
+    if kind == "review_outcome_evidence_v1":
+        review_outcome = validate_review_outcome_evidence(record.get("review_outcome_evidence"))
+        task["review_outcome_evidence_history"] = [deepcopy(review_outcome)]
     if record.get("title"):
         task["title"] = _safe_metadata_value(record.get("title"))
     return task

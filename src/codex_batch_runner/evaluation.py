@@ -4,6 +4,7 @@ from typing import Any
 
 from .provider_resource import derive_provider_resource_evidence, provider_resource_key
 from .execution_evidence_v2 import evidence_view
+from .review_outcome_evidence import review_outcome_view
 from .request_fingerprint import _has_value, _normalized_list, _safe_id_hash, _safe_metadata_value, derive_request_fingerprint
 from .task_vector import derive_normalized_task_vector
 
@@ -28,6 +29,7 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
     provider_resource = derive_provider_resource_evidence(task)
     objective_checks = _objective_checks(task, reviewer)
     outcomes = _outcomes(task, reviewer)
+    review_outcome = _review_outcome_section(task)
     task_vector_evaluation = _task_vector_evaluation(task, task_vector, worker, objective_checks, outcomes)
     exclusion_reasons = _exclusion_reasons(task, task_vector, reviewer, objective_checks, outcomes)
     policy_usage = _policy_usage(task, task_vector, reviewer, objective_checks, outcomes, exclusion_reasons)
@@ -57,6 +59,7 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
         },
         "worker": worker,
         "reviewer": reviewer,
+        "review_outcome": review_outcome,
         "objective_checks": objective_checks,
         "task_vector_evaluation": task_vector_evaluation,
         "outcomes": outcomes,
@@ -72,6 +75,48 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
     }
     row["experiment_cell_key"] = _experiment_cell_key(row)
     return row
+
+
+def _review_outcome_section(task: dict[str, Any]) -> dict[str, Any]:
+    evidence = review_outcome_view(task)
+    acceptance = _dict_value(evidence.get("acceptance"))
+    objective = _dict_value(evidence.get("objective_verification"))
+    semantic = _dict_value(evidence.get("semantic_review"))
+    reviewer = _dict_value(evidence.get("reviewer"))
+    cohort = _dict_value(evidence.get("cohort"))
+    identity = _dict_value(reviewer.get("actual_identity"))
+    return {
+        "schema_version": evidence.get("schema_version"),
+        "evidence_contract_version": _safe_metadata_value(evidence.get("evidence_contract_version")),
+        "legacy": evidence.get("evidence_contract_version") == "legacy-review-unknown",
+        "acceptance": {
+            "method": _safe_metadata_value(acceptance.get("method")),
+            "accepted": bool(acceptance.get("accepted")),
+        },
+        "objective_verification": {"status": _safe_metadata_value(objective.get("status"))},
+        "semantic_review": {
+            "status": _safe_metadata_value(semantic.get("status")),
+            "anchor": bool(semantic.get("anchor")),
+        },
+        "reviewer": {
+            "kind": _safe_metadata_value(reviewer.get("kind")),
+            "role": _safe_metadata_value(reviewer.get("role")),
+            "decision_confidence": _safe_metadata_value(reviewer.get("decision_confidence")),
+            "provenance_class": _safe_metadata_value(reviewer.get("provenance_class")),
+            "actual_identity": {
+                "status": _safe_metadata_value(identity.get("status")),
+                "value": _safe_metadata_value(identity.get("value")) if identity.get("status") == "observed" else "unknown",
+                "source": _safe_metadata_value(identity.get("source")),
+                "confidence": _safe_metadata_value(identity.get("confidence")),
+            },
+        },
+        "cohort": {
+            "cohort_id": _safe_metadata_value(cohort.get("cohort_id")),
+            "components": dict(_dict_value(cohort.get("components"))),
+            "comparability": dict(_dict_value(cohort.get("comparability"))),
+            "exclusion_reasons": list(_list_value(cohort.get("exclusion_reasons"))),
+        },
+    }
 
 
 def _subject_section(task: dict[str, Any], fingerprint: dict[str, Any]) -> dict[str, Any]:
@@ -743,7 +788,7 @@ def _marker_present(value: Any, needles: tuple[str, ...]) -> bool:
     if isinstance(value, dict):
         for key, child in value.items():
             key_text = _safe_metadata_value(key)
-            if any(needle in key_text for needle in needles) and _has_value(child):
+            if any(needle in key_text for needle in needles) and child is not False and _has_value(child):
                 return True
             if _marker_present(child, needles):
                 return True
