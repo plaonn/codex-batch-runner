@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .provider_resource import derive_provider_resource_evidence, provider_resource_key
+from .execution_evidence_v2 import evidence_view
 from .request_fingerprint import _has_value, _normalized_list, _safe_id_hash, _safe_metadata_value, derive_request_fingerprint
 from .task_vector import derive_normalized_task_vector
 
@@ -30,6 +31,7 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
     task_vector_evaluation = _task_vector_evaluation(task, task_vector, worker, objective_checks, outcomes)
     exclusion_reasons = _exclusion_reasons(task, task_vector, reviewer, objective_checks, outcomes)
     policy_usage = _policy_usage(task, task_vector, reviewer, objective_checks, outcomes, exclusion_reasons)
+    execution_evidence = evidence_view(task)
 
     row = {
         "schema_version": SCHEMA_VERSION,
@@ -45,6 +47,14 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
         "lineage": _lineage_section(fingerprint, task),
         "routing": _routing_section(task),
         "provider_resource": provider_resource,
+        "execution_evidence": {
+            "schema_version": execution_evidence.get("schema_version"),
+            "evidence_contract_version": execution_evidence.get("evidence_contract_version"),
+            "actual_model": dict(execution_evidence.get("actual_model") or {}),
+            "token_usage": dict(execution_evidence.get("token_usage") or {}),
+            "monetary_cost": dict(execution_evidence.get("monetary_cost") or {}),
+            "cohort": dict(execution_evidence.get("cohort") or {}),
+        },
         "worker": worker,
         "reviewer": reviewer,
         "objective_checks": objective_checks,
@@ -141,6 +151,8 @@ def _worker_section(task: dict[str, Any]) -> dict[str, Any]:
     attempts = _int_value(task.get("attempts"))
     run_count = _int_value(task.get("run_count"))
     terminal_status = _terminal_status(task.get("status"))
+    execution_evidence = evidence_view(task)
+    actual_model = _dict_value(execution_evidence.get("actual_model"))
 
     return {
         "worker_id": f"{backend}.{selection_rule}" if backend != "unknown" and selection_rule != "unknown" else "unknown",
@@ -157,6 +169,9 @@ def _worker_section(task: dict[str, Any]) -> dict[str, Any]:
         "model_requirement_key": requirement_key,
         "model_selection_rule": selection_rule,
         "model_source": model_source,
+        "actual_model": _safe_metadata_value(actual_model.get("value")),
+        "actual_model_status": _safe_metadata_value(actual_model.get("status")),
+        "evidence_contract_version": _safe_metadata_value(execution_evidence.get("evidence_contract_version")),
         "execution_target": execution_target,
         "model_present": model_present,
         "codex_profile_present": codex_profile_present,

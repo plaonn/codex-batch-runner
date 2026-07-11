@@ -18,6 +18,12 @@ from .external_json_command import (
     run_external_json_command_task,
     validate_final_response,
 )
+from .execution_evidence_v2 import (
+    attach_execution_evidence,
+    build_codex_execution_evidence,
+    build_external_execution_evidence,
+    build_shell_execution_evidence,
+)
 from .model_requirements import ResolvedExecutionConfig, command_options, resolve_execution_config
 from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
@@ -943,6 +949,7 @@ def record_shell_last_run(task: dict, result: ShellResult) -> None:
         "stdout_bytes": result.stdout_bytes,
         "stderr_bytes": result.stderr_bytes,
     }
+    attach_execution_evidence(task, build_shell_execution_evidence(task))
 
 
 def record_external_json_command_last_run(task: dict, result: ExternalJsonCommandResult) -> None:
@@ -963,6 +970,8 @@ def record_external_json_command_last_run(task: dict, result: ExternalJsonComman
     worker_target = resolved_worker_target_metadata(task)
     if worker_target:
         task["last_run"]["resolved_worker_target"] = worker_target
+    attestation = result.final_response.get("execution_evidence") if isinstance(result.final_response, dict) else None
+    attach_execution_evidence(task, build_external_execution_evidence(task, attestation))
 
 
 def resolved_worker_target_metadata(task: dict) -> dict[str, Any]:
@@ -1235,6 +1244,7 @@ def record_last_run(task: dict, result: CodexResult, *, execution_settings: Reso
         }
     if result.watchdog_reason:
         task["last_run"]["watchdog_reason"] = result.watchdog_reason
+    attach_execution_evidence(task, build_codex_execution_evidence(task, result))
 
 
 def execution_settings_has_metadata(settings: ResolvedExecutionConfig) -> bool:

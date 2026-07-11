@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from .evaluation import derive_evaluation_row
+from .execution_evidence_v2 import derive_cohort, validate_execution_evidence_v2
 from .request_fingerprint import _safe_id_hash, _safe_metadata_value
 
-SUPPORTED_RECORD_KINDS = {"codex_subagent_execution"}
+SUPPORTED_RECORD_KINDS = {"codex_subagent_execution", "execution_evidence_v2"}
 
 
 class ExecutionEvidenceError(ValueError):
@@ -36,7 +38,7 @@ def derive_execution_evidence_rows(records: list[dict[str, Any]] | None) -> list
     for index, record in enumerate(records or []):
         task_projection = execution_evidence_task_projection(record, index=index)
         row = derive_evaluation_row(task_projection)
-        row["execution_evidence"] = {
+        row["supplemental_evidence"] = {
             "record_kind": _safe_metadata_value(record.get("record_kind")),
             "queue_task": False,
             "source": "supplemental_execution_evidence",
@@ -83,6 +85,12 @@ def execution_evidence_task_projection(record: dict[str, Any], *, index: int = 0
         "last_result": _last_result_projection(_dict_value(record.get("last_result"))),
         "reviewer_codex": _reviewer_projection(_dict_value(record.get("reviewer_codex"))),
     }
+    if kind == "execution_evidence_v2":
+        evidence = deepcopy(validate_execution_evidence_v2(record.get("execution_evidence")))
+        evidence["cohort"] = derive_cohort(task, evidence)
+        validate_execution_evidence_v2(evidence)
+        task["execution_evidence_history"] = [evidence]
+        task["last_run"]["execution_evidence_id"] = evidence.get("evidence_id")
     if record.get("title"):
         task["title"] = _safe_metadata_value(record.get("title"))
     return task

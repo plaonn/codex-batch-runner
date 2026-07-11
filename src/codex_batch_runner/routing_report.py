@@ -372,6 +372,14 @@ def summarize_evaluation_diagnostics(
             group_evaluation_rows(rows, execution_surface_key),
             summarize_execution_surface_cell,
         ),
+        "evidence_contracts": summarize_evaluation_groups(
+            group_evaluation_rows(rows, evidence_contract_key),
+            summarize_evidence_cohort_cell,
+        ),
+        "evidence_cohorts": summarize_evaluation_groups(
+            group_evaluation_rows(rows, evidence_cohort_key),
+            summarize_evidence_cohort_cell,
+        ),
         "model_sources": summarize_evaluation_groups(
             group_evaluation_rows(rows, model_source_key),
             summarize_model_source_cell,
@@ -420,6 +428,19 @@ def summarize_execution_surface_cell(key: str, rows: list[dict[str, Any]]) -> di
         "accepted": count(rows, lambda row: bool(outcomes(row).get("accepted"))),
         "failed": count(rows, lambda row: outcomes(row).get("worker_terminal_status") == "failed"),
         "usable_for_worker_policy": count(rows, usable_for_worker_policy),
+    }
+
+
+def summarize_evidence_cohort_cell(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "key": key,
+        "tasks": len(rows),
+        "v2_rows": count(rows, lambda row: evidence_contract_key(row) == "execution-evidence-v2"),
+        "legacy_rows": count(rows, lambda row: evidence_contract_key(row) == "legacy-v1"),
+        "model_quality_comparable": count(rows, lambda row: cohort_comparability(row, "model_quality")),
+        "token_cost_comparable": count(rows, lambda row: cohort_comparability(row, "token_cost")),
+        "monetary_cost_comparable": count(rows, lambda row: cohort_comparability(row, "monetary_cost")),
+        "advisory_read_only": True,
     }
 
 
@@ -660,6 +681,24 @@ def execution_surface_key(row: dict[str, Any]) -> str:
     return str(row.get("execution_surface") or subject(row).get("execution_surface") or "unknown")
 
 
+def evidence_contract_key(row: dict[str, Any]) -> str:
+    evidence = row.get("execution_evidence") if isinstance(row.get("execution_evidence"), dict) else {}
+    return str(evidence.get("evidence_contract_version") or "legacy-v1")
+
+
+def evidence_cohort_key(row: dict[str, Any]) -> str:
+    evidence = row.get("execution_evidence") if isinstance(row.get("execution_evidence"), dict) else {}
+    cohort = evidence.get("cohort") if isinstance(evidence.get("cohort"), dict) else {}
+    return str(cohort.get("cohort_id") or "legacy-v1-non-comparable")
+
+
+def cohort_comparability(row: dict[str, Any], key: str) -> bool:
+    evidence = row.get("execution_evidence") if isinstance(row.get("execution_evidence"), dict) else {}
+    cohort = evidence.get("cohort") if isinstance(evidence.get("cohort"), dict) else {}
+    comparability = cohort.get("comparability") if isinstance(cohort.get("comparability"), dict) else {}
+    return bool(comparability.get(key))
+
+
 def model_source_key(row: dict[str, Any]) -> str:
     return str(worker(row).get("model_source") or "unknown")
 
@@ -854,6 +893,12 @@ def render_evaluation_diagnostics(diagnostics: dict[str, Any]) -> str:
     lines.append("execution_surfaces")
     lines.append(render_execution_surface_table(list_value(diagnostics.get("execution_surfaces"))[:10]))
     lines.append("")
+    lines.append("evidence_contracts")
+    lines.append(render_evidence_cohort_table(list_value(diagnostics.get("evidence_contracts"))[:10]))
+    lines.append("")
+    lines.append("evidence_cohorts")
+    lines.append(render_evidence_cohort_table(list_value(diagnostics.get("evidence_cohorts"))[:10]))
+    lines.append("")
     lines.append("model_sources")
     lines.append(render_model_source_table(list_value(diagnostics.get("model_sources"))[:10]))
     lines.append("")
@@ -897,6 +942,23 @@ def render_execution_surface_table(entries: list[dict[str, Any]]) -> str:
             str(entry.get("accepted") or 0),
             str(entry.get("failed") or 0),
             str(entry.get("usable_for_worker_policy") or 0),
+        ]
+        for entry in entries
+    ]
+    return render_table(header, rows)
+
+
+def render_evidence_cohort_table(entries: list[dict[str, Any]]) -> str:
+    header = ["KEY", "ROWS", "V2", "LEGACY", "MODEL", "TOKENS", "MONEY"]
+    rows = [
+        [
+            str(entry.get("key") or "-"),
+            str(entry.get("tasks") or 0),
+            str(entry.get("v2_rows") or 0),
+            str(entry.get("legacy_rows") or 0),
+            str(entry.get("model_quality_comparable") or 0),
+            str(entry.get("token_cost_comparable") or 0),
+            str(entry.get("monetary_cost_comparable") or 0),
         ]
         for entry in entries
     ]

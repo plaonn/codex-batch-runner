@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .execution_evidence_v2 import ExecutionEvidenceV2Error, validate_external_attestation
 from .fs import ensure_dir
 from .timeutil import iso_now
 
@@ -141,6 +142,11 @@ def validate_final_response(final_response: dict[str, Any], task_id: str) -> str
         return "final JSON changed_files must be a list"
     if not isinstance(final_response.get("verification"), list):
         return "final JSON verification must be a list"
+    if "execution_evidence" in final_response:
+        try:
+            validate_external_attestation(final_response.get("execution_evidence"))
+        except ExecutionEvidenceV2Error as exc:
+            return str(exc)
     return None
 
 

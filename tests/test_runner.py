@@ -1031,6 +1031,84 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("completed", task["last_result"]["status"])
             self.assertIn("stdout:", log_text)
 
+    def test_run_next_external_json_command_records_optional_v2_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            response = {
+                "task_id": "external-attested",
+                "status": "completed",
+                "summary": "ok",
+                "changed_files": [],
+                "verification": ["checked"],
+                "execution_evidence": {
+                    "schema_version": 2,
+                    "capability": "actual-model+usage-attestation",
+                    "actual_model": "wrapper-model",
+                    "token_usage": {"input_tokens": 8, "output_tokens": 3},
+                },
+            }
+            create_task(
+                config,
+                "external work",
+                tmp,
+                task_id="external-attested",
+                execution_backend="external-json-command",
+                external_command=[
+                    sys.executable,
+                    "-c",
+                    "import json; print(json.dumps(" + repr(response) + "))",
+                ],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "external-attested")
+            evidence = task["execution_evidence_history"][-1]
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("wrapper-model", evidence["actual_model"]["value"])
+            self.assertEqual("wrapper_attested", evidence["actual_model"]["confidence"])
+            self.assertEqual(11, evidence["token_usage"]["values"]["known_total_tokens"])
+            self.assertEqual(evidence["evidence_id"], task["last_run"]["execution_evidence_id"])
+
+    def test_run_next_external_json_command_rejects_invalid_v2_attestation_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            response = {
+                "task_id": "external-invalid-attestation",
+                "status": "completed",
+                "summary": "ok",
+                "changed_files": [],
+                "verification": ["checked"],
+                "execution_evidence": {
+                    "schema_version": 2,
+                    "capability": "actual-model+usage-attestation",
+                    "actual_model": "claimed-model",
+                    "session_id": "must-not-be-accepted",
+                },
+            }
+            create_task(
+                config,
+                "external work",
+                tmp,
+                task_id="external-invalid-attestation",
+                execution_backend="external-json-command",
+                external_command=[
+                    sys.executable,
+                    "-c",
+                    "import json; print(json.dumps(" + repr(response) + "))",
+                ],
+            )
+
+            outcome = run_next(config)
+            task = load_task(config, "external-invalid-attestation")
+            evidence = task["execution_evidence_history"][-1]
+
+            self.assertEqual("failed", outcome.status)
+            self.assertIn("unsupported key", task["last_error"])
+            self.assertEqual("unavailable", evidence["actual_model"]["status"])
+            self.assertEqual("invalid_external_wrapper_attestation", evidence["actual_model"]["availability_reason"])
+            self.assertNotIn("must-not-be-accepted", json.dumps(evidence))
+
     def test_run_next_external_json_command_missing_command_fails_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")

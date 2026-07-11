@@ -78,6 +78,7 @@
 - `worker_selection_rule`: worker target을 선택한 config rule name.
 - `worker_selection_reason`: worker target 선택 이유.
 - `worker_family`, `worker_model_group`, `worker_budget_hint`: worker target에서 복사된 sanitized reporting metadata.
+- `execution_evidence_history`: 실행 attempt별 sanitized evaluation evidence v2 record의 append-only 목록. 각 record는 actual model, token usage, monetary cost를 `observed`/`token_free`/`unavailable` 상태와 source/confidence/availability reason으로 구분하고, raw prompt/transcript/log/session/thread/path를 포함하지 않습니다. `last_run.execution_evidence_id`는 현재 run에 대응하는 record를 가리킵니다. 기존 task에 이 field가 없으면 report는 `legacy-v1` non-comparable evidence로 해석합니다.
 - bounded review/fix chain metadata:
   - `root_task_id`
   - `parent_task_id`

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .execution_evidence_v2 import evidence_view
 from .queue import list_tasks, task_labels, task_project_id, task_project_root, task_title
 from .routing_report import number
 from .timeutil import iso_now, parse_time
@@ -23,7 +24,7 @@ EXECUTION_REPORT_TABLE_COLUMNS = (
     ("TASK", 48, "left"),
     ("WORKER", 11, "left"),
     ("POOL", 18, "left"),
-    ("MODEL", 20, "left"),
+    ("ACTUAL/PLANNED", 20, "left"),
     ("STATUS", 9, "left"),
     ("REVIEW", 14, "left"),
     ("DURATION", 8, "right"),
@@ -115,7 +116,8 @@ def task_execution_row(config: Config, task: dict[str, Any]) -> dict[str, Any]:
     backend = sanitize(last_run.get("execution_backend") or "codex")
     capacity_pool = sanitize(task.get("capacity_pool") or "codex")
     command = list_value(last_run.get("command"))
-    token_usage, token_usage_source = derive_token_usage(config, last_run, backend)
+    observed_evidence = evidence_view(task)
+    token_usage, token_usage_source = derive_token_usage(config, last_run, backend, observed_evidence)
     duration = number(last_run.get("duration_seconds"))
     queue_wait = duration_between(task.get("created_at"), last_run.get("started_at") or task.get("started_at"))
     changed_files = changed_files_count(task.get("last_result"))
@@ -144,6 +146,7 @@ def task_execution_row(config: Config, task: dict[str, Any]) -> dict[str, Any]:
             "timed_out": bool(last_run.get("timed_out")),
         },
         "model": {
+            "identity_kind": "planned_execution",
             "model": sanitize(resolved_config.get("model") or command_option(command, "--model")),
             "model_group": sanitize(
                 command_option(command, "--model-group") or resolved_worker_target.get("model_group")
@@ -161,6 +164,16 @@ def task_execution_row(config: Config, task: dict[str, Any]) -> dict[str, Any]:
             "codex_profile": sanitize(resolved_config.get("codex_profile") or ""),
             "budget_hint": sanitize(resolved_config.get("budget_hint") or resolved_worker_target.get("budget_hint")),
         },
+        "actual_model": dict(observed_evidence.get("actual_model") or {}),
+        "evidence": {
+            "schema_version": observed_evidence.get("schema_version"),
+            "evidence_contract_version": observed_evidence.get("evidence_contract_version"),
+            "evidence_id": observed_evidence.get("evidence_id"),
+            "capture": dict(observed_evidence.get("capture") or {}),
+            "cohort": dict(observed_evidence.get("cohort") or {}),
+            "monetary_cost": dict(observed_evidence.get("monetary_cost") or {}),
+            "privacy": dict(observed_evidence.get("privacy") or {}),
+        },
         "result": {
             "status": sanitize(last_result_value(task, "status")),
             "reviewer_decision": sanitize(reviewer_decision(task)),
@@ -172,7 +185,19 @@ def task_execution_row(config: Config, task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def derive_token_usage(config: Config, last_run: dict[str, Any], backend: str) -> tuple[dict[str, int | None], str]:
+def derive_token_usage(
+    config: Config,
+    last_run: dict[str, Any],
+    backend: str,
+    observed_evidence: dict[str, Any] | None = None,
+) -> tuple[dict[str, int | None], str]:
+    if observed_evidence and observed_evidence.get("schema_version") == 2:
+        observation = observed_evidence.get("token_usage")
+        if isinstance(observation, dict):
+            values = observation.get("values") if isinstance(observation.get("values"), dict) else {}
+            return token_usage_payload({key: value for key, value in values.items() if value is not None}), str(
+                observation.get("source") or observation.get("status") or "unavailable"
+            )
     stored = usage_dict(last_run.get("usage") if isinstance(last_run, dict) else None)
     if stored:
         return token_usage_payload(stored), "last_run"
@@ -278,6 +303,18 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     token_sources = Counter(str(row.get("token_usage_source") or "unknown") for row in rows)
     worker_families = Counter(str(row.get("execution", {}).get("worker_family") or "unknown") for row in rows)
     model_groups = Counter(str(row.get("model", {}).get("model_group") or "none") for row in rows)
+    evidence_contracts = Counter(
+        str(row.get("evidence", {}).get("evidence_contract_version") or "unknown") for row in rows
+    )
+    cohort_ids = Counter(
+        str(row.get("evidence", {}).get("cohort", {}).get("cohort_id") or "unknown") for row in rows
+    )
+    model_comparability = Counter(
+        "comparable"
+        if bool(row.get("evidence", {}).get("cohort", {}).get("comparability", {}).get("model_quality"))
+        else "non_comparable"
+        for row in rows
+    )
     duration_sum = sum(number(row.get("duration_seconds")) for row in rows)
     token_totals = defaultdict(int)
     token_rows = 0
@@ -297,6 +334,9 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "token_usage_sources": dict(sorted(token_sources.items())),
         "worker_families": dict(sorted(worker_families.items())),
         "model_groups": dict(sorted(model_groups.items())),
+        "evidence_contracts": dict(sorted(evidence_contracts.items())),
+        "cohort_ids": dict(sorted(cohort_ids.items())),
+        "model_comparability": dict(sorted(model_comparability.items())),
         "token_totals": dict(sorted(token_totals.items())),
     }
 
@@ -341,8 +381,12 @@ def execution_display_value(row: dict[str, Any], key: str) -> str:
 
 
 def model_display_value(row: dict[str, Any]) -> str:
+    actual_model = row.get("actual_model") if isinstance(row.get("actual_model"), dict) else {}
+    if actual_model.get("status") == "observed" and actual_model.get("value"):
+        return "actual:" + str(actual_model.get("value"))
     model = row.get("model") if isinstance(row.get("model"), dict) else {}
-    return str(model.get("model") or model.get("model_group") or model.get("model_source") or "-")
+    planned = str(model.get("model") or model.get("model_group") or model.get("model_source") or "-")
+    return "unknown" if planned == "-" else "planned:" + planned
 
 
 def render_fixed_table(columns: tuple[tuple[str, int, str], ...], rows: list[list[str]]) -> str:

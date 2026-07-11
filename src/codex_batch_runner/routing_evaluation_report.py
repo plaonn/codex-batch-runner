@@ -8,8 +8,11 @@ from .evaluation import derive_evaluation_row
 from .execution_evidence import derive_execution_evidence_rows
 from .queue import list_tasks, task_labels, task_project_id, task_project_root
 from .routing_report import (
+    evidence_cohort_key,
+    evidence_contract_key,
     group_evaluation_rows,
     render_probe_lanes,
+    summarize_evidence_cohort_cell,
     summarize_evaluation_groups,
     summarize_task_bucket,
 )
@@ -62,6 +65,12 @@ def build_routing_evaluation_report(
         "evaluation_rows": rows,
         "evaluation_diagnostics": {
             "probe_lanes": summarize_probe_lanes(rows),
+            "evidence_contracts": summarize_evaluation_groups(
+                group_evaluation_rows(rows, evidence_contract_key), summarize_evidence_cohort_cell
+            ),
+            "evidence_cohorts": summarize_evaluation_groups(
+                group_evaluation_rows(rows, evidence_cohort_key), summarize_evidence_cohort_cell
+            ),
             "advisory": {
                 "read_only": True,
                 "mutation_allowed": False,
@@ -71,6 +80,12 @@ def build_routing_evaluation_report(
         "execution_evidence_rows": execution_evidence_rows,
         "execution_evidence_diagnostics": {
             "probe_lanes": summarize_probe_lanes(execution_evidence_rows),
+            "evidence_contracts": summarize_evaluation_groups(
+                group_evaluation_rows(execution_evidence_rows, evidence_contract_key), summarize_evidence_cohort_cell
+            ),
+            "evidence_cohorts": summarize_evaluation_groups(
+                group_evaluation_rows(execution_evidence_rows, evidence_cohort_key), summarize_evidence_cohort_cell
+            ),
             "advisory": {
                 "read_only": True,
                 "mutation_allowed": False,

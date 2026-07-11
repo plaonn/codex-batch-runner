@@ -133,7 +133,7 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 - Rationale: routing/cost 최적화는 작업 요구, worker/backend 선택, provider availability, reviewer reliability, worker quality를 opaque profile label 하나로 합치지 않을 때만 검토 가능한 근거가 된다.
 - Failure prevented: legacy profile 이름이 durable policy primitive가 되는 문제, report가 정책을 자동 변경하는 문제, reviewer drift가 worker 평가를 오염시키는 문제, `capacity_pool`이나 local role 이름에서 provider quota bucket을 추론하는 문제.
 - Assumptions: 모델·worker·provider 선택 축은 독립적으로 변화할 수 있고, 각 선택의 provenance를 별도 field와 evidence row로 보존할 가치가 있다.
-- Derived specs: task JSON은 requirement vector를 저장하고, 실제 선택은 resolved execution/worker config에 기록하며, routing/provider evidence report는 read-only/advisory 진단으로만 사용한다. Queue 밖 실행 근거는 fake task가 아니라 execution surface가 구분된 supplemental evidence row로 병합한다.
+- Derived specs: task JSON은 requirement vector를 저장하고, planned selection은 resolved execution/worker config에 기록하며, observed actual model/usage는 source/confidence/availability가 있는 evaluation evidence v2로 별도 저장한다. Cohort는 evidence/policy/selection/worker/reviewer/derivation version boundary와 comparability를 보존하고 legacy evidence를 v2 actual-model cohort에 합치지 않는다. External actual-model/usage attestation은 optional capability이며 생략 시 unavailable로 남긴다. Routing/provider evidence report는 read-only/advisory 진단으로만 사용하고, queue 밖 실행 근거는 fake task가 아니라 execution surface가 구분된 supplemental evidence row로 병합한다.
 - Revisit when: public schema 통합이 더 단순하다는 evidence가 축적되거나, accepted/rejected/routed 표본을 바탕으로 자동 routing policy 변경을 검토할 때.
 - Revisit signal status: not observed
 - Evidence: [docs/execution.md](execution.md)

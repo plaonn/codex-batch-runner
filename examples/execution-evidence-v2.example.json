@@ -1,0 +1,119 @@
+{
+  "records": [
+    {
+      "record_kind": "execution_evidence_v2",
+      "work_id": "synthetic-evaluation-work-001",
+      "execution_surface": "external_worker",
+      "execution_backend": "external-json-command",
+      "project_id": "example-project",
+      "category": "implementation",
+      "labels": [
+        "evaluation-v2"
+      ],
+      "routing_experiment": "baseline",
+      "routing_size": "small",
+      "routing_risk": "low",
+      "verification_scope": [
+        "unit"
+      ],
+      "status": "completed",
+      "review_status": "accepted",
+      "attempts": 1,
+      "run_count": 1,
+      "last_run": {
+        "command_kind": "external-json-command",
+        "execution_backend": "external-json-command",
+        "duration_seconds": 45,
+        "resolved_execution_config": {
+          "selection_rule": "example-worker-rule",
+          "model_source": "external_wrapper_attestation",
+          "execution_target": "example-worker"
+        }
+      },
+      "last_result": {
+        "status": "completed",
+        "changed_files": [
+          "src/example.py"
+        ],
+        "verification": [
+          "unit tests passed"
+        ]
+      },
+      "execution_evidence": {
+        "schema_version": 2,
+        "evidence_contract_version": "execution-evidence-v2",
+        "kind": "execution_evidence",
+        "evidence_id": "evidence-sha256:example00000000000000001",
+        "captured_at": "2026-07-01T00:00:00+00:00",
+        "attempt": 1,
+        "capture": {
+          "source": "external_wrapper_attestation",
+          "raw_provider_output_included": false,
+          "raw_wrapper_output_included": false
+        },
+        "execution": {
+          "backend": "external-json-command",
+          "worker_family": "external-worker"
+        },
+        "actual_model": {
+          "status": "observed",
+          "value": "example-observed-model",
+          "source": "external_wrapper_attestation",
+          "confidence": "wrapper_attested",
+          "availability_reason": null
+        },
+        "token_usage": {
+          "status": "observed",
+          "values": {
+            "input_tokens": 100,
+            "cached_input_tokens": 25,
+            "output_tokens": 10,
+            "reasoning_output_tokens": null,
+            "uncached_input_tokens": 75,
+            "known_total_tokens": 110
+          },
+          "source": "external_wrapper_attestation",
+          "confidence": "wrapper_attested",
+          "availability_reason": null
+        },
+        "monetary_cost": {
+          "status": "unavailable",
+          "amount": null,
+          "currency": null,
+          "source": null,
+          "confidence": null,
+          "availability_reason": "provider_billing_evidence_not_available"
+        },
+        "cohort": {
+          "definition_version": "execution-cohort-v2",
+          "cohort_id": "sha256:examplecohort001",
+          "components": {
+            "evidence_contract_version": "execution-evidence-v2",
+            "execution_backend": "external-json-command",
+            "actual_model": "example-observed-model",
+            "model_selection_rule": "example-worker-rule",
+            "execution_target": "example-worker",
+            "routing_experiment": "baseline",
+            "review_policy_version": "review-v1",
+            "requirement_derivation_version": "routing-metadata-v1"
+          },
+          "comparability": {
+            "model_quality": true,
+            "token_cost": true,
+            "monetary_cost": false
+          },
+          "exclusion_reasons": [
+            "monetary_cost_unavailable"
+          ]
+        },
+        "privacy": {
+          "raw_prompt_included": false,
+          "raw_transcript_included": false,
+          "session_or_thread_ids_included": false,
+          "raw_paths_included": false,
+          "credentials_included": false
+        }
+      }
+    }
+  ]
+}
