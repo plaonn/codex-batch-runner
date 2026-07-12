@@ -96,6 +96,8 @@ cbr prune --notifier-cursor-state path/to/notify-state.json
 
 `cbr enqueue --backend external-json-command` requires `--command-json` or final-position `--command`. The command must be an argv list; cbr does not evaluate shell strings. The runner appends the wrapped cbr prompt as the command's final argv argument and expects stdout to contain one final JSON object with `task_id`, `status`, `summary`, `changed_files`, and `verification`.
 
+`--model-requirement-json`은 complete requirement v2 JSON을 semantic default 없이 검증합니다. Issuer-owned `revision_id`, 여섯 quality axis의 score/confidence/anchor/evidence codes, hard constraints, utility preferences를 canonical task에 저장합니다. 기존 per-dimension flags는 compatibility surface로 남아 deterministic `legacy-derived` v2 revision을 만들며 exact v2 cohort에는 포함되지 않습니다. `--routing-override-json`은 single-task override를 검증·저장하지만 D2 전에는 selection에 적용하지 않습니다.
+
 config 탐색 순서:
 
 1. `--config` 명시값

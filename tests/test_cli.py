@@ -1387,9 +1387,12 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertEqual("requirement\n", output)
-            self.assertEqual("explicit_cli", task["model_requirement_vector"]["source"])
-            self.assertEqual("low", task["model_requirement_vector"]["dimensions"]["reasoning_depth"])
-            self.assertEqual("high", task["model_requirement_vector"]["dimensions"]["cost_sensitivity"])
+            vector = task["model_requirement_vector"]
+            self.assertEqual(2, vector["schema_version"])
+            self.assertEqual("legacy-derived", vector["derivation_identity"]["kind"])
+            self.assertEqual("explicit_cli", vector["legacy_projection"]["source"])
+            self.assertEqual("low", vector["legacy_projection"]["dimensions"]["reasoning_depth"])
+            self.assertEqual("high", vector["legacy_projection"]["dimensions"]["cost_sensitivity"])
 
     def test_enqueue_records_routing_decision_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1434,7 +1437,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual("small", task["routing_size"])
             self.assertEqual("low", task["routing_risk"])
             self.assertEqual(["unit", "docs"], task["verification_scope"])
-            self.assertEqual("medium", task["model_requirement_vector"]["dimensions"]["reasoning_depth"])
+            self.assertEqual(
+                "medium", task["model_requirement_vector"]["legacy_projection"]["dimensions"]["reasoning_depth"]
+            )
 
     def test_enqueue_records_shell_command_json_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4519,19 +4524,13 @@ class CliTests(unittest.TestCase):
                 tmp,
                 task_id="fix",
                 project_id="project-a",
+                model_requirement_vector=requirement_vector(
+                    reasoning_depth="high",
+                    context_need="high",
+                    tool_reliability="high",
+                    cost_sensitivity="low",
+                ),
             )
-            fix["model_requirement_vector"] = {
-                "source": "test",
-                "confidence": "medium",
-                "dimensions": {
-                    "reasoning_depth": "high",
-                    "context_need": "high",
-                    "tool_reliability": "high",
-                    "latency_priority": "medium",
-                    "cost_sensitivity": "low",
-                    "review_strictness": "medium",
-                },
-            }
             fix["review_followup_for"] = "source"
             fix["subtask_type"] = "auto_review_fix"
             fix["subtask_for"] = "source"
@@ -6178,7 +6177,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("op[0]\tdependency_changes\ttasks=task-b\twould_change=yes", output)
             self.assertEqual("runnable", load_task(config, "task-b")["status"])
 
-    def test_apply_plan_dry_run_accepts_model_requirement_and_routing_metadata(self) -> None:
+    def test_apply_plan_dry_run_rejects_model_requirement_revision_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
@@ -6213,11 +6212,11 @@ class CliTests(unittest.TestCase):
 
             code, output = run_cli(["--config", str(config_path), "apply-plan", str(plan_path), "--dry-run"])
 
-            self.assertEqual(0, code)
+            self.assertEqual(1, code)
             self.assertIn("mode: dry-run", output)
-            self.assertIn("valid: true", output)
+            self.assertIn("model_requirement_vector is immutable", output)
             task = load_task(config, "task-a")
-            self.assertEqual("medium", task["model_requirement_vector"]["dimensions"]["reasoning_depth"])
+            self.assertEqual(2, task["model_requirement_vector"]["schema_version"])
             self.assertIsNone(task["routing_reason"])
             self.assertEqual([], task["routing_risk_factors"])
             self.assertIsNone(task["routing_experiment"])
@@ -6370,9 +6369,6 @@ class CliTests(unittest.TestCase):
                                 "labels": ["safe", "mutation"],
                                 "depends_on": ["task-a"],
                                 "status": "paused",
-                                "model_requirement_vector": {
-                                    "dimensions": {"reasoning_depth": "low", "cost_sensitivity": "high"}
-                                },
                                 "routing_reason": "docs-only bounded change",
                                 "routing_risk_factors": ["public-docs", "low-blast-radius"],
                                 "routing_experiment": "downshift_probe",
@@ -6400,7 +6396,6 @@ class CliTests(unittest.TestCase):
             self.assertEqual(["safe", "mutation"], task["labels"])
             self.assertEqual(["task-a"], task["depends_on"])
             self.assertEqual("paused", task["status"])
-            self.assertEqual("low", task["model_requirement_vector"]["dimensions"]["reasoning_depth"])
             self.assertEqual("docs-only bounded change", task["routing_reason"])
             self.assertEqual(["public-docs", "low-blast-radius"], task["routing_risk_factors"])
             self.assertEqual("downshift_probe", task["routing_experiment"])
@@ -6415,7 +6410,6 @@ class CliTests(unittest.TestCase):
                     "depends_on",
                     "description",
                     "labels",
-                    "model_requirement_vector",
                     "routing_experiment",
                     "routing_reason",
                     "routing_risk",
@@ -6426,10 +6420,6 @@ class CliTests(unittest.TestCase):
                     "verification_scope",
                 ],
                 events[0]["payload"]["changed_fields"],
-            )
-            self.assertEqual(
-                "low",
-                events[0]["payload"]["after"]["model_requirement_vector"]["dimensions"]["reasoning_depth"],
             )
             self.assertEqual("docs-only bounded change", events[0]["payload"]["after"]["routing_reason"])
             self.assertEqual(["public-docs", "low-blast-radius"], events[0]["payload"]["after"]["routing_risk_factors"])

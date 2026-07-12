@@ -16,7 +16,11 @@ from codex_batch_runner.codex import (
     run_codex,
     should_use_resume,
 )
-from codex_batch_runner.model_requirements import resolve_execution_config, resolve_model_requirement_vector
+from codex_batch_runner.model_requirements import (
+    legacy_dimensions_for_requirement,
+    resolve_execution_config,
+    resolve_model_requirement_vector,
+)
 
 
 class CodexParserTests(unittest.TestCase):
@@ -312,9 +316,9 @@ class CodexParserTests(unittest.TestCase):
                 {"id": "task-2", "category": "implementation", "labels": ["worktree-apply"]},
             )
 
-            self.assertEqual("medium", general_worktree["dimensions"]["reasoning_depth"])
-            self.assertEqual("high", critical_worktree["dimensions"]["reasoning_depth"])
-            self.assertEqual("high", critical_worktree["dimensions"]["tool_reliability"])
+            self.assertEqual("medium", legacy_dimensions_for_requirement(general_worktree)["reasoning_depth"])
+            self.assertEqual("high", legacy_dimensions_for_requirement(critical_worktree)["reasoning_depth"])
+            self.assertEqual("high", legacy_dimensions_for_requirement(critical_worktree)["tool_reliability"])
 
     def test_low_risk_docs_metadata_derives_low_cost_requirement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -360,13 +364,15 @@ class CodexParserTests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual("low", low_risk_docs["dimensions"]["reasoning_depth"])
-            self.assertEqual("high", low_risk_docs["dimensions"]["cost_sensitivity"])
-            self.assertEqual("medium", wider_verification["dimensions"]["reasoning_depth"])
-            self.assertEqual("high", high_risk_worktree["dimensions"]["reasoning_depth"])
-            self.assertEqual("medium", explicit_requirement.requirement_vector["dimensions"]["reasoning_depth"])
+            self.assertEqual("low", legacy_dimensions_for_requirement(low_risk_docs)["reasoning_depth"])
+            self.assertEqual("high", legacy_dimensions_for_requirement(low_risk_docs)["cost_sensitivity"])
+            self.assertEqual("medium", legacy_dimensions_for_requirement(wider_verification)["reasoning_depth"])
+            self.assertEqual("high", legacy_dimensions_for_requirement(high_risk_worktree)["reasoning_depth"])
+            self.assertEqual(
+                "medium", legacy_dimensions_for_requirement(explicit_requirement.requirement_vector)["reasoning_depth"]
+            )
 
-    def test_stored_derived_requirement_recomputes_from_current_routing_metadata(self) -> None:
+    def test_stored_requirement_revision_is_not_recomputed_from_current_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))
             config = Config(
@@ -393,10 +399,10 @@ class CodexParserTests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual("high", resolved["dimensions"]["reasoning_depth"])
-            self.assertEqual("low", resolved["dimensions"]["cost_sensitivity"])
+            self.assertEqual("low", legacy_dimensions_for_requirement(resolved)["reasoning_depth"])
+            self.assertEqual("high", legacy_dimensions_for_requirement(resolved)["cost_sensitivity"])
 
-    def test_example_configs_route_reviewers_before_general_high_capability_rule(self) -> None:
+    def test_example_configs_do_not_reinterpret_requirement_by_reviewer_role(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         for config_name in ("config.example.json", "config.automation.example.json"):
             with self.subTest(config_name=config_name):
@@ -404,8 +410,8 @@ class CodexParserTests(unittest.TestCase):
 
                 resolved = resolve_execution_config(config, {}, reviewer=True)
 
-                self.assertEqual("strict-review", resolved.selection_rule)
-                self.assertEqual("batch-review", resolved.codex_profile)
+                self.assertEqual("default_execution_config", resolved.selection_rule)
+                self.assertEqual("batch-normal", resolved.codex_profile)
 
     def test_should_use_resume_after_task_is_marked_running(self) -> None:
         task = {"status": "running", "resume_requested": True, "thread_id": "thread-123"}

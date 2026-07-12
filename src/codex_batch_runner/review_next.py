@@ -1441,9 +1441,6 @@ def enqueue_auto_fix_task(
         created_by="auto-review-fix",
         title=title,
         description=f"Bounded auto-fix follow-up for reviewer findings on {parent_task_id}.",
-        model_requirement_vector=parent_task.get("model_requirement_vector")
-        if isinstance(parent_task.get("model_requirement_vector"), dict)
-        else None,
         subtask_type="auto_review_fix",
         subtask_for=parent_task_id,
         review_followup_for=parent_task_id,

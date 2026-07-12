@@ -4,6 +4,7 @@ from typing import Any
 
 from .provider_resource import derive_provider_resource_evidence, provider_resource_key
 from .execution_evidence_v2 import evidence_view
+from .model_requirements import legacy_dimensions_for_requirement
 from .review_outcome_evidence import review_outcome_view
 from .routing_cost_evidence import routing_cost_evidence_view
 from .request_fingerprint import _has_value, _normalized_list, _safe_id_hash, _safe_metadata_value, derive_request_fingerprint
@@ -184,7 +185,7 @@ def _worker_section(task: dict[str, Any]) -> dict[str, Any]:
     last_run = _dict_value(task.get("last_run"))
     resolved_config = _dict_value(last_run.get("resolved_execution_config"))
     requirement_vector = _dict_value(resolved_config.get("model_requirement_vector") or task.get("model_requirement_vector"))
-    dimensions = _dict_value(requirement_vector.get("dimensions"))
+    dimensions = legacy_dimensions_for_requirement(requirement_vector)
     selection_rule = _safe_metadata_value(resolved_config.get("selection_rule"))
     requirement_key = _join_key(
         "requirement",
@@ -201,6 +202,14 @@ def _worker_section(task: dict[str, Any]) -> dict[str, Any]:
     terminal_status = _terminal_status(task.get("status"))
     execution_evidence = evidence_view(task)
     actual_model = _dict_value(execution_evidence.get("actual_model"))
+    derivation_identity = _dict_value(requirement_vector.get("derivation_identity"))
+    requirement_cohort = (
+        "legacy-derived-non-comparable"
+        if derivation_identity.get("kind") == "legacy-derived"
+        else "requirement-v2-exact"
+        if requirement_vector.get("schema_version") == 2
+        else "legacy-v1-read-only"
+    )
 
     return {
         "worker_id": f"{backend}.{selection_rule}" if backend != "unknown" and selection_rule != "unknown" else "unknown",
@@ -215,6 +224,10 @@ def _worker_section(task: dict[str, Any]) -> dict[str, Any]:
         ),
         "execution_backend": backend,
         "model_requirement_key": requirement_key,
+        "model_requirement_schema_version": requirement_vector.get("schema_version"),
+        "model_requirement_revision_id": _safe_metadata_value(requirement_vector.get("revision_id")),
+        "model_requirement_cohort": requirement_cohort,
+        "model_requirement_exact_v2_cohort_eligible": requirement_cohort == "requirement-v2-exact",
         "model_selection_rule": selection_rule,
         "model_source": model_source,
         "actual_model": _safe_metadata_value(actual_model.get("value")),

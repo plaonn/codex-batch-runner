@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .model_requirements import legacy_dimensions_for_requirement
 from .planned_execution import planned_execution_summary
 from .queue import (
     dependency_blockers,
@@ -192,7 +193,7 @@ def append_execution_config_summary(lines: list[str], task: dict) -> None:
     if task.get("shell_timeout_seconds"):
         fields.append(f"shell_timeout_seconds={sanitize(task.get('shell_timeout_seconds'))}")
     vector = task.get("model_requirement_vector")
-    dimensions = vector.get("dimensions") if isinstance(vector, dict) else {}
+    dimensions = legacy_dimensions_for_requirement(vector)
     if isinstance(dimensions, dict) and dimensions:
         fields.append(
             "model_requirement_vector="

@@ -18,6 +18,7 @@ import codex_batch_runner.runner as runner_module
 from codex_batch_runner.codex import CodexResult
 from codex_batch_runner.evidence import list_rate_limit_evidence
 from codex_batch_runner.events import list_events
+from codex_batch_runner.fs import write_json_atomic
 from codex_batch_runner.prompts import build_prompt
 from codex_batch_runner.queue import create_task, load_task, save_task
 from codex_batch_runner.runner import apply_codex_result, run_next
@@ -334,7 +335,7 @@ class RunnerTests(unittest.TestCase):
             config = make_config(tmp, "success")
             task = create_task(config, "work", tmp, task_id="bad-requirement")
             task["model_requirement_vector"] = {"dimensions": {"reasoning_depth": "extreme"}}
-            save_task(config, task)
+            write_json_atomic(config.queue_dir / "bad-requirement.json", task)
 
             with patch("codex_batch_runner.codex.subprocess.Popen", side_effect=AssertionError("unexpected Codex call")):
                 outcome = run_next(config)
@@ -1448,7 +1449,10 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("high-capability", resolved["selection_rule"])
             self.assertEqual("explicit_model", resolved["model_source"])
             self.assertEqual("gpt-5", resolved["model"])
-            self.assertEqual("high", resolved["model_requirement_vector"]["dimensions"]["reasoning_depth"])
+            self.assertEqual(
+                "high",
+                resolved["model_requirement_vector"]["legacy_projection"]["dimensions"]["reasoning_depth"],
+            )
             self.assertEqual(["model_reasoning_effort"], resolved["config_override_keys"])
 
     def test_run_next_records_cli_default_model_source_for_no_model_config(self) -> None:

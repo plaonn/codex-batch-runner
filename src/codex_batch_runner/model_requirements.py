@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,6 +35,34 @@ REQUIREMENT_DIMENSIONS = (
     "review_strictness",
 )
 REQUIREMENT_LEVELS = {"unknown", "low", "medium", "high"}
+REQUIREMENT_V2_AXES = (
+    "semantic_reasoning",
+    "context_integration",
+    "planning_depth",
+    "instruction_fidelity",
+    "tool_execution_reliability",
+    "adversarial_detection",
+)
+REQUIREMENT_V2_ANCHORS = {0, 250, 500, 750, 1000}
+REQUIREMENT_V2_EVIDENCE_CODES = {
+    "AMBIGUOUS_CONTRACT",
+    "MULTI_MODULE",
+    "DEPENDENT_STAGES",
+    "PUBLIC_PRIVATE_BOUNDARY",
+    "MULTI_TOOL_MUTATION",
+    "ADVERSARIAL_REVIEW",
+}
+REQUIREMENT_V2_DERIVATION_VERSION = "requirement-rubric-v1"
+HARD_CONSTRAINT_KEYS = {
+    "required_execution_surfaces",
+    "required_tools",
+    "minimum_context_tokens",
+    "allowed_reasoning_efforts",
+    "forbidden_provider_families",
+    "interactive_input_required",
+    "independent_provider_required",
+}
+UTILITY_PREFERENCE_KEYS = {"latency_weight", "cost_weight"}
 
 
 @dataclass(frozen=True)
@@ -54,6 +84,11 @@ def model_requirement_vector_value(key: str, value: object) -> dict[str, Any]:
         return {}
     if not isinstance(value, dict):
         raise ValueError(f"{key} must be an object")
+    schema_version = value.get("schema_version")
+    if schema_version == 2:
+        return requirement_v2_value(key, value)
+    if schema_version not in (None, 1):
+        raise ValueError(f"{key}.schema_version must be 1 or 2")
     raw_dimensions = value.get("dimensions", value)
     if not isinstance(raw_dimensions, dict):
         raise ValueError(f"{key}.dimensions must be an object")
@@ -71,6 +106,160 @@ def model_requirement_vector_value(key: str, value: object) -> dict[str, Any]:
     if rationale:
         vector["rationale"] = rationale
     return vector
+
+
+def requirement_v2_value(key: str, value: object, *, require_revision_id: bool = True) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    allowed = {
+        "schema_version",
+        "derivation_version",
+        "revision_id",
+        "quality_requirements",
+        "hard_constraints",
+        "utility_preferences",
+        "derivation_identity",
+        "legacy_projection",
+    }
+    reject_unknown_keys(key, value, allowed)
+    if value.get("schema_version") != 2:
+        raise ValueError(f"{key}.schema_version must be 2")
+    derivation_version = string_value(f"{key}.derivation_version", value.get("derivation_version"))
+    if derivation_version != REQUIREMENT_V2_DERIVATION_VERSION:
+        raise ValueError(
+            f"{key}.derivation_version must be {REQUIREMENT_V2_DERIVATION_VERSION}"
+        )
+    revision_id = optional_string_value(f"{key}.revision_id", value.get("revision_id"))
+    if require_revision_id and not revision_id:
+        raise ValueError(f"{key}.revision_id is required")
+    quality = quality_requirements_value(f"{key}.quality_requirements", value.get("quality_requirements"))
+    constraints = hard_constraints_value(f"{key}.hard_constraints", value.get("hard_constraints", {}))
+    utility = utility_preferences_value(f"{key}.utility_preferences", value.get("utility_preferences", {}))
+    result: dict[str, Any] = {
+        "schema_version": 2,
+        "derivation_version": derivation_version,
+        "quality_requirements": quality,
+        "hard_constraints": constraints,
+        "utility_preferences": utility,
+    }
+    if revision_id:
+        result["revision_id"] = revision_id
+    derivation_identity = value.get("derivation_identity")
+    if derivation_identity not in (None, ""):
+        if not isinstance(derivation_identity, dict):
+            raise ValueError(f"{key}.derivation_identity must be an object")
+        reject_unknown_keys(
+            f"{key}.derivation_identity",
+            derivation_identity,
+            {"kind", "projection_version", "source_schema_version", "exact_v2_cohort_eligible"},
+        )
+        if derivation_identity.get("kind") != "legacy-derived":
+            raise ValueError(f"{key}.derivation_identity.kind must be legacy-derived")
+        if derivation_identity.get("source_schema_version") != 1:
+            raise ValueError(f"{key}.derivation_identity.source_schema_version must be 1")
+        if derivation_identity.get("exact_v2_cohort_eligible") is not False:
+            raise ValueError(f"{key}.derivation_identity.exact_v2_cohort_eligible must be false")
+        result["derivation_identity"] = json.loads(json.dumps(derivation_identity, sort_keys=True))
+    legacy_projection = value.get("legacy_projection")
+    if (derivation_identity in (None, "")) != (legacy_projection in (None, "")):
+        raise ValueError(f"{key}.derivation_identity and legacy_projection must appear together")
+    if legacy_projection not in (None, ""):
+        if not isinstance(legacy_projection, dict):
+            raise ValueError(f"{key}.legacy_projection must be an object")
+        result["legacy_projection"] = model_requirement_vector_value(
+            f"{key}.legacy_projection", legacy_projection
+        )
+    return result
+
+
+def quality_requirements_value(key: str, value: object) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    missing = [axis for axis in REQUIREMENT_V2_AXES if axis not in value]
+    unknown = sorted(str(axis) for axis in value if axis not in REQUIREMENT_V2_AXES)
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append(f"missing axes: {', '.join(missing)}")
+        if unknown:
+            details.append(f"unknown axes: {', '.join(unknown)}")
+        raise ValueError(f"{key} must contain exactly the v2 axes ({'; '.join(details)})")
+    return {axis: quality_axis_value(f"{key}.{axis}", value[axis]) for axis in REQUIREMENT_V2_AXES}
+
+
+def quality_axis_value(key: str, value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    reject_unknown_keys(key, value, {"score", "confidence", "anchor", "evidence_codes"})
+    score = fixed_point_value(f"{key}.score", value.get("score"))
+    confidence = fixed_point_value(f"{key}.confidence", value.get("confidence"))
+    anchor = fixed_point_value(f"{key}.anchor", value.get("anchor"))
+    if anchor not in REQUIREMENT_V2_ANCHORS:
+        raise ValueError(f"{key}.anchor must be one of: 0, 250, 500, 750, 1000")
+    codes = string_list_value(f"{key}.evidence_codes", value.get("evidence_codes", []))
+    unknown = sorted(set(codes) - REQUIREMENT_V2_EVIDENCE_CODES)
+    if unknown:
+        raise ValueError(f"{key}.evidence_codes contains unknown codes: {', '.join(unknown)}")
+    if len(codes) != len(set(codes)):
+        raise ValueError(f"{key}.evidence_codes must not contain duplicates")
+    return {"score": score, "confidence": confidence, "anchor": anchor, "evidence_codes": codes}
+
+
+def hard_constraints_value(key: str, value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    reject_unknown_keys(key, value, HARD_CONSTRAINT_KEYS)
+    result: dict[str, Any] = {}
+    for name in ("required_execution_surfaces", "required_tools", "allowed_reasoning_efforts", "forbidden_provider_families"):
+        if name in value:
+            result[name] = string_list_value(f"{key}.{name}", value[name])
+    if "minimum_context_tokens" in value:
+        result["minimum_context_tokens"] = non_negative_integer_value(
+            f"{key}.minimum_context_tokens", value["minimum_context_tokens"]
+        )
+    for name in ("interactive_input_required", "independent_provider_required"):
+        if name in value:
+            if not isinstance(value[name], bool):
+                raise ValueError(f"{key}.{name} must be a boolean")
+            result[name] = value[name]
+    return result
+
+
+def utility_preferences_value(key: str, value: object) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    reject_unknown_keys(key, value, UTILITY_PREFERENCE_KEYS)
+    return {name: fixed_point_value(f"{key}.{name}", item) for name, item in value.items()}
+
+
+def routing_override_value(key: str, value: object) -> dict[str, Any]:
+    if value in (None, "", {}):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    reject_unknown_keys(key, value, {"mode", "target_id", "reason", "scope", "allow_fallback", "provenance"})
+    mode = string_value(f"{key}.mode", value.get("mode"))
+    if mode not in {"preference", "pin"}:
+        raise ValueError(f"{key}.mode must be preference or pin")
+    scope = string_value(f"{key}.scope", value.get("scope"))
+    if scope != "single_task":
+        raise ValueError(f"{key}.scope must be single_task")
+    provenance = string_value(f"{key}.provenance", value.get("provenance"))
+    if provenance != "operator_override":
+        raise ValueError(f"{key}.provenance must be operator_override")
+    allow_fallback = value.get("allow_fallback")
+    if not isinstance(allow_fallback, bool):
+        raise ValueError(f"{key}.allow_fallback must be a boolean")
+    if mode == "pin" and allow_fallback:
+        raise ValueError(f"{key}.allow_fallback must be false for pin")
+    return {
+        "mode": mode,
+        "target_id": string_value(f"{key}.target_id", value.get("target_id")),
+        "reason": string_value(f"{key}.reason", value.get("reason")),
+        "scope": scope,
+        "allow_fallback": allow_fallback,
+        "provenance": provenance,
+    }
 
 
 def normalize_requirement_dimensions(key: str, value: dict[str, Any]) -> dict[str, str]:
@@ -190,9 +379,22 @@ def positive_int_value(key: str, value: object) -> int:
     return parsed
 
 
-def task_requirement_metadata(*, model_requirement_vector: object = None) -> dict[str, Any]:
-    vector = model_requirement_vector_value("model_requirement_vector", model_requirement_vector)
-    return {"model_requirement_vector": vector} if vector else {}
+def task_requirement_metadata(
+    *, model_requirement_vector: object = None, routing_override: object = None
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    if model_requirement_vector not in (None, "", {}):
+        parsed = model_requirement_vector_value("model_requirement_vector", model_requirement_vector)
+        if parsed.get("schema_version") == 2 and (
+            "derivation_identity" in parsed or "legacy_projection" in parsed
+        ):
+            raise ValueError("issuer v2 input cannot declare legacy compatibility metadata")
+        vector = parsed if parsed.get("schema_version") == 2 else legacy_requirement_projection(parsed)
+        metadata["model_requirement_vector"] = vector
+    override = routing_override_value("routing_override", routing_override)
+    if override:
+        metadata["routing_override"] = override
+    return metadata
 
 
 def resolve_execution_config(config: Any, task: dict[str, Any], *, reviewer: bool = False) -> ResolvedExecutionConfig:
@@ -218,16 +420,12 @@ def resolve_model_requirement_vector(config: Any, task: dict[str, Any], *, revie
     explicit = task.get("model_requirement_vector")
     if explicit not in (None, "", {}):
         vector = model_requirement_vector_value("model_requirement_vector", explicit)
-        if vector.get("source") == DERIVED_REQUIREMENT_SOURCE:
-            return derive_model_requirement_vector(task, reviewer=reviewer)
-        return vector
-    default = config.review_model_requirement_vector if reviewer else config.default_model_requirement_vector
+        return vector if vector.get("schema_version") == 2 else legacy_requirement_projection(vector)
+    default = config.default_model_requirement_vector
     if default:
-        return model_requirement_vector_value(
-            "review_model_requirement_vector" if reviewer else "default_model_requirement_vector",
-            default,
-        )
-    return derive_model_requirement_vector(task, reviewer=reviewer)
+        vector = model_requirement_vector_value("default_model_requirement_vector", default)
+        return vector if vector.get("schema_version") == 2 else legacy_requirement_projection(vector)
+    return derive_model_requirement_vector(task)
 
 
 def derive_model_requirement_vector(task: dict[str, Any], *, reviewer: bool = False) -> dict[str, Any]:
@@ -243,20 +441,49 @@ def derive_model_requirement_vector(task: dict[str, Any], *, reviewer: bool = Fa
         )
     if high_risk_terms(task) or normalized_task_value(task.get("routing_risk")) == "high":
         dimensions.update(reasoning_depth="high", context_need="high", tool_reliability="high", cost_sensitivity="low")
-    if reviewer:
-        dimensions.update(reasoning_depth="high", tool_reliability="high", review_strictness="high")
-        source_fields.append("worker_role")
-    return {
+    legacy = {
         "schema_version": 1,
         "source": DERIVED_REQUIREMENT_SOURCE,
         "confidence": "medium",
         "derived_from": source_fields,
         "dimensions": dimensions,
     }
+    return legacy_requirement_projection(legacy)
+
+
+def legacy_requirement_projection(value: object) -> dict[str, Any]:
+    legacy = model_requirement_vector_value("legacy_requirement", value)
+    unknown_axis = {"score": 0, "confidence": 0, "anchor": 0, "evidence_codes": []}
+
+    canonical = {
+        "schema_version": 2,
+        "derivation_version": REQUIREMENT_V2_DERIVATION_VERSION,
+        "quality_requirements": {
+            axis: dict(unknown_axis) for axis in REQUIREMENT_V2_AXES
+        },
+        "hard_constraints": {},
+        "utility_preferences": {
+            "latency_weight": 0,
+            "cost_weight": 0,
+        },
+        "derivation_identity": {
+            "kind": "legacy-derived",
+            "projection_version": "legacy-v1-to-requirement-v2-v1",
+            "source_schema_version": 1,
+            "exact_v2_cohort_eligible": False,
+        },
+        "legacy_projection": legacy,
+    }
+    canonical["revision_id"] = revision_id_for(canonical)
+    return requirement_v2_value("model_requirement_vector", canonical)
 
 
 def select_execution_config(config: Any, vector: dict[str, Any]) -> dict[str, Any]:
-    dimensions = vector.get("dimensions") if isinstance(vector.get("dimensions"), dict) else {}
+    if vector.get("schema_version") == 2:
+        legacy = vector.get("legacy_projection")
+        dimensions = legacy.get("dimensions", {}) if isinstance(legacy, dict) else {}
+    else:
+        dimensions = vector.get("dimensions") if isinstance(vector.get("dimensions"), dict) else {}
     for rule in config.model_selection_rules:
         if rule_matches(rule.get("when", {}), dimensions):
             selection = {key: value for key, value in rule.items() if key not in {"name", "when"}}
@@ -419,3 +646,42 @@ def string_list_value(key: str, value: object) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
         raise ValueError(f"{key} must be a list of non-empty strings")
     return value
+
+
+def fixed_point_value(key: str, value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1000:
+        raise ValueError(f"{key} must be an integer from 0 to 1000")
+    return value
+
+
+def non_negative_integer_value(key: str, value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{key} must be a non-negative integer")
+    return value
+
+
+def reject_unknown_keys(key: str, value: dict[str, Any], allowed: set[str]) -> None:
+    unknown = sorted(str(name) for name in value if name not in allowed)
+    if unknown:
+        raise ValueError(f"{key} contains unknown keys: {', '.join(unknown)}")
+
+
+def revision_id_for(value: dict[str, Any]) -> str:
+    payload = {name: item for name, item in value.items() if name != "revision_id"}
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+    return f"reqrev-{digest[:24]}"
+
+
+def legacy_dimensions_for_requirement(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    if value.get("schema_version") == 2:
+        legacy = value.get("legacy_projection")
+        if not isinstance(legacy, dict):
+            return {}
+        dimensions = legacy.get("dimensions")
+    else:
+        dimensions = value.get("dimensions")
+    return dimensions if isinstance(dimensions, dict) else {}

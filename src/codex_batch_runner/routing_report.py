@@ -6,7 +6,7 @@ from typing import Any
 from .config import Config
 from .evaluation import derive_evaluation_row
 from .execution_evidence import derive_execution_evidence_rows
-from .model_requirements import low_cost_candidate
+from .model_requirements import legacy_dimensions_for_requirement, low_cost_candidate
 from .provider_resource import derive_provider_resource_evidence, provider_resource_key
 from .queue import list_tasks, task_labels, task_project_id, task_project_root
 from .request_fingerprint import _safe_metadata_value, find_request_fingerprint_candidates
@@ -187,8 +187,8 @@ def task_routing_row(task: dict[str, Any]) -> dict[str, Any]:
 def model_requirement_key(value: object) -> str:
     if not isinstance(value, dict):
         return "unknown"
-    dimensions = value.get("dimensions")
-    if not isinstance(dimensions, dict):
+    dimensions = legacy_dimensions_for_requirement(value)
+    if not dimensions:
         return "unknown"
     parts = [f"{key}={sanitize(dimensions.get(key))}" for key in sorted(dimensions)]
     return " ".join(parts) if parts else "unknown"

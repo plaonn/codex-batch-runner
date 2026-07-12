@@ -76,8 +76,16 @@ def load_task(config: Config, task_id: str) -> dict:
 
 
 def save_task(config: Config, task: dict) -> None:
+    path = task_path(config, task["id"])
+    existing = read_json(path)
+    if isinstance(existing, dict):
+        for field in ("model_requirement_vector", "routing_override"):
+            if existing.get(field) != task.get(field):
+                raise ValueError(
+                    f"{field} is immutable after enqueue; create a new task revision instead"
+                )
     task["updated_at"] = iso_now()
-    write_json_atomic(task_path(config, task["id"]), task)
+    write_json_atomic(path, task)
 
 
 def archive_task(config: Config, task_id: str) -> dict:
@@ -213,6 +221,7 @@ def create_task(
     title: str | None = None,
     description: str | None = None,
     model_requirement_vector: dict | None = None,
+    routing_override: dict | None = None,
     routing_reason: str | None = None,
     routing_risk_factors: list[str] | None = None,
     routing_experiment: str | None = None,
@@ -325,7 +334,10 @@ def create_task(
         "completed_at": None,
         "log_paths": [],
     }
-    requirement_metadata = task_requirement_metadata(model_requirement_vector=model_requirement_vector)
+    requirement_metadata = task_requirement_metadata(
+        model_requirement_vector=model_requirement_vector,
+        routing_override=routing_override,
+    )
     if not requirement_metadata and execution_backend == "codex":
         requirement_metadata = {"model_requirement_vector": derive_model_requirement_vector(task)}
     task.update(requirement_metadata)

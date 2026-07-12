@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .model_requirements import resolve_model_requirement_vector, rule_matches
+from .model_requirements import legacy_dimensions_for_requirement, resolve_model_requirement_vector, rule_matches
 
 
 @dataclass(frozen=True)
@@ -19,7 +19,7 @@ def resolve_worker_target(config: Any, task: dict[str, Any]) -> ResolvedWorkerTa
     if not worker_target_applicable(task):
         return None
     vector = resolve_model_requirement_vector(config, task)
-    dimensions = vector.get("dimensions") if isinstance(vector.get("dimensions"), dict) else {}
+    dimensions = legacy_dimensions_for_requirement(vector)
     for rule in getattr(config, "worker_selection_rules", []) or []:
         if not rule_matches(rule.get("when", {}), dimensions):
             continue

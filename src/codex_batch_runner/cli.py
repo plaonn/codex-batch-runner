@@ -34,7 +34,12 @@ from .execution_report import (
     build_execution_report,
     render_execution_report,
 )
-from .model_requirements import REQUIREMENT_DIMENSIONS, REQUIREMENT_LEVELS, model_requirement_vector_value
+from .model_requirements import (
+    REQUIREMENT_DIMENSIONS,
+    REQUIREMENT_LEVELS,
+    legacy_dimensions_for_requirement,
+    model_requirement_vector_value,
+)
 from .planned_execution import planned_execution_compact_note
 from .policy_proposals import (
     build_direct_model_pin_migration_proposal_report,
@@ -210,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     enqueue.add_argument("--description", help="optional human-readable task description")
     enqueue.add_argument("--model-requirement-json", help="model requirement vector JSON object")
+    enqueue.add_argument("--routing-override-json", help="single-task routing override JSON object")
     for dimension in REQUIREMENT_DIMENSIONS:
         enqueue.add_argument(
             "--" + dimension.replace("_", "-"),
@@ -804,6 +810,7 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         title=args.title,
         description=args.description,
         model_requirement_vector=parse_model_requirement_args(args),
+        routing_override=parse_routing_override_arg(args),
         routing_reason=args.routing_reason,
         routing_risk_factors=args.routing_risk_factor,
         routing_experiment=args.routing_experiment,
@@ -853,6 +860,10 @@ def parse_model_requirement_args(args: argparse.Namespace) -> dict | None:
             raise ValueError("--model-requirement-json must be a JSON object") from exc
         if not isinstance(explicit, dict):
             raise ValueError("--model-requirement-json must be a JSON object")
+    if explicit.get("schema_version") == 2:
+        if any(getattr(args, dimension) for dimension in REQUIREMENT_DIMENSIONS):
+            raise ValueError("v1 dimension flags cannot be combined with model requirement v2 JSON")
+        return model_requirement_vector_value("model_requirement_vector", explicit)
     raw_dimensions = explicit.get("dimensions", {})
     if raw_dimensions in (None, ""):
         raw_dimensions = {}
@@ -869,6 +880,18 @@ def parse_model_requirement_args(args: argparse.Namespace) -> dict | None:
     explicit.setdefault("source", "explicit_cli")
     explicit.setdefault("confidence", "high")
     return model_requirement_vector_value("model_requirement_vector", explicit)
+
+
+def parse_routing_override_arg(args: argparse.Namespace) -> dict | None:
+    if not args.routing_override_json:
+        return None
+    try:
+        value = json.loads(args.routing_override_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("--routing-override-json must be a JSON object") from exc
+    if not isinstance(value, dict):
+        raise ValueError("--routing-override-json must be a JSON object")
+    return value
 
 
 def cmd_list(config: Config, args: argparse.Namespace) -> int:
@@ -2705,9 +2728,11 @@ def worktree_apply_note(task: dict) -> str:
 def model_requirement_note(task: dict) -> str:
     parts = []
     vector = task.get("model_requirement_vector")
-    if isinstance(vector, dict) and vector.get("source") == "derived_from_task_vector":
-        return ""
-    dimensions = vector.get("dimensions") if isinstance(vector, dict) else {}
+    if isinstance(vector, dict):
+        legacy = vector.get("legacy_projection") if vector.get("schema_version") == 2 else vector
+        if isinstance(legacy, dict) and legacy.get("source") == "derived_from_task_vector":
+            return ""
+    dimensions = legacy_dimensions_for_requirement(vector)
     if isinstance(dimensions, dict):
         parts.extend(f"{key}={one_line(value)}" for key, value in sorted(dimensions.items()))
     return " ".join(parts)
@@ -2740,7 +2765,7 @@ def styled_task_title(task: dict, color: "ListColor", *, dim_title: bool = False
 
 def model_requirement_marker(task: dict) -> str:
     vector = task.get("model_requirement_vector")
-    dimensions = vector.get("dimensions") if isinstance(vector, dict) else {}
+    dimensions = legacy_dimensions_for_requirement(vector)
     if not isinstance(dimensions, dict) or not dimensions:
         return "[N]"
     if dimensions.get("reasoning_depth") == "low" and dimensions.get("cost_sensitivity") == "high":

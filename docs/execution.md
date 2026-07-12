@@ -4,11 +4,11 @@
 
 ## Model Requirements
 
-현재 구현의 Task JSON은 provider/model/profile 이름이 아니라 v1 `model_requirement_vector`를 저장합니다. 이 벡터는 작업이 요구하는 모델 특성이고, 현재 설치된 Codex 모델 선택은 config의 `model_selection_rules`와 `default_execution_config`가 실행 직전에 해석합니다. 승인된 D0 계약과 v2 migration boundary는 [Model routing requirement contract](model-routing-contract.md)에 정의되어 있으며 D1 구현 전까지 아래 v1 동작을 바꾸지 않습니다.
+Task JSON은 immutable v2 `model_requirement_vector` revision을 canonical storage로 사용합니다. 기존 v1 task와 v1 CLI dimension 입력은 deterministic `legacy-derived` v2 projection으로 읽고 저장하며, 기존 config selection behavior는 그 projection으로 유지합니다. Native v2 vector는 D2 selector 전까지 새 selection 의미를 만들지 않고 default path를 사용합니다. 승인된 계약과 migration boundary는 [Model routing requirement contract](model-routing-contract.md)에 정의됩니다.
 
 ### 모델 신선도와 실제 모델 식별 한계
 
-일반 task intent는 `model_requirement_vector`만 저장하며 provider/model/profile 식별자를 저장하지 않습니다. D1 이후에도 이 원칙은 유지되며, 유일한 예외는 exact versioned target을 가리키는 `scope=single_task`의 bounded `routing_override`입니다. 이 예외는 hard constraints를 우회하거나 child/retry/review/fix/follow-up에 상속되지 않습니다. 현재 runner는 아직 `routing_override`를 구현하거나 수용하지 않습니다.
+일반 task intent는 `model_requirement_vector`만 저장하며 provider/model/profile 식별자를 저장하지 않습니다. 유일한 예외인 `scope=single_task` bounded `routing_override`는 D1에서 검증·저장하지만 D2 전에는 실행 selection에 적용하지 않습니다. Override와 parent requirement revision은 child/retry/review/fix/follow-up에 자동 상속되지 않습니다.
 
 - 로컬 config는 `execution_targets`에서 안정적인 target alias를 정의하고, `default_execution_config` 또는 `model_selection_rules`가 그 alias를 선택할 수 있습니다.
 - `model_selection_rules`와 `default_execution_config`는 호환을 위해 `model`/`codex_profile`를 직접 고정할 수도 있지만, direct model pin은 freshness metadata를 담을 수 없으므로 `cbr doctor`가 경고합니다.
@@ -22,14 +22,14 @@
 Config는 선택적으로 아래 field를 가질 수 있습니다.
 
 - `default_model_requirement_vector`: task에 explicit vector가 없을 때 사용할 기본 요구 벡터
-- `review_model_requirement_vector`: reviewer Codex 호출에 사용할 요구 벡터
+- `review_model_requirement_vector`: legacy config compatibility field. D1부터 reviewer role을 근거로 requirement를 재해석하지 않으므로 active selection에는 사용하지 않으며, reviewer/fix issuer가 자기 work unit의 새 revision을 제출해야 합니다.
 - `default_execution_config`: selection rule이 match되지 않을 때 사용할 local Codex 실행 설정
 - `execution_targets`: stable local alias와 concrete Codex `model`, `codex_profile`, allowlisted `config_overrides`, optional freshness metadata mapping
 - `model_selection_rules`: requirement dimension match 조건과 direct Codex 실행 설정 또는 `execution_target` alias mapping
 - `worker_targets`: requirement rule이 task를 Codex CLI가 아닌 다른 execution backend로 보낼 때 사용할 backend, capacity pool, command, timeout, worker metadata alias mapping
 - `worker_selection_rules`: requirement dimension match 조건과 `worker_target` alias mapping
 
-Task는 `model_requirement_vector`를 저장할 수 있습니다. 없으면 enqueue 단계에서 routing metadata를 기반으로 deterministic vector를 생성합니다. 직접 model/profile/config override를 task에 저장하지 않습니다.
+Task는 complete v2 `model_requirement_vector`를 `--model-requirement-json`으로 받을 수 있으며 issuer-owned `revision_id`가 필수입니다. 없으면 enqueue 단계에서 routing metadata를 기반으로 deterministic, non-comparable `legacy-derived` v2 revision을 생성합니다. 기존 v1 dimension flags도 같은 projection을 생성합니다. Enqueue 뒤 requirement와 override는 수정할 수 없고 정정은 새 task revision으로 발급합니다.
 
 Task는 model requirement 결정을 나중에 outcome과 대조할 수 있도록 선택적 audit metadata를 저장할 수 있습니다.
 
@@ -401,7 +401,7 @@ cbr apply-plan queue-plan.json --apply
 
 `apply-plan`은 기본적으로 dry-run입니다. `--dry-run`을 생략해도 task JSON을 쓰지 않고 Codex를 실행하지 않으며 post-mutation trigger도 호출하지 않습니다. Dry-run은 plan schema, 지원 operation 이름, 대상 task 존재 여부, running task 대상 금지, operation별 `expected` stale check, dependency cycle 가능성, plan 또는 operation 단위 `reason` 존재 여부를 확인하고 human report 또는 JSON report를 출력합니다. Report는 raw prompt, log path, session/thread id, credential/token 같은 민감한 plan 값을 redaction합니다.
 
-실제 queue 변경은 `--apply`를 명시한 경우에만 수행됩니다. Apply mode는 runner와 같은 queue lock을 잡은 뒤 같은 validation을 다시 실행하고, 검증이 통과한 경우에만 제한된 field를 atomic JSON write로 갱신합니다. 현재 apply 대상 field는 `title`, `description`, `category`, `labels`, `depends_on`, `status`, `model_requirement_vector`, `routing_reason`, `routing_risk_factors`, `routing_experiment`, `routing_size`, `routing_risk`, `verification_scope`입니다. `running` task 대상 mutation과 `status=running` 전환은 거부합니다. `model_requirement_vector`가 제공되면 허용된 dimension/value만 포함하는지 검증하며, `routing_size`/`routing_risk`는 allowlisted enum 값만 허용합니다. 적용된 변경은 sanitized `task_mutated` event로 기록하고, 변경이 있었을 때 configured `post_mutation_trigger_command`를 실행합니다.
+실제 queue 변경은 `--apply`를 명시한 경우에만 수행됩니다. Apply mode는 runner와 같은 queue lock을 잡은 뒤 같은 validation을 다시 실행하고, 검증이 통과한 경우에만 제한된 field를 atomic JSON write로 갱신합니다. 현재 apply 대상 field는 `title`, `description`, `category`, `labels`, `depends_on`, `status`, `routing_reason`, `routing_risk_factors`, `routing_experiment`, `routing_size`, `routing_risk`, `verification_scope`입니다. `running` task 대상 mutation과 `status=running` 전환은 거부합니다. Enqueue 뒤 `model_requirement_vector`와 `routing_override` 수정은 거부하며 정정은 새 task revision으로 발급합니다. `routing_size`/`routing_risk`는 allowlisted enum 값만 허용합니다. 적용된 변경은 sanitized `task_mutated` event로 기록하고, 변경이 있었을 때 configured `post_mutation_trigger_command`를 실행합니다.
 
 지원되는 plan operation은 `pause`, `unpause`, `replan`, `supersede`, `split`, `merge`, `retarget_metadata`, `dependency_changes`, `append_note`, `create_followup`입니다. 현재 apply 가능한 동작은 제한된 field 변경으로 표현할 수 있는 metadata/status/dependency 조정에 한정됩니다. Task 생성이나 다중 재구성이 필요한 operation은 validation/report 대상일 수 있지만, 제한된 apply surface 밖이면 적용 전에 거부됩니다.
 

@@ -6,7 +6,6 @@ from typing import Any
 from .config import Config
 from .events import emit_task_event
 from .fs import read_json
-from .model_requirements import model_requirement_vector_value
 from .lock import FileLock
 from .queue import ROUTING_RISKS, ROUTING_SIZES, VERIFICATION_SCOPES, list_tasks, load_task, save_task
 from .triggers import run_post_mutation_trigger
@@ -63,7 +62,6 @@ APPLY_MUTATION_FIELDS = {
     "labels",
     "depends_on",
     "status",
-    "model_requirement_vector",
     "routing_reason",
     "routing_risk_factors",
     "routing_experiment",
@@ -304,8 +302,6 @@ def normalized_field_updates(fields: dict[str, Any]) -> dict[str, Any]:
             updates[field] = str(value)
         elif field in {"routing_reason", "routing_experiment", "routing_size", "routing_risk"}:
             updates[field] = None if value is None else str(value)
-        elif field == "model_requirement_vector":
-            updates[field] = model_requirement_vector_value("model_requirement_vector", value)
         elif field in {"routing_risk_factors", "verification_scope"}:
             updates[field] = [str(item) for item in value] if isinstance(value, list) else []
     return updates
@@ -395,10 +391,11 @@ def validate_safe_field_updates(config: Config, operation: dict, task_id: str, o
             f"{task_id}: execution_profile is no longer supported; use model_requirement_vector",
         )
     if "model_requirement_vector" in fields:
-        try:
-            model_requirement_vector_value("model_requirement_vector", fields.get("model_requirement_vector"))
-        except ValueError as exc:
-            add_op_error(report, op_report, f"{task_id}: {exc}")
+        add_op_error(
+            report,
+            op_report,
+            f"{task_id}: model_requirement_vector is immutable; create a new task revision instead",
+        )
     validate_choice_field(fields, "routing_size", ROUTING_SIZES, task_id, op_report, report)
     validate_choice_field(fields, "routing_risk", ROUTING_RISKS, task_id, op_report, report)
     validate_choice_list_field(fields, "verification_scope", VERIFICATION_SCOPES, task_id, op_report, report)

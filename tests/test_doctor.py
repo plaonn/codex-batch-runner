@@ -507,7 +507,7 @@ class DoctorTests(unittest.TestCase):
                 provenance["default_execution_config"]["freshness_metadata"]["status"],
             )
             self.assertEqual("cli_default", provenance["reviewer_selected"]["model_source"])
-            self.assertEqual("high-effort-default-model", provenance["reviewer_selected"]["selection_rule"])
+            self.assertIsNone(provenance["reviewer_selected"]["selection_rule"])
             self.assertTrue(provenance["reviewer_selected"]["uses_cli_default_model"])
             self.assertIn(
                 {
@@ -519,7 +519,7 @@ class DoctorTests(unittest.TestCase):
             )
             self.assertEqual(0, human_code)
             self.assertIn(
-                "reviewer_selected: selection_rule=high-effort-default-model "
+                "reviewer_selected: selection_rule=- "
                 "model_source=cli_default target=- explicit_pin=false "
                 "freshness=not_applicable(no_explicit_model_pin)",
                 human_output,

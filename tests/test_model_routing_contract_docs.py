@@ -76,7 +76,8 @@ class ModelRoutingContractDocsTest(unittest.TestCase):
         for text in (requirements, spec, execution, task_schema):
             self.assertIn("model-routing-contract.md", text)
         self.assertIn("REQ-SEPARATE-ROUTING-EVIDENCE", requirements)
-        self.assertIn("D1 전에는 schema에 추가되거나 runner에서 수용되지 않습니다", task_schema)
+        self.assertIn("immutable requirement v2 revision", task_schema)
+        self.assertIn("exact v2 cohort에서 제외", task_schema)
 
 
 if __name__ == "__main__":

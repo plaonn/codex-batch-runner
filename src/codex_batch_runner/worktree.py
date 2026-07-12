@@ -996,9 +996,6 @@ def enqueue_conflict_fix_subtask(
         created_by="worktree-conflict-fix",
         title=title,
         description=f"Bounded stale-base conflict fix for {parent_task_id}.",
-        model_requirement_vector=parent_task.get("model_requirement_vector")
-        if isinstance(parent_task.get("model_requirement_vector"), dict)
-        else None,
         subtask_type="worktree_conflict_fix",
         subtask_for=parent_task_id,
         blocks_root_completion=True,
