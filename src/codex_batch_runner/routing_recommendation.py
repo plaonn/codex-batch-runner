@@ -9,6 +9,7 @@ from .config import Config
 from .queue import list_tasks
 from .routing_cost_evidence import (
     RoutingCostEvidenceError,
+    USAGE_KEYS,
     latest_routing_cost_evidence,
     validate_routing_cost_evidence,
 )
@@ -18,7 +19,7 @@ from .timeutil import iso_now
 
 STATIC_FALLBACK_MODEL = "operator_baseline"
 STATIC_FALLBACK_REASON = "insufficient_comparable_evidence"
-EXCLUDED_DEFAULT_MODEL = "xhigh"
+PROHIBITED_REASONING_EFFORT = "xhigh"
 
 
 def load_routing_cost_evidence_records(paths: list[str]) -> list[dict[str, Any]]:
@@ -32,8 +33,7 @@ def load_routing_cost_evidence_records(paths: list[str]) -> list[dict[str, Any]]
         values = payload.get("records") if isinstance(payload, dict) and "records" in payload else [payload]
         if not isinstance(values, list):
             raise RoutingCostEvidenceError("routing cost evidence JSON must be a record or a records list")
-        for value in values:
-            records.append(validate_routing_cost_evidence(value))
+        records.extend(validate_routing_cost_evidence(value) for value in values)
     return records
 
 
@@ -51,105 +51,90 @@ def build_routing_recommendation(
     available_models: list[str] | None = None,
     routing_cost_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Return a deterministic advisory only; no queue or configuration writes occur."""
-    requested = {
+    """Build a deterministic advisory only; queue/configuration state is never written."""
+    request = {
         "task_bucket": task_bucket,
         "execution_surface": execution_surface,
         "semantic_complexity": semantic_complexity,
         "failure_cost": failure_cost,
         "objective_verification": objective_verification,
-        "expected_context": expected_context,
+        "expected_context_contract_version": expected_context,
         "interaction_need": interaction_need,
         "usage_pressure": usage_pressure,
         "available_models": sorted(set(available_models or [])),
     }
-    records = _queue_records(config) + list(routing_cost_records or [])
-    matching = [record for record in records if _matches_request(record, requested)]
+    matching = [record for record in _queue_records(config) + list(routing_cost_records or []) if _matches_request(record, request)]
     comparable = [record for record in matching if record["cohort"]["comparability"]["joint_quality_cost"]]
+    safety = _safety_gate(request, comparable)
     cohort_keys = {_comparison_cohort_key(record) for record in comparable}
+    if not safety["passed"]:
+        return _insufficient_report(request, matching, comparable, safety["reason"], safety=safety)
     if len(cohort_keys) != 1:
-        return _insufficient_report(requested, matching, comparable, "non_comparable_or_sparse_cohort")
+        return _insufficient_report(request, matching, comparable, "non_comparable_or_sparse_cohort", safety=safety)
 
-    by_model: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for record in comparable:
-        model = _model(record)
-        if model:
-            by_model[model].append(record)
-    candidates = [_candidate(model, rows) for model, rows in sorted(by_model.items())]
-    if requested["available_models"]:
-        candidates = [item for item in candidates if item["model"] in requested["available_models"]]
-    candidates = [item for item in candidates if item["model"] != EXCLUDED_DEFAULT_MODEL]
-    eligible = [item for item in candidates if item["quality_gate"]["passed"]]
-    if not eligible:
-        return _insufficient_report(requested, matching, comparable, "quality_gate_not_met", candidates=candidates)
-
-    # All eligible candidates share an exact comparison cohort. Quality is gated
-    # before this cost-only Pareto selection; lexical model order makes ties stable.
-    recommended = min(eligible, key=lambda item: (item["cost_evidence"]["mean_token_cost"], item["model"]))
-    return {
-        "kind": "routing_recommendation",
-        "generated_at": iso_now(),
-        "read_only": True,
-        "mutation_allowed": False,
-        "status": "recommended",
-        "request": requested,
-        "recommendation": {
-            "model": recommended["model"],
-            "reasoning": "quality gate passed in an exact execution-surface cohort; lowest mean comparable token cost among Pareto candidates",
-            "fallback": {"model": STATIC_FALLBACK_MODEL, "reason": STATIC_FALLBACK_REASON},
-            "confidence": "medium" if len(eligible) > 1 else "low",
-            "comparable_cohort_size": len(comparable),
-            "quality_evidence": recommended["quality_gate"],
-            "cost_evidence": recommended["cost_evidence"],
-            "known_confounders": [],
-            "escalation_trigger": "quality gate fails, objective verification changes, or a higher failure-cost task falls outside this exact cohort",
-            "downgrade_trigger": "a lower-cost candidate accumulates an exact comparable cohort that passes the same quality gate",
-        },
-        "candidates": candidates,
-        "privacy": {"raw_prompts_included": False, "raw_context_included": False, "session_or_thread_ids_included": False},
-    }
+    candidates = _candidates(comparable, request["available_models"])
+    if not candidates:
+        return _insufficient_report(request, matching, comparable, "no_eligible_model_effort_candidates", safety=safety)
+    # routing-cost-evidence-v1 records components and attribution, but deliberately
+    # has no price table or normalized-cost field. It is unsafe to rank components
+    # with an invented scalar or to treat cached and uncached tokens as equivalent.
+    return _insufficient_report(
+        request,
+        matching,
+        comparable,
+        "normalized_cost_unavailable",
+        candidates=candidates,
+        safety=safety,
+    )
 
 
 def _queue_records(config: Config) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for task in list_tasks(config):
-        record = latest_routing_cost_evidence(task)
-        if record is not None:
-            records.append(record)
-    return records
+    return [record for task in list_tasks(config) if (record := latest_routing_cost_evidence(task)) is not None]
 
 
 def _matches_request(record: dict[str, Any], request: dict[str, Any]) -> bool:
     execution = record["execution"]
-    return execution["surface"] == request["execution_surface"] and execution["task_bucket"] == request["task_bucket"]
+    return (
+        execution["surface"] == request["execution_surface"]
+        and execution["task_bucket"] == request["task_bucket"]
+        and execution["context_contract_version"] == request["expected_context_contract_version"]
+    )
+
+
+def _safety_gate(request: dict[str, Any], comparable: list[dict[str, Any]]) -> dict[str, Any]:
+    if not comparable:
+        return {"passed": False, "reason": "no_matching_verified_cohort", "usage_pressure_does_not_relax_quality": True}
+    if request["interaction_need"] != "none":
+        return {"passed": False, "reason": "interaction_need_not_covered_by_execution_evidence", "usage_pressure_does_not_relax_quality": True}
+    verified = all(row["quality"]["objective_verification"] == "passed" and row["quality"]["semantic_review"] == "pass" for row in comparable)
+    if request["failure_cost"] == "high" and not verified:
+        return {"passed": False, "reason": "high_failure_cost_requires_matching_verified_cohort", "usage_pressure_does_not_relax_quality": True}
+    if request["semantic_complexity"] == "high" and not verified:
+        return {"passed": False, "reason": "high_semantic_complexity_requires_matching_verified_cohort", "usage_pressure_does_not_relax_quality": True}
+    if request["objective_verification"] == "none":
+        return {"passed": False, "reason": "objective_verification_required", "usage_pressure_does_not_relax_quality": True}
+    if request["usage_pressure"] in {"high", "critical"} and any(row["usage"]["attribution"]["class"] != "provider_attributed" for row in comparable):
+        return {"passed": False, "reason": "high_usage_pressure_requires_provider_attributed_usage", "usage_pressure_does_not_relax_quality": True}
+    return {"passed": True, "reason": None, "usage_pressure_does_not_relax_quality": True, "verified_cohort": verified}
 
 
 def _comparison_cohort_key(record: dict[str, Any]) -> tuple[str, ...]:
     components = record["cohort"]["components"]
-    return tuple(
-        str(components[key])
-        for key in (
-            "execution_surface",
-            "execution_backend",
-            "task_bucket",
-            "prompt_contract_version",
-            "context_contract_version",
-            "attribution_class",
-            "review_outcome_cohort_id",
-        )
-    )
+    return tuple(str(components[key]) for key in ("execution_surface", "execution_backend", "task_bucket", "prompt_contract_version", "context_contract_version", "attribution_class", "review_outcome_cohort_id"))
 
 
-def _model(record: dict[str, Any]) -> str | None:
-    actual = record["actual_model"]
-    return str(actual["value"]) if actual.get("status") == "observed" else None
+def _candidates(records: list[dict[str, Any]], available_models: list[str]) -> list[dict[str, Any]]:
+    by_selection: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        model = record["selection"]["planned_model"]
+        effort = record["selection"]["planned_reasoning"]
+        if effort == PROHIBITED_REASONING_EFFORT or (available_models and model not in available_models):
+            continue
+        by_selection[(model, effort)].append(record)
+    return [_candidate(model, effort, rows) for (model, effort), rows in sorted(by_selection.items())]
 
 
-def _token_cost(record: dict[str, Any]) -> int:
-    return sum(value for value in record["usage"]["values"].values() if isinstance(value, int))
-
-
-def _candidate(model: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _candidate(model: str, reasoning_effort: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     accepted = [row for row in rows if row["quality"]["accepted"] and not row["quality"]["rejected"]]
     first_pass = [row for row in accepted if row["quality"]["follow_up_count"] == 0 and row["quality"]["rework_count"] == 0]
     adverse = [row for row in rows if row["quality"]["rejected"] or not row["quality"]["accepted"]]
@@ -159,26 +144,21 @@ def _candidate(model: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "needs_fix_or_rejected_rate": len(adverse) / len(rows),
         "thresholds": TASK_BUCKET_ADVISORY_THRESHOLDS,
     }
-    quality["passed"] = (
-        quality["accepted_count"] >= TASK_BUCKET_ADVISORY_THRESHOLDS["min_accepted_count"]
-        and quality["first_pass_accept_rate"] >= TASK_BUCKET_ADVISORY_THRESHOLDS["min_first_pass_accept_rate"]
-        and quality["needs_fix_or_rejected_rate"] <= TASK_BUCKET_ADVISORY_THRESHOLDS["max_needs_fix_or_rejected_rate"]
-    )
-    costs = [_token_cost(row) for row in rows]
+    quality["passed"] = quality["accepted_count"] >= TASK_BUCKET_ADVISORY_THRESHOLDS["min_accepted_count"] and quality["first_pass_accept_rate"] >= TASK_BUCKET_ADVISORY_THRESHOLDS["min_first_pass_accept_rate"] and quality["needs_fix_or_rejected_rate"] <= TASK_BUCKET_ADVISORY_THRESHOLDS["max_needs_fix_or_rejected_rate"]
     return {
         "model": model,
+        "reasoning_effort": reasoning_effort,
         "quality_gate": quality,
-        "cost_evidence": {
-            "sample_count": len(costs),
-            "mean_token_cost": sum(costs) / len(costs),
-            "attribution_class": rows[0]["usage"]["attribution"]["class"],
+        "usage_evidence": {
+            "sample_count": len(rows),
+            "mean_components": {key: sum(row["usage"]["values"][key] or 0 for row in rows) / len(rows) for key in USAGE_KEYS},
+            "attribution": {"class": rows[0]["usage"]["attribution"]["class"], "source": rows[0]["usage"]["attribution"]["source"], "confidence": "contract_attribution_class"},
+            "normalized_cost_available": False,
         },
     }
 
 
-def _insufficient_report(
-    request: dict[str, Any], matching: list[dict[str, Any]], comparable: list[dict[str, Any]], reason: str, *, candidates: list[dict[str, Any]] | None = None
-) -> dict[str, Any]:
+def _insufficient_report(request: dict[str, Any], matching: list[dict[str, Any]], comparable: list[dict[str, Any]], reason: str, *, candidates: list[dict[str, Any]] | None = None, safety: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "kind": "routing_recommendation",
         "generated_at": iso_now(),
@@ -186,16 +166,18 @@ def _insufficient_report(
         "mutation_allowed": False,
         "status": "insufficient",
         "request": request,
+        "safety_gate": safety or {},
         "recommendation": {
             "model": None,
-            "reasoning": STATIC_FALLBACK_REASON,
-            "fallback": {"model": STATIC_FALLBACK_MODEL, "reason": STATIC_FALLBACK_REASON},
+            "reasoning_effort": None,
+            "rationale": STATIC_FALLBACK_REASON,
+            "fallback": {"model": STATIC_FALLBACK_MODEL, "reasoning_effort": "operator_selected", "reason": STATIC_FALLBACK_REASON},
             "confidence": "none",
             "comparable_cohort_size": len(comparable),
             "quality_evidence": {"matching_record_count": len(matching)},
-            "cost_evidence": {"matching_record_count": len(matching)},
+            "cost_evidence": {"normalized_cost_available": False, "reason": reason},
             "known_confounders": [reason],
-            "escalation_trigger": "collect exact comparable evidence before changing routing",
+            "escalation_trigger": "collect exact comparable evidence with normalized cost before changing routing",
             "downgrade_trigger": "not_applicable",
         },
         "candidates": candidates or [],
@@ -206,15 +188,6 @@ def _insufficient_report(
 def render_routing_recommendation(report: dict[str, Any]) -> str:
     recommendation = report["recommendation"]
     rows = [
-        {"FIELD": "status", "VALUE": report["status"]},
-        {"FIELD": "model", "VALUE": recommendation["model"] or "-"},
-        {"FIELD": "fallback", "VALUE": recommendation["fallback"]["model"]},
-        {"FIELD": "confidence", "VALUE": recommendation["confidence"]},
-        {"FIELD": "cohort", "VALUE": str(recommendation["comparable_cohort_size"])},
-        {"FIELD": "reasoning", "VALUE": recommendation["reasoning"]},
-        {"FIELD": "escalation", "VALUE": recommendation["escalation_trigger"]},
-        {"FIELD": "downgrade", "VALUE": recommendation["downgrade_trigger"]},
+        ["status", report["status"]], ["model", recommendation["model"] or "-"], ["reasoning_effort", recommendation["reasoning_effort"] or "-"], ["fallback", f"{recommendation['fallback']['model']} / {recommendation['fallback']['reasoning_effort']}"], ["confidence", recommendation["confidence"]], ["cohort", str(recommendation["comparable_cohort_size"])], ["rationale", recommendation["rationale"]], ["escalation", recommendation["escalation_trigger"]], ["downgrade", recommendation["downgrade_trigger"]],
     ]
-    return "Routing recommendation (read-only)\n" + render_table(
-        ["FIELD", "VALUE"], [[row["FIELD"], row["VALUE"]] for row in rows]
-    ) + "\n"
+    return "Routing recommendation (read-only)\n" + render_table(["FIELD", "VALUE"], rows) + "\n"
