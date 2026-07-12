@@ -126,6 +126,12 @@ PYTHONPATH=src python3 -m codex_batch_runner dashboard
 # Review automation reports
 PYTHONPATH=src python3 -m codex_batch_runner review-next --dry-run
 PYTHONPATH=src python3 -m codex_batch_runner review-next --dry-run --project codex-batch-runner --json
+PYTHONPATH=src python3 -m codex_batch_runner recommend-routing \
+  --task-bucket 'size=small risk=low verify=unit' \
+  --execution-surface cbr_batch \
+  --semantic-complexity medium --failure-cost medium \
+  --objective-verification unit --expected-context bounded \
+  --interaction-need none --usage-pressure normal --json
 
 # Worktree integration
 PYTHONPATH=src python3 -m codex_batch_runner worktree apply task-id --dry-run
