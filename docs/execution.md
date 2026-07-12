@@ -4,11 +4,11 @@
 
 ## Model Requirements
 
-Task JSON은 provider/model/profile 이름이 아니라 `model_requirement_vector`를 저장합니다. 이 벡터는 작업이 요구하는 모델 특성이고, 현재 설치된 Codex 모델 선택은 config의 `model_selection_rules`와 `default_execution_config`가 실행 직전에 해석합니다.
+현재 구현의 Task JSON은 provider/model/profile 이름이 아니라 v1 `model_requirement_vector`를 저장합니다. 이 벡터는 작업이 요구하는 모델 특성이고, 현재 설치된 Codex 모델 선택은 config의 `model_selection_rules`와 `default_execution_config`가 실행 직전에 해석합니다. 승인된 D0 계약과 v2 migration boundary는 [Model routing requirement contract](model-routing-contract.md)에 정의되어 있으며 D1 구현 전까지 아래 v1 동작을 바꾸지 않습니다.
 
 ### 모델 신선도와 실제 모델 식별 한계
 
-Task JSON은 `model_requirement_vector`만 저장하며 provider/model/profile 식별자는 저장하지 않습니다. 즉, 작업 자체가 "무엇을 써야 한다"가 아니라 "어떤 성능/안전 특성이 필요한지"만 정의합니다.
+일반 task intent는 `model_requirement_vector`만 저장하며 provider/model/profile 식별자를 저장하지 않습니다. D1 이후에도 이 원칙은 유지되며, 유일한 예외는 exact versioned target을 가리키는 `scope=single_task`의 bounded `routing_override`입니다. 이 예외는 hard constraints를 우회하거나 child/retry/review/fix/follow-up에 상속되지 않습니다. 현재 runner는 아직 `routing_override`를 구현하거나 수용하지 않습니다.
 
 - 로컬 config는 `execution_targets`에서 안정적인 target alias를 정의하고, `default_execution_config` 또는 `model_selection_rules`가 그 alias를 선택할 수 있습니다.
 - `model_selection_rules`와 `default_execution_config`는 호환을 위해 `model`/`codex_profile`를 직접 고정할 수도 있지만, direct model pin은 freshness metadata를 담을 수 없으므로 `cbr doctor`가 경고합니다.

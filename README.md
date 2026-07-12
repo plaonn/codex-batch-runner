@@ -11,6 +11,7 @@
 ## 문서 지도
 
 - [요구사항 계층 (`ROOT-REQ-*`, `REQ-*`)](docs/requirements.md)
+- [Model routing requirement contract](docs/model-routing-contract.md): requirement v2와 exact-target routing의 D0 public contract.
 - [Core spec index](docs/spec.md): 현재 구현 truth와 topic 문서 index.
 - [Task schema and dependency contract](docs/task-schema.md): task JSON fields, task/review status, dependency readiness.
 - [Execution contract](docs/execution.md): model requirements, capacity/priority, shell backend, runner policy, watchdog, lock, atomic write, Codex command/prompt wrapper, rate-limit, queue mutation.

@@ -106,7 +106,7 @@
 - `review_status`
 - `reviewed_at`
 - `review_reason`
-- `model_requirement_vector`: task가 요구하는 모델 특성 벡터. task JSON에는 provider/model/profile 이름을 저장하지 않습니다.
+- `model_requirement_vector`: 현재 구현에서 task가 요구하는 모델 특성 v1 벡터. 일반 task intent에는 provider/model/profile 이름을 저장하지 않습니다. 승인된 v2 계약은 exact versioned target을 가리키는 bounded `routing_override`만 `single_task` scope의 명시적 예외로 정의하지만, 이 field는 D1 전에는 schema에 추가되거나 runner에서 수용되지 않습니다. [Model routing requirement contract](model-routing-contract.md)를 참고합니다.
 - `origin_parent_ref`: parent attention delivery에 필요한 runtime-private opaque reference. Public fixture/docs에는 실제 값이나 thread id를 넣지 않습니다.
 - `last_result.parent_attention_state`: worker가 명시할 수 있는 `needs_review`, `needs_decision`, `needs_follow_up`, `blocked_external`, `completed`. 생략 시 completed result는 `needs_review`, `blocked_user`는 `needs_decision`으로 수집됩니다.
 

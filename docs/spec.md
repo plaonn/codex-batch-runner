@@ -5,6 +5,7 @@
 ## Topic map
 
 - [요구사항 계층 (`ROOT-REQ-*`, `REQ-*`)](requirements.md): 토큰 효율/스케줄링·완화·감사·리뷰·격리·안전 경계·모델 요구사항·프로젝트 진실 분리를 의미 기반 stable identifier로 설명.
+- [Model routing requirement contract](model-routing-contract.md): role-agnostic issuer-owned requirement v2, rubric anchors, hard constraints/unknown policy, bounded override, exact model attribution, migration/freeze dependency.
 - [Task schema and dependency contract](task-schema.md): task JSON fields, task status, review status, project routing metadata, dependency readiness.
 - [Execution contract](execution.md): model requirements, opt-in usage-aware Codex admission, shell and external-json-command backends, capacity and priority, queue mutation, runner execution policy, watchdog, lock, atomic writes, Codex command/prompt wrapper, rate-limit, Codex CLI maintenance.
 - [Review contract](review.md): review-bundle, review-next, reviewer Codex safety model, mechanical gates, bounded auto-fix loop.
