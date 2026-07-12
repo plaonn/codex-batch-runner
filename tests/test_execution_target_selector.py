@@ -122,6 +122,39 @@ class ExecutionTargetSelectorTests(unittest.TestCase):
                 requirement(constraints={"required_tools": ["filesystem"]}),
             )
 
+    def test_execution_surface_matches_any_allowed_option(self) -> None:
+        config = loaded_config({"codex-high-v1": codex_target("gpt-exact")})
+
+        selected = select_execution_target(
+            config,
+            {},
+            requirement(constraints={"required_execution_surfaces": ["external", "codex"]}),
+        )
+
+        self.assertEqual("codex-high-v1", selected.target_id)
+
+    def test_reasoning_effort_matches_any_allowed_option(self) -> None:
+        config = loaded_config({"codex-high-v1": codex_target("gpt-exact")})
+
+        selected = select_execution_target(
+            config,
+            {},
+            requirement(constraints={"allowed_reasoning_efforts": ["medium", "high"]}),
+        )
+
+        self.assertEqual("codex-high-v1", selected.target_id)
+
+    def test_required_tools_remain_required_subset(self) -> None:
+        config = loaded_config({"codex-high-v1": codex_target("gpt-exact")})
+
+        selected = select_execution_target(
+            config,
+            {},
+            requirement(constraints={"required_tools": ["filesystem", "shell"]}),
+        )
+
+        self.assertEqual("codex-high-v1", selected.target_id)
+
     def test_quality_floor_is_not_relaxed_by_cost_preference(self) -> None:
         cheap = codex_target("cheap", quality=250, cost=1000)
         capable = codex_target("capable", quality=750, cost=0)

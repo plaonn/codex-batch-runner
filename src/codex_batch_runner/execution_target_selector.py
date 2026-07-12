@@ -255,16 +255,18 @@ def _hard_constraints_pass(requirements: object, target: dict[str, Any], registr
 
 def _constraint_actual(name: str, target: dict[str, Any], capabilities: dict[str, Any]) -> Any:
     if name == "required_execution_surfaces":
-        return [target.get("execution_surface")]
+        return target.get("execution_surface")
     if name == "allowed_reasoning_efforts":
-        return [target.get("reasoning_effort")]
+        return target.get("reasoning_effort")
     if name == "forbidden_provider_families":
         return target.get("provider_family")
     return capabilities.get(name)
 
 
 def _constraint_matches(name: str, required: Any, actual: Any) -> bool:
-    if name in {"required_execution_surfaces", "required_tools", "allowed_reasoning_efforts"}:
+    if name in {"required_execution_surfaces", "allowed_reasoning_efforts"}:
+        return isinstance(required, list) and actual in required
+    if name == "required_tools":
         return isinstance(required, list) and isinstance(actual, list) and set(required).issubset(set(actual))
     if name == "forbidden_provider_families":
         return actual not in set(required or [])
