@@ -22,6 +22,7 @@
 - `run-loop` is the single-worker scheduler command; it repeats the `run-next` path with fresh config/queue checks per iteration, emits JSONL with `--json`, and stops on non-actionable outcomes such as empty queue, pause, cooldown, lock contention, or review-needed state.
 - Worktree-backed tasks become dependency-ready only after accepted results are applied to the integration target.
 - Review automation is explicit opt-in. Default `review-next` behavior is report-only, and reviewer Codex is disabled unless config and command guards allow it.
+- Parent linkage가 있는 attention state는 runtime-private durable outbox에 `parent_attention_required`로 기록합니다. Wake는 collection/disposition 요청일 뿐 root goal 완료를 의미하지 않습니다. 실제 전송은 configured local JSON command adapter를 통해서만 opt-in하며, 검증된 Codex non-UI messaging surface가 없으므로 core가 Codex App capability를 가정하지 않습니다.
 - Usage-aware admission is explicit opt-in. It reads one provider-neutral JSON snapshot before a native Codex implementation claim, fails open on adapter errors, and reuses global cooldown plus one-shot wake semantics without probing Codex.
 - Destructive cleanup and branch pruning commands are dry-run by default and require explicit `--apply`.
 

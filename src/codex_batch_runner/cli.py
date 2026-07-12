@@ -110,6 +110,7 @@ from .routing_recommendation import (
     load_routing_cost_evidence_records,
     render_routing_recommendation,
 )
+from .parent_attention import acknowledge_parent_attention, deliver_parent_attention, list_parent_attention
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, build_routing_report, render_routing_report
 from .runner import RunOutcome, run_next
 from .state import (
@@ -586,6 +587,20 @@ def build_parser() -> argparse.ArgumentParser:
     events.add_argument("--limit", type=int, default=DEFAULT_EVENT_LIMIT, help=f"maximum events to show (default: {DEFAULT_EVENT_LIMIT})")
     events.add_argument("--json", action="store_true", help="print JSON")
     events.set_defaults(func=cmd_events)
+
+    parent_attention = sub.add_parser("parent-attention", help="inspect and deliver durable parent-attention outbox records")
+    parent_attention_sub = parent_attention.add_subparsers(dest="parent_attention_command", required=True)
+    pa_list = parent_attention_sub.add_parser("list", help="list durable parent-attention records")
+    pa_list.add_argument("--json", action="store_true", help="print JSON")
+    pa_list.set_defaults(func=cmd_parent_attention_list)
+    pa_deliver = parent_attention_sub.add_parser("deliver", help="attempt one idempotent adapter delivery")
+    pa_deliver.add_argument("event_id")
+    pa_deliver.add_argument("--json", action="store_true", help="print JSON")
+    pa_deliver.set_defaults(func=cmd_parent_attention_deliver)
+    pa_ack = parent_attention_sub.add_parser("ack", help="acknowledge a delivered parent-attention record")
+    pa_ack.add_argument("event_id")
+    pa_ack.add_argument("--json", action="store_true", help="print JSON")
+    pa_ack.set_defaults(func=cmd_parent_attention_ack)
 
     index = sub.add_parser("index", help="inspect or rebuild the local SQLite read index")
     index_sub = index.add_subparsers(dest="index_command", required=True)
@@ -4210,6 +4225,37 @@ def cmd_events(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(events, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_events_human(events), end="")
+    return 0
+
+
+def cmd_parent_attention_list(config: Config, args: argparse.Namespace) -> int:
+    records = list_parent_attention(config)
+    if args.json:
+        print(json.dumps(records, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        for record in records:
+            print(f"{record['event_id']}\t{record['wake_reason']}\t{record['delivery']['state']}\t{record['work_item_ref']}")
+    return 0
+
+
+def cmd_parent_attention_deliver(config: Config, args: argparse.Namespace) -> int:
+    try:
+        result = deliver_parent_attention(config, args.event_id)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    payload = {"event_id": result.event_id, "state": result.state, "attempted": result.attempted, "message": result.message}
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) if args.json else f"{result.event_id}\t{result.state}\t{result.message}")
+    return 0 if result.state in {"delivered", "acknowledged"} else 2
+
+
+def cmd_parent_attention_ack(config: Config, args: argparse.Namespace) -> int:
+    try:
+        record = acknowledge_parent_attention(config, args.event_id)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) if args.json else f"{record['event_id']}\tacknowledged")
     return 0
 
 

@@ -126,6 +126,13 @@ def set_review_status(
         summary=f"reviewed task {task_id} as {review_status}",
         payload=transition_payload(task, review_status=review_status, reviewed_at=task.get("reviewed_at")),
     )
+    if review_status == "needs_followup" and task.get("origin_parent_ref"):
+        from .parent_attention import create_parent_attention
+        create_parent_attention(
+            config, parent_ref=str(task["origin_parent_ref"]), work_item_ref=str(task["id"]),
+            completion_id=str(task.get("reviewed_at") or "review"), wake_reason="needs_follow_up",
+            summary=str(reason or "review requires follow-up"),
+        )
     return task
 
 

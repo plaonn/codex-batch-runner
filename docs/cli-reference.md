@@ -60,6 +60,9 @@ cbr list --all
 cbr list --unreviewed
 cbr list --needs-review
 cbr rate-limits
+cbr parent-attention list --json
+cbr parent-attention deliver EVENT_ID --json
+cbr parent-attention ack EVENT_ID --json
 cbr cooldown show
 cbr cooldown set 7:6
 cbr cooldown set "6/22 7:06"

@@ -71,6 +71,14 @@ dashboard, Telegram notification, automatic review, queue mutation 기능이 커
 
 Event envelope includes `schema_version`, `event_id`, `event_type`, `occurred_at`, optional `task_id`, optional `project_id`, optional `project_root`, `actor`, `source`, `summary`, and sanitized `payload`.
 
+## Parent-attention durable outbox
+
+Parent linkage가 있는 worker attention state는 일반 audit event와 별도로 `parent_attention_outbox_dir`의 event별 JSON 파일에 durable outbox record로 저장합니다. Record는 opaque `parent_ref`, `work_item_ref`, deterministic `event_id`, `completion_id`, `wake_reason`, sanitized summary/evidence reference, delivery state와 attempt metadata를 포함합니다. 동일 linkage/completion/reason 수집은 같은 id를 생성하므로 중복 파일이나 중복 delivery를 만들지 않습니다.
+
+Delivery state는 `pending`, `retry_wait`, `delivered`, `acknowledged`, `unavailable`, `failed`를 구분합니다. Adapter failure는 configured maximum까지 exponential backoff하며, 성공은 acknowledgement와 분리합니다. Command 미설정은 `unavailable`, bounded retry 소진은 `failed`로 남습니다. `cbr parent-attention deliver EVENT_ID`는 configured argv command에 public-safe JSON을 stdin으로 전달하며 raw prompt, transcript, path, secret을 전달하지 않습니다. Adapter는 `event_id`를 idempotency key로 사용해야 합니다.
+
+현재 Codex App parent task에 메시지를 보내는 stable non-UI integration surface는 이 저장소에서 검증되지 않았습니다. 따라서 Codex-specific hidden adapter는 제공하지 않고 local operator가 검증한 command만 opt-in할 수 있습니다. Parent wake는 collection/disposition 요청이며 전체 root goal 완료나 archive 승인이 아닙니다.
+
 Payload 원칙:
 
 - event는 작고 구조화된 record로 유지합니다.

@@ -33,6 +33,11 @@ class Config:
     stale_lock_seconds: int
     rate_limit_cooldown_seconds: int
     default_max_attempts: int
+    parent_attention_outbox_dir: Path | None = None
+    parent_attention_delivery_command: list[str] = field(default_factory=list)
+    parent_attention_delivery_timeout_seconds: int = 15
+    parent_attention_max_attempts: int = 5
+    parent_attention_retry_base_seconds: int = 30
     usage_admission_enabled: bool = False
     usage_admission_command: list[str] = field(default_factory=list)
     usage_admission_timeout_seconds: int = 5
@@ -97,6 +102,9 @@ class Config:
         queue_dir = path_value("queue_dir", ".codex-batch-runner/tasks")
         log_dir = path_value("log_dir", ".codex-batch-runner/logs")
         event_dir = path_value("event_dir", str(log_dir.parent / "events"))
+        parent_attention_outbox_dir = path_value(
+            "parent_attention_outbox_dir", str(log_dir.parent / "parent-attention-outbox")
+        )
         notifier_cursor_state_paths = path_list_value("notifier_cursor_state_paths", data, base)
         reject_removed_config_keys(data)
 
@@ -138,6 +146,7 @@ class Config:
             queue_dir=queue_dir,
             log_dir=log_dir,
             event_dir=event_dir,
+            parent_attention_outbox_dir=parent_attention_outbox_dir,
             notifier_cursor_state_paths=notifier_cursor_state_paths,
             lock_file=path_value("lock_file", ".codex-batch-runner/runner.lock"),
             state_file=path_value("state_file", ".codex-batch-runner/state.json"),
@@ -151,6 +160,21 @@ class Config:
             post_mutation_trigger_command=argv_list(
                 "post_mutation_trigger_command",
                 data.get("post_mutation_trigger_command", []),
+            ),
+            parent_attention_delivery_command=argv_list(
+                "parent_attention_delivery_command",
+                data.get("parent_attention_delivery_command", []),
+            ),
+            parent_attention_delivery_timeout_seconds=positive_int_value(
+                "parent_attention_delivery_timeout_seconds",
+                data.get("parent_attention_delivery_timeout_seconds", 15),
+            ),
+            parent_attention_max_attempts=positive_int_value(
+                "parent_attention_max_attempts", data.get("parent_attention_max_attempts", 5)
+            ),
+            parent_attention_retry_base_seconds=positive_int_value(
+                "parent_attention_retry_base_seconds",
+                data.get("parent_attention_retry_base_seconds", 30),
             ),
             manual_cooldown_wake_scheduler=manual_cooldown_wake_scheduler_value(
                 data.get("manual_cooldown_wake_scheduler", "disabled")

@@ -14,6 +14,7 @@ from typing import Any
 from .codex import FIRST_MEANINGFUL_STALL_REASON, STARTUP_STALL_REASON, CodexResult, run_codex
 from .config import Config
 from .events import emit_task_event, result_summary_payload, transition_payload
+from .parent_attention import create_parent_attention
 from .external_json_command import (
     ExternalJsonCommandResult,
     run_external_json_command_task,
@@ -650,6 +651,7 @@ def apply_codex_result(
             summary=payload.get("summary_excerpt") or f"completed task {task.get('id')}",
             payload=payload,
         )
+        emit_parent_attention_for_task(config, task, "needs_review")
         return
 
     if status == "needs_resume":
@@ -682,6 +684,7 @@ def apply_codex_result(
             summary=payload.get("summary_excerpt") or f"task {task.get('id')} blocked on user input",
             payload=payload,
         )
+        emit_parent_attention_for_task(config, task, "needs_decision")
         return
 
     task["status"] = "failed"
@@ -697,6 +700,30 @@ def apply_codex_result(
         source="run-next",
         summary=payload.get("summary_excerpt") or str(task.get("last_error") or f"failed task {task.get('id')}"),
         payload=payload,
+    )
+    if final_response.get("parent_attention_state") == "blocked_external":
+        emit_parent_attention_for_task(config, task, "blocked_external")
+
+
+def emit_parent_attention_for_task(config: Config, task: dict[str, Any], default_reason: str) -> None:
+    parent_ref = task.get("origin_parent_ref")
+    if not isinstance(parent_ref, str) or not parent_ref.strip():
+        return
+    last_result = task.get("last_result") if isinstance(task.get("last_result"), dict) else {}
+    requested = last_result.get("parent_attention_state") or task.get("parent_attention_state")
+    allowed = {"needs_review", "needs_decision", "needs_follow_up", "blocked_external", "completed"}
+    wake_reason = requested if requested in allowed else default_reason
+    completion_id = str(task.get("completed_at") or f"attempt-{task.get('attempts', 0)}")
+    evidence_refs: list[str] = []
+    last_run = task.get("last_run") if isinstance(task.get("last_run"), dict) else {}
+    for key in ("execution_evidence_id", "review_outcome_evidence_id", "routing_cost_evidence_id"):
+        if last_run.get(key):
+            evidence_refs.append(f"{key}:{last_run[key]}")
+    create_parent_attention(
+        config, parent_ref=parent_ref, work_item_ref=str(task.get("id") or "unknown"),
+        completion_id=completion_id, wake_reason=wake_reason,
+        summary=str(last_result.get("summary") or task.get("last_error") or wake_reason),
+        evidence_refs=evidence_refs,
     )
 
 
@@ -738,6 +765,7 @@ def apply_shell_result(
             summary=payload.get("summary_excerpt") or f"completed task {task.get('id')}",
             payload=payload,
         )
+        emit_parent_attention_for_task(config, task, "needs_review")
         return
 
     task["status"] = "failed"
@@ -758,6 +786,8 @@ def apply_shell_result(
         summary=payload.get("summary_excerpt") or str(task.get("last_error") or f"failed task {task.get('id')}"),
         payload=payload,
     )
+    if task.get("parent_attention_state") == "blocked_external":
+        emit_parent_attention_for_task(config, task, "blocked_external")
 
 
 def apply_external_json_command_result(
@@ -831,6 +861,7 @@ def apply_external_json_command_result(
             summary=payload.get("summary_excerpt") or f"completed task {task.get('id')}",
             payload=payload,
         )
+        emit_parent_attention_for_task(config, task, "needs_review")
         return
     if status == "needs_resume":
         task["status"] = "needs_resume"
@@ -846,6 +877,7 @@ def apply_external_json_command_result(
             summary=payload.get("summary_excerpt") or f"task {task.get('id')} needs resume",
             payload=payload,
         )
+        emit_parent_attention_for_task(config, task, "needs_decision")
         return
     if status == "blocked_user":
         task["status"] = "blocked_user"
@@ -876,6 +908,8 @@ def apply_external_json_command_result(
         summary=payload.get("summary_excerpt") or str(task.get("last_error") or f"failed task {task.get('id')}"),
         payload=payload,
     )
+    if final_response.get("parent_attention_state") == "blocked_external":
+        emit_parent_attention_for_task(config, task, "blocked_external")
 
 
 def external_json_command_completed_success(task: dict[str, Any], result: ExternalJsonCommandResult) -> bool:

@@ -154,6 +154,21 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 - Revisit signal status: not observed
 - Evidence: [AGENTS.md](../AGENTS.md), [docs/spec.md](spec.md)
 
+## REQ-DURABLE-PARENT-ATTENTION: parent collection을 위한 durable attention delivery
+
+- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Decision class: Durable Requirement
+- Status: active
+- Validity scope: Durable
+- Requirement: parent linkage가 있는 worker result의 `needs_review`, `needs_decision`, `needs_follow_up`, `blocked_external`, `completed` 상태는 공통 `parent_attention_required` outbox event로 보존되고, delivery와 acknowledgement가 idempotent하게 추적되어야 한다.
+- Rationale: CBR가 비상호작용 worker 실행의 단일 monitor 역할을 하면서 originating parent가 collection/disposition 시점을 놓치지 않게 하기 위해.
+- Failure prevented: terminal 또는 attention 상태를 polling 사이에 놓치는 문제, 중복 wake, adapter 장애로 event가 유실되는 문제, wake를 root-goal 완료로 오해하는 문제.
+- Assumptions: opaque parent reference는 runtime private state에 최소 범위로 저장할 수 있고, 실제 parent message 전송은 supported adapter가 있을 때만 opt-in할 수 있다.
+- Derived specs: [Events, Index, and Retention Contract](events-and-index.md), [Task schema](task-schema.md)
+- Revisit when: Codex가 stable non-UI parent messaging API를 제공하거나 canonical runtime store가 파일 outbox에서 바뀔 때.
+- Revisit signal status: Codex non-UI messaging surface not currently verified; generic operator adapter only.
+- Evidence: [docs/events-and-index.md](events-and-index.md), [docs/task-schema.md](task-schema.md)
+
 ## Revalidation contract
 
 `Revisit when` 신호가 관찰되면 다음 순서로 처리한다.
