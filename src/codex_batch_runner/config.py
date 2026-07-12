@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .fs import read_json
+from .execution_target_selector import constraint_registry_value, execution_target_inventory_value
 from .model_requirements import (
     REQUIREMENT_DIMENSIONS,
     execution_config_value,
@@ -82,6 +83,8 @@ class Config:
     model_selection_rules: list[dict[str, Any]] = field(default_factory=list)
     worker_targets: dict[str, dict[str, Any]] = field(default_factory=dict)
     worker_selection_rules: list[dict[str, Any]] = field(default_factory=list)
+    execution_target_inventory: dict[str, Any] = field(default_factory=dict)
+    constraint_registry: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def load(cls, config_path: str | None = None, root: Path | None = None) -> "Config":
@@ -118,6 +121,10 @@ class Config:
         worker_targets = worker_targets_value(data.get("worker_targets"))
         worker_selection_rules = worker_selection_rules_value(data.get("worker_selection_rules"))
         validate_worker_target_references(worker_targets, worker_selection_rules, capacity_pools)
+        execution_target_inventory = execution_target_inventory_value(data.get("execution_target_inventory"))
+        constraint_registry = constraint_registry_value(data.get("constraint_registry"))
+        if execution_target_inventory and not constraint_registry:
+            raise ValueError("constraint_registry is required with execution_target_inventory")
         usage_admission_enabled = bool_value(
             "usage_admission_enabled",
             data.get("usage_admission_enabled", False),
@@ -292,6 +299,8 @@ class Config:
             model_selection_rules=model_selection_rules,
             worker_targets=worker_targets,
             worker_selection_rules=worker_selection_rules,
+            execution_target_inventory=execution_target_inventory,
+            constraint_registry=constraint_registry,
         )
 
 

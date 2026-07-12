@@ -1,8 +1,8 @@
 # Model Routing Requirement Contract
 
 이 문서는 role-agnostic task issuer가 제출하는 model requirement v2와 routing rubric의
-공개 계약을 정의합니다. Runner는 D1 schema compatibility를 구현했으며 D2 selector 전까지
-legacy v1 selection behavior를 deterministic projection으로 유지합니다. Global model-routing
+공개 계약을 정의합니다. Runner는 D1 schema compatibility와 D2 exact target selector를
+구현했습니다. Legacy v1 config/task는 계속 읽지만 exact automatic cohort에는 들어가지 않습니다. Global model-routing
 rebuild freeze가 해제되기 전에는 이 계약을 근거로 새 CBR task를 dispatch하지 않습니다.
 
 Requirement reference: `REQ-SEPARATE-ROUTING-EVIDENCE`
@@ -186,7 +186,11 @@ Migration order는 `D0 -> D1 -> D2 -> D3 -> D4 -> D5 -> D6`입니다.
 - D1: v2 schema, validation, revision identity, legacy projection을 구현함. 새 task는 v2를
   쓰고 v1은 read-only `legacy-derived`로만 읽음. Legacy projection은
   `exact_v2_cohort_eligible=false`로 표시되며 v2 exact cohort에 포함하지 않음.
-- D2-D5: exact selector, evidence v3, reports, posterior/exploration을 순차 구현함.
+- D2: `execution_target_inventory`와 `constraint_registry`를 사용하는 단일 selector를 구현함.
+  Native requirement v2만 automatic exact selection에 진입하며 legacy model/worker first-match
+  config는 compatibility path로만 유지함. Codex automatic target은 exact `model`과
+  `reasoning_effort`가 필수이고 CLI-default target은 config validation에서 거부함.
+- D3-D5: evidence v3, reports, posterior/exploration을 순차 구현함.
 - D6: end-to-end matrix, public/private safety, fresh independent review, operator config
   migration과 명시적 승인을 완료함.
 

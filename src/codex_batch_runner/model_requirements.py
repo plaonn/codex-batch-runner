@@ -5,6 +5,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .execution_target_selector import SELECTION_POLICY_VERSION, select_execution_target
+
 
 SAFE_CONFIG_OVERRIDE_KEYS = {
     "model_reasoning_effort",
@@ -400,6 +402,33 @@ def task_requirement_metadata(
 def resolve_execution_config(config: Any, task: dict[str, Any], *, reviewer: bool = False) -> ResolvedExecutionConfig:
     worker_role = "reviewer" if reviewer else "implementer"
     vector = resolve_model_requirement_vector(config, task, reviewer=reviewer)
+    selected_target = select_execution_target(config, task, vector)
+    if selected_target is not None:
+        if selected_target.target.get("execution_surface") != "codex":
+            return ResolvedExecutionConfig(
+                requirement_vector=vector,
+                selection_rule=SELECTION_POLICY_VERSION,
+                selection_reason=selected_target.selection_reason,
+                model_source="non_codex_target",
+                execution_target=selected_target.target_id,
+                worker_role=worker_role,
+            )
+        target = selected_target.target
+        return ResolvedExecutionConfig(
+            requirement_vector=vector,
+            selection_rule=SELECTION_POLICY_VERSION,
+            selection_reason=selected_target.selection_reason,
+            model=target["model"],
+            model_source="target_alias",
+            execution_target=selected_target.target_id,
+            codex_profile=target.get("codex_profile"),
+            config_overrides={
+                **(target.get("config_overrides") or {}),
+                "model_reasoning_effort": target["reasoning_effort"],
+            },
+            budget_hint=target.get("budget_hint"),
+            worker_role=worker_role,
+        )
     selection = select_execution_config(config, vector)
     resolved_selection = resolve_execution_target(config, selection)
     return ResolvedExecutionConfig(

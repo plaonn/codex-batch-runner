@@ -4,11 +4,15 @@
 
 ## Model Requirements
 
-Task JSON은 immutable v2 `model_requirement_vector` revision을 canonical storage로 사용합니다. 기존 v1 task와 v1 CLI dimension 입력은 deterministic `legacy-derived` v2 projection으로 읽고 저장하며, 기존 config selection behavior는 그 projection으로 유지합니다. Native v2 vector는 D2 selector 전까지 새 selection 의미를 만들지 않고 default path를 사용합니다. 승인된 계약과 migration boundary는 [Model routing requirement contract](model-routing-contract.md)에 정의됩니다.
+Task JSON은 immutable v2 `model_requirement_vector` revision을 canonical storage로 사용합니다. 기존 v1 task와 v1 CLI dimension 입력은 deterministic `legacy-derived` v2 projection으로 읽고 저장하며, 기존 config selection behavior는 그 projection으로 유지합니다. Native v2 vector는 versioned `execution_target_inventory`와 `constraint_registry`가 있으면 D2 exact selector를 사용합니다. 승인된 계약과 migration boundary는 [Model routing requirement contract](model-routing-contract.md)에 정의됩니다.
 
 ### 모델 신선도와 실제 모델 식별 한계
 
-일반 task intent는 `model_requirement_vector`만 저장하며 provider/model/profile 식별자를 저장하지 않습니다. 유일한 예외인 `scope=single_task` bounded `routing_override`는 D1에서 검증·저장하지만 D2 전에는 실행 selection에 적용하지 않습니다. Override와 parent requirement revision은 child/retry/review/fix/follow-up에 자동 상속되지 않습니다.
+일반 task intent는 `model_requirement_vector`만 저장하며 provider/model/profile 식별자를 저장하지 않습니다. 유일한 예외인 `scope=single_task` bounded `routing_override`는 D2 selector에서 preference 또는 fail-closed pin으로 적용됩니다. 두 mode 모두 hard constraint와 quality floor를 우회하지 않습니다. Override와 parent requirement revision은 child/retry/review/fix/follow-up에 자동 상속되지 않습니다.
+
+`execution_target_inventory` schema v1은 snapshot id, `current|stale` status, constraint-registry version, target map을 가집니다. 각 native target은 stable target id, execution surface, trust state, per-axis `static_fitness`, latency/cost score와 capability evidence를 선언합니다. Codex target은 exact model/reasoning pair가 필수입니다. D2의 `static_fitness`는 `quality_evidence_status=static_non_learned`인 cold-start fitness일 뿐 학습된 capability나 posterior가 아닙니다. 모든 requirement quality axis를 충족한 target만 utility 비교에 들어갑니다. `quality_evidence_status=insufficient`이면 selector는 `insufficient_quality_evidence`로 중단합니다.
+
+Constraint evidence source는 `provider_declared`, `surface_reported`, fresh `operator_verified`, `empirically_observed`, `unknown` 중 하나입니다. `operator_verified` evidence는 timezone이 있는 미래 `expires_at`이 있어야 확정 충족 근거로 인정됩니다. 나머지 unknown/empirical evidence는 versioned registry의 `reject|probe_only|soft_penalty|ignore` policy를 따릅니다.
 
 - 로컬 config는 `execution_targets`에서 안정적인 target alias를 정의하고, `default_execution_config` 또는 `model_selection_rules`가 그 alias를 선택할 수 있습니다.
 - `model_selection_rules`와 `default_execution_config`는 호환을 위해 `model`/`codex_profile`를 직접 고정할 수도 있지만, direct model pin은 freshness metadata를 담을 수 없으므로 `cbr doctor`가 경고합니다.

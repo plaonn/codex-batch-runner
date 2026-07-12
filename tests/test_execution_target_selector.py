@@ -1,0 +1,240 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+
+from codex_batch_runner.config import Config
+from codex_batch_runner.execution_target_selector import TargetSelectionError, select_execution_target
+from codex_batch_runner.model_requirements import resolve_execution_config
+from codex_batch_runner.worker_routing import resolve_worker_target
+
+
+def requirement(*, floor: int = 500, constraints: dict | None = None, latency: int = 0, cost: int = 0) -> dict:
+    axes = {
+        name: {"score": floor, "confidence": 1000, "anchor": floor, "evidence_codes": []}
+        for name in (
+            "semantic_reasoning",
+            "context_integration",
+            "planning_depth",
+            "instruction_fidelity",
+            "tool_execution_reliability",
+            "adversarial_detection",
+        )
+    }
+    return {
+        "schema_version": 2,
+        "derivation_version": "requirement-rubric-v1",
+        "revision_id": "reqrev-test",
+        "quality_requirements": axes,
+        "hard_constraints": constraints or {},
+        "utility_preferences": {"latency_weight": latency, "cost_weight": cost},
+    }
+
+
+def codex_target(model: str, *, quality: int = 750, latency: int = 500, cost: int = 500) -> dict:
+    return {
+        "execution_surface": "codex",
+        "model": model,
+        "reasoning_effort": "high",
+        "trust_state": "trusted",
+        "static_fitness": {
+            axis: quality
+            for axis in (
+                "semantic_reasoning", "context_integration", "planning_depth", "instruction_fidelity",
+                "tool_execution_reliability", "adversarial_detection",
+            )
+        },
+        "latency_score": latency,
+        "cost_score": cost,
+        "capabilities": {"required_tools": ["filesystem", "shell"], "minimum_context_tokens": 200000},
+        "capability_evidence": {
+            "required_tools": {"source": "operator_verified", "expires_at": "2099-01-01T00:00:00Z"},
+            "minimum_context_tokens": {"source": "provider_declared"},
+            "required_execution_surfaces": {"source": "surface_reported"},
+            "allowed_reasoning_efforts": {"source": "surface_reported"},
+        },
+    }
+
+
+def loaded_config(targets: dict, *, policies: dict | None = None) -> Config:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = root / "config.json"
+        constraints = policies or {
+            "required_tools": {"unknown_policy": "reject"},
+            "minimum_context_tokens": {"unknown_policy": "reject"},
+            "required_execution_surfaces": {"unknown_policy": "reject"},
+            "allowed_reasoning_efforts": {"unknown_policy": "reject"},
+        }
+        path.write_text(
+            json.dumps(
+                {
+                    "execution_target_inventory": {
+                        "schema_version": 1,
+                        "snapshot_id": "sha256:test-snapshot",
+                        "status": "current",
+                        "constraint_registry_version": "constraints-v1",
+                        "targets": targets,
+                    },
+                    "constraint_registry": {
+                        "schema_version": 1,
+                        "version": "constraints-v1",
+                        "constraints": constraints,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return Config.load(str(path), root=root)
+
+
+class ExecutionTargetSelectorTests(unittest.TestCase):
+    def test_automatic_codex_target_is_exact_and_command_ready(self) -> None:
+        config = loaded_config({"codex-high-v1": codex_target("gpt-exact")})
+
+        selected = resolve_execution_config(config, {"model_requirement_vector": requirement()})
+
+        self.assertEqual("codex-high-v1", selected.execution_target)
+        self.assertEqual("gpt-exact", selected.model)
+        self.assertEqual("high", selected.config_overrides["model_reasoning_effort"])
+        self.assertEqual("automatic_static_non_learned", selected.selection_reason)
+
+    def test_inventory_rejects_cli_default_automatic_codex_target(self) -> None:
+        target = codex_target("gpt-exact")
+        target.pop("model")
+        target["model_source"] = "cli_default"
+
+        with self.assertRaisesRegex(ValueError, "requires exact model and reasoning_effort"):
+            loaded_config({"bad": target})
+
+    def test_hard_constraint_unknown_rejects_target(self) -> None:
+        target = codex_target("gpt-exact")
+        target["capability_evidence"].pop("required_tools")
+        config = loaded_config({"unknown-tools": target})
+
+        with self.assertRaisesRegex(TargetSelectionError, "no_eligible_model"):
+            select_execution_target(
+                config,
+                {},
+                requirement(constraints={"required_tools": ["filesystem"]}),
+            )
+
+    def test_quality_floor_is_not_relaxed_by_cost_preference(self) -> None:
+        cheap = codex_target("cheap", quality=250, cost=1000)
+        capable = codex_target("capable", quality=750, cost=0)
+        config = loaded_config({"cheap": cheap, "capable": capable})
+
+        selected = select_execution_target(config, {}, requirement(floor=750, cost=1000))
+
+        self.assertEqual("capable", selected.target_id)
+
+    def test_insufficient_quality_boundary_does_not_invent_posterior(self) -> None:
+        target = codex_target("unknown-quality")
+        target["quality_evidence_status"] = "insufficient"
+        config = loaded_config({"unknown-quality": target})
+
+        with self.assertRaisesRegex(TargetSelectionError, "insufficient_quality_evidence"):
+            select_execution_target(config, {}, requirement())
+
+    def test_deterministic_tie_break_uses_target_id(self) -> None:
+        config = loaded_config({"z-target": codex_target("z"), "a-target": codex_target("a")})
+
+        selected = select_execution_target(config, {}, requirement())
+
+        self.assertEqual("a-target", selected.target_id)
+
+    def test_pin_fails_closed_when_target_is_below_floor(self) -> None:
+        config = loaded_config({"low": codex_target("low", quality=250), "high": codex_target("high")})
+        task = {
+            "routing_override": {
+                "mode": "pin",
+                "target_id": "low",
+                "reason": "test",
+                "scope": "single_task",
+                "allow_fallback": False,
+                "provenance": "operator_override",
+            }
+        }
+
+        with self.assertRaisesRegex(TargetSelectionError, "manual_pin_unavailable"):
+            select_execution_target(config, task, requirement(floor=500))
+
+    def test_preference_fallback_reuses_normal_eligibility_and_ranking(self) -> None:
+        config = loaded_config({"a": codex_target("a", cost=100), "b": codex_target("b", cost=900)})
+        task = {
+            "routing_override": {
+                "mode": "preference",
+                "target_id": "missing",
+                "reason": "test",
+                "scope": "single_task",
+                "allow_fallback": True,
+                "provenance": "operator_override",
+            }
+        }
+
+        selected = select_execution_target(config, task, requirement(cost=1000))
+
+        self.assertEqual("b", selected.target_id)
+        self.assertEqual("operator_preference_fallback", selected.selection_reason)
+
+    def test_unified_inventory_can_select_external_worker(self) -> None:
+        target = {
+            "execution_surface": "external",
+            "execution_backend": "external-json-command",
+            "external_command": ["public-worker"],
+            "capacity_pool": "codex",
+            "trust_state": "trusted",
+            "static_fitness": {
+                "semantic_reasoning": 750,
+                "context_integration": 750,
+                "planning_depth": 750,
+                "instruction_fidelity": 750,
+                "tool_execution_reliability": 750,
+                "adversarial_detection": 750,
+            },
+            "latency_score": 500,
+            "cost_score": 500,
+            "capabilities": {},
+            "capability_evidence": {},
+        }
+        config = loaded_config({"external-v1": target})
+
+        selected = resolve_worker_target(config, {"model_requirement_vector": requirement()})
+
+        self.assertEqual("external-v1", selected.name)
+        self.assertEqual("external-json-command", selected.target["execution_backend"])
+
+    def test_native_inventory_preempts_both_legacy_first_match_paths(self) -> None:
+        config = loaded_config({"exact-codex": codex_target("exact")})
+        config = replace(
+            config,
+            model_selection_rules=[{"name": "legacy-model", "when": {}, "model": "legacy"}],
+            worker_targets={
+                "legacy-worker": {
+                    "execution_backend": "external-json-command",
+                    "external_command": ["legacy-worker"],
+                }
+            },
+            worker_selection_rules=[{"name": "legacy-worker-rule", "when": {}, "worker_target": "legacy-worker"}],
+        )
+        task = {"model_requirement_vector": requirement()}
+
+        self.assertIsNone(resolve_worker_target(config, task))
+        selected = resolve_execution_config(config, task)
+        self.assertEqual("exact-codex", selected.execution_target)
+        self.assertEqual("exact", selected.model)
+
+    def test_legacy_v1_config_remains_readable_and_does_not_enter_exact_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            resolved = resolve_execution_config(config, {"model_requirement_vector": {"dimensions": {"reasoning_depth": "low"}}})
+
+        self.assertEqual("cli_default", resolved.model_source)
+        self.assertIsNone(resolved.execution_target)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .model_requirements import legacy_dimensions_for_requirement, resolve_model_requirement_vector, rule_matches
+from .execution_target_selector import SELECTION_POLICY_VERSION, select_execution_target
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,17 @@ def resolve_worker_target(config: Any, task: dict[str, Any]) -> ResolvedWorkerTa
     if not worker_target_applicable(task):
         return None
     vector = resolve_model_requirement_vector(config, task)
+    selected_target = select_execution_target(config, task, vector)
+    if selected_target is not None:
+        if selected_target.target.get("execution_surface") == "codex":
+            return None
+        return ResolvedWorkerTarget(
+            name=selected_target.target_id,
+            selection_rule=SELECTION_POLICY_VERSION,
+            selection_reason=selected_target.selection_reason,
+            requirement_vector=vector,
+            target=selected_target.target,
+        )
     dimensions = legacy_dimensions_for_requirement(vector)
     for rule in getattr(config, "worker_selection_rules", []) or []:
         if not rule_matches(rule.get("when", {}), dimensions):
