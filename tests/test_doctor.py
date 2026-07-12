@@ -111,7 +111,7 @@ class DoctorTests(unittest.TestCase):
             executable = Path(tmp) / "codex"
             executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
             executable.chmod(0o755)
-            config_path = write_config(tmp, [str(executable), "exec", "--json"])
+            config_path = write_config(tmp, [str(executable), "exec", "--json"], extra={"root": tmp})
 
             code, output = run_cli(["--config", str(config_path), "doctor"])
 
