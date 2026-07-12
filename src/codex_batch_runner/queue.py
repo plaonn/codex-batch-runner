@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import socket
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -9,6 +10,7 @@ from .config import Config
 from .events import emit_task_event, transition_payload
 from .model_requirements import derive_model_requirement_vector, task_requirement_metadata
 from .fs import ensure_dir, read_json, write_json_atomic
+from .lock import lock_pid, pid_exists
 from .timeutil import iso_now, parse_time, utc_now
 from .worker_routing import planned_worker_capacity_pool
 
@@ -783,14 +785,39 @@ def recover_stale_running_tasks(config: Config) -> list[str]:
     for task in list_tasks(config):
         if task.get("status") != "running":
             continue
+        runner_hostname = task.get("active_runner_hostname")
+        runner_pid = lock_pid(task.get("active_runner_pid"))
+        same_host = isinstance(runner_hostname, str) and runner_hostname == socket.gethostname()
+        pid_alive = pid_exists(runner_pid) if same_host and runner_pid is not None else None
+        dead_same_host_pid = pid_alive is False
         started_at = parse_time(task.get("started_at"))
-        stale = not started_at or (utc_now() - started_at).total_seconds() > config.stale_lock_seconds
-        if not stale:
+        stale_by_age = not started_at or (utc_now() - started_at).total_seconds() > config.stale_lock_seconds
+        if pid_alive is True or (not dead_same_host_pid and not stale_by_age):
             continue
+        recovery_reason = "same_host_dead_runner_pid" if dead_same_host_pid else "stale_started_at"
+        previous_status = str(task.get("status") or "")
         task["status"] = "needs_resume" if task.get("next_prompt") else "runnable"
-        task["last_error"] = "recovered stale running task"
+        task["last_error"] = f"recovered stale running task: {recovery_reason}"
+        task["running_recovered_at"] = iso_now()
+        task["running_recovery_reason"] = recovery_reason
+        task["running_recovery_runner_hostname"] = runner_hostname if isinstance(runner_hostname, str) else None
+        task["running_recovery_runner_pid"] = runner_pid
         clear_active_run_metadata(task)
         save_task(config, task)
+        emit_task_event(
+            config,
+            "task_mutated",
+            task,
+            source="stale-running-recovery",
+            summary=f"recovered running task {task['id']}: {recovery_reason}",
+            payload=transition_payload(
+                task,
+                previous_status=previous_status,
+                mutation="stale_running_recovery",
+                recovery_reason=recovery_reason,
+                recovered_at=task.get("running_recovered_at"),
+            ),
+        )
         recovered.append(task["id"])
     return recovered
 

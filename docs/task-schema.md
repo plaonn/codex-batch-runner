@@ -99,6 +99,8 @@
 - `started_at`
 - `completed_at`
 - `log_paths`
+- `running_recovered_at`, `running_recovery_reason`: stale `running` recovery 시각과 `same_host_dead_runner_pid` 또는 `stale_started_at` provenance
+- `running_recovery_runner_hostname`, `running_recovery_runner_pid`: recovery 판단 당시의 active runner metadata snapshot. Recovery 뒤 active-run metadata 자체는 제거됩니다.
 - `review_status`
 - `reviewed_at`
 - `review_reason`

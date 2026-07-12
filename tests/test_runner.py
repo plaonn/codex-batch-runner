@@ -812,7 +812,9 @@ class RunnerTests(unittest.TestCase):
             config = make_config(tmp, "success")
             stale = create_task(config, "stale", tmp, task_id="stale-task")
             stale["status"] = "running"
-            stale["started_at"] = None
+            stale["started_at"] = "2999-01-01T00:00:00+00:00"
+            stale["active_runner_hostname"] = socket.gethostname()
+            stale["active_runner_pid"] = 424242
             save_task(config, stale)
             create_task(config, "ready", tmp, task_id="ready-task")
             config.state_file.write_text(
@@ -829,14 +831,17 @@ class RunnerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")):
+            with (
+                patch("codex_batch_runner.queue.pid_exists", return_value=False),
+                patch("codex_batch_runner.runner.run_codex", side_effect=AssertionError("unexpected Codex call")),
+            ):
                 outcome = run_next(config)
 
             self.assertEqual("paused", outcome.status)
             self.assertIn("operator drain window", outcome.message)
             recovered = load_task(config, "stale-task")
             self.assertEqual("runnable", recovered["status"])
-            self.assertEqual("recovered stale running task", recovered["last_error"])
+            self.assertEqual("recovered stale running task: same_host_dead_runner_pid", recovered["last_error"])
             self.assertEqual("runnable", load_task(config, "ready-task")["status"])
             self.assertIsNone(load_state(config)["last_task_id"])
 

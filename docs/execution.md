@@ -560,7 +560,7 @@ lock 파일 예:
 
 기본 stale 기준은 긴 Codex 작업을 고려해 6시간으로 시작함.
 
-lock 복구 후 `running` 상태의 task가 stale 기준보다 오래됐으면 다음 실행에서 다시 `runnable` 또는 `needs_resume`으로 되돌림. 실제 Codex가 아직 실행 중인 task를 중복 실행하지 않도록 stale 기준은 보수적으로 길게 둠.
+lock 복구 후 `running` task의 `active_runner_hostname`이 현재 host와 같고 valid `active_runner_pid`가 dead로 확인되면 age threshold를 기다리지 않고 즉시 복구합니다. Live same-host PID는 복구하지 않으며, remote/unknown host, missing/invalid PID처럼 liveness를 확인할 수 없으면 `started_at` 기반 stale threshold를 사용합니다. 복구 상태는 `next_prompt`가 있으면 `needs_resume`, 없으면 `runnable`이며 active-run metadata를 지우고 `running_recovered_at`, `running_recovery_reason`, 관측 runner hostname/PID를 남깁니다.
 
 
 ## Atomic write policy

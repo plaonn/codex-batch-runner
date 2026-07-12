@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import tempfile
 import unittest
 from dataclasses import replace
@@ -164,6 +165,87 @@ class QueueTests(unittest.TestCase):
 
             self.assertEqual(["stale"], recovered)
             self.assertEqual("runnable", loaded["status"])
+            self.assertEqual("stale_started_at", loaded["running_recovery_reason"])
+
+    def test_recover_running_task_immediately_for_dead_same_host_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            task = create_task(config, "dead", tmp, task_id="dead")
+            task.update(
+                status="running",
+                started_at="2999-01-01T00:00:00+00:00",
+                active_runner_hostname=socket.gethostname(),
+                active_runner_pid=424242,
+                active_run_id="run-id",
+                next_prompt="continue",
+            )
+            save_task(config, task)
+
+            with patch("codex_batch_runner.queue.pid_exists", return_value=False) as pid_check:
+                recovered = recover_stale_running_tasks(config)
+            loaded = load_task(config, "dead")
+
+            self.assertEqual(["dead"], recovered)
+            pid_check.assert_called_once_with(424242)
+            self.assertEqual("needs_resume", loaded["status"])
+            self.assertEqual("same_host_dead_runner_pid", loaded["running_recovery_reason"])
+            self.assertEqual(socket.gethostname(), loaded["running_recovery_runner_hostname"])
+            self.assertEqual(424242, loaded["running_recovery_runner_pid"])
+            self.assertNotIn("active_runner_hostname", loaded)
+            self.assertNotIn("active_runner_pid", loaded)
+            self.assertNotIn("active_run_id", loaded)
+
+    def test_does_not_recover_running_task_for_live_same_host_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            task = create_task(config, "live", tmp, task_id="live")
+            task.update(
+                status="running",
+                started_at="2000-01-01T00:00:00+00:00",
+                active_runner_hostname=socket.gethostname(),
+                active_runner_pid=os.getpid(),
+            )
+            save_task(config, task)
+
+            recovered = recover_stale_running_tasks(config)
+
+            self.assertEqual([], recovered)
+            self.assertEqual("running", load_task(config, "live")["status"])
+
+    def test_remote_runner_uses_age_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            task = create_task(config, "remote", tmp, task_id="remote")
+            task.update(
+                status="running",
+                started_at="2999-01-01T00:00:00+00:00",
+                active_runner_hostname="remote-host",
+                active_runner_pid=424242,
+            )
+            save_task(config, task)
+
+            with patch("codex_batch_runner.queue.pid_exists") as pid_check:
+                recovered = recover_stale_running_tasks(config)
+
+            self.assertEqual([], recovered)
+            pid_check.assert_not_called()
+            self.assertEqual("running", load_task(config, "remote")["status"])
+
+    def test_missing_runner_metadata_uses_age_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            fresh = create_task(config, "fresh", tmp, task_id="fresh")
+            fresh.update(status="running", started_at="2999-01-01T00:00:00+00:00")
+            save_task(config, fresh)
+            old = create_task(config, "old", tmp, task_id="old")
+            old.update(status="running", started_at="2000-01-01T00:00:00+00:00")
+            save_task(config, old)
+
+            recovered = recover_stale_running_tasks(config)
+
+            self.assertEqual(["old"], recovered)
+            self.assertEqual("running", load_task(config, "fresh")["status"])
+            self.assertEqual("runnable", load_task(config, "old")["status"])
 
     def test_archive_task_preserves_task_file_and_previous_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
