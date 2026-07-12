@@ -101,6 +101,8 @@ def render_status_report(report: dict[str, Any]) -> str:
     global_cooldown = cooldowns.get("global") if isinstance(cooldowns.get("global"), dict) else {}
     reviewer_cooldown = cooldowns.get("reviewer_codex") if isinstance(cooldowns.get("reviewer_codex"), dict) else {}
     lock = report.get("lock") if isinstance(report.get("lock"), dict) else {}
+    capacity = queue.get("capacity") if isinstance(queue.get("capacity"), dict) else {}
+    capacity_pools = capacity.get("capacity_pools") if isinstance(capacity.get("capacity_pools"), dict) else {}
     rows = [
         ["admission", str(admission.get("status") or "-"), str(admission.get("recommended_action") or "-")],
         ["can_enqueue", _yes_no(admission.get("can_enqueue")), "-"],
@@ -131,6 +133,24 @@ def render_status_report(report: dict[str, Any]) -> str:
         "",
         render_table(["SECTION", "STATUS", "DETAIL"], rows),
     ]
+    if capacity_pools:
+        pool_rows = []
+        for name, raw_pool in capacity_pools.items():
+            pool = raw_pool if isinstance(raw_pool, dict) else {}
+            blocker_reason = pool.get("blocker_reason")
+            pool_rows.append(
+                [
+                    str(name),
+                    f"max={pool.get('max_running', 0)}",
+                    f"running={pool.get('running', 0)}",
+                    f"remaining={pool.get('remaining', 0)}",
+                    str(blocker_reason or "available"),
+                ]
+            )
+        lines.extend(["", "## capacity pools", "", render_table(
+            ["POOL", "MAX", "RUNNING", "REMAINING", "BLOCKER"],
+            pool_rows,
+        )])
     warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
     if warnings:
         lines.extend(["", "warnings:"])
@@ -170,12 +190,27 @@ def _task_selection_entries(config: Config, tasks: list[dict[str, Any]]) -> list
 
 def _capacity_summary(config: Config, tasks: list[dict[str, Any]]) -> dict[str, Any]:
     running = _running_capacity(tasks)
+    running_by_pool = running["by_pool"]
+    capacity_pools = {}
+    for name, pool in sorted(config.capacity_pools.items()):
+        max_running = int(pool["max_running"])
+        running_count = int(running_by_pool[name]) if isinstance(running_by_pool, Counter) else 0
+        remaining = max(0, max_running - running_count)
+        blocked = remaining == 0
+        capacity_pools[name] = {
+            "max_running": max_running,
+            "running": running_count,
+            "remaining": remaining,
+            "blocked": blocked,
+            "blocker_reason": "capacity_pool_full" if blocked else None,
+        }
     return {
         "max_total_running": config.max_total_running,
         "max_running_per_project": config.max_running_per_project,
+        "capacity_pools": capacity_pools,
         "running_total": running["total"],
         "running_by_project": dict(sorted(running["by_project"].items())),
-        "running_by_pool": dict(sorted(running["by_pool"].items())),
+        "running_by_pool": dict(sorted(running_by_pool.items())),
     }
 
 

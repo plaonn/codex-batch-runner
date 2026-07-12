@@ -1135,6 +1135,16 @@ class CliTests(unittest.TestCase):
             self.assertTrue(report["admission"]["can_run_next"])
             self.assertEqual("idle", report["admission"]["recommended_action"])
             self.assertEqual(0, report["queue"]["task_count"])
+            self.assertEqual(
+                {
+                    "max_running": 1,
+                    "running": 0,
+                    "remaining": 1,
+                    "blocked": False,
+                    "blocker_reason": None,
+                },
+                report["queue"]["capacity"]["capacity_pools"]["codex"],
+            )
 
             code, output = run_cli(["--config", str(config_path), "status"])
 
@@ -1142,6 +1152,47 @@ class CliTests(unittest.TestCase):
             self.assertIn("# cbr status", output)
             self.assertIn("read_only: yes", output)
             self.assertIn("admission", output)
+            self.assertIn("## capacity pools", output)
+            self.assertIn("remaining=1", output)
+
+    def test_status_command_reports_full_configured_capacity_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                extra={
+                    "max_total_running": 3,
+                    "max_running_per_project": 3,
+                    "capacity_pools": {
+                        "codex": {"max_running": 2},
+                        "codex-spark": {"max_running": 1},
+                    },
+                },
+            )
+            config = Config.load(str(config_path))
+            running = create_task(config, "spark work", tmp, task_id="spark-running")
+            running["status"] = "running"
+            running["capacity_pool"] = "codex-spark"
+            save_task(config, running)
+
+            code, output = run_cli(["--config", str(config_path), "status", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            pools = report["queue"]["capacity"]["capacity_pools"]
+            self.assertEqual(2, pools["codex"]["remaining"])
+            self.assertFalse(pools["codex"]["blocked"])
+            self.assertEqual(1, pools["codex-spark"]["running"])
+            self.assertEqual(0, pools["codex-spark"]["remaining"])
+            self.assertTrue(pools["codex-spark"]["blocked"])
+            self.assertEqual("capacity_pool_full", pools["codex-spark"]["blocker_reason"])
+            self.assertEqual({"codex-spark": 1}, report["queue"]["capacity"]["running_by_pool"])
+
+            code, output = run_cli(["--config", str(config_path), "status"])
+
+            self.assertEqual(0, code)
+            self.assertIn("codex-spark", output)
+            self.assertIn("remaining=0", output)
+            self.assertIn("capacity_pool_full", output)
 
     def test_status_command_reports_admission_cooldown_pause_and_review_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
