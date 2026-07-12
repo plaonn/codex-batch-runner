@@ -104,6 +104,12 @@ from .routing_policy_candidates import (
     build_routing_policy_candidate_report,
     render_routing_policy_candidate_report,
 )
+from .routing_recommendation import (
+    RoutingCostEvidenceError,
+    build_routing_recommendation,
+    load_routing_cost_evidence_records,
+    render_routing_recommendation,
+)
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, build_routing_report, render_routing_report
 from .runner import RunOutcome, run_next
 from .state import (
@@ -321,6 +327,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     routing_report.add_argument("--json", action="store_true", help="print JSON")
     routing_report.set_defaults(func=cmd_routing_report)
+
+    recommend_routing = sub.add_parser(
+        "recommend-routing",
+        help="recommend a model from exact comparable routing-cost evidence without mutating state",
+    )
+    recommend_routing.add_argument("--task-bucket", required=True)
+    recommend_routing.add_argument("--execution-surface", required=True)
+    recommend_routing.add_argument("--semantic-complexity", required=True)
+    recommend_routing.add_argument("--failure-cost", required=True)
+    recommend_routing.add_argument("--objective-verification", required=True)
+    recommend_routing.add_argument("--expected-context", required=True)
+    recommend_routing.add_argument("--interaction-need", required=True)
+    recommend_routing.add_argument("--usage-pressure", required=True)
+    recommend_routing.add_argument("--available-model", action="append", default=[])
+    recommend_routing.add_argument("--routing-cost-evidence-json", action="append", default=[], metavar="PATH")
+    recommend_routing.add_argument("--json", action="store_true", help="print JSON")
+    recommend_routing.set_defaults(func=cmd_recommend_routing)
 
     routing_policy_candidates = sub.add_parser(
         "routing-policy-candidates",
@@ -3724,6 +3747,32 @@ def cmd_routing_report(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_routing_report(report), end="")
+    return 0
+
+
+def cmd_recommend_routing(config: Config, args: argparse.Namespace) -> int:
+    try:
+        records = load_routing_cost_evidence_records(args.routing_cost_evidence_json)
+    except RoutingCostEvidenceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    report = build_routing_recommendation(
+        config,
+        task_bucket=args.task_bucket,
+        execution_surface=args.execution_surface,
+        semantic_complexity=args.semantic_complexity,
+        failure_cost=args.failure_cost,
+        objective_verification=args.objective_verification,
+        expected_context=args.expected_context,
+        interaction_need=args.interaction_need,
+        usage_pressure=args.usage_pressure,
+        available_models=args.available_model,
+        routing_cost_records=records,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_routing_recommendation(report), end="")
     return 0
 
 
