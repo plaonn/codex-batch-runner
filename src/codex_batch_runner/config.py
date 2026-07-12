@@ -42,8 +42,7 @@ class Config:
     usage_admission_command: list[str] = field(default_factory=list)
     usage_admission_timeout_seconds: int = 5
     usage_admission_max_age_seconds: int = 300
-    usage_admission_primary_threshold_percent: float | None = None
-    usage_admission_secondary_threshold_percent: float | None = None
+    usage_admission_short_window_threshold_percent: float | None = None
     usage_admission_reset_grace_seconds: int = 60
     manual_cooldown_wake_scheduler: str = "disabled"
     manual_cooldown_wake_command: list[str] = field(default_factory=list)
@@ -127,18 +126,14 @@ class Config:
             "usage_admission_command",
             data.get("usage_admission_command", []),
         )
-        usage_admission_primary_threshold_percent = optional_percentage_value(
-            "usage_admission_primary_threshold_percent",
-            data.get("usage_admission_primary_threshold_percent"),
-        )
-        usage_admission_secondary_threshold_percent = optional_percentage_value(
-            "usage_admission_secondary_threshold_percent",
-            data.get("usage_admission_secondary_threshold_percent"),
+        usage_admission_short_window_threshold_percent = optional_percentage_value(
+            "usage_admission_short_window_threshold_percent",
+            data.get("usage_admission_short_window_threshold_percent"),
         )
         validate_usage_admission_config(
             usage_admission_enabled,
             usage_admission_command,
-            usage_admission_primary_threshold_percent,
+            usage_admission_short_window_threshold_percent,
         )
 
         return cls(
@@ -212,8 +207,7 @@ class Config:
                 "usage_admission_max_age_seconds",
                 data.get("usage_admission_max_age_seconds", 300),
             ),
-            usage_admission_primary_threshold_percent=usage_admission_primary_threshold_percent,
-            usage_admission_secondary_threshold_percent=usage_admission_secondary_threshold_percent,
+            usage_admission_short_window_threshold_percent=usage_admission_short_window_threshold_percent,
             usage_admission_reset_grace_seconds=non_negative_int_value(
                 "usage_admission_reset_grace_seconds",
                 data.get("usage_admission_reset_grace_seconds", 60),
@@ -488,15 +482,15 @@ def optional_percentage_value(key: str, value: object) -> float | None:
 def validate_usage_admission_config(
     enabled: bool,
     command: list[str],
-    primary_threshold_percent: float | None,
+    short_window_threshold_percent: float | None,
 ) -> None:
     if not enabled:
         return
     if not command:
         raise ValueError("usage_admission_command must be configured when usage_admission_enabled is true")
-    if primary_threshold_percent is None:
+    if short_window_threshold_percent is None:
         raise ValueError(
-            "usage_admission_primary_threshold_percent must be configured when usage_admission_enabled is true"
+            "usage_admission_short_window_threshold_percent must be configured when usage_admission_enabled is true"
         )
 
 

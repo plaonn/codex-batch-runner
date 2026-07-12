@@ -32,7 +32,7 @@ def admission_config(tmp: str, **overrides):
         "usage_admission_command": ["usage-snapshot", "--json"],
         "usage_admission_timeout_seconds": 2,
         "usage_admission_max_age_seconds": 300,
-        "usage_admission_primary_threshold_percent": 10.0,
+        "usage_admission_short_window_threshold_percent": 10.0,
         "usage_admission_reset_grace_seconds": 60,
     }
     values.update(overrides)
@@ -67,10 +67,11 @@ def snapshot(
         "primary": {
             "remaining_percent": primary,
             "resets_at": reset_at.isoformat(),
+            "window_minutes": 300,
         },
     }
     if secondary is not None:
-        value["secondary"] = {"remaining_percent": secondary}
+        value["secondary"] = {"remaining_percent": secondary, "window_minutes": 10080}
         if secondary_reset_at is not None:
             value["secondary"]["resets_at"] = secondary_reset_at.isoformat()
     return value
@@ -99,10 +100,10 @@ class UsageAdmissionTests(unittest.TestCase):
                 decision = check_usage_admission(config, now=NOW)
 
             self.assertEqual("allowed", decision.status)
-            self.assertEqual("remaining_above_thresholds", decision.reason)
+            self.assertEqual("short_window_above_threshold_and_long_window_not_exhausted", decision.reason)
             run.assert_called_once()
 
-    def test_fresh_low_primary_gates_until_reset_plus_grace(self) -> None:
+    def test_fresh_low_short_window_gates_until_reset_plus_grace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = admission_config(tmp, usage_admission_reset_grace_seconds=90)
             reset_at = NOW + timedelta(hours=2)
@@ -112,12 +113,12 @@ class UsageAdmissionTests(unittest.TestCase):
 
             self.assertEqual("gated", decision.status)
             self.assertEqual(reset_at + timedelta(seconds=90), decision.cooldown_until)
-            self.assertEqual("primary_remaining_at_or_below_threshold", decision.reason)
-            self.assertEqual(("primary",), decision.gate_windows)
+            self.assertEqual("short_window_remaining_at_or_below_threshold", decision.reason)
+            self.assertEqual(("short_window",), decision.gate_windows)
 
-    def test_low_secondary_uses_distinct_later_secondary_reset(self) -> None:
+    def test_low_long_window_does_not_gate_unless_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config = admission_config(tmp, usage_admission_secondary_threshold_percent=5.0)
+            config = admission_config(tmp)
             primary_reset_at = NOW + timedelta(hours=2)
             secondary_reset_at = NOW + timedelta(days=4)
             value = snapshot(
@@ -130,15 +131,11 @@ class UsageAdmissionTests(unittest.TestCase):
             with patch.object(usage_module.subprocess, "run", return_value=command_result(value)):
                 decision = check_usage_admission(config, now=NOW)
 
-            self.assertEqual("gated", decision.status)
-            self.assertEqual("secondary_remaining_at_or_below_threshold", decision.reason)
-            self.assertEqual(secondary_reset_at, decision.reset_at)
-            self.assertEqual(("secondary",), decision.gate_windows)
-            self.assertEqual(secondary_reset_at + timedelta(seconds=60), decision.cooldown_until)
+            self.assertEqual("allowed", decision.status)
 
-    def test_both_low_selects_later_triggering_reset(self) -> None:
+    def test_both_low_gates_only_until_short_window_reset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config = admission_config(tmp, usage_admission_secondary_threshold_percent=5.0)
+            config = admission_config(tmp)
             primary_reset_at = NOW + timedelta(hours=2)
             secondary_reset_at = NOW + timedelta(days=4)
             value = snapshot(
@@ -152,34 +149,34 @@ class UsageAdmissionTests(unittest.TestCase):
                 decision = check_usage_admission(config, now=NOW)
 
             self.assertEqual("gated", decision.status)
-            self.assertEqual("primary_and_secondary_remaining_at_or_below_threshold", decision.reason)
-            self.assertEqual(("primary", "secondary"), decision.gate_windows)
-            self.assertEqual(secondary_reset_at, decision.reset_at)
-            self.assertEqual(secondary_reset_at + timedelta(seconds=60), decision.cooldown_until)
+            self.assertEqual("short_window_remaining_at_or_below_threshold", decision.reason)
+            self.assertEqual(("short_window",), decision.gate_windows)
+            self.assertEqual(primary_reset_at, decision.reset_at)
+            self.assertEqual(primary_reset_at + timedelta(seconds=60), decision.cooldown_until)
             event = list_events(config)[-1]
             self.assertEqual("usage_admission_gated", event["event_type"])
             self.assertEqual(
                 {
                     "status": "gated",
-                    "reason": "primary_and_secondary_remaining_at_or_below_threshold",
+                    "reason": "short_window_remaining_at_or_below_threshold",
                     "observed_at": (NOW - timedelta(seconds=20)).isoformat(),
-                    "reset_at": secondary_reset_at.isoformat(),
-                    "gate_windows": ["primary", "secondary"],
-                    "cooldown_until": (secondary_reset_at + timedelta(seconds=60)).isoformat(),
-                    "primary_remaining_percent": 10.0,
-                    "secondary_remaining_percent": 5.0,
+                    "reset_at": primary_reset_at.isoformat(),
+                    "gate_windows": ["short_window"],
+                    "cooldown_until": (primary_reset_at + timedelta(seconds=60)).isoformat(),
+                    "short_window_remaining_percent": 10.0,
+                    "long_window_remaining_percent": 5.0,
                 },
                 event["payload"],
             )
 
-    def test_missing_secondary_reset_fails_open_with_sanitized_evidence(self) -> None:
+    def test_exhausted_long_window_requires_its_reset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config = admission_config(tmp, usage_admission_secondary_threshold_percent=5.0)
+            config = admission_config(tmp)
             value = snapshot(
                 observed_at=NOW - timedelta(seconds=20),
                 reset_at=NOW + timedelta(hours=2),
                 primary=60,
-                secondary=5,
+                secondary=0,
             )
             stderr = io.StringIO()
             with (
@@ -189,11 +186,11 @@ class UsageAdmissionTests(unittest.TestCase):
                 decision = check_usage_admission(config, now=NOW)
 
             self.assertEqual("fail_open", decision.status)
-            self.assertEqual("secondary_reset_time_invalid", decision.reason)
+            self.assertEqual("long_window_reset_time_invalid", decision.reason)
             self.assertNotIn("usage-snapshot", stderr.getvalue())
             event = list_events(config)[-1]
             self.assertEqual("usage_admission_warning", event["event_type"])
-            self.assertEqual("secondary_reset_time_invalid", event["payload"]["reason"])
+            self.assertEqual("long_window_reset_time_invalid", event["payload"]["reason"])
             self.assertNotIn("usage-snapshot", json.dumps(event))
 
     def test_stale_low_snapshot_after_reset_allows_bounded_attempt(self) -> None:
@@ -209,11 +206,11 @@ class UsageAdmissionTests(unittest.TestCase):
                 decision = check_usage_admission(config, now=NOW)
 
             self.assertEqual("allowed", decision.status)
-            self.assertEqual("primary_stale_after_reset_bounded_attempt", decision.reason)
+            self.assertEqual("short_window_stale_after_reset_bounded_attempt", decision.reason)
 
-    def test_stale_low_secondary_after_secondary_reset_allows_bounded_attempt(self) -> None:
+    def test_stale_exhausted_long_window_after_reset_allows_bounded_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config = admission_config(tmp, usage_admission_secondary_threshold_percent=5.0)
+            config = admission_config(tmp)
             primary_reset_at = NOW - timedelta(days=5)
             secondary_reset_at = NOW - timedelta(minutes=2)
             value = snapshot(
@@ -227,8 +224,8 @@ class UsageAdmissionTests(unittest.TestCase):
                 decision = check_usage_admission(config, now=NOW)
 
             self.assertEqual("allowed", decision.status)
-            self.assertEqual("secondary_stale_after_reset_bounded_attempt", decision.reason)
-            self.assertEqual(("secondary",), decision.gate_windows)
+            self.assertEqual("long_window_stale_after_reset_bounded_attempt", decision.reason)
+            self.assertEqual(("long_window",), decision.gate_windows)
             self.assertEqual(secondary_reset_at, decision.reset_at)
 
     def test_invalid_json_and_timeout_fail_open_with_sanitized_evidence(self) -> None:

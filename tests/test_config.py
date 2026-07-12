@@ -138,8 +138,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual([], config.usage_admission_command)
             self.assertEqual(5, config.usage_admission_timeout_seconds)
             self.assertEqual(300, config.usage_admission_max_age_seconds)
-            self.assertIsNone(config.usage_admission_primary_threshold_percent)
-            self.assertIsNone(config.usage_admission_secondary_threshold_percent)
+            self.assertIsNone(config.usage_admission_short_window_threshold_percent)
             self.assertEqual(60, config.usage_admission_reset_grace_seconds)
             self.assertEqual(1, config.max_total_running)
             self.assertEqual(1, config.max_running_per_project)
@@ -625,8 +624,7 @@ class ConfigTests(unittest.TestCase):
                         "usage_admission_command": ["usage-snapshot", "--json"],
                         "usage_admission_timeout_seconds": 3,
                         "usage_admission_max_age_seconds": 120,
-                        "usage_admission_primary_threshold_percent": 12.5,
-                        "usage_admission_secondary_threshold_percent": 8,
+                        "usage_admission_short_window_threshold_percent": 12.5,
                         "usage_admission_reset_grace_seconds": 90,
                     }
                 ),
@@ -639,25 +637,24 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(["usage-snapshot", "--json"], config.usage_admission_command)
             self.assertEqual(3, config.usage_admission_timeout_seconds)
             self.assertEqual(120, config.usage_admission_max_age_seconds)
-            self.assertEqual(12.5, config.usage_admission_primary_threshold_percent)
-            self.assertEqual(8.0, config.usage_admission_secondary_threshold_percent)
+            self.assertEqual(12.5, config.usage_admission_short_window_threshold_percent)
             self.assertEqual(90, config.usage_admission_reset_grace_seconds)
 
-    def test_enabled_usage_admission_requires_command_and_primary_threshold(self) -> None:
+    def test_enabled_usage_admission_requires_command_and_short_window_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
             invalid_cases = [
                 (
-                    {"usage_admission_enabled": True, "usage_admission_primary_threshold_percent": 10},
+                    {"usage_admission_enabled": True, "usage_admission_short_window_threshold_percent": 10},
                     "usage_admission_command must be configured",
                 ),
                 (
                     {"usage_admission_enabled": True, "usage_admission_command": ["usage-snapshot"]},
-                    "usage_admission_primary_threshold_percent must be configured",
+                    "usage_admission_short_window_threshold_percent must be configured",
                 ),
                 (
-                    {"usage_admission_primary_threshold_percent": 101},
-                    "usage_admission_primary_threshold_percent must be a number from 0 to 100",
+                    {"usage_admission_short_window_threshold_percent": 101},
+                    "usage_admission_short_window_threshold_percent must be a number from 0 to 100",
                 ),
             ]
             for data, message in invalid_cases:
