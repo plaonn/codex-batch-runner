@@ -166,18 +166,21 @@ def run_next(config: Config, *, suppress_wake_hooks: bool = False) -> RunOutcome
         return outcome or RunOutcome(status="empty", message="no runnable task")
 
     task = claimed.task
-    if not suppress_wake_hooks and should_trigger_post_claim_wake(config, task):
-        run_post_run_trigger(config)
-
-    if claimed.execution_backend == "shell":
-        result = run_shell_task(config, claimed.run_task, claimed.attempt)
-        outcome = finalize_shell_run(config, claimed, result)
-    elif claimed.execution_backend == "external-json-command":
-        result = run_external_json_command_task(config, claimed.run_task, claimed.prompt, claimed.attempt)
-        outcome = finalize_external_json_command_run(config, claimed, result)
-    else:
-        result = run_codex(config, claimed.run_task, claimed.prompt, claimed.attempt)
-        outcome = finalize_codex_run(config, claimed, result)
+    try:
+        if not suppress_wake_hooks and should_trigger_post_claim_wake(config, task):
+            run_post_run_trigger(config)
+        if claimed.execution_backend == "shell":
+            result = run_shell_task(config, claimed.run_task, claimed.attempt)
+            outcome = finalize_shell_run(config, claimed, result)
+        elif claimed.execution_backend == "external-json-command":
+            result = run_external_json_command_task(config, claimed.run_task, claimed.prompt, claimed.attempt)
+            outcome = finalize_external_json_command_run(config, claimed, result)
+        else:
+            result = run_codex(config, claimed.run_task, claimed.prompt, claimed.attempt)
+            outcome = finalize_codex_run(config, claimed, result)
+    except Exception as exc:
+        finalize_runner_exception(config, claimed, exc)
+        raise
 
     should_wake = bool(outcome and outcome.task_id and should_trigger_post_run_wake(config, task))
     if should_wake and not suppress_wake_hooks:
@@ -413,6 +416,35 @@ def acquire_finalize_lock(config: Config) -> FileLock:
         time.sleep(0.1)
 
 
+def finalize_runner_exception(config: Config, claimed: ClaimedRun, exc: Exception) -> None:
+    lock = acquire_finalize_lock(config)
+    try:
+        task = load_claimed_task_for_finalize(config, claimed)
+        if not task:
+            return
+        clear_active_run_metadata(task)
+        task["status"] = "failed"
+        task["last_error"] = f"runner execution failed: {exc}"
+        task["failure_count"] = int(task.get("failure_count", 0)) + 1
+        if claimed.execution_cwd:
+            task["execution_worktree_status"] = "retained"
+            task["execution_retained_at"] = iso_now()
+        save_task(config, task)
+        emit_task_event(
+            config,
+            "task_failed",
+            task,
+            source="run-next",
+            summary=task["last_error"],
+            payload=transition_payload(task, failure_count=task.get("failure_count"), failure_kind="runner_exception"),
+        )
+        if claimed.usage_stale_reset_at:
+            finish_usage_stale_attempt(config, claimed.usage_stale_reset_at, str(task["id"]))
+        claimed.task = task
+    finally:
+        lock.release()
+
+
 def should_trigger_post_claim_wake(config: Config, processed_task: dict[str, Any] | None) -> bool:
     if not processed_task:
         return False
@@ -450,10 +482,10 @@ def validate_execution_config(config: Config, task: dict[str, Any]) -> tuple[Res
 def apply_configured_worker_target(config: Config, task: dict[str, Any]) -> str | None:
     try:
         resolved = resolve_worker_target(config, task)
+        if resolved:
+            apply_worker_target(task, resolved)
     except ValueError as exc:
         return str(exc)
-    if resolved:
-        apply_worker_target(task, resolved)
     return None
 
 

@@ -1129,6 +1129,38 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("external_command argv list", task["last_error"])
             self.assertFalse(task["log_paths"])
 
+    def test_worker_target_missing_external_command_fails_before_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                make_config(tmp, "success"),
+                worker_targets={"broken": {"execution_backend": "external-json-command", "external_command": []}},
+                worker_selection_rules=[{"name": "all-tasks", "when": {}, "worker_target": "broken"}],
+            )
+            create_task(config, "external work", tmp, task_id="broken-target")
+
+            outcome = run_next(config)
+            task = load_task(config, "broken-target")
+
+            self.assertEqual("failed", outcome.status)
+            self.assertIn("non-empty external_command argv list", task["last_error"])
+            self.assertEqual("codex", task["execution_backend"])
+            self.assertNotIn("active_run_id", task)
+
+    def test_runner_exception_finalizes_claim_as_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "success")
+            create_task(config, "work", tmp, task_id="runner-exception")
+
+            with patch.object(runner_module, "run_codex", side_effect=RuntimeError("worker crashed")):
+                with self.assertRaisesRegex(RuntimeError, "worker crashed"):
+                    run_next(config)
+
+            task = load_task(config, "runner-exception")
+            self.assertEqual("failed", task["status"])
+            self.assertIn("runner execution failed: worker crashed", task["last_error"])
+            self.assertNotIn("active_run_id", task)
+            self.assertNotIn("active_runner_pid", task)
+
     def test_run_next_external_json_command_needs_resume_uses_resume_unavailable_continuation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")

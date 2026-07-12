@@ -1595,6 +1595,46 @@ class CliTests(unittest.TestCase):
             self.assertEqual("antigravity_review", resolved_target["worker_target"])
             self.assertEqual("claude-gpt", resolved_target["model_group"])
 
+    def test_explicit_codex_backend_is_not_overridden_by_worker_selection_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(
+                tmp,
+                codex_command=[sys.executable, str(FAKE_CODEX), "success"],
+                extra={
+                    "worker_targets": {
+                        "external_review": {
+                            "execution_backend": "external-json-command",
+                            "external_command": [sys.executable, "-c", "print('{}')"],
+                        }
+                    },
+                    "worker_selection_rules": [
+                        {
+                            "name": "strict-review",
+                            "when": {"review_strictness": "high"},
+                            "worker_target": "external_review",
+                        }
+                    ],
+                },
+            )
+
+            code, _ = run_cli(
+                [
+                    "--config", str(config_path), "enqueue", "--cwd", tmp,
+                    "--id", "explicit-codex", "--prompt", "review this",
+                    "--backend", "codex", "--review-strictness", "high",
+                ]
+            )
+            run_code, run_output = run_cli(["--config", str(config_path), "run-next", "--json"])
+            task = load_task(Config.load(str(config_path)), "explicit-codex")
+
+            self.assertEqual(0, code)
+            self.assertEqual(0, run_code)
+            self.assertEqual("completed", json.loads(run_output)["status"])
+            self.assertEqual("codex", task["execution_backend"])
+            self.assertTrue(task["execution_backend_explicit"])
+            self.assertIsNone(task["external_command"])
+            self.assertNotIn("worker_target", task)
+
     def test_worker_selection_rule_uses_planned_capacity_pool_for_admission(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(

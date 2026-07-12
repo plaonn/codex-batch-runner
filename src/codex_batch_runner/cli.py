@@ -186,7 +186,6 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument(
         "--backend",
         choices=("codex", "shell", "external-json-command"),
-        default="codex",
         help="execution backend (default: codex)",
     )
     command_group = enqueue.add_mutually_exclusive_group()
@@ -783,13 +782,14 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
     if args.prompt_file:
         prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
     command = parse_command_args(args)
-    if args.backend == "codex" and prompt is None:
+    backend = args.backend or "codex"
+    if backend == "codex" and prompt is None:
         raise ValueError("Codex tasks require --prompt or --prompt-file")
-    if args.backend in {"shell", "external-json-command"} and not command:
-        raise ValueError(f"{args.backend} tasks require --command-json or --command")
-    if args.backend == "shell" and prompt is None:
+    if backend in {"shell", "external-json-command"} and not command:
+        raise ValueError(f"{backend} tasks require --command-json or --command")
+    if backend == "shell" and prompt is None:
         prompt = "Shell task: " + shlex.join(command or [])
-    if args.backend == "external-json-command" and prompt is None:
+    if backend == "external-json-command" and prompt is None:
         prompt = "External JSON command task: " + shlex.join(command or [])
     task = create_task(
         config=config,
@@ -811,9 +811,9 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         routing_risk=args.routing_risk,
         verification_scope=args.verification_scope,
         execution_backend=args.backend,
-        shell_command=command if args.backend == "shell" else None,
+        shell_command=command if backend == "shell" else None,
         shell_timeout_seconds=args.shell_timeout_seconds,
-        external_command=command if args.backend == "external-json-command" else None,
+        external_command=command if backend == "external-json-command" else None,
         external_timeout_seconds=args.external_timeout_seconds,
         capacity_pool=args.capacity_pool,
         task_priority=args.priority,

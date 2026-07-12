@@ -219,7 +219,7 @@ def create_task(
     routing_size: str | None = None,
     routing_risk: str | None = None,
     verification_scope: list[str] | None = None,
-    execution_backend: str = "codex",
+    execution_backend: str | None = None,
     shell_command: list[str] | None = None,
     shell_timeout_seconds: int | None = None,
     external_command: list[str] | None = None,
@@ -239,6 +239,7 @@ def create_task(
     if not task_id:
         stamp = now.replace(":", "").replace("+", "Z").replace(".", "-")
         task_id = slugify(f"task-{stamp}")
+    execution_backend_explicit = execution_backend is not None
     execution_backend = validate_execution_backend(execution_backend)
     capacity_pool = validate_capacity_pool(capacity_pool)
     task_priority = validate_task_priority(task_priority)
@@ -304,6 +305,7 @@ def create_task(
         "next_prompt": None,
         "cwd": str(cwd_path),
         "execution_backend": execution_backend,
+        "execution_backend_explicit": execution_backend_explicit,
         "capacity_pool": capacity_pool,
         "task_priority": task_priority,
         "shell_command": shell_command,

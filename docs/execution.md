@@ -265,7 +265,7 @@ Example:
 }
 ```
 
-Only default `codex` tasks are eligible for worker target routing. Tasks already enqueued with `execution_backend=shell` or `execution_backend=external-json-command`, tasks with explicit `shell_command` or `external_command`, and `needs_resume` tasks keep their stored execution backend. On claim, cbr applies the selected target to the task JSON by setting `execution_backend`, `capacity_pool`, command, timeout, and sanitized worker metadata before running the worker.
+Only implicit default `codex` tasks are eligible for worker target routing. An explicit `--backend` always wins over worker-selection policy, including `--backend codex`. Tasks already enqueued with `execution_backend=shell` or `execution_backend=external-json-command`, tasks with explicit `shell_command` or `external_command`, and `needs_resume` tasks keep their stored execution backend. On claim, cbr validates the selected target's backend command contract, then applies the target to the task JSON by setting `execution_backend`, `capacity_pool`, command, timeout, and sanitized worker metadata before running the worker.
 
 Queue admission uses the planned worker target capacity pool for matching runnable tasks. This means a strict-review task routed to `external-review` is not blocked merely because the default `codex` pool is full, while running capacity still counts the pool stored on already claimed tasks.
 

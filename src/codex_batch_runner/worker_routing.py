@@ -42,6 +42,8 @@ def worker_target_applicable(task: dict[str, Any]) -> bool:
         return False
     if str(task.get("execution_backend") or "codex") != "codex":
         return False
+    if task.get("execution_backend_explicit") is True:
+        return False
     return not task.get("shell_command") and not task.get("external_command")
 
 
@@ -58,6 +60,12 @@ def planned_worker_capacity_pool(config: Any, task: dict[str, Any]) -> str | Non
 def apply_worker_target(task: dict[str, Any], resolved: ResolvedWorkerTarget) -> None:
     target = resolved.target
     backend = str(target.get("execution_backend") or "")
+    if backend == "external-json-command":
+        validate_worker_command("external_command", target.get("external_command"))
+    elif backend == "shell":
+        validate_worker_command("shell_command", target.get("shell_command"))
+    else:
+        raise ValueError(f"worker_target {resolved.name!r} has invalid execution_backend: {backend}")
     task["execution_backend"] = backend
     task["capacity_pool"] = str(target.get("capacity_pool") or "codex")
     if backend == "external-json-command":
@@ -77,3 +85,8 @@ def apply_worker_target(task: dict[str, Any], resolved: ResolvedWorkerTarget) ->
         task["worker_model_group"] = target.get("model_group")
     if target.get("budget_hint"):
         task["worker_budget_hint"] = target.get("budget_hint")
+
+
+def validate_worker_command(name: str, value: object) -> None:
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        raise ValueError(f"worker_target requires non-empty {name} argv list")
