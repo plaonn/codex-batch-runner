@@ -130,7 +130,7 @@ PYTHONPATH=src python3 -m codex_batch_runner recommend-routing \
   --task-bucket 'size=small risk=low verify=unit' \
   --execution-surface cbr_batch \
   --semantic-complexity medium --failure-cost medium \
-  --objective-verification unit --expected-context bounded \
+  --objective-verification unit --expected-context context-v1 \
   --interaction-need none --usage-pressure normal --json
 
 # Worktree integration

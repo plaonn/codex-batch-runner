@@ -45,16 +45,16 @@ def recommendation(config: Config, records: list[dict], *, surface: str = "cbr_b
         semantic_complexity="medium",
         failure_cost="medium",
         objective_verification="unit",
-        expected_context="bounded",
+        expected_context="context-v1",
         interaction_need="none",
         usage_pressure="normal",
-        available_models=["cheap-model-2026", "frontier-model-2026", "xhigh"],
+        available_models=["cheap-model-2026", "frontier-model-2026", "frontier-model", "xhigh"],
         routing_cost_records=records,
     )
 
 
 class RoutingRecommendationTests(unittest.TestCase):
-    def test_recommends_lowest_cost_quality_gated_model_and_keeps_surfaces_separate(self) -> None:
+    def test_returns_explicit_model_effort_fields_without_inventing_token_cost(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(tmp)
             records = []
@@ -70,9 +70,17 @@ class RoutingRecommendationTests(unittest.TestCase):
 
             report = recommendation(config, records)
 
-            self.assertEqual("recommended", report["status"])
-            self.assertEqual("cheap-model-2026", report["recommendation"]["model"])
+            self.assertEqual("insufficient", report["status"])
+            self.assertIn("model", report["recommendation"])
+            self.assertIn("reasoning_effort", report["recommendation"])
+            self.assertIsNone(report["recommendation"]["model"])
+            self.assertIsNone(report["recommendation"]["reasoning_effort"])
+            self.assertEqual("operator_selected", report["recommendation"]["fallback"]["reasoning_effort"])
+            self.assertEqual("normalized_cost_unavailable", report["recommendation"]["cost_evidence"]["reason"])
             self.assertEqual(10, report["recommendation"]["comparable_cohort_size"])
+            self.assertEqual("cheap-model-2026", report["candidates"][0]["model"])
+            self.assertEqual("medium", report["candidates"][0]["reasoning_effort"])
+            self.assertNotIn("mean_token_cost", report["candidates"][0]["usage_evidence"])
             self.assertTrue(report["read_only"])
             self.assertFalse(report["mutation_allowed"])
 
@@ -84,7 +92,49 @@ class RoutingRecommendationTests(unittest.TestCase):
             self.assertEqual("insufficient", report["status"])
             self.assertIsNone(report["recommendation"]["model"])
             self.assertEqual("operator_baseline", report["recommendation"]["fallback"]["model"])
-            self.assertEqual("insufficient_comparable_evidence", report["recommendation"]["reasoning"])
+            self.assertEqual("insufficient_comparable_evidence", report["recommendation"]["rationale"])
+
+    def test_xhigh_reasoning_candidate_is_not_emitted_or_inherited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(tmp)
+            records = []
+            for effort in ("medium", "xhigh"):
+                for _ in range(5):
+                    task = comparable_task()
+                    task["last_run"]["resolved_execution_config"]["reasoning_effort"] = effort
+                    records.append(build_routing_cost_evidence(task))
+
+            report = recommendation(config, records)
+
+            self.assertEqual(["medium"], [candidate["reasoning_effort"] for candidate in report["candidates"]])
+            self.assertNotIn("xhigh", json.dumps(report["candidates"]))
+            self.assertIsNone(report["recommendation"]["reasoning_effort"])
+
+    def test_cached_components_are_preserved_without_equating_them_to_uncached_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(tmp)
+            records = []
+            for _ in range(5):
+                task = comparable_task()
+                records.append(build_routing_cost_evidence(task, usage={"uncached_input_tokens": 1, "cached_input_tokens": 1000, "cache_write_tokens": 0, "output_tokens": 0, "reasoning_output_tokens": 0}))
+
+            report = recommendation(config, records)
+
+            usage = report["candidates"][0]["usage_evidence"]
+            self.assertEqual(1, usage["mean_components"]["uncached_input_tokens"])
+            self.assertEqual(1000, usage["mean_components"]["cached_input_tokens"])
+            self.assertFalse(usage["normalized_cost_available"])
+            self.assertEqual("normalized_cost_unavailable", report["recommendation"]["cost_evidence"]["reason"])
+
+    def test_high_failure_cost_requires_matching_verified_cohort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(tmp)
+            record = build_routing_cost_evidence(comparable_task())
+            record["quality"]["semantic_review"] = "not_performed"
+            report = build_routing_recommendation(config, task_bucket="size=small risk=low verify=unit", execution_surface="cbr_batch", semantic_complexity="medium", failure_cost="high", objective_verification="unit", expected_context="context-v1", interaction_need="none", usage_pressure="high", routing_cost_records=[record])
+
+            self.assertEqual("high_failure_cost_requires_matching_verified_cohort", report["recommendation"]["cost_evidence"]["reason"])
+            self.assertTrue(report["safety_gate"]["usage_pressure_does_not_relax_quality"])
 
     def test_cli_json_and_human_output_are_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,17 +142,18 @@ class RoutingRecommendationTests(unittest.TestCase):
             records = [build_routing_cost_evidence(comparable_task()) for _ in range(5)]
             evidence_path = Path(tmp) / "evidence.json"
             evidence_path.write_text(json.dumps({"records": records}), encoding="utf-8")
-            args = ["--config", str(Path(tmp) / "config.json"), "recommend-routing", "--task-bucket", "size=small risk=low verify=unit", "--execution-surface", "cbr_batch", "--semantic-complexity", "medium", "--failure-cost", "medium", "--objective-verification", "unit", "--expected-context", "bounded", "--interaction-need", "none", "--usage-pressure", "normal", "--available-model", "frontier-model-2026", "--routing-cost-evidence-json", str(evidence_path)]
+            args = ["--config", str(Path(tmp) / "config.json"), "recommend-routing", "--task-bucket", "size=small risk=low verify=unit", "--execution-surface", "cbr_batch", "--semantic-complexity", "medium", "--failure-cost", "medium", "--objective-verification", "unit", "--expected-context", "context-v1", "--interaction-need", "none", "--usage-pressure", "normal", "--available-model", "frontier-model-2026", "--routing-cost-evidence-json", str(evidence_path)]
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 self.assertEqual(0, main(args + ["--json"]))
             report = json.loads(stdout.getvalue())
-            self.assertEqual("recommended", report["status"])
+            self.assertEqual("insufficient", report["status"])
             self.assertFalse(report["mutation_allowed"])
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 self.assertEqual(0, main(args))
             self.assertIn("Routing recommendation (read-only)", stdout.getvalue())
+            self.assertIn("reasoning_effort", stdout.getvalue())
 
 
 def _config(tmp: str) -> Config:
