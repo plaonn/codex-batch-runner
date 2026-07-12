@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "evidence_contract_version": "routing-cost-evidence-v1",
+  "kind": "routing_cost_evidence",
+  "selection": {
+    "planned_model": "frontier-model",
+    "planned_reasoning": "medium"
+  },
+  "execution": {
+    "surface": "cbr_batch",
+    "task_bucket": "size=small risk=low verify=unit",
+    "prompt_contract_version": "prompt-v1",
+    "context_contract_version": "context-v1"
+  },
+  "actual_model": {
+    "status": "observed",
+    "value": "frontier-model-2026",
+    "source": "provider_response",
+    "confidence": "provider_observed"
+  },
+  "usage": {
+    "values": {
+      "uncached_input_tokens": 1200,
+      "cached_input_tokens": 800,
+      "cache_write_tokens": 200,
+      "output_tokens": 300,
+      "reasoning_output_tokens": 75
+    },
+    "attribution": {
+      "class": "provider_attributed",
+      "source": "provider_response"
+    }
+  },
+  "quality": {
+    "objective_verification": "passed",
+    "semantic_review": "pass",
+    "human_acceptance": false,
+    "accepted": true,
+    "rejected": false,
+    "follow_up_count": 1,
+    "rework_count": 0
+  },
+  "privacy": {
+    "public_safe_export": true,
+    "raw_prompt_included": false,
+    "raw_context_included": false,
+    "raw_transcript_included": false,
+    "session_or_thread_ids_included": false,
+    "raw_paths_included": false,
+    "personal_usage_messages_included": false
+  }
+}

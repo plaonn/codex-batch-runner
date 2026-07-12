@@ -175,6 +175,45 @@ Shell attempt log는 stdout/stderr 전체를 task log file에 저장합니다. T
 Codex CLI update 같은 guarded maintenance workflow는 runner-level maintenance로 처리합니다. Shell task는 프로젝트별 ordered dependency gate로 사용할 수 있지만, runner pause를 잡고 queue idle gate를 확인하는 solo maintenance mode 자체는 shell backend가 아니라 별도 maintenance command가 담당합니다.
 
 
+## Cost-aware routing evidence
+
+`routing-cost-evidence-v1` is an append-only supplemental contract over execution
+evidence and review outcome evidence. It does not replace either source contract.
+It keeps these comparison axes explicit:
+
+- planned model and reasoning from resolved execution config;
+- provider/wrapper-observed actual model;
+- execution surface and backend, task bucket, prompt contract version, and context
+  contract version;
+- uncached input, cached input, cache-write, output, and reasoning-output tokens;
+- objective verification, semantic review, human acceptance, rejection, follow-up,
+  and rework counts.
+
+Usage attribution is one of `provider_attributed`, `window_estimated`,
+`concurrent_confounded`, or `unavailable`. An isolated before/after usage-window
+estimate remains a different cohort from provider-attributed usage. A window
+with concurrent work is `concurrent_confounded` and is excluded from cost
+comparison; it must not be relabeled as an estimate merely because a numeric
+delta is available. `unavailable` evidence contains no usage values.
+
+Quality and cost can be compared only when the cohort has an observed actual
+model, versioned task/prompt/context axes, comparable review outcome evidence,
+and non-confounded usage attribution. The attribution class and review outcome
+cohort id are cohort components, so unlike observations are never pooled.
+Legacy tasks without this supplemental history are projected as
+`legacy-routing-cost-unknown` and excluded from quality and cost denominators.
+
+The public-safe projection contains no prompt/context text, transcript, raw
+provider output, session/thread id, local path, or personal usage-limit message.
+Those values are forbidden in the contract rather than merely hidden by the
+human-readable renderer. See
+[`examples/routing-cost-evidence-v1.example.json`](../examples/routing-cost-evidence-v1.example.json)
+for a sanitized shape excerpt. Persisted records also include evidence identity,
+timestamps, source-contract references, and the derived cohort.
+
+This evidence is read-only/advisory. It does not mutate the online routing
+policy, runner config, or queue.
+
 ## External JSON command backend
 
 `execution_backend=external-json-command` task는 Codex를 호출하지 않고 generic local argv list command를 실행하되, command stdout에서 cbr-compatible final JSON object를 읽어 task 결과로 사용합니다. 이 backend는 vendor-neutral adapter boundary입니다. cbr는 provider-native resume id, model/quota identity, auth, GUI automation, model discovery, quota probing을 추론하거나 구현하지 않습니다. v1 commit boundary는 cbr-owned입니다. External workers modify files and report results; they do not commit or push.

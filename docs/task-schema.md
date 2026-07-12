@@ -79,6 +79,7 @@
 - `worker_selection_reason`: worker target 선택 이유.
 - `worker_family`, `worker_model_group`, `worker_budget_hint`: worker target에서 복사된 sanitized reporting metadata.
 - `execution_evidence_history`: 실행 attempt별 sanitized evaluation evidence v2 record의 append-only 목록. 각 record는 actual model, token usage, monetary cost를 `observed`/`token_free`/`unavailable` 상태와 source/confidence/availability reason으로 구분하고, raw prompt/transcript/log/session/thread/path를 포함하지 않습니다. `last_run.execution_evidence_id`는 현재 run에 대응하는 record를 가리킵니다. 기존 task에 이 field가 없으면 report는 `legacy-v1` non-comparable evidence로 해석합니다.
+- `routing_cost_evidence_history`: cost-aware routing용 sanitized supplemental evidence의 append-only 목록. `routing-cost-evidence-v1`은 planned model/reasoning과 observed actual model, execution surface, task bucket, prompt/context contract version을 분리합니다. Usage는 uncached input, cached input, cache write, output, reasoning output을 각각 저장하고 attribution을 `provider_attributed`, `window_estimated`, `concurrent_confounded`, `unavailable` 중 하나로 표시합니다. 기존 task에 이 field가 없으면 report는 `legacy-routing-cost-unknown` non-comparable evidence로 해석합니다.
 - bounded review/fix chain metadata:
   - `root_task_id`
   - `parent_task_id`

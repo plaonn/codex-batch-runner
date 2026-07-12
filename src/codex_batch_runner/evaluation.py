@@ -5,6 +5,7 @@ from typing import Any
 from .provider_resource import derive_provider_resource_evidence, provider_resource_key
 from .execution_evidence_v2 import evidence_view
 from .review_outcome_evidence import review_outcome_view
+from .routing_cost_evidence import routing_cost_evidence_view
 from .request_fingerprint import _has_value, _normalized_list, _safe_id_hash, _safe_metadata_value, derive_request_fingerprint
 from .task_vector import derive_normalized_task_vector
 
@@ -34,6 +35,7 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
     exclusion_reasons = _exclusion_reasons(task, task_vector, reviewer, objective_checks, outcomes)
     policy_usage = _policy_usage(task, task_vector, reviewer, objective_checks, outcomes, exclusion_reasons)
     execution_evidence = evidence_view(task)
+    routing_cost_evidence = routing_cost_evidence_view(task)
 
     row = {
         "schema_version": SCHEMA_VERSION,
@@ -57,6 +59,7 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
             "monetary_cost": dict(execution_evidence.get("monetary_cost") or {}),
             "cohort": dict(execution_evidence.get("cohort") or {}),
         },
+        "routing_cost_evidence": routing_cost_evidence,
         "worker": worker,
         "reviewer": reviewer,
         "review_outcome": review_outcome,
