@@ -67,6 +67,7 @@ ACTIVE_RUN_FIELDS = (
     "active_runner_pid",
     "active_run_attempt",
     "active_run_started_at",
+    "active_execution_target_snapshot",
 )
 
 
@@ -299,6 +300,8 @@ def claim_next_implementation_task_locked(
     task["active_runner_pid"] = os.getpid()
     task["active_run_attempt"] = task["attempts"]
     task["active_run_started_at"] = started_at
+    if execution_config and execution_config.selected_target_snapshot:
+        task["active_execution_target_snapshot"] = execution_config.selected_target_snapshot
     if execution_cwd:
         task["execution_worktree_status"] = "running"
         task["execution_started_at"] = started_at
@@ -1094,10 +1097,17 @@ def record_external_json_command_last_run(
     worker_target = resolved_worker_target_metadata(task)
     if worker_target:
         task["last_run"]["resolved_worker_target"] = worker_target
+    if execution_settings and execution_settings_has_metadata(execution_settings):
+        task["last_run"]["worker_role"] = execution_settings.worker_role
+        task["last_run"]["resolved_execution_config"] = resolved_execution_config_metadata(
+            execution_settings
+        )
     attestation = result.final_response.get("execution_evidence") if isinstance(result.final_response, dict) else None
     if execution_settings and exact_v3_settings(execution_settings):
         attach_execution_evidence_v3(
-            task, build_external_execution_evidence_v3(task, attestation, execution_settings, config)
+            task, build_external_execution_evidence_v3(
+                task, attestation, execution_settings, config, command=result.command[:-1]
+            )
         )
     else:
         attach_execution_evidence(task, build_external_execution_evidence(task, attestation))
@@ -1363,17 +1373,9 @@ def record_last_run(
     }
     if execution_settings and execution_settings_has_metadata(execution_settings):
         task["last_run"]["worker_role"] = execution_settings.worker_role
-        task["last_run"]["resolved_execution_config"] = {
-            "selection_rule": execution_settings.selection_rule,
-            "selection_reason": execution_settings.selection_reason,
-            "model": execution_settings.model,
-            "model_source": execution_settings.model_source,
-            "execution_target": execution_settings.execution_target,
-            "codex_profile": execution_settings.codex_profile,
-            "config_override_keys": sorted((execution_settings.config_overrides or {}).keys()),
-            "budget_hint": execution_settings.budget_hint,
-            "model_requirement_vector": execution_settings.requirement_vector,
-        }
+        task["last_run"]["resolved_execution_config"] = resolved_execution_config_metadata(
+            execution_settings
+        )
     if result.watchdog_reason:
         task["last_run"]["watchdog_reason"] = result.watchdog_reason
     if execution_settings and exact_v3_settings(execution_settings):
@@ -1398,6 +1400,20 @@ def execution_settings_has_metadata(settings: ResolvedExecutionConfig) -> bool:
             settings.requirement_vector,
         )
     )
+
+
+def resolved_execution_config_metadata(settings: ResolvedExecutionConfig) -> dict[str, Any]:
+    return {
+        "selection_rule": settings.selection_rule,
+        "selection_reason": settings.selection_reason,
+        "model": settings.model,
+        "model_source": settings.model_source,
+        "execution_target": settings.execution_target,
+        "codex_profile": settings.codex_profile,
+        "config_override_keys": sorted((settings.config_overrides or {}).keys()),
+        "budget_hint": settings.budget_hint,
+        "model_requirement_vector": settings.requirement_vector,
+    }
 
 
 def duration_seconds(started_at: object, finished_at: object) -> float | None:

@@ -143,10 +143,15 @@ def target_value(key: str, target_id: object, value: object) -> dict[str, Any]:
             target["model"] = value["model"].strip()
             target["command_model"] = value["command_model"].strip()
             target["reasoning_effort"] = value["reasoning_effort"].strip()
-            placeholders = {part for part in command if part in {"{model}", "{reasoning_effort}"}}
-            if placeholders != {"{model}", "{reasoning_effort}"}:
+            if target["model"] != target["command_model"]:
+                raise ValueError(f"{key} exact target requires model == command_model")
+            placeholder_counts = {
+                placeholder: command.count(placeholder)
+                for placeholder in ("{model}", "{reasoning_effort}")
+            }
+            if any(count != 1 for count in placeholder_counts.values()):
                 raise ValueError(
-                    f"{key}.{command_key} exact target requires {{model}} and {{reasoning_effort}} argv placeholders"
+                    f"{key}.{command_key} exact target requires exactly one {{model}} and {{reasoning_effort}} argv placeholders"
                 )
     for numeric in ("latency_score", "cost_score"):
         raw = value.get(numeric, 0)

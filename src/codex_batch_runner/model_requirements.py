@@ -79,6 +79,7 @@ class ResolvedExecutionConfig:
     config_overrides: dict[str, str] | None = None
     budget_hint: str | None = None
     worker_role: str = "implementer"
+    selected_target_snapshot: dict[str, Any] | None = None
 
 
 def model_requirement_vector_value(key: str, value: object) -> dict[str, Any]:
@@ -404,6 +405,16 @@ def resolve_execution_config(config: Any, task: dict[str, Any], *, reviewer: boo
     vector = resolve_model_requirement_vector(config, task, reviewer=reviewer)
     selected_target = select_execution_target(config, task, vector)
     if selected_target is not None:
+        inventory = getattr(config, "execution_target_inventory", {}) or {}
+        registry = getattr(config, "constraint_registry", {}) or {}
+        target_snapshot = json.loads(json.dumps({
+            "target_id": selected_target.target_id,
+            "target": selected_target.target,
+            "inventory_schema_version": inventory.get("schema_version"),
+            "inventory_snapshot_id": inventory.get("snapshot_id"),
+            "constraint_registry_version": registry.get("version"),
+            "selection_policy_version": SELECTION_POLICY_VERSION,
+        }, sort_keys=True))
         if selected_target.target.get("execution_surface") != "codex":
             target = selected_target.target
             return ResolvedExecutionConfig(
@@ -415,6 +426,7 @@ def resolve_execution_config(config: Any, task: dict[str, Any], *, reviewer: boo
                 model_source="target_alias" if target.get("model") else "non_codex_target",
                 config_overrides={"model_reasoning_effort": target["reasoning_effort"]} if target.get("reasoning_effort") else None,
                 worker_role=worker_role,
+                selected_target_snapshot=target_snapshot,
             )
         target = selected_target.target
         return ResolvedExecutionConfig(
@@ -431,6 +443,7 @@ def resolve_execution_config(config: Any, task: dict[str, Any], *, reviewer: boo
             },
             budget_hint=target.get("budget_hint"),
             worker_role=worker_role,
+            selected_target_snapshot=target_snapshot,
         )
     selection = select_execution_config(config, vector)
     resolved_selection = resolve_execution_target(config, selection)

@@ -265,6 +265,16 @@ class ExecutionTargetSelectorTests(unittest.TestCase):
         broken["external_command"] = ["public-worker"]
         with self.assertRaisesRegex(ValueError, "requires .* argv placeholders"):
             loaded_config({"broken": broken})
+        duplicate = dict(target)
+        duplicate["external_command"] = [
+            "public-worker", "{model}", "{model}", "{reasoning_effort}",
+        ]
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            loaded_config({"duplicate": duplicate})
+        mismatch = dict(target)
+        mismatch["command_model"] = "other-model"
+        with self.assertRaisesRegex(ValueError, "model == command_model"):
+            loaded_config({"mismatch": mismatch})
 
     def test_native_inventory_preempts_both_legacy_first_match_paths(self) -> None:
         config = loaded_config({"exact-codex": codex_target("exact")})

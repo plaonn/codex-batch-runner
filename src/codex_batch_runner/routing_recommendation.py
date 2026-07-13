@@ -123,7 +123,10 @@ def _safety_gate(request: dict[str, Any], comparable: list[dict[str, Any]]) -> d
 
 def _comparison_cohort_key(record: dict[str, Any]) -> tuple[str, ...]:
     components = record["cohort"]["components"]
-    excluded = {"cohort_id", "target_id", "planned_model", "actual_model", "selected_model", "command_model", "reasoning_effort", "planned_reasoning"}
+    excluded = {
+        "cohort_id", "target_id", "planned_model", "actual_model", "selected_model",
+        "command_model", "reasoning_effort", "planned_reasoning", "review_outcome_cohort_id",
+    }
     return tuple(f"{key}={components[key]}" for key in sorted(components) if key not in excluded)
 
 

@@ -1115,6 +1115,64 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("invalid_external_wrapper_attestation", evidence["actual_model"]["availability_reason"])
             self.assertNotIn("must-not-be-accepted", json.dumps(evidence))
 
+    def test_exact_external_inventory_target_binds_claim_snapshot_argv_and_v3_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            axes = {
+                name: {"score": 500, "confidence": 1000, "anchor": 500, "evidence_codes": []}
+                for name in (
+                    "semantic_reasoning", "context_integration", "planning_depth",
+                    "instruction_fidelity", "tool_execution_reliability", "adversarial_detection",
+                )
+            }
+            response = {
+                "task_id": "exact-external-e2e", "status": "completed", "summary": "ok",
+                "changed_files": [], "verification": ["checked"],
+            }
+            script = "import json; print(json.dumps(" + repr(response) + "))"
+            target = {
+                "target_id": "external-exact-v1", "execution_surface": "external",
+                "execution_backend": "external-json-command", "trust_state": "trusted",
+                "external_command": [sys.executable, "-c", script, "{model}", "{reasoning_effort}"],
+                "model": "external-exact-model", "command_model": "external-exact-model",
+                "reasoning_effort": "high", "static_fitness": {name: 750 for name in axes},
+                "quality_evidence_status": "static_non_learned", "fitness_source": "static_non_learned",
+                "latency_score": 500, "cost_score": 500, "capabilities": {}, "capability_evidence": {},
+            }
+            cfg = replace(
+                make_config(tmp, "success"),
+                execution_target_inventory={
+                    "schema_version": 1, "snapshot_id": "sha256:exact-e2e", "status": "current",
+                    "constraint_registry_version": "constraints-v1",
+                    "targets": {"external-exact-v1": target},
+                },
+                constraint_registry={"schema_version": 1, "version": "constraints-v1", "constraints": {}},
+            )
+            create_task(
+                cfg, "external work", tmp, task_id="exact-external-e2e",
+                model_requirement_vector={
+                    "schema_version": 2, "derivation_version": "requirement-rubric-v1",
+                    "revision_id": "reqrev-external-e2e", "quality_requirements": axes,
+                    "hard_constraints": {}, "utility_preferences": {},
+                },
+            )
+
+            outcome = run_next(cfg)
+            item = load_task(cfg, "exact-external-e2e")
+            evidence = item["execution_evidence_history"][-1]
+
+            self.assertEqual("completed", outcome.status)
+            self.assertEqual("external-json-command", item["execution_backend"])
+            self.assertEqual(
+                [sys.executable, "-c", script, "external-exact-model", "high"],
+                item["last_run"]["command"],
+            )
+            self.assertEqual("external-exact-model", evidence["identity"]["selected_model"])
+            self.assertEqual("external-exact-model", evidence["identity"]["command_model"])
+            self.assertEqual("high", evidence["identity"]["command_reasoning_effort"])
+            self.assertEqual("command_attributed", evidence["identity"]["attestation"])
+            self.assertEqual("sha256:exact-e2e", evidence["versions"]["inventory_snapshot_id"])
+            self.assertTrue(evidence["cohort"]["comparability"]["model_quality"])
+
     def test_run_next_external_json_command_missing_command_fails_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp, "success")

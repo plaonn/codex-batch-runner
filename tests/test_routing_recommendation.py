@@ -18,7 +18,7 @@ from codex_batch_runner.routing_cost_evidence import validate_routing_cost_evide
 from codex_batch_runner.routing_recommendation import build_routing_recommendation
 
 
-def comparable_task() -> dict:
+def comparable_task(*, model: str = "frontier-model-2026", effort: str = "medium") -> dict:
     task = {
         "id": "synthetic-routing-task",
         "attempts": 1,
@@ -41,8 +41,16 @@ def comparable_task() -> dict:
     }
     selected = ResolvedExecutionConfig(
         requirement_vector=vector, selection_rule="execution-target-selector-v1",
-        selection_reason="automatic_static_non_learned", model="frontier-model-2026",
-        execution_target="frontier-medium-v1", config_overrides={"model_reasoning_effort": "medium"},
+        selection_reason="automatic_static_non_learned", model=model,
+        execution_target=model + "-" + effort + "-v1", config_overrides={"model_reasoning_effort": effort},
+        selected_target_snapshot={
+            "target_id": model + "-" + effort + "-v1",
+            "target": {"target_id": model + "-" + effort + "-v1", "execution_surface": "codex"},
+            "inventory_schema_version": 1,
+            "inventory_snapshot_id": "sha256:recommendation-inventory",
+            "constraint_registry_version": "constraints-v1",
+            "selection_policy_version": "execution-target-selector-v1",
+        },
     )
     cfg = Config.load(root=Path.cwd())
     cfg = Config(**{**cfg.__dict__, "execution_target_inventory": {
@@ -50,7 +58,7 @@ def comparable_task() -> dict:
     }, "constraint_registry": {"schema_version": 1, "version": "constraints-v1", "constraints": {}}})
     attach_execution_evidence_v3(task, build_codex_execution_evidence_v3(
         task, SimpleNamespace(events=[{
-            "type": "turn.completed", "model": "frontier-model-2026",
+            "type": "turn.completed", "model": model,
             "usage": {"input_tokens": 100, "output_tokens": 20},
         }]), selected, cfg,
     ))
@@ -81,12 +89,7 @@ class RoutingRecommendationTests(unittest.TestCase):
             records = []
             for model, output in (("frontier-model-2026", 50), ("cheap-model-2026", 10)):
                 for _ in range(5):
-                    task = comparable_task()
-                    evidence = task["execution_evidence_history"][-1]
-                    evidence["identity"]["selected_model"] = model
-                    evidence["identity"]["command_model"] = model
-                    evidence["identity"]["provider_reported_model"]["value"] = model
-                    evidence["routing"]["target_id"] = model + "-medium-v1"
+                    task = comparable_task(model=model)
                     records.append(build_routing_cost_evidence(task, usage={"uncached_input_tokens": 50, "cached_input_tokens": 0, "cache_write_tokens": 0, "output_tokens": output, "reasoning_output_tokens": 0}))
             thread_task = comparable_task()
             thread_task["execution_surface"] = "user_owned_thread"
@@ -124,8 +127,7 @@ class RoutingRecommendationTests(unittest.TestCase):
             records = []
             for effort in ("medium", "xhigh"):
                 for _ in range(5):
-                    task = comparable_task()
-                    task["execution_evidence_history"][-1]["identity"]["reasoning_effort"] = effort
+                    task = comparable_task(effort=effort)
                     records.append(build_routing_cost_evidence(task))
 
             report = recommendation(config, records)

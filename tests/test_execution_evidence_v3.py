@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import copy
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -17,6 +19,7 @@ from codex_batch_runner.execution_evidence_v3 import (
     attach_execution_evidence_v3,
     build_codex_execution_evidence_v3,
     build_external_execution_evidence_v3,
+    validate_execution_evidence_v3,
     validate_external_attestation_v3,
 )
 from codex_batch_runner.external_json_command import run_external_json_command_task
@@ -39,6 +42,19 @@ def settings(*, model: str = "exact-model", reason: str = "automatic_static_non_
         requirement_vector=requirement(), selection_rule="execution-target-selector-v1",
         selection_reason=reason, model=model, execution_target="exact-target-v1",
         config_overrides={"model_reasoning_effort": "high"},
+        selected_target_snapshot={
+            "target_id": "exact-target-v1",
+            "target": {
+                "target_id": "exact-target-v1", "execution_surface": "external",
+                "execution_backend": "external-json-command",
+                "external_command": ["wrapper", "{model}", "{reasoning_effort}"],
+                "model": model, "command_model": model, "reasoning_effort": "high",
+            },
+            "inventory_schema_version": 1,
+            "inventory_snapshot_id": "sha256:inventory-test",
+            "constraint_registry_version": "constraints-v1",
+            "selection_policy_version": "execution-target-selector-v1",
+        },
     )
 
 
@@ -195,11 +211,12 @@ class ExecutionEvidenceV3Tests(unittest.TestCase):
                 **task(), "execution_backend": "external-json-command",
                 "worker_command_model": "exact-model", "worker_reasoning_effort": "high",
             }
-            omitted = build_external_execution_evidence_v3(item, None, settings(), cfg)
+            command = ["wrapper", "exact-model", "high"]
+            omitted = build_external_execution_evidence_v3(item, None, settings(), cfg, command=command)
             mismatch = build_external_execution_evidence_v3(
                 item,
                 {"schema_version": 3, "capability": "provider-model+usage-attestation", "provider_reported_model": "other-model"},
-                settings(), cfg,
+                settings(), cfg, command=command,
             )
 
         self.assertEqual("command_attributed", omitted["identity"]["attestation"])
@@ -210,17 +227,81 @@ class ExecutionEvidenceV3Tests(unittest.TestCase):
                 "provider_reported_model": "exact-model", "session_id": "private",
             })
 
-    def test_external_command_identity_is_checked_before_subprocess(self) -> None:
+    def test_external_exact_target_snapshot_overrides_mutable_task_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = config(Path(tmp))
             item = {
-                **task(), "external_command": ["wrapper", "{model}", "{reasoning_effort}"],
+                **task(), "external_command": ["mutated-wrapper", "wrong-model", "low"],
                 "worker_command_model": "wrong-model", "worker_reasoning_effort": "high",
             }
+            completed = SimpleNamespace(stdout="", stderr="", returncode=0)
+            with patch("codex_batch_runner.external_json_command.subprocess.run", return_value=completed) as run:
+                run_external_json_command_task(cfg, item, "prompt", 1, execution_settings=settings())
+        self.assertEqual(["wrapper", "exact-model", "high", "prompt"], run.call_args.args[0])
+
+    def test_external_duplicate_identity_fails_before_subprocess(self) -> None:
+        broken = copy.deepcopy(settings().selected_target_snapshot)
+        broken["target"]["external_command"] = [
+            "wrapper", "{model}", "{model}", "{reasoning_effort}",
+        ]
+        selected = replace(settings(), selected_target_snapshot=broken)
+        with tempfile.TemporaryDirectory() as tmp:
             with patch("codex_batch_runner.external_json_command.subprocess.run") as run:
                 with self.assertRaises(CommandIdentityError):
-                    run_external_json_command_task(cfg, item, "prompt", 1, execution_settings=settings())
+                    run_external_json_command_task(
+                        config(Path(tmp)), task(), "prompt", 1, execution_settings=selected,
+                    )
         run.assert_not_called()
+
+    def test_external_mutated_template_without_placeholders_fails_before_subprocess(self) -> None:
+        broken = copy.deepcopy(settings().selected_target_snapshot)
+        broken["target"]["external_command"] = ["wrapper", "exact-model", "high"]
+        selected = replace(settings(), selected_target_snapshot=broken)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("codex_batch_runner.external_json_command.subprocess.run") as run:
+                with self.assertRaises(CommandIdentityError):
+                    run_external_json_command_task(
+                        config(Path(tmp)), task(), "prompt", 1, execution_settings=selected,
+                    )
+        run.assert_not_called()
+
+    def test_validator_rejects_tampered_derived_identity_and_cohort_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            record = build_codex_execution_evidence_v3(
+                task(), SimpleNamespace(events=[]), settings(), config(Path(tmp)),
+            )
+        mutations = (
+            ("integrity adverse", lambda item: item["integrity"].update(adverse=True)),
+            ("attestation", lambda item: item["identity"].update(attestation="verified")),
+            ("comparability", lambda item: item["cohort"]["comparability"].update(model_quality=False)),
+            ("cohort id", lambda item: item["cohort"].update(cohort_id="sha256:tampered")),
+            ("components", lambda item: item["cohort"]["components"].update(review_policy_version="other")),
+            ("exclusions", lambda item: item["cohort"].update(exclusion_reasons=["tampered"])),
+            ("selection", lambda item: item["routing"].update(selection_cohort="override")),
+            ("raw capture", lambda item: item["capture"].update(raw_provider_output_included=True)),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                tampered = copy.deepcopy(record)
+                mutate(tampered)
+                with self.assertRaises(ValueError):
+                    validate_execution_evidence_v3(tampered)
+
+    def test_validator_rejects_selected_command_provider_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            record = build_codex_execution_evidence_v3(
+                task(), SimpleNamespace(events=[]), settings(), config(Path(tmp)),
+            )
+        for field, value in (("selected_model", "other"), ("command_model", "other")):
+            with self.subTest(field=field):
+                tampered = copy.deepcopy(record)
+                tampered["identity"][field] = value
+                with self.assertRaises(ValueError):
+                    validate_execution_evidence_v3(tampered)
+        tampered = copy.deepcopy(record)
+        tampered["identity"]["provider_reported_model"].update(status="observed", value="other")
+        with self.assertRaises(ValueError):
+            validate_execution_evidence_v3(tampered)
 
 
 if __name__ == "__main__":

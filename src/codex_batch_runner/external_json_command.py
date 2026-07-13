@@ -47,9 +47,10 @@ def run_external_json_command_task(
     execution_settings: Any = None,
 ) -> ExternalJsonCommandResult:
     settings = execution_settings or task.get("_resolved_execution_settings")
+    command_argv = external_command(task, settings=settings)
     if settings is not None:
-        enforce_external_command_identity(task, settings, config)
-    command = [*external_command(task, settings=settings), prompt]
+        enforce_external_command_identity(task, settings, command_argv, config)
+    command = [*command_argv, prompt]
     timeout_seconds = int(task.get("external_timeout_seconds") or config.external_json_command_timeout_seconds)
     log_dir = ensure_dir(config.log_dir / task["id"])
     log_path = log_dir / f"attempt-{attempt}.external-json-command.log"
@@ -120,7 +121,9 @@ def run_external_json_command_task(
 
 
 def external_command(task: dict[str, Any], *, settings: Any = None) -> list[str]:
-    command = task.get("external_command")
+    snapshot = getattr(settings, "selected_target_snapshot", None) or {}
+    target = snapshot.get("target") if isinstance(snapshot.get("target"), dict) else {}
+    command = target.get("external_command") if target else task.get("external_command")
     if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
         raise ValueError("external-json-command task requires non-empty external_command argv list")
     values = {
