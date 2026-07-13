@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .execution_evidence_v2 import reporting_evidence_view
 from .fs import read_json
 from .lock import lock_status
 from .model_requirements import SAFE_CONFIG_OVERRIDE_KEYS, command_options, resolve_execution_config
@@ -69,12 +70,36 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
         "worktree": worktree_summary(config, tasks),
         "capacity": capacity_summary(config, tasks),
         "model_requirements": model_config,
+        "execution_evidence": execution_evidence_summary(tasks),
         "decision_cards": decision_card_summary(config),
         "auto_review": auto_review_summary(tasks, config),
         "tasks": task_summary(tasks, by_id, config),
         "checks": checks,
     }
     return report
+
+
+def execution_evidence_summary(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    contracts: Counter[str] = Counter()
+    selection_cohorts: Counter[str] = Counter()
+    integrity: Counter[str] = Counter()
+    for task in tasks:
+        evidence = reporting_evidence_view(task)
+        contracts[str(evidence.get("evidence_contract_version") or "legacy-v1")] += 1
+        cohort = evidence.get("cohort") if isinstance(evidence.get("cohort"), dict) else {}
+        components = cohort.get("components") if isinstance(cohort.get("components"), dict) else {}
+        selection_cohorts[str(components.get("selection_cohort") or "non-exact")] += 1
+        identity = evidence.get("identity") if isinstance(evidence.get("identity"), dict) else {}
+        if identity:
+            integrity[str(identity.get("integrity_status") or "unknown")] += 1
+    return {
+        "read_only": True,
+        "contracts": dict(sorted(contracts.items())),
+        "selection_cohorts": dict(sorted(selection_cohorts.items())),
+        "integrity_statuses": dict(sorted(integrity.items())),
+        "exact_v3_count": contracts.get("execution-evidence-v3", 0),
+        "adverse_v3_count": sum(count for status, count in integrity.items() if status != "compliant"),
+    }
 
 
 def model_requirement_summary(config: Config) -> dict[str, Any]:
@@ -815,6 +840,15 @@ def render_doctor_report(report: dict[str, Any]) -> str:
             f"  version_output: {codex.get('version_output')}",
         ]
     )
+    evidence = report.get("execution_evidence") or {}
+    lines.extend([
+        "",
+        "execution_evidence:",
+        f"  exact_v3_count: {evidence.get('exact_v3_count', 0)}",
+        f"  adverse_v3_count: {evidence.get('adverse_v3_count', 0)}",
+        "  contracts: " + (", ".join(f"{key}={value}" for key, value in (evidence.get("contracts") or {}).items()) or "-"),
+        "  selection_cohorts: " + (", ".join(f"{key}={value}" for key, value in (evidence.get("selection_cohorts") or {}).items()) or "-"),
+    ])
     if codex.get("version_error"):
         lines.append(f"  version_warning: {codex.get('version_error')}")
     check_counts = Counter(str(check.get("level") or "unknown") for check in report["checks"])

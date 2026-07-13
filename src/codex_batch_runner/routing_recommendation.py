@@ -8,6 +8,7 @@ from typing import Any
 from .config import Config
 from .queue import list_tasks
 from .routing_cost_evidence import (
+    EXACT_EVIDENCE_CONTRACT_VERSION,
     RoutingCostEvidenceError,
     USAGE_KEYS,
     latest_routing_cost_evidence,
@@ -64,11 +65,13 @@ def build_routing_recommendation(
         "available_models": sorted(set(available_models or [])),
     }
     matching = [record for record in _queue_records(config) + list(routing_cost_records or []) if _matches_request(record, request)]
-    comparable = [record for record in matching if record["cohort"]["comparability"]["joint_quality_cost"]]
+    exact_matching = [record for record in matching if record.get("evidence_contract_version") == EXACT_EVIDENCE_CONTRACT_VERSION]
+    comparable = [record for record in exact_matching if record["cohort"]["comparability"]["joint_quality_cost"]]
     safety = _safety_gate(request, comparable)
     cohort_keys = {_comparison_cohort_key(record) for record in comparable}
     if not safety["passed"]:
-        return _insufficient_report(request, matching, comparable, safety["reason"], safety=safety)
+        reason = safety["reason"] if exact_matching else "no_matching_exact_v3_cohort"
+        return _insufficient_report(request, matching, comparable, reason, safety=safety)
     if len(cohort_keys) != 1:
         return _insufficient_report(request, matching, comparable, "non_comparable_or_sparse_cohort", safety=safety)
 
@@ -120,14 +123,16 @@ def _safety_gate(request: dict[str, Any], comparable: list[dict[str, Any]]) -> d
 
 def _comparison_cohort_key(record: dict[str, Any]) -> tuple[str, ...]:
     components = record["cohort"]["components"]
-    return tuple(str(components[key]) for key in ("execution_surface", "execution_backend", "task_bucket", "prompt_contract_version", "context_contract_version", "attribution_class", "review_outcome_cohort_id"))
+    excluded = {"cohort_id", "target_id", "planned_model", "actual_model", "selected_model", "command_model", "reasoning_effort", "planned_reasoning"}
+    return tuple(f"{key}={components[key]}" for key in sorted(components) if key not in excluded)
 
 
 def _candidates(records: list[dict[str, Any]], available_models: list[str]) -> list[dict[str, Any]]:
     by_selection: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for record in records:
-        model = record["selection"]["planned_model"]
-        effort = record["selection"]["planned_reasoning"]
+        identity = record.get("identity") if isinstance(record.get("identity"), dict) else {}
+        model = str(identity.get("selected_model") or "unknown")
+        effort = str(identity.get("reasoning_effort") or "unknown")
         if effort == PROHIBITED_REASONING_EFFORT or (available_models and model not in available_models):
             continue
         by_selection[(model, effort)].append(record)

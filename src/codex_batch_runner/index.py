@@ -12,8 +12,9 @@ from .config import Config
 from .events import read_jsonl, sanitize_payload, sanitize_scalar
 from .fs import ensure_dir, read_json
 from .timeutil import iso_now
+from .execution_evidence_v2 import reporting_evidence_view
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DB_FILENAME = "index.sqlite3"
 
 
@@ -203,6 +204,14 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
           task_priority TEXT,
           execution_backend TEXT,
           model_requirement_json TEXT NOT NULL,
+          execution_evidence_contract TEXT,
+          execution_selection_cohort TEXT,
+          selected_model TEXT,
+          command_model TEXT,
+          provider_reported_model TEXT,
+          reasoning_effort TEXT,
+          identity_integrity_status TEXT,
+          identity_adverse INTEGER,
           routing_size TEXT,
           routing_risk TEXT,
           verification_scope_json TEXT NOT NULL,
@@ -309,9 +318,11 @@ def insert_task(conn: sqlite3.Connection, task: dict[str, Any]) -> None:
           task_id, schema_version, title, description, status, project_id, category,
           labels_json, created_by, created_at, updated_at, started_at, completed_at, archived_at,
           attempts, run_count, capacity_pool, task_priority, execution_backend, model_requirement_json,
+          execution_evidence_contract, execution_selection_cohort, selected_model, command_model,
+          provider_reported_model, reasoning_effort, identity_integrity_status, identity_adverse,
           routing_size, routing_risk, verification_scope_json, resolution, resolved_at, root_task_id,
           parent_task_id, subtask_type, subtask_for, blocks_root_completion, chain_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             text_value(task.get("id")),
@@ -334,6 +345,7 @@ def insert_task(conn: sqlite3.Connection, task: dict[str, Any]) -> None:
             safe_text(task.get("task_priority") or task.get("priority")),
             safe_text(task.get("execution_backend")),
             json_dumps_sanitized(task.get("model_requirement_vector") if isinstance(task.get("model_requirement_vector"), dict) else {}),
+            *execution_evidence_index_values(task),
             safe_text(task.get("routing_size")),
             safe_text(task.get("routing_risk")),
             json_dumps_sanitized(list_value(task.get("verification_scope"))),
@@ -346,6 +358,24 @@ def insert_task(conn: sqlite3.Connection, task: dict[str, Any]) -> None:
             bool_int(task.get("blocks_root_completion")),
             safe_text(task.get("chain_status")),
         ),
+    )
+
+
+def execution_evidence_index_values(task: dict[str, Any]) -> tuple[Any, ...]:
+    evidence = reporting_evidence_view(task)
+    identity = evidence.get("identity") if isinstance(evidence.get("identity"), dict) else {}
+    provider = identity.get("provider_reported_model") if isinstance(identity.get("provider_reported_model"), dict) else {}
+    cohort = evidence.get("cohort") if isinstance(evidence.get("cohort"), dict) else {}
+    components = cohort.get("components") if isinstance(cohort.get("components"), dict) else {}
+    return (
+        safe_text(evidence.get("evidence_contract_version")),
+        safe_text(components.get("selection_cohort")),
+        safe_text(identity.get("selected_model")),
+        safe_text(identity.get("command_model")),
+        safe_text(provider.get("value")),
+        safe_text(identity.get("reasoning_effort")),
+        safe_text(identity.get("integrity_status")),
+        bool_int(identity.get("adverse")),
     )
 
 

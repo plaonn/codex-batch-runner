@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import Any
 
-from .execution_evidence_v2 import evidence_view, execution_backend
+from .execution_evidence_v2 import reporting_evidence_view, execution_backend
 from .review_outcome_evidence import review_outcome_view
 from .timeutil import iso_now
 
@@ -12,6 +12,8 @@ from .timeutil import iso_now
 SCHEMA_VERSION = 1
 EVIDENCE_CONTRACT_VERSION = "routing-cost-evidence-v1"
 COHORT_DEFINITION_VERSION = "routing-cost-cohort-v1"
+EXACT_EVIDENCE_CONTRACT_VERSION = "routing-cost-evidence-v2"
+EXACT_COHORT_DEFINITION_VERSION = "routing-cost-cohort-v2"
 ATTRIBUTION_CLASSES = {
     "provider_attributed",
     "window_estimated",
@@ -52,7 +54,7 @@ def build_routing_cost_evidence(
     window_before: float | None = None,
     window_after: float | None = None,
 ) -> dict[str, Any]:
-    execution = evidence_view(task)
+    execution = reporting_evidence_view(task)
     review = review_outcome_view(task)
     resolved_usage = _usage_from_execution(execution) if usage is None else _normalize_usage(usage)
     resolved_class = attribution_class or _default_attribution_class(execution, resolved_usage)
@@ -69,9 +71,10 @@ def build_routing_cost_evidence(
         raise RoutingCostEvidenceError("unavailable attribution cannot include usage values")
 
     captured_at = iso_now()
+    exact = execution.get("schema_version") == 3
     record = {
-        "schema_version": SCHEMA_VERSION,
-        "evidence_contract_version": EVIDENCE_CONTRACT_VERSION,
+        "schema_version": 2 if exact else SCHEMA_VERSION,
+        "evidence_contract_version": EXACT_EVIDENCE_CONTRACT_VERSION if exact else EVIDENCE_CONTRACT_VERSION,
         "kind": "routing_cost_evidence",
         "evidence_id": _stable_id({"task": str(task.get("id") or "unknown"), "attempt": _int(task.get("attempts")), "captured_at": captured_at}),
         "captured_at": captured_at,
@@ -105,6 +108,13 @@ def build_routing_cost_evidence(
             "personal_usage_messages_included": False,
         },
     }
+    if exact:
+        record["identity"] = dict(execution.get("identity") or {})
+        record["versions"] = dict(execution.get("versions") or {})
+        record["target"] = dict(execution.get("routing") or {})
+        execution_cohort = execution.get("cohort") if isinstance(execution.get("cohort"), dict) else {}
+        execution_components = execution_cohort.get("components") if isinstance(execution_cohort.get("components"), dict) else {}
+        record["target"]["selection_cohort"] = execution_components.get("selection_cohort")
     record["cohort"] = derive_routing_cost_cohort(record)
     validate_routing_cost_evidence(record)
     return record
@@ -124,7 +134,7 @@ def latest_routing_cost_evidence(task: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(history, list):
         return None
     for record in reversed(history):
-        if isinstance(record, dict) and record.get("evidence_contract_version") == EVIDENCE_CONTRACT_VERSION:
+        if isinstance(record, dict) and record.get("evidence_contract_version") in {EVIDENCE_CONTRACT_VERSION, EXACT_EVIDENCE_CONTRACT_VERSION}:
             return validate_routing_cost_evidence(record)
     return None
 
@@ -160,7 +170,7 @@ def derive_routing_cost_cohort(record: dict[str, Any]) -> dict[str, Any]:
     attribution = record["usage"]["attribution"]
     quality = record["quality"]
     components = {
-        "evidence_contract_version": EVIDENCE_CONTRACT_VERSION,
+        "evidence_contract_version": record["evidence_contract_version"],
         "execution_surface": execution["surface"],
         "execution_backend": execution["backend"],
         "task_bucket": execution["task_bucket"],
@@ -172,6 +182,19 @@ def derive_routing_cost_cohort(record: dict[str, Any]) -> dict[str, Any]:
         "attribution_class": attribution["class"],
         "review_outcome_cohort_id": quality["review_outcome_cohort_id"],
     }
+    exact = record.get("evidence_contract_version") == EXACT_EVIDENCE_CONTRACT_VERSION
+    if exact:
+        identity = record["identity"]
+        versions = record["versions"]
+        target = record["target"]
+        components.update({
+            "selection_cohort": target.get("selection_cohort") or "unknown",
+            "target_id": target.get("target_id") or "unknown",
+            "selected_model": identity.get("selected_model") or "unknown",
+            "command_model": identity.get("command_model") or "unknown",
+            "reasoning_effort": identity.get("reasoning_effort") or "unknown",
+            **versions,
+        })
     exclusions: list[str] = []
     for key in (
         "execution_surface",
@@ -185,6 +208,12 @@ def derive_routing_cost_cohort(record: dict[str, Any]) -> dict[str, Any]:
             exclusions.append(f"{key}_unversioned")
     if actual_model.get("status") != "observed":
         exclusions.append("actual_model_unavailable")
+    if exact:
+        identity = record["identity"]
+        if identity.get("adverse"):
+            exclusions.append(str(identity.get("integrity_status") or "adverse_identity_integrity"))
+        if identity.get("selected_model") != identity.get("command_model"):
+            exclusions.append("selected_command_mismatch")
     usage_comparable = attribution["class"] in {"provider_attributed", "window_estimated"}
     if not usage_comparable:
         exclusions.append(f"usage_attribution_{attribution['class']}")
@@ -192,10 +221,11 @@ def derive_routing_cost_cohort(record: dict[str, Any]) -> dict[str, Any]:
     if not quality_comparable:
         exclusions.append("quality_evidence_non_comparable")
     axes_complete = not any(reason.endswith("_unversioned") for reason in exclusions)
-    quality_comparable = quality_comparable and axes_complete and actual_model.get("status") == "observed"
-    usage_comparable = usage_comparable and axes_complete and actual_model.get("status") == "observed"
+    identity_comparable = not exact or not bool(record["identity"].get("adverse"))
+    quality_comparable = quality_comparable and axes_complete and actual_model.get("status") == "observed" and identity_comparable
+    usage_comparable = usage_comparable and axes_complete and actual_model.get("status") == "observed" and identity_comparable
     return {
-        "definition_version": COHORT_DEFINITION_VERSION,
+        "definition_version": EXACT_COHORT_DEFINITION_VERSION if exact else COHORT_DEFINITION_VERSION,
         "cohort_id": "sha256:" + _stable_hash(components)[:16],
         "components": components,
         "comparability": {"quality": quality_comparable, "usage_cost": usage_comparable, "joint_quality_cost": quality_comparable and usage_comparable},
@@ -204,7 +234,9 @@ def derive_routing_cost_cohort(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_routing_cost_evidence(record: object) -> dict[str, Any]:
-    if not isinstance(record, dict) or record.get("schema_version") != SCHEMA_VERSION or record.get("evidence_contract_version") != EVIDENCE_CONTRACT_VERSION:
+    if not isinstance(record, dict) or (record.get("schema_version"), record.get("evidence_contract_version")) not in {
+        (SCHEMA_VERSION, EVIDENCE_CONTRACT_VERSION), (2, EXACT_EVIDENCE_CONTRACT_VERSION)
+    }:
         raise RoutingCostEvidenceError("invalid routing cost evidence contract")
     for key in FORBIDDEN_KEYS:
         if _contains_key(record, key):
@@ -212,6 +244,19 @@ def validate_routing_cost_evidence(record: object) -> dict[str, Any]:
     selection = record.get("selection")
     if not isinstance(selection, dict) or set(selection) != {"planned_model", "planned_reasoning"}:
         raise RoutingCostEvidenceError("invalid planned selection")
+    exact = record.get("evidence_contract_version") == EXACT_EVIDENCE_CONTRACT_VERSION
+    if exact:
+        identity = record.get("identity")
+        versions = record.get("versions")
+        target = record.get("target")
+        if not isinstance(identity, dict) or not identity.get("selected_model") or not identity.get("command_model") or not identity.get("reasoning_effort"):
+            raise RoutingCostEvidenceError("exact routing cost evidence requires selected, command, and reasoning identity")
+        if not isinstance(versions, dict) or not versions or any(not isinstance(value, str) or not value or value == "None" for value in versions.values()):
+            raise RoutingCostEvidenceError("exact routing cost evidence requires contract versions")
+        if not isinstance(target, dict) or not target.get("target_id"):
+            raise RoutingCostEvidenceError("exact routing cost evidence requires target id")
+        if target.get("selection_cohort") not in {"automatic", "override"}:
+            raise RoutingCostEvidenceError("exact routing cost evidence requires automatic or override selection cohort")
     execution = record.get("execution")
     required_execution = {"surface", "backend", "task_bucket", "prompt_contract_version", "context_contract_version", "execution_evidence_contract_version"}
     if not isinstance(execution, dict) or set(execution) != required_execution:
@@ -277,8 +322,12 @@ def validate_routing_cost_evidence(record: object) -> dict[str, Any]:
     ):
         raise RoutingCostEvidenceError("invalid routing quality evidence")
     cohort = record.get("cohort")
-    if not isinstance(cohort, dict) or cohort.get("definition_version") != COHORT_DEFINITION_VERSION:
+    expected_cohort = EXACT_COHORT_DEFINITION_VERSION if exact else COHORT_DEFINITION_VERSION
+    if not isinstance(cohort, dict) or cohort.get("definition_version") != expected_cohort:
         raise RoutingCostEvidenceError("invalid routing cost cohort")
+    canonical_cohort = derive_routing_cost_cohort(record)
+    if cohort != canonical_cohort:
+        raise RoutingCostEvidenceError("routing cost cohort does not match canonical record axes")
     privacy = record.get("privacy")
     if not isinstance(privacy, dict) or privacy.get("public_safe_export") is not True or any(value is not False for key, value in privacy.items() if key != "public_safe_export"):
         raise RoutingCostEvidenceError("routing cost evidence is not public-safe")

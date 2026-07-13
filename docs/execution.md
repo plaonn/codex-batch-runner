@@ -181,6 +181,15 @@ Codex CLI update 같은 guarded maintenance workflow는 runner-level maintenance
 
 ## Cost-aware routing evidence
 
+`routing-cost-evidence-v1` remains the read-only compatibility contract for execution
+evidence v2 and legacy routing readers. Exact execution evidence v3 produces the new
+`routing-cost-evidence-v2` contract. Its cohort includes selection cohort
+(`automatic` or `override`), target id, selected and command model, exact reasoning,
+and every execution contract version. Provider omission retains command attribution;
+provider mismatch remains adverse and makes quality/cost comparison ineligible.
+Automatic and override evidence, evidence v2, CLI-default, and legacy records are not
+merged by reports or recommendations.
+
 `routing-cost-evidence-v1` is an append-only supplemental contract over execution
 evidence and review outcome evidence. It does not replace either source contract.
 It keeps these comparison axes explicit:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .provider_resource import derive_provider_resource_evidence, provider_resource_key
-from .execution_evidence_v2 import evidence_view
+from .execution_evidence_v2 import reporting_evidence_view
 from .model_requirements import legacy_dimensions_for_requirement
 from .review_outcome_evidence import review_outcome_view
 from .routing_cost_evidence import routing_cost_evidence_view
@@ -35,7 +35,7 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
     task_vector_evaluation = _task_vector_evaluation(task, task_vector, worker, objective_checks, outcomes)
     exclusion_reasons = _exclusion_reasons(task, task_vector, reviewer, objective_checks, outcomes)
     policy_usage = _policy_usage(task, task_vector, reviewer, objective_checks, outcomes, exclusion_reasons)
-    execution_evidence = evidence_view(task)
+    execution_evidence = reporting_evidence_view(task)
     routing_cost_evidence = routing_cost_evidence_view(task)
 
     row = {
@@ -56,6 +56,10 @@ def derive_evaluation_row(task: dict[str, Any]) -> dict[str, Any]:
             "schema_version": execution_evidence.get("schema_version"),
             "evidence_contract_version": execution_evidence.get("evidence_contract_version"),
             "actual_model": dict(execution_evidence.get("actual_model") or {}),
+            "identity": dict(execution_evidence.get("identity") or {}),
+            "versions": dict(execution_evidence.get("versions") or {}),
+            "routing": dict(execution_evidence.get("routing") or {}),
+            "integrity": dict(execution_evidence.get("integrity") or {}),
             "token_usage": dict(execution_evidence.get("token_usage") or {}),
             "monetary_cost": dict(execution_evidence.get("monetary_cost") or {}),
             "cohort": dict(execution_evidence.get("cohort") or {}),
@@ -200,7 +204,7 @@ def _worker_section(task: dict[str, Any]) -> dict[str, Any]:
     attempts = _int_value(task.get("attempts"))
     run_count = _int_value(task.get("run_count"))
     terminal_status = _terminal_status(task.get("status"))
-    execution_evidence = evidence_view(task)
+    execution_evidence = reporting_evidence_view(task)
     actual_model = _dict_value(execution_evidence.get("actual_model"))
     derivation_identity = _dict_value(requirement_vector.get("derivation_identity"))
     requirement_cohort = (
@@ -232,6 +236,11 @@ def _worker_section(task: dict[str, Any]) -> dict[str, Any]:
         "model_source": model_source,
         "actual_model": _safe_metadata_value(actual_model.get("value")),
         "actual_model_status": _safe_metadata_value(actual_model.get("status")),
+        "selected_model": _safe_metadata_value(_dict_value(execution_evidence.get("identity")).get("selected_model")),
+        "command_model": _safe_metadata_value(_dict_value(execution_evidence.get("identity")).get("command_model")),
+        "provider_reported_model": _safe_metadata_value(_dict_value(_dict_value(execution_evidence.get("identity")).get("provider_reported_model")).get("value")),
+        "identity_integrity_status": _safe_metadata_value(_dict_value(execution_evidence.get("identity")).get("integrity_status")),
+        "identity_adverse": bool(_dict_value(execution_evidence.get("identity")).get("adverse")),
         "evidence_contract_version": _safe_metadata_value(execution_evidence.get("evidence_contract_version")),
         "execution_target": execution_target,
         "model_present": model_present,

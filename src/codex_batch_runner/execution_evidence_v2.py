@@ -287,6 +287,41 @@ def evidence_view(task: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def reporting_evidence_view(task: dict[str, Any]) -> dict[str, Any]:
+    """Return a version-preserving projection for read-only report consumers."""
+    record = evidence_view(task)
+    if record.get("schema_version") != 3:
+        return record
+    identity = record.get("identity") if isinstance(record.get("identity"), dict) else {}
+    provider = identity.get("provider_reported_model") if isinstance(identity.get("provider_reported_model"), dict) else {}
+    selected = identity.get("selected_model")
+    command = identity.get("command_model")
+    integrity = record.get("integrity") if isinstance(record.get("integrity"), dict) else {}
+    command_exact = bool(selected and command and selected == command)
+    projected = dict(record)
+    projected["actual_model"] = {
+        "status": "observed" if command_exact else "unavailable",
+        "value": command if command_exact else None,
+        "source": "command_enforced" if command_exact else None,
+        "confidence": identity.get("attestation") if command_exact else None,
+        "availability_reason": None if command_exact else str(integrity.get("status") or "identity_not_exact"),
+    }
+    projected["identity"] = {
+        "selected_model": selected,
+        "command_model": command,
+        "provider_reported_model": dict(provider),
+        "reasoning_effort": identity.get("reasoning_effort"),
+        "attestation": identity.get("attestation"),
+        "integrity_status": integrity.get("status"),
+        "adverse": bool(integrity.get("adverse")),
+    }
+    projected["monetary_cost"] = {
+        "status": "unavailable", "amount": None, "currency": None, "source": None,
+        "confidence": None, "availability_reason": "provider_billing_evidence_not_available",
+    }
+    return projected
+
+
 def validate_execution_evidence_v2(record: object) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise ExecutionEvidenceV2Error("execution evidence v2 must be a JSON object")

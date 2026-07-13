@@ -8,7 +8,10 @@ from unittest.mock import patch
 
 from codex_batch_runner.codex import run_codex
 from codex_batch_runner.config import Config
-from codex_batch_runner.execution_evidence_v2 import build_codex_execution_evidence, evidence_view
+from codex_batch_runner.execution_evidence_v2 import build_codex_execution_evidence, evidence_view, reporting_evidence_view
+from codex_batch_runner.evaluation import derive_evaluation_row
+from codex_batch_runner.routing_cost_evidence import build_routing_cost_evidence
+from codex_batch_runner.execution_report import task_execution_row
 from codex_batch_runner.execution_evidence_v3 import (
     CommandIdentityError,
     attach_execution_evidence_v3,
@@ -108,6 +111,28 @@ class ExecutionEvidenceV3Tests(unittest.TestCase):
         self.assertTrue(record["integrity"]["adverse"])
         self.assertEqual("exact-model", record["identity"]["command_model"])
         self.assertEqual("other-model", record["identity"]["provider_reported_model"]["value"])
+
+        item = task()
+        item["last_run"] = {"resolved_execution_config": {"model": "exact-model", "reasoning_effort": "high"}}
+        attach_execution_evidence_v3(item, record)
+        view = reporting_evidence_view(item)
+        row = derive_evaluation_row(item)
+        self.assertEqual("exact-model", view["identity"]["selected_model"])
+        self.assertEqual("exact-model", view["identity"]["command_model"])
+        self.assertEqual("other-model", view["identity"]["provider_reported_model"]["value"])
+        self.assertEqual("provider_model_mismatch", row["worker"]["identity_integrity_status"])
+        self.assertTrue(row["worker"]["identity_adverse"])
+
+        cost = build_routing_cost_evidence(item, attribution_class="unavailable")
+        self.assertEqual("routing-cost-evidence-v2", cost["evidence_contract_version"])
+        self.assertFalse(cost["cohort"]["comparability"]["quality"])
+        self.assertIn("provider_model_mismatch", cost["cohort"]["exclusion_reasons"])
+
+        report_row = task_execution_row(config(Path.cwd()), item)
+        self.assertEqual("exact-model", report_row["identity"]["selected_model"])
+        self.assertEqual("exact-model", report_row["identity"]["command_model"])
+        self.assertEqual("other-model", report_row["identity"]["provider_reported_model"]["value"])
+        self.assertEqual("provider_model_mismatch", report_row["evidence"]["integrity"]["status"])
 
     def test_exact_versions_and_automatic_override_cohorts_are_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

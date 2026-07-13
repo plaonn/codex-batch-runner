@@ -7,10 +7,11 @@ from typing import Any
 
 from .evaluation import derive_evaluation_row
 from .execution_evidence_v2 import derive_cohort, validate_execution_evidence_v2
+from .execution_evidence_v3 import validate_execution_evidence_v3
 from .review_outcome_evidence import validate_review_outcome_evidence
 from .request_fingerprint import _safe_id_hash, _safe_metadata_value
 
-SUPPORTED_RECORD_KINDS = {"codex_subagent_execution", "execution_evidence_v2", "review_outcome_evidence_v1"}
+SUPPORTED_RECORD_KINDS = {"codex_subagent_execution", "execution_evidence_v2", "execution_evidence_v3", "review_outcome_evidence_v1"}
 
 
 class ExecutionEvidenceError(ValueError):
@@ -92,6 +93,10 @@ def execution_evidence_task_projection(record: dict[str, Any], *, index: int = 0
         evidence = deepcopy(validate_execution_evidence_v2(record.get("execution_evidence")))
         evidence["cohort"] = derive_cohort(task, evidence)
         validate_execution_evidence_v2(evidence)
+        task["execution_evidence_history"] = [evidence]
+        task["last_run"]["execution_evidence_id"] = evidence.get("evidence_id")
+    if kind == "execution_evidence_v3":
+        evidence = deepcopy(validate_execution_evidence_v3(record.get("execution_evidence")))
         task["execution_evidence_history"] = [evidence]
         task["last_run"]["execution_evidence_id"] = evidence.get("evidence_id")
     if kind == "review_outcome_evidence_v1":

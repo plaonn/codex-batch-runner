@@ -5,13 +5,16 @@ import contextlib
 import io
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 from codex_batch_runner.config import Config
 from codex_batch_runner.cli import main
-from codex_batch_runner.execution_evidence_v2 import attach_execution_evidence, build_execution_evidence
+from codex_batch_runner.execution_evidence_v3 import attach_execution_evidence_v3, build_codex_execution_evidence_v3
+from codex_batch_runner.model_requirements import ResolvedExecutionConfig
 from codex_batch_runner.review_outcome_evidence import attach_review_outcome_evidence, build_review_outcome_evidence
 from codex_batch_runner.routing_cost_evidence import build_routing_cost_evidence
+from codex_batch_runner.routing_cost_evidence import validate_routing_cost_evidence, RoutingCostEvidenceError
 from codex_batch_runner.routing_recommendation import build_routing_recommendation
 
 
@@ -32,7 +35,25 @@ def comparable_task() -> dict:
         "follow_up_count": 0,
         "last_run": {"execution_backend": "codex", "resolved_execution_config": {"model": "frontier-model", "reasoning_effort": "medium"}},
     }
-    attach_execution_evidence(task, build_execution_evidence(task, capture_source="synthetic", actual_model="frontier-model-2026", actual_model_source="provider", actual_model_confidence="observed", actual_model_unavailable_reason=None, token_usage={"input_tokens": 100, "output_tokens": 20}, token_usage_source="provider", token_usage_confidence="observed", token_usage_unavailable_reason=None))
+    vector = {
+        "schema_version": 2, "derivation_version": "requirement-rubric-v1", "revision_id": "recommendation-v3",
+        "quality_requirements": {}, "hard_constraints": {}, "utility_preferences": {},
+    }
+    selected = ResolvedExecutionConfig(
+        requirement_vector=vector, selection_rule="execution-target-selector-v1",
+        selection_reason="automatic_static_non_learned", model="frontier-model-2026",
+        execution_target="frontier-medium-v1", config_overrides={"model_reasoning_effort": "medium"},
+    )
+    cfg = Config.load(root=Path.cwd())
+    cfg = Config(**{**cfg.__dict__, "execution_target_inventory": {
+        "schema_version": 1, "snapshot_id": "sha256:recommendation-inventory", "status": "current", "targets": {},
+    }, "constraint_registry": {"schema_version": 1, "version": "constraints-v1", "constraints": {}}})
+    attach_execution_evidence_v3(task, build_codex_execution_evidence_v3(
+        task, SimpleNamespace(events=[{
+            "type": "turn.completed", "model": "frontier-model-2026",
+            "usage": {"input_tokens": 100, "output_tokens": 20},
+        }]), selected, cfg,
+    ))
     attach_review_outcome_evidence(task, build_review_outcome_evidence(task, acceptance_method="reviewer_pass", accepted=True, objective_status="passed", semantic_status="pass", reviewer_kind="codex", actual_identity="reviewer", actual_identity_source="provider_observed", actual_identity_confidence="provider_observed", review_policy_version="review-v1", rubric_version="rubric-v1"))
     return task
 
@@ -61,8 +82,11 @@ class RoutingRecommendationTests(unittest.TestCase):
             for model, output in (("frontier-model-2026", 50), ("cheap-model-2026", 10)):
                 for _ in range(5):
                     task = comparable_task()
-                    task["last_run"]["resolved_execution_config"]["model"] = model
-                    task["execution_evidence_history"][-1]["actual_model"]["value"] = model
+                    evidence = task["execution_evidence_history"][-1]
+                    evidence["identity"]["selected_model"] = model
+                    evidence["identity"]["command_model"] = model
+                    evidence["identity"]["provider_reported_model"]["value"] = model
+                    evidence["routing"]["target_id"] = model + "-medium-v1"
                     records.append(build_routing_cost_evidence(task, usage={"uncached_input_tokens": 50, "cached_input_tokens": 0, "cache_write_tokens": 0, "output_tokens": output, "reasoning_output_tokens": 0}))
             thread_task = comparable_task()
             thread_task["execution_surface"] = "user_owned_thread"
@@ -101,7 +125,7 @@ class RoutingRecommendationTests(unittest.TestCase):
             for effort in ("medium", "xhigh"):
                 for _ in range(5):
                     task = comparable_task()
-                    task["last_run"]["resolved_execution_config"]["reasoning_effort"] = effort
+                    task["execution_evidence_history"][-1]["identity"]["reasoning_effort"] = effort
                     records.append(build_routing_cost_evidence(task))
 
             report = recommendation(config, records)
@@ -125,6 +149,18 @@ class RoutingRecommendationTests(unittest.TestCase):
             self.assertEqual(1000, usage["mean_components"]["cached_input_tokens"])
             self.assertFalse(usage["normalized_cost_available"])
             self.assertEqual("normalized_cost_unavailable", report["recommendation"]["cost_evidence"]["reason"])
+
+    def test_tampered_exact_cohort_is_rejected_before_recommendation(self) -> None:
+        record = build_routing_cost_evidence(comparable_task())
+        record["cohort"]["components"]["selection_cohort"] = "override"
+        record["cohort"]["comparability"]["joint_quality_cost"] = True
+        with self.assertRaisesRegex(RoutingCostEvidenceError, "canonical record axes"):
+            validate_routing_cost_evidence(record)
+
+        record = build_routing_cost_evidence(comparable_task())
+        record["target"].pop("selection_cohort")
+        with self.assertRaisesRegex(RoutingCostEvidenceError, "automatic or override"):
+            validate_routing_cost_evidence(record)
 
     def test_high_failure_cost_requires_matching_verified_cohort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

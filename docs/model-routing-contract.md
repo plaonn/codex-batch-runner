@@ -207,6 +207,10 @@ Migration order는 `D0 -> D1 -> D2 -> D3 -> D4 -> D5 -> D6`입니다.
   config는 compatibility path로만 유지함. Codex automatic target은 exact `model`과
   `reasoning_effort`가 필수이고 CLI-default target은 config validation에서 거부함.
 - D3-D5: evidence v3, reports, posterior/exploration을 순차 구현함.
+- D4 report reader는 v3 identity를 `selected_model`, `command_model`,
+  `provider_reported_model`로 분리해 표시하고 adverse integrity를 보존합니다. Routing-cost v2와
+  recommendation은 exact automatic/override 및 모든 contract-version 경계를 비교 key에
+  포함하며 invalid comparison은 mutation 없이 explicit `insufficient`로 끝납니다.
 - D6: end-to-end matrix, public/private safety, fresh independent review, operator config
   migration과 명시적 승인을 완료함.
 

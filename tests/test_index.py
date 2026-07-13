@@ -93,7 +93,7 @@ class IndexCommandTests(unittest.TestCase):
             status = json.loads(output)
 
             self.assertEqual(0, code)
-            self.assertEqual(1, status["schema_version"])
+            self.assertEqual(2, status["schema_version"])
             self.assertEqual(2, status["indexed_tasks"])
             self.assertEqual(2, status["source_task_files"])
             self.assertEqual([], status["warnings"])

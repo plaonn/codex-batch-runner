@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .execution_evidence_v2 import evidence_view
+from .execution_evidence_v2 import reporting_evidence_view
 from .queue import list_tasks, task_labels, task_project_id, task_project_root, task_title
 from .routing_report import number
 from .timeutil import iso_now, parse_time
@@ -116,7 +116,7 @@ def task_execution_row(config: Config, task: dict[str, Any]) -> dict[str, Any]:
     backend = sanitize(last_run.get("execution_backend") or "codex")
     capacity_pool = sanitize(task.get("capacity_pool") or "codex")
     command = list_value(last_run.get("command"))
-    observed_evidence = evidence_view(task)
+    observed_evidence = reporting_evidence_view(task)
     token_usage, token_usage_source = derive_token_usage(config, last_run, backend, observed_evidence)
     duration = number(last_run.get("duration_seconds"))
     queue_wait = duration_between(task.get("created_at"), last_run.get("started_at") or task.get("started_at"))
@@ -165,12 +165,16 @@ def task_execution_row(config: Config, task: dict[str, Any]) -> dict[str, Any]:
             "budget_hint": sanitize(resolved_config.get("budget_hint") or resolved_worker_target.get("budget_hint")),
         },
         "actual_model": dict(observed_evidence.get("actual_model") or {}),
+        "identity": dict(observed_evidence.get("identity") or {}),
         "evidence": {
             "schema_version": observed_evidence.get("schema_version"),
             "evidence_contract_version": observed_evidence.get("evidence_contract_version"),
             "evidence_id": observed_evidence.get("evidence_id"),
             "capture": dict(observed_evidence.get("capture") or {}),
             "cohort": dict(observed_evidence.get("cohort") or {}),
+            "versions": dict(observed_evidence.get("versions") or {}),
+            "routing": dict(observed_evidence.get("routing") or {}),
+            "integrity": dict(observed_evidence.get("integrity") or {}),
             "monetary_cost": dict(observed_evidence.get("monetary_cost") or {}),
             "privacy": dict(observed_evidence.get("privacy") or {}),
         },
@@ -191,7 +195,7 @@ def derive_token_usage(
     backend: str,
     observed_evidence: dict[str, Any] | None = None,
 ) -> tuple[dict[str, int | None], str]:
-    if observed_evidence and observed_evidence.get("schema_version") == 2:
+    if observed_evidence and observed_evidence.get("schema_version") in {2, 3}:
         observation = observed_evidence.get("token_usage")
         if isinstance(observation, dict):
             values = observation.get("values") if isinstance(observation.get("values"), dict) else {}

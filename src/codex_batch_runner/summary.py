@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .model_requirements import legacy_dimensions_for_requirement
 from .planned_execution import planned_execution_summary
+from .execution_evidence_v2 import reporting_evidence_view
 from .queue import (
     dependency_blockers,
     dependency_status,
@@ -225,6 +226,19 @@ def append_routing_summary(lines: list[str], task: dict) -> None:
         fields.append("verification_scope=" + ",".join(sanitize(item) for item in verification_scope))
     if fields:
         lines.append("routing: " + ", ".join(fields))
+    evidence = reporting_evidence_view(task)
+    identity = evidence.get("identity") if isinstance(evidence.get("identity"), dict) else {}
+    if identity:
+        provider = identity.get("provider_reported_model") if isinstance(identity.get("provider_reported_model"), dict) else {}
+        lines.append(
+            "execution_identity: "
+            f"contract={sanitize(evidence.get('evidence_contract_version'))}, "
+            f"selected_model={sanitize(identity.get('selected_model'))}, "
+            f"command_model={sanitize(identity.get('command_model'))}, "
+            f"provider_reported_model={sanitize(provider.get('value') or provider.get('status'))}, "
+            f"reasoning_effort={sanitize(identity.get('reasoning_effort'))}, "
+            f"integrity={sanitize(identity.get('integrity_status'))}"
+        )
 
 
 def meaningful_chain_value(key: str, value: object) -> bool:
