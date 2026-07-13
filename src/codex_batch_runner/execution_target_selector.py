@@ -136,6 +136,18 @@ def target_value(key: str, target_id: object, value: object) -> dict[str, Any]:
         command = value.get(command_key)
         if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
             raise ValueError(f"{key}.{command_key} must be a non-empty list of strings")
+        identity_values = (value.get("model"), value.get("command_model"), value.get("reasoning_effort"))
+        if any(item not in (None, "") for item in identity_values):
+            if not all(isinstance(item, str) and item.strip() for item in identity_values):
+                raise ValueError(f"{key} exact external target requires model, command_model, and reasoning_effort")
+            target["model"] = value["model"].strip()
+            target["command_model"] = value["command_model"].strip()
+            target["reasoning_effort"] = value["reasoning_effort"].strip()
+            placeholders = {part for part in command if part in {"{model}", "{reasoning_effort}"}}
+            if placeholders != {"{model}", "{reasoning_effort}"}:
+                raise ValueError(
+                    f"{key}.{command_key} exact target requires {{model}} and {{reasoning_effort}} argv placeholders"
+                )
     for numeric in ("latency_score", "cost_score"):
         raw = value.get(numeric, 0)
         if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw <= 1000:

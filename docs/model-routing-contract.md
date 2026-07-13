@@ -173,6 +173,22 @@ Evidence v3는 최소한 `selected_model`, `command_model`, `provider_reported_m
 requirement/rubric/constraint/target/review/outcome version을 저장합니다. Evidence v2,
 CLI-default, legacy run은 v3 exact-model quality cohort와 합치지 않습니다.
 
+Runner는 claim 시 확정한 execution setting을 provider 호출 경계까지 그대로 전달하고,
+Codex argv의 단일 `--model` 값 또는 exact external target의 versioned `command_model`을
+호출 직전에 다시 확인합니다. 값이 없거나 `selected_model`과 다르면 provider process를
+시작하지 않고 `selected_command_mismatch` integrity evidence를 append합니다. External
+target은 `model`, `command_model`, `reasoning_effort`를 모두 제공할 때만 v3 exact cohort에
+진입하며 command argv에 독립된 `{model}`, `{reasoning_effort}` placeholder를 포함해
+wrapper invocation에 두 값을 직접 결속해야 합니다. 기존 external target은 v2
+compatibility cohort에 남습니다.
+
+Provider attestation은 optional입니다. Codex의 trusted completion event 또는 external
+wrapper의 allowlisted `provider-model+usage-attestation`만
+`provider_reported_model`로 읽습니다. 누락 시 `command_attributed`, 일치 시 `verified`,
+불일치 시 결과와 command attribution을 보존한 채 `provider_model_mismatch` adverse
+integrity evidence로 기록합니다. Raw provider output, prompt, path, session/thread id는
+evidence record에 포함하지 않습니다.
+
 ## Versioning, migration, and freeze dependency
 
 Requirement schema/rubric, constraint registry, inventory schema/snapshot, selection policy,

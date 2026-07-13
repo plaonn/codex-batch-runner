@@ -240,6 +240,32 @@ class ExecutionTargetSelectorTests(unittest.TestCase):
         self.assertEqual("external-v1", selected.name)
         self.assertEqual("external-json-command", selected.target["execution_backend"])
 
+    def test_exact_external_target_requires_identity_bound_command_placeholders(self) -> None:
+        target = {
+            "execution_surface": "external",
+            "execution_backend": "external-json-command",
+            "external_command": ["public-worker", "{model}", "{reasoning_effort}"],
+            "model": "external-exact-model",
+            "command_model": "external-exact-model",
+            "reasoning_effort": "high",
+            "trust_state": "trusted",
+            "static_fitness": {axis: 750 for axis in requirement()["quality_requirements"]},
+            "latency_score": 500,
+            "cost_score": 500,
+            "capabilities": {},
+            "capability_evidence": {},
+        }
+        selected = resolve_worker_target(
+            loaded_config({"external-exact-v1": target}),
+            {"model_requirement_vector": requirement()},
+        )
+
+        self.assertEqual("external-exact-model", selected.target["model"])
+        broken = dict(target)
+        broken["external_command"] = ["public-worker"]
+        with self.assertRaisesRegex(ValueError, "requires .* argv placeholders"):
+            loaded_config({"broken": broken})
+
     def test_native_inventory_preempts_both_legacy_first_match_paths(self) -> None:
         config = loaded_config({"exact-codex": codex_target("exact")})
         config = replace(

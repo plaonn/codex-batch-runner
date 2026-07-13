@@ -222,7 +222,7 @@ def latest_execution_evidence(task: dict[str, Any]) -> dict[str, Any] | None:
             if isinstance(record, dict) and record.get("evidence_id") == evidence_id:
                 return record
     for record in reversed(history):
-        if isinstance(record, dict) and record.get("schema_version") == SCHEMA_VERSION:
+        if isinstance(record, dict) and record.get("schema_version") in {SCHEMA_VERSION, 3}:
             return record
     return None
 
@@ -279,6 +279,10 @@ def evidence_view(task: dict[str, Any]) -> dict[str, Any]:
     record = latest_execution_evidence(task)
     if record is None:
         return legacy_evidence_view(task)
+    if record.get("schema_version") == 3:
+        from .execution_evidence_v3 import validate_execution_evidence_v3
+
+        return validate_execution_evidence_v3(record)
     validate_execution_evidence_v2(record)
     return record
 

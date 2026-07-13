@@ -26,6 +26,13 @@ from .execution_evidence_v2 import (
     build_external_execution_evidence,
     build_shell_execution_evidence,
 )
+from .execution_evidence_v3 import (
+    CommandIdentityError,
+    attach_execution_evidence_v3,
+    build_codex_execution_evidence_v3,
+    build_external_execution_evidence_v3,
+    exact_v3_settings,
+)
 from .model_requirements import ResolvedExecutionConfig, command_options, resolve_execution_config
 from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
@@ -269,7 +276,7 @@ def claim_next_implementation_task_locked(
             execution_cwd=str(execution_cwd) if execution_cwd else None,
             execution_backend=execution_backend,
         )
-    if execution_backend == "codex":
+    if execution_backend in {"codex", "external-json-command"}:
         execution_config, config_error = validate_execution_config(config, task)
         if config_error:
             mark_execution_config_failure(config, task, config_error)
@@ -313,6 +320,8 @@ def claim_next_implementation_task_locked(
     mark_run(config, task["id"])
 
     run_task = dict(task)
+    if execution_config is not None:
+        run_task["_resolved_execution_settings"] = execution_config
     if execution_cwd:
         run_task["cwd"] = str(execution_cwd)
     return ClaimedRun(
@@ -389,6 +398,7 @@ def finalize_external_json_command_run(
             result,
             git_status_cwd=claimed.execution_cwd,
             completion_guard_error=completion_guard_error,
+            execution_settings=claimed.execution_settings,
         )
         claimed.task = task
         return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
@@ -426,6 +436,8 @@ def finalize_runner_exception(config: Config, claimed: ClaimedRun, exc: Exceptio
         task["status"] = "failed"
         task["last_error"] = f"runner execution failed: {exc}"
         task["failure_count"] = int(task.get("failure_count", 0)) + 1
+        if isinstance(exc, CommandIdentityError):
+            attach_execution_evidence_v3(task, exc.record)
         if claimed.execution_cwd:
             task["execution_worktree_status"] = "retained"
             task["execution_retained_at"] = iso_now()
@@ -602,7 +614,7 @@ def apply_codex_result(
 ) -> None:
     clear_active_run_metadata(task)
     task.setdefault("log_paths", []).append(str(result.log_path))
-    record_last_run(task, result, execution_settings=execution_settings)
+    record_last_run(config, task, result, execution_settings=execution_settings)
     if result.command_kind == "resume":
         task["resume_count"] = int(task.get("resume_count", 0)) + 1
     if result.session_id:
@@ -829,10 +841,11 @@ def apply_external_json_command_result(
     *,
     git_status_cwd: Path | None = None,
     completion_guard_error: str | None = None,
+    execution_settings: ResolvedExecutionConfig | None = None,
 ) -> None:
     clear_active_run_metadata(task)
     task.setdefault("log_paths", []).append(str(result.log_path))
-    record_external_json_command_last_run(task, result)
+    record_external_json_command_last_run(config, task, result, execution_settings=execution_settings)
     task["cooldown_until"] = None
     git_status = inspect_task_git_status(str(git_status_cwd) if git_status_cwd else task.get("cwd"))
     if git_status:
@@ -1060,7 +1073,10 @@ def record_shell_last_run(task: dict, result: ShellResult) -> None:
     attach_execution_evidence(task, build_shell_execution_evidence(task))
 
 
-def record_external_json_command_last_run(task: dict, result: ExternalJsonCommandResult) -> None:
+def record_external_json_command_last_run(
+    config: Config, task: dict, result: ExternalJsonCommandResult, *,
+    execution_settings: ResolvedExecutionConfig | None = None,
+) -> None:
     task["last_run"] = {
         "execution_backend": "external-json-command",
         "command_kind": "external-json-command",
@@ -1079,7 +1095,12 @@ def record_external_json_command_last_run(task: dict, result: ExternalJsonComman
     if worker_target:
         task["last_run"]["resolved_worker_target"] = worker_target
     attestation = result.final_response.get("execution_evidence") if isinstance(result.final_response, dict) else None
-    attach_execution_evidence(task, build_external_execution_evidence(task, attestation))
+    if execution_settings and exact_v3_settings(execution_settings):
+        attach_execution_evidence_v3(
+            task, build_external_execution_evidence_v3(task, attestation, execution_settings, config)
+        )
+    else:
+        attach_execution_evidence(task, build_external_execution_evidence(task, attestation))
 
 
 def resolved_worker_target_metadata(task: dict) -> dict[str, Any]:
@@ -1325,7 +1346,10 @@ def startup_stall_error(reason: str, progress: dict[str, Any]) -> str:
     return "codex startup stalled before meaningful JSONL events"
 
 
-def record_last_run(task: dict, result: CodexResult, *, execution_settings: ResolvedExecutionConfig | None = None) -> None:
+def record_last_run(
+    config: Config, task: dict, result: CodexResult, *,
+    execution_settings: ResolvedExecutionConfig | None = None,
+) -> None:
     finished_at = iso_now()
     started_at = task.get("started_at")
     task["last_run"] = {
@@ -1352,7 +1376,12 @@ def record_last_run(task: dict, result: CodexResult, *, execution_settings: Reso
         }
     if result.watchdog_reason:
         task["last_run"]["watchdog_reason"] = result.watchdog_reason
-    attach_execution_evidence(task, build_codex_execution_evidence(task, result))
+    if execution_settings and exact_v3_settings(execution_settings):
+        attach_execution_evidence_v3(
+            task, build_codex_execution_evidence_v3(task, result, execution_settings, config)
+        )
+    else:
+        attach_execution_evidence(task, build_codex_execution_evidence(task, result))
 
 
 def execution_settings_has_metadata(settings: ResolvedExecutionConfig) -> bool:

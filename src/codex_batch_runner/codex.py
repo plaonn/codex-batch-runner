@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .model_requirements import command_options, insert_command_options, resolve_execution_config
+from .execution_evidence_v3 import enforce_codex_command_identity
 from .fs import ensure_dir
 from .limits import matched_rate_limit_markers
+from .model_requirements import command_options, insert_command_options, resolve_execution_config
 from .timeutil import iso_now
 
 
@@ -130,18 +131,18 @@ def format_command_with_resolved_config(
     return [*insert_command_options(base[:-1], command_options(settings)), base[-1]]
 
 
-def run_codex(config: Config, task: dict, prompt: str, attempt: int) -> CodexResult:
+def run_codex(
+    config: Config, task: dict, prompt: str, attempt: int, *, execution_settings: Any = None
+) -> CodexResult:
     log_dir = ensure_dir(config.log_dir / task["id"])
     log_path = log_dir / f"attempt-{attempt}.jsonl"
     use_resume = should_use_resume(task)
     resume_id_used = (task.get("session_id") or task.get("thread_id")) if use_resume else None
     command_kind = "resume" if use_resume else "exec"
-    command = format_command_with_resolved_config(
-        config.codex_resume_command if use_resume else config.codex_command,
-        task,
-        prompt,
-        config,
-    )
+    settings = execution_settings or task.get("_resolved_execution_settings") or resolve_execution_config(config, task)
+    base = format_command(config.codex_resume_command if use_resume else config.codex_command, task, prompt)
+    command = [*insert_command_options(base[:-1], command_options(settings)), base[-1]]
+    enforce_codex_command_identity(task, settings, command, config)
     stderr_chunks: list[str] = []
     events: list[dict[str, Any]] = []
 

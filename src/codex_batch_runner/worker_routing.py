@@ -97,6 +97,10 @@ def apply_worker_target(task: dict[str, Any], resolved: ResolvedWorkerTarget) ->
         task["worker_model_group"] = target.get("model_group")
     if target.get("budget_hint"):
         task["worker_budget_hint"] = target.get("budget_hint")
+    if target.get("model"):
+        task["worker_selected_model"] = target.get("model")
+        task["worker_command_model"] = target.get("command_model")
+        task["worker_reasoning_effort"] = target.get("reasoning_effort")
 
 
 def validate_worker_command(name: str, value: object) -> None:

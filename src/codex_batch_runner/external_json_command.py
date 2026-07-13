@@ -9,6 +9,11 @@ from typing import Any
 
 from .config import Config
 from .execution_evidence_v2 import ExecutionEvidenceV2Error, validate_external_attestation
+from .execution_evidence_v3 import (
+    ExecutionEvidenceV3Error,
+    enforce_external_command_identity,
+    validate_external_attestation_v3,
+)
 from .fs import ensure_dir
 from .timeutil import iso_now
 
@@ -38,8 +43,13 @@ def run_external_json_command_task(
     task: dict[str, Any],
     prompt: str,
     attempt: int,
+    *,
+    execution_settings: Any = None,
 ) -> ExternalJsonCommandResult:
-    command = [*external_command(task), prompt]
+    settings = execution_settings or task.get("_resolved_execution_settings")
+    if settings is not None:
+        enforce_external_command_identity(task, settings, config)
+    command = [*external_command(task, settings=settings), prompt]
     timeout_seconds = int(task.get("external_timeout_seconds") or config.external_json_command_timeout_seconds)
     log_dir = ensure_dir(config.log_dir / task["id"])
     log_path = log_dir / f"attempt-{attempt}.external-json-command.log"
@@ -109,11 +119,17 @@ def run_external_json_command_task(
     )
 
 
-def external_command(task: dict[str, Any]) -> list[str]:
+def external_command(task: dict[str, Any], *, settings: Any = None) -> list[str]:
     command = task.get("external_command")
     if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
         raise ValueError("external-json-command task requires non-empty external_command argv list")
-    return list(command)
+    values = {
+        "model": str(getattr(settings, "model", "") or ""),
+        "reasoning_effort": str(
+            (getattr(settings, "config_overrides", None) or {}).get("model_reasoning_effort") or ""
+        ),
+    }
+    return [values.get(part[1:-1], part) if part in {"{model}", "{reasoning_effort}"} else part for part in command]
 
 
 def parse_final_response(stdout: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -144,8 +160,12 @@ def validate_final_response(final_response: dict[str, Any], task_id: str) -> str
         return "final JSON verification must be a list"
     if "execution_evidence" in final_response:
         try:
-            validate_external_attestation(final_response.get("execution_evidence"))
-        except ExecutionEvidenceV2Error as exc:
+            evidence = final_response.get("execution_evidence")
+            if isinstance(evidence, dict) and evidence.get("schema_version") == 3:
+                validate_external_attestation_v3(evidence)
+            else:
+                validate_external_attestation(evidence)
+        except (ExecutionEvidenceV2Error, ExecutionEvidenceV3Error) as exc:
             return str(exc)
     return None
 

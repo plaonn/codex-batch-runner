@@ -405,12 +405,15 @@ def resolve_execution_config(config: Any, task: dict[str, Any], *, reviewer: boo
     selected_target = select_execution_target(config, task, vector)
     if selected_target is not None:
         if selected_target.target.get("execution_surface") != "codex":
+            target = selected_target.target
             return ResolvedExecutionConfig(
                 requirement_vector=vector,
                 selection_rule=SELECTION_POLICY_VERSION,
                 selection_reason=selected_target.selection_reason,
-                model_source="non_codex_target",
                 execution_target=selected_target.target_id,
+                model=target.get("model"),
+                model_source="target_alias" if target.get("model") else "non_codex_target",
+                config_overrides={"model_reasoning_effort": target["reasoning_effort"]} if target.get("reasoning_effort") else None,
                 worker_role=worker_role,
             )
         target = selected_target.target
