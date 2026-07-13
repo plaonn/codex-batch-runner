@@ -79,6 +79,14 @@ class ModelRoutingContractDocsTest(unittest.TestCase):
         self.assertIn("immutable requirement v2 revision", task_schema)
         self.assertIn("exact v2 cohort에서 제외", task_schema)
 
+    def test_public_import_docs_include_v3_without_merging_cohorts(self) -> None:
+        execution = (ROOT / "docs" / "execution.md").read_text(encoding="utf-8")
+        cli_reference = (ROOT / "docs" / "cli-reference.md").read_text(encoding="utf-8")
+        for text in (execution, cli_reference):
+            self.assertIn("execution_evidence_v3", text)
+        self.assertIn("Legacy, v2, v3 cohort는 서로 합치지 않습니다", cli_reference)
+        self.assertIn("Legacy, v2, v3 cohort는 합산 가능한 actual-model cohort로 취급하지 않습니다", execution)
+
 
 if __name__ == "__main__":
     unittest.main()

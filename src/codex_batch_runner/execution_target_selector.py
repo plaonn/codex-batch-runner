@@ -130,29 +130,28 @@ def target_value(key: str, target_id: object, value: object) -> dict[str, Any]:
         target["reasoning_effort"] = _string(f"{key}.reasoning_effort", value.get("reasoning_effort"))
     else:
         backend = value.get("execution_backend")
-        if backend not in {"external-json-command", "shell"}:
-            raise ValueError(f"{key}.execution_backend must be external-json-command or shell")
-        command_key = "external_command" if backend == "external-json-command" else "shell_command"
+        if backend != "external-json-command":
+            raise ValueError(f"{key}.execution_backend must be external-json-command; shell is not an automatic model target")
+        command_key = "external_command"
         command = value.get(command_key)
         if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
             raise ValueError(f"{key}.{command_key} must be a non-empty list of strings")
         identity_values = (value.get("model"), value.get("command_model"), value.get("reasoning_effort"))
-        if any(item not in (None, "") for item in identity_values):
-            if not all(isinstance(item, str) and item.strip() for item in identity_values):
-                raise ValueError(f"{key} exact external target requires model, command_model, and reasoning_effort")
-            target["model"] = value["model"].strip()
-            target["command_model"] = value["command_model"].strip()
-            target["reasoning_effort"] = value["reasoning_effort"].strip()
-            if target["model"] != target["command_model"]:
-                raise ValueError(f"{key} exact target requires model == command_model")
-            placeholder_counts = {
-                placeholder: command.count(placeholder)
-                for placeholder in ("{model}", "{reasoning_effort}")
-            }
-            if any(count != 1 for count in placeholder_counts.values()):
-                raise ValueError(
-                    f"{key}.{command_key} exact target requires exactly one {{model}} and {{reasoning_effort}} argv placeholders"
-                )
+        if not all(isinstance(item, str) and item.strip() for item in identity_values):
+            raise ValueError(f"{key} automatic external target requires model, command_model, and reasoning_effort")
+        target["model"] = value["model"].strip()
+        target["command_model"] = value["command_model"].strip()
+        target["reasoning_effort"] = value["reasoning_effort"].strip()
+        if target["model"] != target["command_model"]:
+            raise ValueError(f"{key} exact target requires model == command_model")
+        placeholder_counts = {
+            placeholder: command.count(placeholder)
+            for placeholder in ("{model}", "{reasoning_effort}")
+        }
+        if any(count != 1 for count in placeholder_counts.values()):
+            raise ValueError(
+                f"{key}.{command_key} exact target requires exactly one {{model}} and {{reasoning_effort}} argv placeholders"
+            )
     for numeric in ("latency_score", "cost_score"):
         raw = value.get(numeric, 0)
         if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw <= 1000:
@@ -198,7 +197,10 @@ def select_execution_target(config: Any, task: dict[str, Any], requirement: dict
     if registry.get("version") != inventory.get("constraint_registry_version"):
         raise TargetSelectionError("stale_model_inventory", "inventory and constraint registry versions differ")
     candidates: list[tuple[str, dict[str, Any]]] = []
-    for target_id, target in inventory["targets"].items():
+    for target_id, raw_target in inventory["targets"].items():
+        # Re-validate programmatically constructed or mutated Config state so
+        # malformed automatic targets cannot bypass config loading before claim.
+        target = target_value(f"execution_target_inventory.targets.{target_id}", target_id, raw_target)
         if target.get("trust_state") not in ELIGIBLE_TRUST_STATES:
             continue
         if _hard_constraints_pass(requirement.get("hard_constraints", {}), target, registry):

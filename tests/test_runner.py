@@ -19,6 +19,8 @@ from codex_batch_runner.codex import CodexResult
 from codex_batch_runner.evidence import list_rate_limit_evidence
 from codex_batch_runner.events import list_events
 from codex_batch_runner.fs import write_json_atomic
+from codex_batch_runner.external_json_command import run_external_json_command_task
+from codex_batch_runner.model_requirements import ResolvedExecutionConfig
 from codex_batch_runner.prompts import build_prompt
 from codex_batch_runner.queue import create_task, load_task, save_task
 from codex_batch_runner.runner import apply_codex_result, run_next
@@ -1211,6 +1213,84 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("command_attributed", evidence["identity"]["attestation"])
             self.assertEqual("sha256:exact-e2e", evidence["versions"]["inventory_snapshot_id"])
             self.assertTrue(evidence["cohort"]["comparability"]["model_quality"])
+
+    def test_native_v2_malformed_external_inventory_fails_before_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            axes = {
+                name: {"score": 500, "confidence": 1000, "anchor": 500, "evidence_codes": []}
+                for name in (
+                    "semantic_reasoning", "context_integration", "planning_depth",
+                    "instruction_fidelity", "tool_execution_reliability", "adversarial_detection",
+                )
+            }
+            target = {
+                "target_id": "malformed", "execution_surface": "external",
+                "execution_backend": "external-json-command", "trust_state": "trusted",
+                "external_command": ["must-not-run", "{model}", "{reasoning_effort}"],
+                "model": "exact", "reasoning_effort": "high",
+                "static_fitness": {name: 750 for name in axes},
+                "quality_evidence_status": "static_non_learned", "latency_score": 500,
+                "cost_score": 500, "capabilities": {}, "capability_evidence": {},
+            }
+            cfg = replace(
+                make_config(tmp, "success"),
+                execution_target_inventory={
+                    "schema_version": 1, "snapshot_id": "sha256:malformed", "status": "current",
+                    "constraint_registry_version": "constraints-v1", "targets": {"malformed": target},
+                },
+                constraint_registry={"schema_version": 1, "version": "constraints-v1", "constraints": {}},
+            )
+            create_task(cfg, "external work", tmp, task_id="malformed-external", model_requirement_vector={
+                "schema_version": 2, "derivation_version": "requirement-rubric-v1",
+                "revision_id": "reqrev-malformed", "quality_requirements": axes,
+                "hard_constraints": {}, "utility_preferences": {},
+            })
+
+            with patch("codex_batch_runner.external_json_command.subprocess.run") as subprocess_run:
+                outcome = run_next(cfg)
+
+            task = load_task(cfg, "malformed-external")
+            self.assertEqual("failed", outcome.status)
+            self.assertIn("automatic external target requires", task["last_error"])
+            subprocess_run.assert_not_called()
+            self.assertNotIn("active_run_id", task)
+
+    def test_pre_provider_rejects_malformed_native_external_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(tmp, "success")
+            settings = ResolvedExecutionConfig(
+                requirement_vector={
+                    "schema_version": 2,
+                    "revision_id": "reqrev-pre-provider",
+                    "derivation_version": "requirement-rubric-v1",
+                },
+                selection_rule="execution-target-selector-v1",
+                selection_reason="automatic_static_non_learned",
+                execution_target="malformed",
+                model="exact",
+                model_source="target_alias",
+                config_overrides={"model_reasoning_effort": "high"},
+                selected_target_snapshot={
+                    "target_id": "malformed",
+                    "inventory_schema_version": 1,
+                    "inventory_snapshot_id": "sha256:pre-provider",
+                    "selection_policy_version": "execution-target-selector-v1",
+                    "constraint_registry_version": "constraints-v1",
+                    "target": {
+                        "execution_backend": "external-json-command",
+                        "external_command": ["must-not-run", "{model}", "{reasoning_effort}"],
+                        "model": "exact",
+                        "reasoning_effort": "high",
+                    },
+                },
+            )
+            task = {"id": "pre-provider-malformed", "external_command": ["must-not-run"]}
+
+            with patch("codex_batch_runner.external_json_command.subprocess.run") as subprocess_run:
+                with self.assertRaisesRegex(ValueError, "selected_command_mismatch"):
+                    run_external_json_command_task(cfg, task, "prompt", 1, execution_settings=settings)
+
+            subprocess_run.assert_not_called()
 
     def test_run_next_external_json_command_missing_command_fails_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

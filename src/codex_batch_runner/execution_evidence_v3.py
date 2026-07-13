@@ -78,9 +78,16 @@ def enforce_codex_command_identity(
 def enforce_external_command_identity(
     task: dict[str, Any], settings: Any, command: list[str], config: Any
 ) -> None:
-    if not exact_v3_settings(settings):
+    snapshot = getattr(settings, "selected_target_snapshot", None)
+    selector_selected = bool(
+        getattr(settings, "selection_rule", None) == "execution-target-selector-v1"
+        and isinstance(snapshot, dict)
+        and isinstance(snapshot.get("target"), dict)
+        and snapshot["target"].get("execution_backend") == "external-json-command"
+    )
+    if not selector_selected:
         return
-    selected = str(settings.model)
+    selected = str(getattr(settings, "model", None) or "")
     target = _exact_external_target(settings)
     commanded = external_command_identity(command, settings)
     selected_reasoning = reasoning_effort(settings)

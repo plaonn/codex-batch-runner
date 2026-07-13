@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from codex_batch_runner.config import Config
-from codex_batch_runner.execution_target_selector import TargetSelectionError, select_execution_target
+from codex_batch_runner.execution_target_selector import TargetSelectionError, select_execution_target, target_value
 from codex_batch_runner.model_requirements import resolve_execution_config
 from codex_batch_runner.worker_routing import resolve_worker_target
 
@@ -213,7 +213,7 @@ class ExecutionTargetSelectorTests(unittest.TestCase):
         self.assertEqual("b", selected.target_id)
         self.assertEqual("operator_preference_fallback", selected.selection_reason)
 
-    def test_unified_inventory_can_select_external_worker(self) -> None:
+    def test_unified_inventory_rejects_non_exact_external_worker(self) -> None:
         target = {
             "execution_surface": "external",
             "execution_backend": "external-json-command",
@@ -233,12 +233,39 @@ class ExecutionTargetSelectorTests(unittest.TestCase):
             "capabilities": {},
             "capability_evidence": {},
         }
-        config = loaded_config({"external-v1": target})
+        with self.assertRaisesRegex(ValueError, "automatic external target requires model, command_model, and reasoning_effort"):
+            loaded_config({"external-v1": target})
 
-        selected = resolve_worker_target(config, {"model_requirement_vector": requirement()})
+    def test_direct_target_parser_rejects_partial_identity_and_shell(self) -> None:
+        target = {
+            "execution_surface": "external", "execution_backend": "external-json-command",
+            "external_command": ["worker", "{model}", "{reasoning_effort}"],
+            "model": "exact", "trust_state": "trusted",
+            "static_fitness": {axis: 750 for axis in requirement()["quality_requirements"]},
+            "latency_score": 500, "cost_score": 500, "capabilities": {}, "capability_evidence": {},
+        }
+        with self.assertRaisesRegex(ValueError, "automatic external target requires"):
+            target_value("execution_target_inventory.targets.partial", "partial", target)
 
-        self.assertEqual("external-v1", selected.name)
-        self.assertEqual("external-json-command", selected.target["execution_backend"])
+        shell = dict(target)
+        shell.update({"execution_backend": "shell", "shell_command": ["true"]})
+        shell.pop("external_command")
+        with self.assertRaisesRegex(ValueError, "shell is not an automatic model target"):
+            target_value("execution_target_inventory.targets.shell", "shell", shell)
+
+    def test_selector_revalidates_mutated_inventory_before_selection(self) -> None:
+        config = loaded_config({"exact": {
+            "execution_surface": "external", "execution_backend": "external-json-command",
+            "external_command": ["worker", "{model}", "{reasoning_effort}"],
+            "model": "exact", "command_model": "exact", "reasoning_effort": "high",
+            "trust_state": "trusted",
+            "static_fitness": {axis: 750 for axis in requirement()["quality_requirements"]},
+            "latency_score": 500, "cost_score": 500, "capabilities": {}, "capability_evidence": {},
+        }})
+        config.execution_target_inventory["targets"]["exact"].pop("command_model")
+
+        with self.assertRaisesRegex(ValueError, "automatic external target requires"):
+            select_execution_target(config, {}, requirement())
 
     def test_exact_external_target_requires_identity_bound_command_placeholders(self) -> None:
         target = {
