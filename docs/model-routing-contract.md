@@ -211,6 +211,22 @@ Migration order는 `D0 -> D1 -> D2 -> D3 -> D4 -> D5 -> D6`입니다.
   `provider_reported_model`로 분리해 표시하고 adverse integrity를 보존합니다. Routing-cost v2와
   recommendation은 exact automatic/override 및 모든 contract-version 경계를 비교 key에
   포함하며 invalid comparison은 mutation 없이 explicit `insufficient`로 끝납니다.
+- D5 outcome projection v1은 append-only raw evidence에서 재생성하는 public-safe 파생
+  record입니다. `root_lineage_id`별 최신 projection 하나만 독립 표본으로 사용하고 first-pass와
+  recovery-inclusive outcome을 분리합니다. Exact `execution-evidence-v3`와 requirement region의
+  `0/250/500/750/1000` anchor만 capability cohort에 들어가며 v1/v2/legacy 및 다른 contract-version
+  cohort와 합치지 않습니다.
+- `capability-report`는 명시적 versioned decay policy, half-life, Beta prior, Dirichlet prior와
+  sanitized outcome projection을 입력받아 posterior를 deterministic하게 rebuild하는 read-only
+  surface입니다. Cached input, uncached input, output, reasoning token을 분리하고 log1p weighted
+  mean/variance, median/p80/p95/effective sample size를 출력합니다. Timeout/cancel latency는 censored로
+  남고 auth/quota/timeout/provider outage는 availability evidence일 뿐 quality failure가 아닙니다.
+- `exploration-report`는 explicit reviewed selection probability와 exploration policy version을
+  요구하는 read-only admission surface입니다. Eligible candidate, chosen/baseline target, probability,
+  probe kind를 기록할 수 있지만 target을 실행하거나 routing/config를 변경하지 않습니다. 한 project의
+  동시 probe 1개 제한, high failure-cost 금지, sensitive boundary 금지, budget, rollback/fallback,
+  strong objective verification, adverse target/region cooldown을 강제합니다. Contextual Thompson
+  Sampling은 D5에 포함하지 않습니다.
 - D6: end-to-end matrix, public/private safety, fresh independent review, operator config
   migration과 명시적 승인을 완료함.
 

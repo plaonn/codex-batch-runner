@@ -14,6 +14,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from .apply_plan import apply_queue_mutation_plan, build_apply_plan_report, render_apply_plan_report
+from .capability_belief import CapabilityBeliefError, rebuild_capability_report
 from .config import Config
 from .cooldown import MANUAL_COOLDOWN_SAFETY_OFFSET_SECONDS, cooldown_status, format_duration, parse_manual_cooldown
 from .doctor import build_doctor_report, render_doctor_report
@@ -117,6 +118,7 @@ from .routing_recommendation import (
 )
 from .parent_attention import acknowledge_parent_attention, deliver_parent_attention, list_parent_attention
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, build_routing_report, render_routing_report
+from .safe_exploration import ExplorationError, exploration_admission
 from .runner import RunOutcome, run_next
 from .state import (
     clear_global_cooldown,
@@ -333,6 +335,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     routing_report.add_argument("--json", action="store_true", help="print JSON")
     routing_report.set_defaults(func=cmd_routing_report)
+
+    capability_report = sub.add_parser(
+        "capability-report",
+        help="rebuild read-only capability posterior from sanitized outcome projections",
+    )
+    capability_report.add_argument("--outcome-projection-json", action="append", default=[], required=True, metavar="PATH")
+    capability_report.add_argument("--posterior-policy-json", required=True, metavar="PATH")
+    capability_report.add_argument("--as-of", required=True, help="ISO-8601 rebuild timestamp")
+    capability_report.set_defaults(func=cmd_capability_report)
+
+    exploration_report = sub.add_parser(
+        "exploration-report",
+        help="evaluate read-only safe exploration admission without selecting or running a target",
+    )
+    exploration_report.add_argument("--context-json", required=True, metavar="PATH")
+    exploration_report.add_argument("--exploration-policy-json", required=True, metavar="PATH")
+    exploration_report.set_defaults(func=cmd_exploration_report)
 
     recommend_routing = sub.add_parser(
         "recommend-routing",
@@ -3787,6 +3806,40 @@ def cmd_routing_report(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_routing_report(report), end="")
+    return 0
+
+
+def cmd_capability_report(config: Config, args: argparse.Namespace) -> int:
+    try:
+        records: list[dict] = []
+        for path in args.outcome_projection_json:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                records.extend(payload)
+            elif isinstance(payload, dict):
+                records.append(payload)
+            else:
+                raise CapabilityBeliefError("outcome projection JSON must be an object or array")
+        policy = json.loads(Path(args.posterior_policy_json).read_text(encoding="utf-8"))
+        report = rebuild_capability_report(records, policy=policy, as_of=args.as_of)
+    except (OSError, json.JSONDecodeError, CapabilityBeliefError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_exploration_report(config: Config, args: argparse.Namespace) -> int:
+    try:
+        context = json.loads(Path(args.context_json).read_text(encoding="utf-8"))
+        policy = json.loads(Path(args.exploration_policy_json).read_text(encoding="utf-8"))
+        if not isinstance(context, dict) or not isinstance(policy, dict):
+            raise ExplorationError("exploration context and policy must be JSON objects")
+        report = exploration_admission(context, policy)
+    except (OSError, json.JSONDecodeError, ExplorationError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 

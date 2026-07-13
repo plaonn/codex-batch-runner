@@ -12,6 +12,12 @@ Task JSON은 immutable v2 `model_requirement_vector` revision을 canonical stora
 
 `execution_target_inventory` schema v1은 snapshot id, `current|stale` status, constraint-registry version, target map을 가집니다. 각 native target은 stable target id, execution surface, trust state, per-axis `static_fitness`, latency/cost score와 capability evidence를 선언합니다. Codex target은 exact model/reasoning pair가 필수입니다. D2의 `static_fitness`는 `quality_evidence_status=static_non_learned`인 cold-start fitness일 뿐 학습된 capability나 posterior가 아닙니다. 모든 requirement quality axis를 충족한 target만 utility 비교에 들어갑니다. `quality_evidence_status=insufficient`이면 selector는 `insufficient_quality_evidence`로 중단합니다.
 
+D5 capability posterior도 automatic selector나 active inventory를 변경하지 않습니다. Sanitized
+outcome projection과 reviewed posterior policy를 `cbr capability-report`에 제공해 read-only snapshot을
+rebuild할 수 있습니다. Safe exploration admission은 `cbr exploration-report`로 별도 검사하며 실제
+probe dispatch, queue mutation, provider call은 수행하지 않습니다. 탐색률과 half-life/prior는 CLI나
+source의 암묵적 default가 아니라 입력 policy의 명시적 versioned 값이어야 합니다.
+
 Constraint evidence source는 `provider_declared`, `surface_reported`, fresh `operator_verified`, `empirically_observed`, `unknown` 중 하나입니다. `operator_verified` evidence는 timezone이 있는 미래 `expires_at`이 있어야 확정 충족 근거로 인정됩니다. 나머지 unknown/empirical evidence는 versioned registry의 `reject|probe_only|soft_penalty|ignore` policy를 따릅니다.
 
 - 로컬 config는 `execution_targets`에서 안정적인 target alias를 정의하고, `default_execution_config` 또는 `model_selection_rules`가 그 alias를 선택할 수 있습니다.
