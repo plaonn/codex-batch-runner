@@ -27,6 +27,7 @@ from codex_batch_runner.queue import create_task, dependency_status, list_tasks,
 from codex_batch_runner.review_bundle import build_review_bundle
 from codex_batch_runner.review_next import apply_mechanical_accept, detectable_safety_violation, review_fingerprint
 from codex_batch_runner.reviewer_codex import ReviewerCodexOutcome
+from codex_batch_runner.review_outcome_evidence import review_outcome_view
 from codex_batch_runner.state import load_state, set_global_cooldown, set_runner_pause
 
 
@@ -61,6 +62,44 @@ def write_config(
     }
     if codex_command is not None:
         data["codex_command"] = codex_command
+        if auto_review_codex_enabled:
+            axes = (
+                "semantic_reasoning", "context_integration", "planning_depth", "instruction_fidelity",
+                "tool_execution_reliability", "adversarial_detection",
+            )
+            data["execution_target_inventory"] = {
+                "schema_version": 1,
+                "snapshot_id": "sha256:test-reviewer-inventory",
+                "status": "current",
+                "constraint_registry_version": "test-reviewer-constraints-v1",
+                "targets": {
+                    "test-reviewer-exact": {
+                        "execution_surface": "codex",
+                        "model": "test-reviewer-model",
+                        "reasoning_effort": "high",
+                        "trust_state": "trusted",
+                        "static_fitness": {axis: 1000 for axis in axes},
+                        "latency_score": 500,
+                        "cost_score": 500,
+                        "capabilities": {
+                            "required_execution_surfaces": ["codex"],
+                            "interactive_input_required": False,
+                        },
+                        "capability_evidence": {
+                            "required_execution_surfaces": {"source": "surface_reported"},
+                            "interactive_input_required": {"source": "surface_reported"},
+                        },
+                    }
+                },
+            }
+            data["constraint_registry"] = {
+                "schema_version": 1,
+                "version": "test-reviewer-constraints-v1",
+                "constraints": {
+                    "required_execution_surfaces": {"unknown_policy": "reject"},
+                    "interactive_input_required": {"unknown_policy": "reject"},
+                },
+            }
     if extra:
         data.update(extra)
     if trigger_command is not None:
@@ -7862,6 +7901,15 @@ class CliTests(unittest.TestCase):
             self.assertEqual("pass", report["auto_review"]["reviewer_codex_result"]["decision"])
             self.assertEqual("accepted", task["review_status"])
             self.assertIn("reviewer Codex clear pass", task["review_reason"])
+            outcome = review_outcome_view(task)
+            self.assertEqual({"method": "reviewer_pass", "accepted": True}, outcome["acceptance"])
+            self.assertEqual("passed", outcome["objective_verification"]["status"])
+            self.assertEqual("pass", outcome["semantic_review"]["status"])
+            self.assertEqual(1, len(task["review_outcome_evidence_history"]))
+            self.assertEqual(
+                task["automatic_reviewer_execution_evidence_history"][-1]["cohort"]["cohort_id"],
+                outcome["cohort"]["components"]["reviewer_execution_cohort_id"],
+            )
 
     def test_review_next_reviewer_codex_needs_fix_records_summary_without_accepting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7888,6 +7936,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue(report["mutated"])
             self.assertEqual("needs_fix", report["auto_review"]["decision"])
             self.assertTrue(report["auto_review"]["reviewer_codex_invoked"])
+            outcome = review_outcome_view(task)
+            self.assertEqual({"method": "none", "accepted": False}, outcome["acceptance"])
+            self.assertEqual("needs_fix", outcome["semantic_review"]["status"])
+            self.assertEqual(1, len(task["review_outcome_evidence_history"]))
             self.assertEqual("unreviewed", task["review_status"])
             self.assertEqual("needs_fix", task["reviewer_codex"]["decision"])
             self.assertIn("Update docs/spec.md", task["reviewer_codex"]["suggested_fix_prompt"])

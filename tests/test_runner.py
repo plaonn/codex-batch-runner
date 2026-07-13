@@ -49,6 +49,45 @@ def make_config(tmp: str, mode: str, trigger_command: list[str] | None = None) -
     )
 
 
+def with_exact_reviewer_inventory(config: Config) -> Config:
+    axes = (
+        "semantic_reasoning", "context_integration", "planning_depth", "instruction_fidelity",
+        "tool_execution_reliability", "adversarial_detection",
+    )
+    return replace(
+        config,
+        execution_target_inventory={
+            "schema_version": 1,
+            "snapshot_id": "sha256:test-reviewer-inventory",
+            "status": "current",
+            "constraint_registry_version": "test-reviewer-constraints-v1",
+            "targets": {
+                "test-reviewer-exact": {
+                    "execution_surface": "codex", "model": "test-reviewer-model",
+                    "reasoning_effort": "high", "trust_state": "trusted",
+                    "static_fitness": {axis: 1000 for axis in axes},
+                    "latency_score": 500, "cost_score": 500,
+                    "quality_evidence_status": "static_non_learned",
+                    "capabilities": {"required_execution_surfaces": ["codex"], "interactive_input_required": False},
+                    "capability_evidence": {
+                        "required_execution_surfaces": {"source": "surface_reported"},
+                        "interactive_input_required": {"source": "surface_reported"},
+                    },
+                    "fitness_source": "static_non_learned",
+                    "target_id": "test-reviewer-exact",
+                }
+            },
+        },
+        constraint_registry={
+            "schema_version": 1, "version": "test-reviewer-constraints-v1",
+            "constraints": {
+                "required_execution_surfaces": {"unknown_policy": "reject"},
+                "interactive_input_required": {"unknown_policy": "reject"},
+            },
+        },
+    )
+
+
 def missing_command_config(tmp: str) -> Config:
     base = Config.load(root=Path(tmp))
     return Config(
@@ -463,11 +502,11 @@ class RunnerTests(unittest.TestCase):
             repo = Path(tmp) / "repo"
             repo.mkdir()
             init_repo(repo)
-            config = replace(
+            config = with_exact_reviewer_inventory(replace(
                 make_config(tmp, "reviewer_needs_human"),
                 auto_review_codex_enabled=True,
                 auto_review_codex_max_calls_per_run=1,
-            )
+            ))
             create_clean_completed_task(config, repo, "reviewable")
 
             first = run_next(config)
@@ -493,11 +532,11 @@ class RunnerTests(unittest.TestCase):
             repo = Path(tmp) / "repo"
             repo.mkdir()
             init_repo(repo)
-            config = replace(
+            config = with_exact_reviewer_inventory(replace(
                 make_config(tmp, "reviewer_needs_human"),
                 auto_review_codex_enabled=True,
                 auto_review_codex_max_calls_per_run=1,
-            )
+            ))
             old = create_clean_completed_task(config, repo, "old-review")
             old["completed_at"] = "2026-01-01T00:00:00+00:00"
             save_task(config, old)

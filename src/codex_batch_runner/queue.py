@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import Config
 from .events import emit_task_event, transition_payload
-from .model_requirements import issue_native_requirement_v2, task_requirement_metadata
+from .model_requirements import derive_model_requirement_vector, issue_native_requirement_v2, task_requirement_metadata
 from .fs import ensure_dir, read_json, write_json_atomic
 from .lock import lock_pid, pid_exists
 from .timeutil import iso_now, parse_time, utc_now
@@ -75,7 +75,7 @@ def load_task(config: Config, task_id: str) -> dict:
     return task
 
 
-def save_task(config: Config, task: dict) -> None:
+def save_task(config: Config, task: dict, *, touch_updated_at: bool = True) -> None:
     path = task_path(config, task["id"])
     existing = read_json(path)
     if isinstance(existing, dict):
@@ -90,7 +90,8 @@ def save_task(config: Config, task: dict) -> None:
             raise ValueError("automatic_reviewer_work_units must be a list")
         if new_reviewer_units[: len(existing_reviewer_units)] != existing_reviewer_units:
             raise ValueError("automatic reviewer work units are immutable after issuance")
-    task["updated_at"] = iso_now()
+    if touch_updated_at:
+        task["updated_at"] = iso_now()
     write_json_atomic(path, task)
 
 
@@ -345,7 +346,8 @@ def create_task(
         routing_override=routing_override,
     )
     if not requirement_metadata and execution_backend == "codex":
-        requirement_metadata = {"model_requirement_vector": issue_native_requirement_v2(task)}
+        issuer = issue_native_requirement_v2 if task.get("subtask_type") else derive_model_requirement_vector
+        requirement_metadata = {"model_requirement_vector": issuer(task)}
     task.update(requirement_metadata)
     write_json_atomic(path, task)
     emit_task_event(

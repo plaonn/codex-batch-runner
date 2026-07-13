@@ -1158,12 +1158,7 @@ def run_reviewer_phase(
     reviewer_work_unit = issue_automatic_reviewer_work_unit(config, task)
     outcome = run_reviewer_codex(config, reviewer_work_unit, bundle, calls_used_this_run=1)
     if outcome.rate_limited:
-        record_automatic_reviewer_evidence(
-            config,
-            task_id,
-            {"decision": "failed_review", "confidence": "low"},
-            outcome.execution_evidence,
-        )
+        store_automatic_reviewer_execution_evidence(config, task_id, outcome.execution_evidence)
         cooldown_until = add_seconds(config.auto_review_codex_cooldown_seconds)
         mark_reviewer_codex_rate_limit(config, cooldown_until, task_id)
         record_reviewer_summary(
@@ -1177,6 +1172,10 @@ def run_reviewer_phase(
                 "execution_evidence": outcome.execution_evidence,
             },
             bundle=bundle,
+        )
+        record_final_reviewer_outcome(
+            config, task_id, {"decision": "failed_review", "confidence": "low"},
+            outcome.execution_evidence, objective_status="unavailable",
         )
         return reviewer_phase_report(
             decision="failed_review",
@@ -1205,7 +1204,7 @@ def run_reviewer_phase(
     }
     if outcome.execution_evidence:
         reviewer_result["execution_evidence"] = outcome.execution_evidence
-    record_automatic_reviewer_evidence(config, task_id, reviewer_result, outcome.execution_evidence)
+    store_automatic_reviewer_execution_evidence(config, task_id, outcome.execution_evidence)
     if reviewer_clear_pass(reviewer_result):
         applied = apply_reviewer_accept(config, task_id, expected_fingerprint, reviewer_result)
         return reviewer_phase_report(
@@ -1223,6 +1222,15 @@ def run_reviewer_phase(
 
     if reviewer_result.get("decision") == "needs_fix":
         applied = record_and_maybe_enqueue_auto_fix(config, task_id, expected_fingerprint, reviewer_result)
+        final_result = {
+            **reviewer_result,
+            "decision": applied.get("decision") or "needs_fix",
+            "reason": applied.get("reason") or reviewer_result.get("reason"),
+        }
+        record_final_reviewer_outcome(
+            config, task_id, final_result, outcome.execution_evidence,
+            objective_status="unavailable",
+        )
         return reviewer_phase_report(
             decision=applied["decision"],
             reason=applied["reason"],
@@ -1237,6 +1245,10 @@ def run_reviewer_phase(
         )
 
     record_reviewer_summary(config, task_id, reviewer_result, bundle=bundle)
+    record_final_reviewer_outcome(
+        config, task_id, reviewer_result, outcome.execution_evidence,
+        objective_status="unavailable",
+    )
     return reviewer_phase_report(
         decision=str(reviewer_result.get("decision") or "failed_review"),
         reason=str(reviewer_result.get("reason") or outcome.reason),
@@ -1331,15 +1343,20 @@ def apply_reviewer_accept(
     )
     current = review_fingerprint(task, bundle)
     if current != expected_fingerprint:
+        final_result = {
+            **reviewer_result,
+            "decision": "needs_human",
+            "reason": "stale review state after reviewer Codex pass",
+        }
         record_reviewer_summary(
             config,
             task_id,
-            {
-                **reviewer_result,
-                "decision": "needs_human",
-                "reason": "stale review state after reviewer Codex pass",
-            },
+            final_result,
             bundle=bundle,
+        )
+        record_final_reviewer_outcome(
+            config, task_id, final_result, reviewer_result.get("execution_evidence"),
+            objective_status="unavailable",
         )
         return {
             "mutated": False,
@@ -1349,15 +1366,20 @@ def apply_reviewer_accept(
         }
     gates = mechanical_gates(task, bundle)
     if not all(gate["ok"] for gate in gates):
+        final_result = {
+            **reviewer_result,
+            "decision": "needs_human",
+            "reason": "mechanical gates no longer pass after reviewer Codex pass",
+        }
         record_reviewer_summary(
             config,
             task_id,
-            {
-                **reviewer_result,
-                "decision": "needs_human",
-                "reason": "mechanical gates no longer pass after reviewer Codex pass",
-            },
+            final_result,
             bundle=bundle,
+        )
+        record_final_reviewer_outcome(
+            config, task_id, final_result, reviewer_result.get("execution_evidence"),
+            objective_status="failed",
         )
         return {
             "mutated": False,
@@ -1391,6 +1413,20 @@ def apply_reviewer_accept(
         post_accept,
         accepted_reason="reviewer Codex returned high-confidence pass and mechanical gates passed",
     )
+    final_task = load_task(config, task_id)
+    if decision == "accepted":
+        append_final_reviewer_outcome(
+            final_task, reviewer_result, reviewer_result.get("execution_evidence"),
+            acceptance_method="reviewer_pass", accepted=True, objective_status="passed",
+        )
+    else:
+        append_final_reviewer_outcome(
+            final_task,
+            {**reviewer_result, "decision": "needs_human", "reason": reason},
+            reviewer_result.get("execution_evidence"),
+            acceptance_method="none", accepted=False, objective_status="unavailable",
+        )
+    save_task(config, final_task)
     return {
         "mutated": True,
         "decision": decision,
@@ -1458,14 +1494,13 @@ def issue_automatic_reviewer_work_unit(config: Config, task: dict[str, Any]) -> 
     if not isinstance(history, list):
         raise ValueError("automatic_reviewer_work_units must be a list")
     history.append(work_unit)
-    save_task(config, task)
+    save_task(config, task, touch_updated_at=False)
     return work_unit
 
 
-def record_automatic_reviewer_evidence(
+def store_automatic_reviewer_execution_evidence(
     config: Config,
     task_id: str,
-    reviewer_result: dict[str, Any],
     execution_evidence: dict[str, Any] | None,
 ) -> None:
     if not isinstance(execution_evidence, dict):
@@ -1477,6 +1512,36 @@ def record_automatic_reviewer_evidence(
     evidence_id = execution_evidence.get("evidence_id")
     if not any(isinstance(item, dict) and item.get("evidence_id") == evidence_id for item in history):
         history.append(execution_evidence)
+    save_task(config, task, touch_updated_at=False)
+
+
+def record_final_reviewer_outcome(
+    config: Config,
+    task_id: str,
+    reviewer_result: dict[str, Any],
+    execution_evidence: dict[str, Any] | None,
+    *,
+    objective_status: str,
+) -> None:
+    task = load_task(config, task_id)
+    append_final_reviewer_outcome(
+        task, reviewer_result, execution_evidence,
+        acceptance_method="none", accepted=False, objective_status=objective_status,
+    )
+    save_task(config, task)
+
+
+def append_final_reviewer_outcome(
+    task: dict[str, Any],
+    reviewer_result: dict[str, Any],
+    execution_evidence: dict[str, Any] | None,
+    *,
+    acceptance_method: str,
+    accepted: bool,
+    objective_status: str,
+) -> None:
+    if not isinstance(execution_evidence, dict):
+        return
     identity = execution_evidence.get("identity") if isinstance(execution_evidence.get("identity"), dict) else {}
     provider = identity.get("provider_reported_model") if isinstance(identity.get("provider_reported_model"), dict) else {}
     actual_model = provider.get("value")
@@ -1488,9 +1553,9 @@ def record_automatic_reviewer_evidence(
         semantic_status = "failed_review"
     outcome = build_review_outcome_evidence(
         task,
-        acceptance_method="none",
-        accepted=False,
-        objective_status="unavailable",
+        acceptance_method=acceptance_method,
+        accepted=accepted,
+        objective_status=objective_status,
         semantic_status=semantic_status,
         reviewer_kind="codex",
         reviewer_role=str(task.get("reviewer_role") or "reviewer"),
@@ -1504,7 +1569,6 @@ def record_automatic_reviewer_evidence(
         reviewer_execution_cohort_id=str(cohort.get("cohort_id") or "legacy-reviewer-execution-unknown"),
     )
     attach_review_outcome_evidence(task, outcome)
-    save_task(config, task)
 
 
 def enqueue_auto_fix_task(
