@@ -12,6 +12,7 @@ from .queue import (
     capacity_blockers,
     dependency_status,
     is_in_cooldown,
+    rejected_discarded_result,
     task_project_id,
 )
 from .routing_report import render_table
@@ -277,7 +278,7 @@ def _needs_review(task: dict[str, Any]) -> bool:
     return (
         task.get("status") == "completed"
         and not task.get("resolution")
-        and not _rejected_discarded_result(task)
+        and not rejected_discarded_result(task)
         and _review_status(task) in {"unreviewed", "rejected", "needs_followup"}
     )
 
@@ -295,17 +296,6 @@ def _review_status(task: dict[str, Any]) -> str:
     if task.get("status") == "completed":
         return str(task.get("review_status") or "unreviewed")
     return str(task.get("review_status") or "")
-
-
-def _rejected_discarded_result(task: dict[str, Any]) -> bool:
-    return (
-        task.get("status") in {"completed", "archived"}
-        and task.get("review_status") == "rejected"
-        and task.get("execution_mode") == "git_worktree"
-        and task.get("execution_worktree_status") == "cleaned"
-        and task.get("execution_cleanup_kind") == "discard"
-        and task.get("execution_cleanup_result_applied") is False
-    )
 
 
 def _yes_no(value: object) -> str:

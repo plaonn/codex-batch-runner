@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from codex_batch_runner.cli import parse_model_requirement_args, parse_routing_override_arg
 from codex_batch_runner.config import Config
@@ -42,6 +43,11 @@ def requirement_v2(revision_id: str = "reqrev-issued-1") -> dict:
 
 
 class ModelRequirementV2Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._cbr_config_patcher = patch.dict("os.environ", {"CBR_CONFIG": ""}, clear=False)
+        self._cbr_config_patcher.start()
+        self.addCleanup(self._cbr_config_patcher.stop)
+
     def test_cli_accepts_complete_v2_and_override_without_defaults(self) -> None:
         args = SimpleNamespace(
             model_requirement_json=json.dumps(requirement_v2()),

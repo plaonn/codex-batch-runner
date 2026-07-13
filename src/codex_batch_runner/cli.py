@@ -81,6 +81,7 @@ from .queue import (
     TASK_PRIORITIES,
     ROUTING_RISKS,
     ROUTING_SIZES,
+    rejected_discarded_result,
     VERIFICATION_SCOPES,
     archive_task,
     capacity_blockers,
@@ -3655,17 +3656,6 @@ def accepted_worktree_not_applied(task: dict) -> bool:
         task.get("execution_mode") == "git_worktree"
         and review_status(task) == "accepted"
         and task.get("execution_apply_status") != "applied"
-    )
-
-
-def rejected_discarded_result(task: dict) -> bool:
-    return (
-        task.get("status") in {"completed", "archived"}
-        and task.get("review_status") == "rejected"
-        and task.get("execution_mode") == "git_worktree"
-        and task.get("execution_worktree_status") == "cleaned"
-        and task.get("execution_cleanup_kind") == "discard"
-        and task.get("execution_cleanup_result_applied") is False
     )
 
 

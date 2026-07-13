@@ -16,6 +16,7 @@ from .queue import (
     dependency_status,
     list_tasks,
     load_task,
+    rejected_discarded_result,
     save_task,
     task_labels,
     task_project_id,
@@ -400,7 +401,12 @@ def no_selection_report(
 
 
 def is_review_needed(task: dict) -> bool:
-    return task.get("status") == "completed" and not task.get("resolution") and review_status(task) in REVIEW_NEEDED_STATUSES
+    return (
+        task.get("status") == "completed"
+        and not task.get("resolution")
+        and not rejected_discarded_result(task)
+        and review_status(task) in REVIEW_NEEDED_STATUSES
+    )
 
 
 def apply_filters(tasks: list[dict], filters: Namespace | None) -> list[dict]:

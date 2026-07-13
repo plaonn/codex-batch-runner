@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_batch_runner.config import Config
 from codex_batch_runner.execution_target_selector import TargetSelectionError, select_execution_target, target_value
@@ -92,6 +93,11 @@ def loaded_config(targets: dict, *, policies: dict | None = None) -> Config:
 
 
 class ExecutionTargetSelectorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._cbr_config_patcher = patch.dict("os.environ", {"CBR_CONFIG": ""}, clear=False)
+        self._cbr_config_patcher.start()
+        self.addCleanup(self._cbr_config_patcher.stop)
+
     def test_automatic_codex_target_is_exact_and_command_ready(self) -> None:
         config = loaded_config({"codex-high-v1": codex_target("gpt-exact")})
 

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_batch_runner.config import Config
 from codex_batch_runner.cli import main
@@ -83,6 +84,11 @@ def recommendation(config: Config, records: list[dict], *, surface: str = "cbr_b
 
 
 class RoutingRecommendationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._cbr_config_patcher = patch.dict("os.environ", {"CBR_CONFIG": ""}, clear=False)
+        self._cbr_config_patcher.start()
+        self.addCleanup(self._cbr_config_patcher.stop)
+
     def test_returns_explicit_model_effort_fields_without_inventing_token_cost(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(tmp)

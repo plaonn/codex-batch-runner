@@ -7473,6 +7473,38 @@ class CliTests(unittest.TestCase):
             self.assertIn("selected: false", output)
             self.assertIn("no completed task needs review", output)
 
+    def test_rejected_discarded_result_is_closed_across_review_surfaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "discarded work", tmp, task_id="discarded")
+            task.update(
+                {
+                    "status": "completed",
+                    "review_status": "rejected",
+                    "execution_mode": "git_worktree",
+                    "execution_worktree_status": "cleaned",
+                    "execution_cleanup_kind": "discard",
+                    "execution_cleanup_result_applied": False,
+                }
+            )
+            save_task(config, task)
+
+            review_code, review_output = run_cli(
+                ["--config", str(config_path), "review-next", "--dry-run", "--json"]
+            )
+            status_code, status_output = run_cli(["--config", str(config_path), "status", "--json"])
+            doctor_code, doctor_output = run_cli(["--config", str(config_path), "doctor", "--json"])
+
+            self.assertEqual(0, review_code)
+            self.assertFalse(json.loads(review_output)["selected"])
+            self.assertEqual(0, status_code)
+            self.assertEqual(0, json.loads(status_output)["review"]["needs_review_count"])
+            self.assertEqual(0, doctor_code)
+            doctor = json.loads(doctor_output)
+            self.assertEqual(0, doctor["auto_review"]["reviewable_completed"])
+            self.assertEqual(0, doctor["tasks"]["needs_review_completed"])
+
     def test_review_next_dry_run_filters_by_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

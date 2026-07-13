@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from codex_batch_runner.config import Config
 from codex_batch_runner.execution_evidence import derive_execution_evidence_rows, load_execution_evidence_records
@@ -23,6 +24,11 @@ from codex_batch_runner.routing_report import summarize_evaluation_diagnostics
 
 
 class ExecutionEvidenceV2Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._cbr_config_patcher = patch.dict("os.environ", {"CBR_CONFIG": ""}, clear=False)
+        self._cbr_config_patcher.start()
+        self.addCleanup(self._cbr_config_patcher.stop)
+
     def test_codex_capture_records_provider_observed_model_and_usage(self) -> None:
         task = task_fixture()
         result = SimpleNamespace(

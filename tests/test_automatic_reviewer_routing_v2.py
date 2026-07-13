@@ -81,6 +81,11 @@ def exact_review_evidence(config: Config, parent: dict, decision: str = "pass") 
 
 
 class AutomaticReviewerRoutingV2Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._cbr_config_patcher = patch.dict("os.environ", {"CBR_CONFIG": ""}, clear=False)
+        self._cbr_config_patcher.start()
+        self.addCleanup(self._cbr_config_patcher.stop)
+
     def test_final_outcome_lifecycle_accept_stale_gate_failure_and_needs_fix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

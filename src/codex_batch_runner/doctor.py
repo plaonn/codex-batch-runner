@@ -14,7 +14,13 @@ from .execution_evidence_v2 import reporting_evidence_view
 from .fs import read_json
 from .lock import lock_status
 from .model_requirements import SAFE_CONFIG_OVERRIDE_KEYS, command_options, resolve_execution_config
-from .queue import RUNNABLE_STATUSES, capacity_blockers, dependency_status, is_in_cooldown
+from .queue import (
+    RUNNABLE_STATUSES,
+    capacity_blockers,
+    dependency_status,
+    is_in_cooldown,
+    rejected_discarded_result,
+)
 from .state import load_state
 from .timeutil import parse_time, utc_now
 from .transcript import sanitize
@@ -590,6 +596,7 @@ def task_summary(tasks: list[dict[str, Any]], by_id: dict[Any, dict[str, Any]], 
         if (
             status == "completed"
             and not task.get("resolution")
+            and not rejected_discarded_result(task)
             and review_status(task) in {"unreviewed", "rejected", "needs_followup"}
         ):
             needs_review_count += 1
@@ -627,6 +634,7 @@ def auto_review_summary(tasks: list[dict[str, Any]], config: Config) -> dict[str
         for task in tasks
         if task.get("status") == "completed"
         and not task.get("resolution")
+        and not rejected_discarded_result(task)
         and review_status(task) in {"unreviewed", "rejected", "needs_followup"}
     )
     return {

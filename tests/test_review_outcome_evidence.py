@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_batch_runner.config import Config
 from codex_batch_runner.evaluation import derive_evaluation_row
@@ -54,6 +55,11 @@ def reviewer_pass(task_value: dict, *, anchor: bool = True) -> dict:
 
 
 class ReviewOutcomeEvidenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._cbr_config_patcher = patch.dict("os.environ", {"CBR_CONFIG": ""}, clear=False)
+        self._cbr_config_patcher.start()
+        self.addCleanup(self._cbr_config_patcher.stop)
+
     def test_append_only_history_and_unknown_identity_do_not_infer_role_or_plan(self) -> None:
         value = task("review-append")
         record = build_review_outcome_evidence(

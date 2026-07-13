@@ -78,6 +78,11 @@ def task() -> dict:
 
 
 class ExecutionEvidenceV3Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._cbr_config_patcher = patch.dict("os.environ", {"CBR_CONFIG": ""}, clear=False)
+        self._cbr_config_patcher.start()
+        self.addCleanup(self._cbr_config_patcher.stop)
+
     def test_codex_command_mismatch_fails_before_provider_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = config(Path(tmp))
