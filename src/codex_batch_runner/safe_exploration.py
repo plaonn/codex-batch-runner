@@ -8,7 +8,15 @@ EXPLORATION_DECISION_SCHEMA_VERSION = 1
 EXPLORATION_CONTRACT_VERSION = "safe-exploration-v1"
 PROBE_KINDS = {"downshift_probe", "availability_probe", "uncertainty_probe", "upshift_guard"}
 ALLOWED_TARGET_STATES = {"probe_only", "trusted"}
-PROHIBITED_BOUNDARIES = {"destructive", "security", "financial", "deployment"}
+PROHIBITED_BOUNDARIES = {
+    "credentials",
+    "deployment",
+    "destructive",
+    "financial",
+    "privacy",
+    "public_private",
+    "security",
+}
 
 
 class ExplorationError(ValueError):
@@ -27,7 +35,12 @@ def exploration_admission(context: dict[str, Any], policy: dict[str, Any]) -> di
         reasons.append("hard_constraints_not_eligible")
     if context.get("failure_cost") not in {"low", "medium"}:
         reasons.append("failure_cost_not_eligible")
-    boundaries = set(context.get("boundaries") or [])
+    raw_boundaries = context.get("boundaries")
+    if not isinstance(raw_boundaries, list) or any(
+        not isinstance(item, str) or not item for item in raw_boundaries
+    ):
+        raise ExplorationError("boundaries must be a list of non-empty strings")
+    boundaries = set(raw_boundaries)
     if boundaries & PROHIBITED_BOUNDARIES:
         reasons.append("prohibited_boundary")
     if context.get("objective_verification") != "strong":

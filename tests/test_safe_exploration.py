@@ -51,6 +51,26 @@ class SafeExplorationTests(unittest.TestCase):
         self.assertIn("failure_cost_not_eligible", admission["reasons"])
         self.assertIn("prohibited_boundary", admission["reasons"])
 
+        for boundary in (
+            "credentials",
+            "deployment",
+            "destructive",
+            "financial",
+            "privacy",
+            "public_private",
+            "security",
+        ):
+            with self.subTest(boundary=boundary):
+                decision = exploration_admission(context(boundaries=[boundary]), POLICY)
+                self.assertFalse(decision["admitted"])
+                self.assertIn("prohibited_boundary", decision["reasons"])
+
+    def test_boundaries_require_a_list_of_non_empty_strings(self) -> None:
+        for boundaries in ("security", [""], [1]):
+            with self.subTest(boundaries=boundaries):
+                with self.assertRaisesRegex(ExplorationError, "boundaries must be"):
+                    exploration_admission(context(boundaries=boundaries), POLICY)
+
     def test_concurrency_budget_and_adverse_cooldown_guards(self) -> None:
         admission = exploration_admission(context(active_project_probes=1, budget_remaining=0, same_target_region_adverse=True), POLICY)
         self.assertEqual(
