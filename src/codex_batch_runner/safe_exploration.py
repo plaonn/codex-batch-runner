@@ -18,6 +18,8 @@ class ExplorationError(ValueError):
 def exploration_admission(context: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
     """Evaluate bounded exploration; policy values are explicit reviewed inputs."""
     _validate_policy(policy)
+    budget_remaining = _non_negative_integer(context, "budget_remaining")
+    active_project_probes = _non_negative_integer(context, "active_project_probes")
     reasons: list[str] = []
     if context.get("probe_kind") not in PROBE_KINDS:
         reasons.append("invalid_probe_kind")
@@ -32,11 +34,11 @@ def exploration_admission(context: dict[str, Any], policy: dict[str, Any]) -> di
         reasons.append("objective_verification_not_strong")
     if not context.get("rollback_available") or not context.get("baseline_fallback_available"):
         reasons.append("recovery_guard_missing")
-    if int(context.get("budget_remaining", 0)) <= 0:
+    if budget_remaining <= 0:
         reasons.append("budget_exhausted")
     if context.get("target_state") not in ALLOWED_TARGET_STATES:
         reasons.append("target_state_not_eligible")
-    if int(context.get("active_project_probes", 0)) >= 1:
+    if active_project_probes >= 1:
         reasons.append("project_probe_concurrency_limit")
     if context.get("same_target_region_adverse"):
         reasons.append("same_target_region_cooldown")
@@ -94,6 +96,13 @@ def _validate_policy(policy: dict[str, Any]) -> None:
     probability = policy.get("selection_probability")
     if not isinstance(probability, (int, float)) or isinstance(probability, bool) or not 0 < probability <= 1:
         raise ExplorationError("explicit reviewed selection probability is required")
+
+
+def _non_negative_integer(context: dict[str, Any], field: str) -> int:
+    value = context.get(field)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ExplorationError(f"{field} must be a non-negative integer")
+    return value
 
 
 def _stable_id(value: object) -> str:
