@@ -496,6 +496,52 @@ def derive_model_requirement_vector(task: dict[str, Any], *, reviewer: bool = Fa
     return legacy_requirement_projection(legacy)
 
 
+def issue_native_requirement_v2(task: dict[str, Any], *, work_unit_id: str | None = None) -> dict[str, Any]:
+    """Issue a role-agnostic requirement revision for one newly-created work unit."""
+    low = low_cost_candidate(task)
+    high = high_risk_terms(task) or normalized_task_value(task.get("routing_risk")) == "high"
+    score = 750 if high else 250 if low else 500
+    confidence = 750
+    evidence_codes: list[str] = []
+    if high:
+        evidence_codes.append("AMBIGUOUS_CONTRACT")
+    if normalized_task_value(task.get("routing_size")) in {"large", "xlarge"}:
+        evidence_codes.append("MULTI_MODULE")
+    if task.get("subtask_type") or task.get("depends_on"):
+        evidence_codes.append("DEPENDENT_STAGES")
+    if any(term in normalized_task_value(task) for term in ("public", "private", "credential", "secret")):
+        evidence_codes.append("PUBLIC_PRIVATE_BOUNDARY")
+    if task.get("verification_scope"):
+        evidence_codes.append("ADVERSARIAL_REVIEW")
+    evidence_codes = sorted(set(evidence_codes))
+    canonical = {
+        "schema_version": 2,
+        "derivation_version": REQUIREMENT_V2_DERIVATION_VERSION,
+        "quality_requirements": {
+            axis: {
+                "score": score,
+                "confidence": confidence,
+                "anchor": score,
+                "evidence_codes": evidence_codes,
+            }
+            for axis in REQUIREMENT_V2_AXES
+        },
+        "hard_constraints": {
+            "required_execution_surfaces": ["codex"],
+            "interactive_input_required": False,
+        },
+        "utility_preferences": {
+            "latency_weight": 750 if low else 250,
+            "cost_weight": 750 if low else 250,
+        },
+    }
+    revision_source = {"requirement": canonical, "work_unit_id": str(work_unit_id or task.get("id") or "")}
+    canonical["revision_id"] = "reqrev-sha256:" + hashlib.sha256(
+        json.dumps(revision_source, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return requirement_v2_value("model_requirement_vector", canonical)
+
+
 def legacy_requirement_projection(value: object) -> dict[str, Any]:
     legacy = model_requirement_vector_value("legacy_requirement", value)
     unknown_axis = {"score": 0, "confidence": 0, "anchor": 0, "evidence_codes": []}

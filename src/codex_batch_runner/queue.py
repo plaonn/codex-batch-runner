@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import Config
 from .events import emit_task_event, transition_payload
-from .model_requirements import derive_model_requirement_vector, task_requirement_metadata
+from .model_requirements import issue_native_requirement_v2, task_requirement_metadata
 from .fs import ensure_dir, read_json, write_json_atomic
 from .lock import lock_pid, pid_exists
 from .timeutil import iso_now, parse_time, utc_now
@@ -84,6 +84,12 @@ def save_task(config: Config, task: dict) -> None:
                 raise ValueError(
                     f"{field} is immutable after enqueue; create a new task revision instead"
                 )
+        existing_reviewer_units = existing.get("automatic_reviewer_work_units", [])
+        new_reviewer_units = task.get("automatic_reviewer_work_units", [])
+        if not isinstance(existing_reviewer_units, list) or not isinstance(new_reviewer_units, list):
+            raise ValueError("automatic_reviewer_work_units must be a list")
+        if new_reviewer_units[: len(existing_reviewer_units)] != existing_reviewer_units:
+            raise ValueError("automatic reviewer work units are immutable after issuance")
     task["updated_at"] = iso_now()
     write_json_atomic(path, task)
 
@@ -339,7 +345,7 @@ def create_task(
         routing_override=routing_override,
     )
     if not requirement_metadata and execution_backend == "codex":
-        requirement_metadata = {"model_requirement_vector": derive_model_requirement_vector(task)}
+        requirement_metadata = {"model_requirement_vector": issue_native_requirement_v2(task)}
     task.update(requirement_metadata)
     write_json_atomic(path, task)
     emit_task_event(

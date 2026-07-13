@@ -17,18 +17,6 @@
       "review_strictness": "medium"
     }
   },
-  "review_model_requirement_vector": {
-    "source": "config_review_default",
-    "confidence": "medium",
-    "dimensions": {
-      "reasoning_depth": "high",
-      "context_need": "medium",
-      "tool_reliability": "high",
-      "latency_priority": "medium",
-      "cost_sensitivity": "low",
-      "review_strictness": "high"
-    }
-  },
   "execution_targets": {
     "balanced_current": {
       "model": "gpt-5",

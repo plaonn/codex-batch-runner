@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .codex import format_command_with_resolved_config, parse_json_line
+from .codex import format_command, parse_json_line
 from .config import Config
 from .fs import ensure_dir
 from .limits import matched_rate_limit_markers
+from .execution_evidence_v3 import build_codex_execution_evidence_v3, enforce_codex_command_identity
+from .model_requirements import command_options, insert_command_options, resolve_execution_config
 from .timeutil import iso_now
 from .transcript import sanitize
 
@@ -27,6 +29,7 @@ class ReviewerCodexOutcome:
     rate_limited: bool = False
     rate_limit_markers: list[str] | None = None
     log_path: Path | None = None
+    execution_evidence: dict[str, Any] | None = None
 
 
 def build_reviewer_prompt(
@@ -92,7 +95,23 @@ def run_reviewer_codex(
     log_dir = ensure_dir(config.log_dir / task_id)
     log_path = log_dir / f"reviewer-{calls_used_this_run}.jsonl"
     try:
-        command = format_command_with_resolved_config(config.codex_command, {"id": task_id}, prompt, config, reviewer=True)
+        settings = resolve_execution_config(config, task)
+        snapshot = settings.selected_target_snapshot or {}
+        target = snapshot.get("target") if isinstance(snapshot.get("target"), dict) else {}
+        if (
+            settings.requirement_vector.get("schema_version") != 2
+            or settings.requirement_vector.get("derivation_identity")
+            or settings.selection_rule != "execution-target-selector-v1"
+            or not settings.model
+            or not settings.config_overrides
+            or not settings.config_overrides.get("model_reasoning_effort")
+            or target.get("model") != settings.model
+            or target.get("reasoning_effort") != settings.config_overrides.get("model_reasoning_effort")
+        ):
+            raise ValueError("automatic reviewer requires native v2 and an exact model+reasoning target")
+        base = format_command(config.codex_command, task, prompt)
+        command = [*insert_command_options(base[:-1], command_options(settings)), base[-1]]
+        enforce_codex_command_identity(task, settings, command, config)
     except ValueError as exc:
         log_path.write_text("", encoding="utf-8")
         return ReviewerCodexOutcome(
@@ -101,6 +120,7 @@ def run_reviewer_codex(
             reason=sanitize(f"invalid reviewer execution config: {exc}"),
             result=None,
             log_path=log_path,
+            execution_evidence=None,
         )
     events: list[dict[str, Any]] = []
     stderr = ""
@@ -125,6 +145,9 @@ def run_reviewer_codex(
             reason="reviewer Codex timed out",
             result=None,
             log_path=log_path,
+            execution_evidence=build_codex_execution_evidence_v3(
+                task, SimpleReviewerResult([]), settings, config
+            ),
         )
     except OSError as exc:
         log_path.write_text("", encoding="utf-8")
@@ -134,6 +157,9 @@ def run_reviewer_codex(
             reason=sanitize(f"reviewer Codex failed to start: {exc}"),
             result=None,
             log_path=log_path,
+            execution_evidence=build_codex_execution_evidence_v3(
+                task, SimpleReviewerResult([]), settings, config
+            ),
         )
 
     log_path.write_text(process.stdout, encoding="utf-8")
@@ -154,6 +180,9 @@ def run_reviewer_codex(
             rate_limited=True,
             rate_limit_markers=markers,
             log_path=log_path,
+            execution_evidence=build_codex_execution_evidence_v3(
+                task, SimpleReviewerResult(events), settings, config
+            ),
         )
 
     candidate = extract_reviewer_result(events)
@@ -164,6 +193,9 @@ def run_reviewer_codex(
             reason="reviewer Codex did not return reviewer JSON",
             result=None,
             log_path=log_path,
+            execution_evidence=build_codex_execution_evidence_v3(
+                task, SimpleReviewerResult(events), settings, config
+            ),
         )
 
     valid = validate_reviewer_result(candidate, task_id)
@@ -174,6 +206,9 @@ def run_reviewer_codex(
             reason=valid,
             result=sanitize_reviewer_result(candidate),
             log_path=log_path,
+            execution_evidence=build_codex_execution_evidence_v3(
+                task, SimpleReviewerResult(events), settings, config
+            ),
         )
 
     result = sanitize_reviewer_result(candidate)
@@ -183,7 +218,15 @@ def run_reviewer_codex(
         reason=str(result["reason"]),
         result=result,
         log_path=log_path,
+        execution_evidence=build_codex_execution_evidence_v3(
+            task, SimpleReviewerResult(events), settings, config
+        ),
     )
+
+
+@dataclass(frozen=True)
+class SimpleReviewerResult:
+    events: list[dict[str, Any]]
 
 
 def extract_reviewer_result(events: list[dict[str, Any]]) -> dict[str, Any] | None:

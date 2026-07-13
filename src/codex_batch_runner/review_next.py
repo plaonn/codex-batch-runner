@@ -26,6 +26,8 @@ from .queue import (
 from .review_bundle import build_review_bundle, sanitize_value
 from .review_followup import build_review_follow_up_action
 from .reviewer_codex import reviewer_clear_pass, run_reviewer_codex
+from .model_requirements import issue_native_requirement_v2
+from .review_outcome_evidence import attach_review_outcome_evidence, build_review_outcome_evidence
 from .state import in_global_cooldown, in_reviewer_codex_cooldown, is_runner_paused, mark_reviewer_codex_rate_limit
 from .summary import review_status
 from .timeutil import add_seconds, iso_now
@@ -1153,8 +1155,15 @@ def run_reviewer_phase(
             reviewer_limit_exceeded=True,
         )
 
-    outcome = run_reviewer_codex(config, task, bundle, calls_used_this_run=1)
+    reviewer_work_unit = issue_automatic_reviewer_work_unit(config, task)
+    outcome = run_reviewer_codex(config, reviewer_work_unit, bundle, calls_used_this_run=1)
     if outcome.rate_limited:
+        record_automatic_reviewer_evidence(
+            config,
+            task_id,
+            {"decision": "failed_review", "confidence": "low"},
+            outcome.execution_evidence,
+        )
         cooldown_until = add_seconds(config.auto_review_codex_cooldown_seconds)
         mark_reviewer_codex_rate_limit(config, cooldown_until, task_id)
         record_reviewer_summary(
@@ -1165,6 +1174,7 @@ def run_reviewer_phase(
                 "reason": outcome.reason,
                 "rate_limit_markers": sorted(set(outcome.rate_limit_markers or [])),
                 "cooldown_until": cooldown_until,
+                "execution_evidence": outcome.execution_evidence,
             },
             bundle=bundle,
         )
@@ -1193,6 +1203,9 @@ def run_reviewer_phase(
             "cooldown_recommended_seconds": 0,
         },
     }
+    if outcome.execution_evidence:
+        reviewer_result["execution_evidence"] = outcome.execution_evidence
+    record_automatic_reviewer_evidence(config, task_id, reviewer_result, outcome.execution_evidence)
     if reviewer_clear_pass(reviewer_result):
         applied = apply_reviewer_accept(config, task_id, expected_fingerprint, reviewer_result)
         return reviewer_phase_report(
@@ -1417,6 +1430,83 @@ def record_reviewer_summary(
     )
 
 
+def issue_automatic_reviewer_work_unit(config: Config, task: dict[str, Any]) -> dict[str, Any]:
+    """Persist an immutable reviewer-owned work unit before target selection/invocation."""
+    sequence = len(task.get("automatic_reviewer_work_units", [])) + 1
+    work_unit_id = f"{task.get('id')}:automatic-review:{sequence}"
+    work_unit = {
+        "id": work_unit_id,
+        "cwd": task.get("cwd"),
+        "routing_size": task.get("routing_size"),
+        "routing_risk": task.get("routing_risk"),
+        "verification_scope": task.get("verification_scope") or [],
+        "category": task.get("category"),
+        "labels": list(task.get("labels") or []),
+        "subtask_type": "automatic_review",
+        "subtask_for": task.get("id"),
+        "review_policy_version": task.get("review_policy_version"),
+        "review_rubric_version": task.get("review_rubric_version"),
+        "issued_at": iso_now(),
+    }
+    work_unit["model_requirement_vector"] = issue_native_requirement_v2(
+        work_unit, work_unit_id=work_unit_id
+    )
+    history = task.get("automatic_reviewer_work_units")
+    if history is None:
+        history = []
+        task["automatic_reviewer_work_units"] = history
+    if not isinstance(history, list):
+        raise ValueError("automatic_reviewer_work_units must be a list")
+    history.append(work_unit)
+    save_task(config, task)
+    return work_unit
+
+
+def record_automatic_reviewer_evidence(
+    config: Config,
+    task_id: str,
+    reviewer_result: dict[str, Any],
+    execution_evidence: dict[str, Any] | None,
+) -> None:
+    if not isinstance(execution_evidence, dict):
+        return
+    task = load_task(config, task_id)
+    history = task.setdefault("automatic_reviewer_execution_evidence_history", [])
+    if not isinstance(history, list):
+        raise ValueError("automatic_reviewer_execution_evidence_history must be a list")
+    evidence_id = execution_evidence.get("evidence_id")
+    if not any(isinstance(item, dict) and item.get("evidence_id") == evidence_id for item in history):
+        history.append(execution_evidence)
+    identity = execution_evidence.get("identity") if isinstance(execution_evidence.get("identity"), dict) else {}
+    provider = identity.get("provider_reported_model") if isinstance(identity.get("provider_reported_model"), dict) else {}
+    actual_model = provider.get("value")
+    source = "provider_observed" if actual_model else None
+    confidence = "provider_observed" if actual_model else None
+    cohort = execution_evidence.get("cohort") if isinstance(execution_evidence.get("cohort"), dict) else {}
+    semantic_status = str(reviewer_result.get("decision") or "failed_review")
+    if semantic_status not in {"pass", "needs_fix", "needs_human", "failed_review"}:
+        semantic_status = "failed_review"
+    outcome = build_review_outcome_evidence(
+        task,
+        acceptance_method="none",
+        accepted=False,
+        objective_status="unavailable",
+        semantic_status=semantic_status,
+        reviewer_kind="codex",
+        reviewer_role=str(task.get("reviewer_role") or "reviewer"),
+        decision_confidence=str(reviewer_result.get("confidence") or "unknown"),
+        anchor_semantic_review=str(task.get("reviewer_role") or "") == "anchor",
+        actual_identity=str(actual_model) if actual_model else None,
+        actual_identity_source=source,
+        actual_identity_confidence=confidence,
+        review_policy_version=str(task.get("review_policy_version") or "legacy"),
+        rubric_version=str(task.get("review_rubric_version") or "legacy"),
+        reviewer_execution_cohort_id=str(cohort.get("cohort_id") or "legacy-reviewer-execution-unknown"),
+    )
+    attach_review_outcome_evidence(task, outcome)
+    save_task(config, task)
+
+
 def enqueue_auto_fix_task(
     config: Config,
     parent_task: dict[str, Any],
@@ -1617,7 +1707,7 @@ def auto_fix_skip_summary(skip_reasons: list[Any]) -> str:
 def compact_reviewer_result(result: dict[str, Any]) -> dict[str, Any]:
     findings = result.get("findings") if isinstance(result.get("findings"), list) else []
     fingerprints = result.get("finding_fingerprints") if isinstance(result.get("finding_fingerprints"), list) else []
-    return {
+    compact = {
         "decision": sanitize(result.get("decision")),
         "confidence": sanitize(result.get("confidence")),
         "reason": sanitize(result.get("reason")),
@@ -1632,6 +1722,10 @@ def compact_reviewer_result(result: dict[str, Any]) -> dict[str, Any]:
         "reviewer_limits": sanitize_value(result.get("reviewer_limits")) if isinstance(result.get("reviewer_limits"), dict) else {},
         "reviewed_at": sanitize(result.get("reviewed_at") or iso_now()),
     }
+    execution = result.get("execution_evidence")
+    if isinstance(execution, dict):
+        compact["execution_evidence_id"] = sanitize(execution.get("evidence_id"))
+    return compact
 
 
 def update_task_chain_from_reviewer(task: dict[str, Any], result: dict[str, Any], *, accepted: bool) -> None:

@@ -164,7 +164,7 @@ class ModelRequirementV2Tests(unittest.TestCase):
                 {"findings": [], "finding_fingerprints": []},
             )
             self.assertNotEqual("reqrev-parent", child["model_requirement_vector"]["revision_id"])
-            self.assertEqual("legacy-derived", child["model_requirement_vector"]["derivation_identity"]["kind"])
+            self.assertNotIn("derivation_identity", child["model_requirement_vector"])
             self.assertNotIn("routing_override", child)
 
 

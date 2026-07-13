@@ -241,6 +241,12 @@ Migration order는 `D0 -> D1 -> D2 -> D3 -> D4 -> D5 -> D6`입니다.
 - D6: end-to-end matrix, public/private safety, fresh independent review, operator config
   migration과 명시적 승인을 완료함.
 
+Automatic reviewer/fix/subtask도 각각 생성 시점에 issuer-owned native v2 revision을 발행합니다.
+Reviewer invocation은 그 work-unit vector만 unified selector에 전달하며 role metadata를 requirement로
+재해석하지 않습니다. Exact model+reasoning target, immutable reviewer revision, command-attributed
+identity가 모두 없으면 fail closed하고 CLI-default/legacy reviewer 경로로 fallback하지 않습니다.
+기존 저장 task와 legacy reviewer config는 read compatibility만 제공하며 D6 freeze-exit cohort가 아닙니다.
+
 D1 이후 구현은 parent가 D0를 수용하기 전 시작할 수 없습니다. Global CBR dispatch
 freeze는 D6 수용과 operator의 명시적 해제 전까지 유지되며, 문서 계약 또는 부분 구현은
 freeze 해제 근거가 아닙니다.

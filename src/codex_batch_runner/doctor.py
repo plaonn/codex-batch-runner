@@ -126,6 +126,13 @@ def model_requirement_summary(config: Config) -> dict[str, Any]:
     return {
         "default_model_requirement_vector": config.default_model_requirement_vector,
         "review_model_requirement_vector": config.review_model_requirement_vector,
+        "review_model_requirement_vector_status": "legacy_compatibility_only",
+        "automatic_reviewer_routing": {
+            "requirement_issuer": "work_unit_native_v2",
+            "selector": "execution-target-selector-v1",
+            "requires_exact_model_and_reasoning": True,
+            "cli_default_comparable": False,
+        },
         "model_selection_rules": [rule.get("name") for rule in config.model_selection_rules],
         "execution_targets": sorted(config.execution_targets),
         "allowlisted_config_override_keys": sorted(SAFE_CONFIG_OVERRIDE_KEYS),

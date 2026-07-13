@@ -54,6 +54,7 @@ def build_review_outcome_evidence(
     actual_identity_confidence: str | None = None,
     review_policy_version: str | None = None,
     rubric_version: str | None = None,
+    reviewer_execution_cohort_id: str | None = None,
 ) -> dict[str, Any]:
     if acceptance_method not in ACCEPTANCE_METHODS:
         raise ReviewOutcomeEvidenceError("invalid acceptance method")
@@ -101,6 +102,7 @@ def build_review_outcome_evidence(
         record,
         review_policy_version=review_policy_version,
         rubric_version=rubric_version,
+        reviewer_execution_cohort_id=reviewer_execution_cohort_id,
     )
     validate_review_outcome_evidence(record)
     return record
@@ -178,6 +180,7 @@ def derive_review_outcome_cohort(
     *,
     review_policy_version: str | None = None,
     rubric_version: str | None = None,
+    reviewer_execution_cohort_id: str | None = None,
 ) -> dict[str, Any]:
     execution = evidence_view(task)
     execution_cohort = execution.get("cohort") if isinstance(execution.get("cohort"), dict) else {}
@@ -191,6 +194,7 @@ def derive_review_outcome_cohort(
         "rubric_version": str(rubric_version or task.get("review_rubric_version") or "legacy"),
         "acceptance_method": str(acceptance.get("method") or "none"),
         "reviewer_provenance_class": str(reviewer.get("provenance_class") or "unknown"),
+        "reviewer_execution_cohort_id": str(reviewer_execution_cohort_id or "legacy-reviewer-execution-unknown"),
     }
     return {
         "definition_version": COHORT_DEFINITION_VERSION,
@@ -243,7 +247,7 @@ def validate_review_outcome_evidence(record: object) -> dict[str, Any]:
         not isinstance(cohort, dict)
         or cohort.get("definition_version") != COHORT_DEFINITION_VERSION
         or not isinstance(components, dict)
-        or set(components) != {
+        or set(components) not in ({
             "task_bucket_key",
             "execution_cohort_id",
             "outcome_contract_version",
@@ -251,7 +255,16 @@ def validate_review_outcome_evidence(record: object) -> dict[str, Any]:
             "rubric_version",
             "acceptance_method",
             "reviewer_provenance_class",
-        }
+        }, {
+            "task_bucket_key",
+            "execution_cohort_id",
+            "outcome_contract_version",
+            "review_policy_version",
+            "rubric_version",
+            "acceptance_method",
+            "reviewer_provenance_class",
+            "reviewer_execution_cohort_id",
+        })
         or components.get("outcome_contract_version") != EVIDENCE_CONTRACT_VERSION
         or components.get("acceptance_method") != acceptance["method"]
         or components.get("reviewer_provenance_class") != reviewer["provenance_class"]
