@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -385,17 +386,23 @@ def summarize_model_measurements(rows: list[dict[str, Any]]) -> dict[str, Any]:
         _model_measurement_target(key, grouped_rows)
         for key, grouped_rows in sorted(groups.items())
     ]
-    quality_models = {
-        target["model"]
-        for target in targets
-        if target["review"]["comparable_quality_runs"] > 0
-    }
+    quality_models = {target["model"] for target in targets if target["review"]["comparable_quality_runs"] > 0}
+    stratum_models: defaultdict[str, set[str]] = defaultdict(set)
+    for target in targets:
+        for stratum in target["review"]["strata"]:
+            if stratum["comparable_runs"] > 0:
+                stratum_models[stratum["stratum_id"]].add(target["model"])
+    common_review_strata = sorted(
+        stratum_id for stratum_id, models in stratum_models.items() if len(models) >= 2
+    )
     if not exact_rows:
         comparison_status = "no_exact_v3_evidence"
     elif len({target["model"] for target in targets}) < 2:
         comparison_status = "insufficient_models"
     elif len(quality_models) < 2:
         comparison_status = "insufficient_comparable_quality"
+    elif not common_review_strata:
+        comparison_status = "insufficient_common_review_stratum"
     else:
         comparison_status = "descriptive_only"
     return {
@@ -414,6 +421,7 @@ def summarize_model_measurements(rows: list[dict[str, Any]]) -> dict[str, Any]:
             1 for row in exact_rows if bool(row.get("evidence", {}).get("integrity", {}).get("adverse"))
         ),
         "cross_model_quality_status": comparison_status,
+        "common_review_stratum_ids": common_review_strata,
         "inference_allowed": False,
         "targets": targets,
     }
@@ -431,14 +439,9 @@ def _model_measurement_target(
         str(row.get("identity", {}).get("attestation") or "unknown")
         for row in rows
     )
-    execution_cohorts = {
-        str(row.get("evidence", {}).get("cohort", {}).get("cohort_id") or "unknown")
-        for row in rows
-    }
-    version_sets = {
-        json.dumps(row.get("evidence", {}).get("versions", {}), sort_keys=True, separators=(",", ":"))
-        for row in rows
-    }
+    execution_cohorts: Counter[str] = Counter()
+    version_sets: Counter[str] = Counter()
+    review_strata: dict[str, dict[str, Any]] = {}
     review_contracts: Counter[str] = Counter()
     comparable_quality_runs = 0
     accepted_runs = 0
@@ -457,20 +460,24 @@ def _model_measurement_target(
     for row in rows:
         cohort = row.get("evidence", {}).get("cohort", {})
         comparability = cohort.get("comparability", {}) if isinstance(cohort, dict) else {}
+        execution_cohort_id = str(cohort.get("cohort_id") or "unknown") if isinstance(cohort, dict) else "unknown"
+        execution_cohorts[execution_cohort_id] += 1
+        versions = row.get("evidence", {}).get("versions", {})
+        version_key = json.dumps(versions if isinstance(versions, dict) else {}, sort_keys=True, separators=(",", ":"))
+        version_sets[version_key] += 1
         model_quality_comparable_runs += int(bool(comparability.get("model_quality")))
         token_cost_comparable_runs += int(bool(comparability.get("token_cost")))
         review = row.get("review_outcome") if isinstance(row.get("review_outcome"), dict) else {}
         review_contracts[str(review.get("evidence_contract_version") or "unknown")] += 1
-        review_comparability = review.get("cohort", {}).get("comparability", {})
-        execution_quality_comparable = bool(comparability.get("model_quality"))
-        integrity_adverse = bool(row.get("evidence", {}).get("integrity", {}).get("adverse"))
-        if (
-            isinstance(review_comparability, dict)
-            and bool(review_comparability.get("quality"))
-            and execution_quality_comparable
-            and not integrity_adverse
-        ):
+        stratum = _bound_review_stratum(row, execution_cohort_id=execution_cohort_id)
+        if stratum is not None:
             comparable_quality_runs += 1
+            stored = review_strata.setdefault(
+                stratum["stratum_id"],
+                {**stratum, "comparable_runs": 0, "accepted_runs": 0},
+            )
+            stored["comparable_runs"] += 1
+            stored["accepted_runs"] += int(bool(review.get("acceptance", {}).get("accepted")))
         accepted_runs += int(bool(review.get("acceptance", {}).get("accepted")))
         objective_passed_runs += int(review.get("objective_verification", {}).get("status") == "passed")
         semantic_pass_runs += int(review.get("semantic_review", {}).get("status") == "pass")
@@ -503,7 +510,15 @@ def _model_measurement_target(
         "selection_cohort": selection_cohort,
         "run_count": len(rows),
         "execution_cohort_count": len(execution_cohorts),
+        "execution_cohorts": [
+            {"cohort_id": cohort_id, "run_count": execution_cohorts[cohort_id]}
+            for cohort_id in sorted(execution_cohorts)
+        ],
         "version_set_count": len(version_sets),
+        "version_strata": [
+            {"versions": json.loads(version_key), "run_count": version_sets[version_key]}
+            for version_key in sorted(version_sets)
+        ],
         "integrity": {
             "statuses": dict(sorted(integrity.items())),
             "adverse_runs": sum(
@@ -521,6 +536,7 @@ def _model_measurement_target(
             "accepted_runs": accepted_runs,
             "objective_passed_runs": objective_passed_runs,
             "semantic_pass_runs": semantic_pass_runs,
+            "strata": [review_strata[stratum_id] for stratum_id in sorted(review_strata)],
         },
         "tokens": {
             "observed_runs": token_observed_runs,
@@ -536,6 +552,59 @@ def _model_measurement_target(
             "timed_out_runs": timed_out_runs,
             "actual_model_observed_runs": actual_model_observed_runs,
         },
+    }
+
+
+def _bound_review_stratum(row: dict[str, Any], *, execution_cohort_id: str) -> dict[str, Any] | None:
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    execution_cohort = evidence.get("cohort") if isinstance(evidence.get("cohort"), dict) else {}
+    execution_comparability = (
+        execution_cohort.get("comparability") if isinstance(execution_cohort.get("comparability"), dict) else {}
+    )
+    if not bool(execution_comparability.get("model_quality")):
+        return None
+    integrity = evidence.get("integrity") if isinstance(evidence.get("integrity"), dict) else {}
+    if bool(integrity.get("adverse")):
+        return None
+    review = row.get("review_outcome") if isinstance(row.get("review_outcome"), dict) else {}
+    if review.get("evidence_contract_version") != "review-outcome-evidence-v1":
+        return None
+    review_cohort = review.get("cohort") if isinstance(review.get("cohort"), dict) else {}
+    review_comparability = (
+        review_cohort.get("comparability") if isinstance(review_cohort.get("comparability"), dict) else {}
+    )
+    if not bool(review_comparability.get("quality")):
+        return None
+    components = review_cohort.get("components") if isinstance(review_cohort.get("components"), dict) else {}
+    if str(components.get("execution_cohort_id") or "") != execution_cohort_id:
+        return None
+    versions = evidence.get("versions") if isinstance(evidence.get("versions"), dict) else {}
+    stratum_components = {
+        "task_bucket_key": str(components.get("task_bucket_key") or "unknown"),
+        "outcome_contract_version": str(components.get("outcome_contract_version") or "unknown"),
+        "review_policy_version": str(components.get("review_policy_version") or "unknown"),
+        "review_rubric_version": str(components.get("rubric_version") or "unknown"),
+        "acceptance_method": str(components.get("acceptance_method") or "unknown"),
+        "reviewer_provenance_class": str(components.get("reviewer_provenance_class") or "unknown"),
+        "reviewer_execution_cohort_id": str(
+            components.get("reviewer_execution_cohort_id") or "legacy-reviewer-execution-unknown"
+        ),
+        "execution_backend": str(row.get("execution", {}).get("backend") or "unknown"),
+        "requirement_schema_version": str(versions.get("requirement_schema_version") or "unknown"),
+        "rubric_version": str(versions.get("rubric_version") or "unknown"),
+        "constraint_registry_version": str(versions.get("constraint_registry_version") or "unknown"),
+        "target_contract_version": str(versions.get("target_contract_version") or "unknown"),
+        "quality_outcome_version": str(versions.get("outcome_contract_version") or "unknown"),
+        "review_execution_policy_version": str(versions.get("review_policy_version") or "unknown"),
+        "review_execution_rubric_version": str(versions.get("review_rubric_version") or "unknown"),
+        "selection_policy_version": str(versions.get("selection_policy_version") or "unknown"),
+        "inventory_schema_version": str(versions.get("inventory_schema_version") or "unknown"),
+        "inventory_snapshot_id": str(versions.get("inventory_snapshot_id") or "unknown"),
+    }
+    encoded = json.dumps(stratum_components, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "stratum_id": "sha256:" + hashlib.sha256(encoded).hexdigest()[:16],
+        "components": stratum_components,
     }
 
 

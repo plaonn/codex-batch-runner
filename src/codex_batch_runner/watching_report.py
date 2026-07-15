@@ -7,7 +7,7 @@ from .config import Config
 from .decision_cards import build_decision_card_inventory
 from .evidence import rate_limit_dir
 from .fs import read_json
-from .queue import discarded_review_result, list_tasks, task_labels, task_project_id, task_project_root
+from .queue import list_tasks, rejected_discarded_result, task_labels, task_project_id, task_project_root
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, render_table
 from .state import get_runner_pause, load_state
 from .timeutil import parse_time, utc_now
@@ -365,7 +365,7 @@ def _review_backlog(task: dict[str, Any]) -> bool:
     return (
         task.get("status") == "completed"
         and not task.get("resolution")
-        and not discarded_review_result(task)
+        and not rejected_discarded_result(task)
         and _review_status(task) in {"unreviewed", "rejected", "needs_followup", "reviewing"}
     )
 

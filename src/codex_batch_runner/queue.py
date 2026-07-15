@@ -215,21 +215,16 @@ def list_tasks(config: Config) -> list[dict]:
     return tasks
 
 
-def discarded_review_result(task: dict) -> bool:
-    """Return whether a rejected/follow-up worktree result was conclusively discarded."""
+def rejected_discarded_result(task: dict) -> bool:
+    """Return whether a rejected worktree result was conclusively discarded."""
     return (
         task.get("status") in {"completed", "archived"}
-        and task.get("review_status") in {"rejected", "needs_followup"}
+        and task.get("review_status") == "rejected"
         and task.get("execution_mode") == "git_worktree"
         and task.get("execution_worktree_status") == "cleaned"
         and task.get("execution_cleanup_kind") == "discard"
         and task.get("execution_cleanup_result_applied") is False
     )
-
-
-def rejected_discarded_result(task: dict) -> bool:
-    """Return whether a rejected worktree result was conclusively discarded."""
-    return task.get("review_status") == "rejected" and discarded_review_result(task)
 
 
 def create_task(

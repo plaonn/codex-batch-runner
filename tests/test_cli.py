@@ -3241,7 +3241,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("cooldown_rate_limits", output)
             self.assertIn("ready_for_close_review", output)
 
-    def test_watching_report_excludes_resolved_and_discarded_terminal_work(self) -> None:
+    def test_watching_report_excludes_resolved_and_rejected_discarded_terminal_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
@@ -3326,9 +3326,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual("action_required", areas["queue_execution"]["evidence_status"])
             self.assertIn("failed_or_blocked=1", areas["queue_execution"]["signals"])
             self.assertEqual("action_required", areas["review_apply"]["evidence_status"])
-            self.assertIn("review_backlog=1", areas["review_apply"]["signals"])
+            self.assertIn("review_backlog=2", areas["review_apply"]["signals"])
             self.assertEqual(
-                ["genuine-review"],
+                ["discarded-followup", "genuine-review"],
                 areas["review_apply"]["evidence"]["review_backlog_task_ids"],
             )
 

@@ -182,11 +182,15 @@ class ExecutionEvidenceV3Tests(unittest.TestCase):
         self.assertEqual(2, measurements["exact_v3_run_count"])
         self.assertEqual(0, measurements["non_exact_run_count"])
         self.assertEqual("descriptive_only", measurements["cross_model_quality_status"])
+        self.assertEqual(1, len(measurements["common_review_stratum_ids"]))
         self.assertFalse(measurements["inference_allowed"])
         self.assertEqual(2, len(measurements["targets"]))
         self.assertEqual(2, sum(target["review"]["comparable_quality_runs"] for target in measurements["targets"]))
         self.assertEqual(320, sum(target["tokens"]["totals"]["known_total_tokens"] for target in measurements["targets"]))
         self.assertTrue(all(target["integrity"]["adverse_runs"] == 0 for target in measurements["targets"]))
+        self.assertTrue(all(len(target["execution_cohorts"]) == 1 for target in measurements["targets"]))
+        self.assertTrue(all(len(target["version_strata"]) == 1 for target in measurements["targets"]))
+        self.assertTrue(all(len(target["review"]["strata"]) == 1 for target in measurements["targets"]))
 
         human = render_execution_report({
             "row_count": 2,
@@ -239,6 +243,63 @@ class ExecutionEvidenceV3Tests(unittest.TestCase):
 
         self.assertEqual(1, measurements["adverse_run_count"])
         self.assertEqual(0, measurements["targets"][0]["review"]["comparable_quality_runs"])
+
+    def test_model_measurements_reject_mismatched_review_execution_cohort_binding(self) -> None:
+        def row(model: str, execution_cohort_id: str) -> dict:
+            return {
+                "evidence": {
+                    "evidence_contract_version": "execution-evidence-v3",
+                    "routing": {"target_id": model + "-target", "selection_cohort": "automatic"},
+                    "integrity": {"status": "compliant", "adverse": False},
+                    "cohort": {
+                        "cohort_id": execution_cohort_id,
+                        "comparability": {"model_quality": True, "token_cost": True},
+                    },
+                    "versions": {
+                        "requirement_schema_version": "2",
+                        "rubric_version": "rubric-v1",
+                        "constraint_registry_version": "constraints-v1",
+                        "target_contract_version": "target-v1",
+                        "outcome_contract_version": "outcome-v1",
+                        "review_policy_version": "review-v1",
+                        "review_rubric_version": "review-rubric-v1",
+                        "selection_policy_version": "selector-v1",
+                        "inventory_schema_version": "1",
+                        "inventory_snapshot_id": "snapshot-v1",
+                    },
+                },
+                "identity": {"selected_model": model, "reasoning_effort": "high", "attestation": "verified"},
+                "actual_model": {"status": "observed"},
+                "review_outcome": {
+                    "evidence_contract_version": "review-outcome-evidence-v1",
+                    "acceptance": {"accepted": True},
+                    "objective_verification": {"status": "passed"},
+                    "semantic_review": {"status": "pass"},
+                    "cohort": {
+                        "comparability": {"quality": True},
+                        "components": {
+                            "execution_cohort_id": "stale-" + execution_cohort_id,
+                            "task_bucket_key": "size=small risk=low verify=unit",
+                            "outcome_contract_version": "review-outcome-evidence-v1",
+                            "review_policy_version": "review-v1",
+                            "rubric_version": "review-rubric-v1",
+                            "acceptance_method": "reviewer_pass",
+                            "reviewer_provenance_class": "codex:provider_observed",
+                            "reviewer_execution_cohort_id": "reviewer-cohort-v1",
+                        },
+                    },
+                },
+                "execution": {"backend": "codex", "returncode": 0, "timed_out": False},
+                "duration_seconds": 1,
+                "token_usage": {"known_total_tokens": 10},
+            }
+
+        measurements = summarize_model_measurements([row("model-a", "exec-a"), row("model-b", "exec-b")])
+
+        self.assertEqual("insufficient_comparable_quality", measurements["cross_model_quality_status"])
+        self.assertEqual([], measurements["common_review_stratum_ids"])
+        self.assertTrue(all(target["review"]["comparable_quality_runs"] == 0 for target in measurements["targets"]))
+        self.assertTrue(all(target["review"]["strata"] == [] for target in measurements["targets"]))
 
     def test_provider_mismatch_is_adverse_and_does_not_rewrite_command_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
