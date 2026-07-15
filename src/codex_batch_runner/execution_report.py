@@ -579,6 +579,8 @@ def _bound_review_stratum(row: dict[str, Any], *, execution_cohort_id: str) -> d
     if str(components.get("execution_cohort_id") or "") != execution_cohort_id:
         return None
     versions = evidence.get("versions") if isinstance(evidence.get("versions"), dict) else {}
+    routing = evidence.get("routing") if isinstance(evidence.get("routing"), dict) else {}
+    identity = row.get("identity") if isinstance(row.get("identity"), dict) else {}
     stratum_components = {
         "task_bucket_key": str(components.get("task_bucket_key") or "unknown"),
         "outcome_contract_version": str(components.get("outcome_contract_version") or "unknown"),
@@ -590,6 +592,9 @@ def _bound_review_stratum(row: dict[str, Any], *, execution_cohort_id: str) -> d
             components.get("reviewer_execution_cohort_id") or "legacy-reviewer-execution-unknown"
         ),
         "execution_backend": str(row.get("execution", {}).get("backend") or "unknown"),
+        "selection_cohort": str(routing.get("selection_cohort") or "unknown"),
+        "reasoning_effort": str(identity.get("reasoning_effort") or "unknown"),
+        "identity_attestation": str(identity.get("attestation") or "unknown"),
         "requirement_schema_version": str(versions.get("requirement_schema_version") or "unknown"),
         "rubric_version": str(versions.get("rubric_version") or "unknown"),
         "constraint_registry_version": str(versions.get("constraint_registry_version") or "unknown"),

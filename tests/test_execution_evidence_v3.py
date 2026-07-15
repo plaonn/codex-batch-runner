@@ -301,6 +301,68 @@ class ExecutionEvidenceV3Tests(unittest.TestCase):
         self.assertTrue(all(target["review"]["comparable_quality_runs"] == 0 for target in measurements["targets"]))
         self.assertTrue(all(target["review"]["strata"] == [] for target in measurements["targets"]))
 
+    def test_model_measurements_do_not_merge_selection_lane_or_reasoning_strata(self) -> None:
+        def row(model: str, cohort_id: str, lane: str, effort: str) -> dict:
+            review_components = {
+                "execution_cohort_id": cohort_id,
+                "task_bucket_key": "size=small risk=low verify=unit",
+                "outcome_contract_version": "review-outcome-evidence-v1",
+                "review_policy_version": "review-v1",
+                "rubric_version": "review-rubric-v1",
+                "acceptance_method": "reviewer_pass",
+                "reviewer_provenance_class": "codex:provider_observed",
+                "reviewer_execution_cohort_id": "reviewer-cohort-v1",
+            }
+            return {
+                "evidence": {
+                    "evidence_contract_version": "execution-evidence-v3",
+                    "routing": {"target_id": model + "-target", "selection_cohort": lane},
+                    "integrity": {"status": "compliant", "adverse": False},
+                    "cohort": {
+                        "cohort_id": cohort_id,
+                        "comparability": {"model_quality": True, "token_cost": True},
+                    },
+                    "versions": {
+                        "requirement_schema_version": "2",
+                        "rubric_version": "rubric-v1",
+                        "constraint_registry_version": "constraints-v1",
+                        "target_contract_version": "target-v1",
+                        "outcome_contract_version": "outcome-v1",
+                        "review_policy_version": "review-v1",
+                        "review_rubric_version": "review-rubric-v1",
+                        "selection_policy_version": "selector-v1",
+                        "inventory_schema_version": "1",
+                        "inventory_snapshot_id": "snapshot-v1",
+                    },
+                },
+                "identity": {"selected_model": model, "reasoning_effort": effort, "attestation": "verified"},
+                "actual_model": {"status": "observed"},
+                "review_outcome": {
+                    "evidence_contract_version": "review-outcome-evidence-v1",
+                    "acceptance": {"accepted": True},
+                    "objective_verification": {"status": "passed"},
+                    "semantic_review": {"status": "pass"},
+                    "cohort": {"comparability": {"quality": True}, "components": review_components},
+                },
+                "execution": {"backend": "codex", "returncode": 0, "timed_out": False},
+                "duration_seconds": 1,
+                "token_usage": {"known_total_tokens": 10},
+            }
+
+        mixed_lane = summarize_model_measurements([
+            row("model-a", "exec-a", "automatic", "high"),
+            row("model-b", "exec-b", "override", "high"),
+        ])
+        mixed_reasoning = summarize_model_measurements([
+            row("model-a", "exec-a", "automatic", "high"),
+            row("model-b", "exec-b", "automatic", "medium"),
+        ])
+
+        self.assertEqual("insufficient_common_review_stratum", mixed_lane["cross_model_quality_status"])
+        self.assertEqual("insufficient_common_review_stratum", mixed_reasoning["cross_model_quality_status"])
+        self.assertEqual([], mixed_lane["common_review_stratum_ids"])
+        self.assertEqual([], mixed_reasoning["common_review_stratum_ids"])
+
     def test_provider_mismatch_is_adverse_and_does_not_rewrite_command_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             record = build_codex_execution_evidence_v3(
