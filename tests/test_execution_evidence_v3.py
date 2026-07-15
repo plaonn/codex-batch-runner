@@ -13,7 +13,7 @@ from codex_batch_runner.config import Config
 from codex_batch_runner.execution_evidence_v2 import build_codex_execution_evidence, evidence_view, reporting_evidence_view
 from codex_batch_runner.evaluation import derive_evaluation_row
 from codex_batch_runner.routing_cost_evidence import build_routing_cost_evidence
-from codex_batch_runner.execution_report import task_execution_row
+from codex_batch_runner.execution_report import render_execution_report, summarize_model_measurements, task_execution_row
 from codex_batch_runner.execution_evidence_v3 import (
     CommandIdentityError,
     attach_execution_evidence_v3,
@@ -24,6 +24,7 @@ from codex_batch_runner.execution_evidence_v3 import (
 )
 from codex_batch_runner.external_json_command import run_external_json_command_task
 from codex_batch_runner.model_requirements import ResolvedExecutionConfig
+from codex_batch_runner.review_outcome_evidence import attach_review_outcome_evidence, build_review_outcome_evidence
 
 
 def requirement() -> dict:
@@ -120,6 +121,124 @@ class ExecutionEvidenceV3Tests(unittest.TestCase):
         self.assertEqual("command_attributed", omitted["identity"]["attestation"])
         self.assertEqual("exact-model", omitted["identity"]["command_model"])
         self.assertTrue(omitted["cohort"]["comparability"]["model_quality"])
+
+    def test_execution_report_summarizes_exact_model_measurements_without_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config(Path(tmp))
+            rows = []
+            for index, model in enumerate(("exact-model-a", "exact-model-b"), start=1):
+                item = task()
+                item.update({
+                    "id": f"measurement-{index}",
+                    "title": f"Measurement {index}",
+                    "status": "completed",
+                    "review_status": "accepted",
+                    "created_at": "2026-07-15T00:00:00+00:00",
+                    "last_run": {
+                        "execution_backend": "codex",
+                        "command_kind": "exec",
+                        "returncode": 0,
+                        "duration_seconds": 10 * index,
+                        "started_at": "2026-07-15T00:00:01+00:00",
+                        "finished_at": "2026-07-15T00:00:21+00:00",
+                    },
+                    "last_result": {"status": "completed", "changed_files": [], "verification": ["unit"]},
+                })
+                selected = settings(model=model)
+                attach_execution_evidence_v3(
+                    item,
+                    build_codex_execution_evidence_v3(
+                        item,
+                        SimpleNamespace(events=[{
+                            "type": "turn.completed",
+                            "model": model,
+                            "usage": {"input_tokens": 100 * index, "cached_input_tokens": 25, "output_tokens": 10},
+                        }]),
+                        selected,
+                        cfg,
+                    ),
+                )
+                attach_review_outcome_evidence(
+                    item,
+                    build_review_outcome_evidence(
+                        item,
+                        acceptance_method="reviewer_pass",
+                        accepted=True,
+                        objective_status="passed",
+                        semantic_status="pass",
+                        reviewer_kind="codex",
+                        actual_identity="reviewer-model",
+                        actual_identity_source="provider_observed",
+                        actual_identity_confidence="provider_observed",
+                        review_policy_version="review-v1",
+                        rubric_version="rubric-v1",
+                    ),
+                )
+                rows.append(task_execution_row(cfg, item))
+
+        measurements = summarize_model_measurements(rows)
+
+        self.assertEqual("model-measurement-summary-v1", measurements["contract_version"])
+        self.assertEqual(2, measurements["exact_v3_run_count"])
+        self.assertEqual(0, measurements["non_exact_run_count"])
+        self.assertEqual("descriptive_only", measurements["cross_model_quality_status"])
+        self.assertFalse(measurements["inference_allowed"])
+        self.assertEqual(2, len(measurements["targets"]))
+        self.assertEqual(2, sum(target["review"]["comparable_quality_runs"] for target in measurements["targets"]))
+        self.assertEqual(320, sum(target["tokens"]["totals"]["known_total_tokens"] for target in measurements["targets"]))
+        self.assertTrue(all(target["integrity"]["adverse_runs"] == 0 for target in measurements["targets"]))
+
+        human = render_execution_report({
+            "row_count": 2,
+            "filtered_count": 2,
+            "total_available": 2,
+            "rows": rows,
+            "summary": {"model_measurements": measurements},
+        })
+        self.assertIn("EXACT MODEL MEASUREMENTS", human)
+        self.assertIn("cross_model_quality: descriptive_only", human)
+        self.assertIn("exact-model-a", human)
+
+    def test_model_measurements_keep_legacy_rows_out_of_exact_cohorts(self) -> None:
+        measurements = summarize_model_measurements([
+            {
+                "evidence": {"evidence_contract_version": "legacy-v1"},
+                "identity": {},
+                "execution": {"returncode": 0, "timed_out": False},
+                "token_usage": {"known_total_tokens": 10},
+            }
+        ])
+
+        self.assertEqual(0, measurements["exact_v3_run_count"])
+        self.assertEqual(1, measurements["non_exact_run_count"])
+        self.assertEqual("no_exact_v3_evidence", measurements["cross_model_quality_status"])
+        self.assertEqual([], measurements["targets"])
+
+    def test_model_measurements_do_not_count_adverse_identity_as_comparable_quality(self) -> None:
+        measurements = summarize_model_measurements([{
+            "evidence": {
+                "evidence_contract_version": "execution-evidence-v3",
+                "routing": {"target_id": "target", "selection_cohort": "automatic"},
+                "integrity": {"status": "provider_model_mismatch", "adverse": True},
+                "cohort": {"cohort_id": "cohort", "comparability": {"model_quality": False, "token_cost": False}},
+                "versions": {"selection_policy_version": "v1"},
+            },
+            "identity": {"selected_model": "model", "reasoning_effort": "high", "attestation": "adverse"},
+            "actual_model": {"status": "observed"},
+            "review_outcome": {
+                "evidence_contract_version": "review-outcome-evidence-v1",
+                "acceptance": {"accepted": True},
+                "objective_verification": {"status": "passed"},
+                "semantic_review": {"status": "pass"},
+                "cohort": {"comparability": {"quality": True}},
+            },
+            "execution": {"returncode": 0, "timed_out": False},
+            "duration_seconds": 1,
+            "token_usage": {"known_total_tokens": 10},
+        }])
+
+        self.assertEqual(1, measurements["adverse_run_count"])
+        self.assertEqual(0, measurements["targets"][0]["review"]["comparable_quality_runs"])
 
     def test_provider_mismatch_is_adverse_and_does_not_rewrite_command_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

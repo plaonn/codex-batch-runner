@@ -8,6 +8,7 @@ from typing import Any
 from .config import Config
 from .execution_evidence_v2 import reporting_evidence_view
 from .queue import list_tasks, task_labels, task_project_id, task_project_root, task_title
+from .review_outcome_evidence import review_outcome_view
 from .routing_report import number
 from .timeutil import iso_now, parse_time
 from .transcript import sanitize
@@ -29,6 +30,18 @@ EXECUTION_REPORT_TABLE_COLUMNS = (
     ("REVIEW", 14, "left"),
     ("DURATION", 8, "right"),
     ("TOKENS", 42, "left"),
+)
+MODEL_MEASUREMENT_CONTRACT_VERSION = "model-measurement-summary-v1"
+MODEL_MEASUREMENT_TABLE_COLUMNS = (
+    ("TARGET", 20, "left"),
+    ("MODEL", 22, "left"),
+    ("EFFORT", 8, "left"),
+    ("LANE", 9, "left"),
+    ("RUNS", 5, "right"),
+    ("QUALITY", 9, "right"),
+    ("TOKENS", 12, "right"),
+    ("AVG LAT", 9, "right"),
+    ("INTEGRITY", 12, "left"),
 )
 
 
@@ -178,6 +191,7 @@ def task_execution_row(config: Config, task: dict[str, Any]) -> dict[str, Any]:
             "monetary_cost": dict(observed_evidence.get("monetary_cost") or {}),
             "privacy": dict(observed_evidence.get("privacy") or {}),
         },
+        "review_outcome": review_outcome_view(task),
         "result": {
             "status": sanitize(last_result_value(task, "status")),
             "reviewer_decision": sanitize(reviewer_decision(task)),
@@ -342,6 +356,194 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "cohort_ids": dict(sorted(cohort_ids.items())),
         "model_comparability": dict(sorted(model_comparability.items())),
         "token_totals": dict(sorted(token_totals.items())),
+        "model_measurements": summarize_model_measurements(rows),
+    }
+
+
+def summarize_model_measurements(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build descriptive exact-v3 model measurements without inferring capability."""
+    exact_rows = [
+        row
+        for row in rows
+        if row.get("evidence", {}).get("evidence_contract_version") == "execution-evidence-v3"
+    ]
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in exact_rows:
+        identity = row.get("identity") if isinstance(row.get("identity"), dict) else {}
+        routing = row.get("evidence", {}).get("routing", {})
+        if not isinstance(routing, dict):
+            routing = {}
+        key = (
+            str(routing.get("target_id") or "unknown"),
+            str(identity.get("selected_model") or "unknown"),
+            str(identity.get("reasoning_effort") or "unknown"),
+            str(routing.get("selection_cohort") or "unknown"),
+        )
+        groups[key].append(row)
+
+    targets = [
+        _model_measurement_target(key, grouped_rows)
+        for key, grouped_rows in sorted(groups.items())
+    ]
+    quality_models = {
+        target["model"]
+        for target in targets
+        if target["review"]["comparable_quality_runs"] > 0
+    }
+    if not exact_rows:
+        comparison_status = "no_exact_v3_evidence"
+    elif len({target["model"] for target in targets}) < 2:
+        comparison_status = "insufficient_models"
+    elif len(quality_models) < 2:
+        comparison_status = "insufficient_comparable_quality"
+    else:
+        comparison_status = "descriptive_only"
+    return {
+        "contract_version": MODEL_MEASUREMENT_CONTRACT_VERSION,
+        "mode": "read_only",
+        "mutation": {"allowed": False, "applied": False},
+        "exact_v3_run_count": len(exact_rows),
+        "non_exact_run_count": len(rows) - len(exact_rows),
+        "automatic_run_count": sum(
+            1 for row in exact_rows if row.get("evidence", {}).get("routing", {}).get("selection_cohort") == "automatic"
+        ),
+        "override_run_count": sum(
+            1 for row in exact_rows if row.get("evidence", {}).get("routing", {}).get("selection_cohort") == "override"
+        ),
+        "adverse_run_count": sum(
+            1 for row in exact_rows if bool(row.get("evidence", {}).get("integrity", {}).get("adverse"))
+        ),
+        "cross_model_quality_status": comparison_status,
+        "inference_allowed": False,
+        "targets": targets,
+    }
+
+
+def _model_measurement_target(
+    key: tuple[str, str, str, str], rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    target_id, model, reasoning_effort, selection_cohort = key
+    integrity = Counter(
+        str(row.get("evidence", {}).get("integrity", {}).get("status") or "unknown")
+        for row in rows
+    )
+    attestations = Counter(
+        str(row.get("identity", {}).get("attestation") or "unknown")
+        for row in rows
+    )
+    execution_cohorts = {
+        str(row.get("evidence", {}).get("cohort", {}).get("cohort_id") or "unknown")
+        for row in rows
+    }
+    version_sets = {
+        json.dumps(row.get("evidence", {}).get("versions", {}), sort_keys=True, separators=(",", ":"))
+        for row in rows
+    }
+    review_contracts: Counter[str] = Counter()
+    comparable_quality_runs = 0
+    accepted_runs = 0
+    objective_passed_runs = 0
+    semantic_pass_runs = 0
+    model_quality_comparable_runs = 0
+    token_cost_comparable_runs = 0
+    completed_latencies: list[float] = []
+    censored_latencies: list[float] = []
+    token_totals: defaultdict[str, int] = defaultdict(int)
+    token_observed_runs = 0
+    completed_runs = 0
+    failed_runs = 0
+    timed_out_runs = 0
+    actual_model_observed_runs = 0
+    for row in rows:
+        cohort = row.get("evidence", {}).get("cohort", {})
+        comparability = cohort.get("comparability", {}) if isinstance(cohort, dict) else {}
+        model_quality_comparable_runs += int(bool(comparability.get("model_quality")))
+        token_cost_comparable_runs += int(bool(comparability.get("token_cost")))
+        review = row.get("review_outcome") if isinstance(row.get("review_outcome"), dict) else {}
+        review_contracts[str(review.get("evidence_contract_version") or "unknown")] += 1
+        review_comparability = review.get("cohort", {}).get("comparability", {})
+        execution_quality_comparable = bool(comparability.get("model_quality"))
+        integrity_adverse = bool(row.get("evidence", {}).get("integrity", {}).get("adverse"))
+        if (
+            isinstance(review_comparability, dict)
+            and bool(review_comparability.get("quality"))
+            and execution_quality_comparable
+            and not integrity_adverse
+        ):
+            comparable_quality_runs += 1
+        accepted_runs += int(bool(review.get("acceptance", {}).get("accepted")))
+        objective_passed_runs += int(review.get("objective_verification", {}).get("status") == "passed")
+        semantic_pass_runs += int(review.get("semantic_review", {}).get("status") == "pass")
+        usage = row.get("token_usage") if isinstance(row.get("token_usage"), dict) else {}
+        if usage.get("known_total_tokens") is not None:
+            token_observed_runs += 1
+        for token_key in (*TOKEN_USAGE_KEYS, "uncached_input_tokens", "known_total_tokens"):
+            value = int_value(usage.get(token_key))
+            if value is not None:
+                token_totals[token_key] += value
+        execution = row.get("execution") if isinstance(row.get("execution"), dict) else {}
+        timed_out = bool(execution.get("timed_out"))
+        duration = number(row.get("duration_seconds"))
+        if timed_out:
+            timed_out_runs += 1
+            censored_latencies.append(duration)
+        else:
+            completed_latencies.append(duration)
+        returncode = int_value(execution.get("returncode"))
+        if returncode == 0 and not timed_out:
+            completed_runs += 1
+        elif returncode is not None or timed_out:
+            failed_runs += 1
+        actual = row.get("actual_model") if isinstance(row.get("actual_model"), dict) else {}
+        actual_model_observed_runs += int(actual.get("status") == "observed")
+    return {
+        "target_id": target_id,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "selection_cohort": selection_cohort,
+        "run_count": len(rows),
+        "execution_cohort_count": len(execution_cohorts),
+        "version_set_count": len(version_sets),
+        "integrity": {
+            "statuses": dict(sorted(integrity.items())),
+            "adverse_runs": sum(
+                1 for row in rows if bool(row.get("evidence", {}).get("integrity", {}).get("adverse"))
+            ),
+            "attestations": dict(sorted(attestations.items())),
+        },
+        "comparability": {
+            "model_quality_runs": model_quality_comparable_runs,
+            "token_cost_runs": token_cost_comparable_runs,
+        },
+        "review": {
+            "evidence_contracts": dict(sorted(review_contracts.items())),
+            "comparable_quality_runs": comparable_quality_runs,
+            "accepted_runs": accepted_runs,
+            "objective_passed_runs": objective_passed_runs,
+            "semantic_pass_runs": semantic_pass_runs,
+        },
+        "tokens": {
+            "observed_runs": token_observed_runs,
+            "totals": dict(sorted(token_totals.items())),
+        },
+        "latency": {
+            "completed": _descriptive_latency(completed_latencies),
+            "censored": _descriptive_latency(censored_latencies),
+        },
+        "availability": {
+            "completed_runs": completed_runs,
+            "failed_runs": failed_runs,
+            "timed_out_runs": timed_out_runs,
+            "actual_model_observed_runs": actual_model_observed_runs,
+        },
+    }
+
+
+def _descriptive_latency(values: list[float]) -> dict[str, Any]:
+    return {
+        "count": len(values),
+        "sum_seconds": round(sum(values), 3),
+        "avg_seconds": round(sum(values) / len(values), 3) if values else None,
     }
 
 
@@ -376,7 +578,44 @@ def render_execution_report(report: dict[str, Any]) -> str:
         for row in rows
     ]
     lines.append(render_fixed_table(EXECUTION_REPORT_TABLE_COLUMNS, table_rows))
+    measurements = summary.get("model_measurements") if isinstance(summary.get("model_measurements"), dict) else {}
+    measurement_targets = measurements.get("targets") if isinstance(measurements.get("targets"), list) else []
+    lines.extend(
+        [
+            "",
+            "EXACT MODEL MEASUREMENTS",
+            (
+                f"exact_v3_runs: {measurements.get('exact_v3_run_count', 0)} "
+                f"non_exact_runs: {measurements.get('non_exact_run_count', 0)} "
+                f"cross_model_quality: {measurements.get('cross_model_quality_status', 'no_exact_v3_evidence')}"
+            ),
+        ]
+    )
+    if measurement_targets:
+        lines.append(render_fixed_table(MODEL_MEASUREMENT_TABLE_COLUMNS, [_measurement_table_row(item) for item in measurement_targets]))
+    else:
+        lines.append("No exact execution-evidence-v3 model measurements found.")
     return "\n".join(lines) + "\n"
+
+
+def _measurement_table_row(target: dict[str, Any]) -> list[str]:
+    review = target.get("review") if isinstance(target.get("review"), dict) else {}
+    tokens = target.get("tokens") if isinstance(target.get("tokens"), dict) else {}
+    totals = tokens.get("totals") if isinstance(tokens.get("totals"), dict) else {}
+    latency = target.get("latency", {}).get("completed", {})
+    integrity = target.get("integrity") if isinstance(target.get("integrity"), dict) else {}
+    statuses = integrity.get("statuses") if isinstance(integrity.get("statuses"), dict) else {}
+    return [
+        str(target.get("target_id") or "unknown"),
+        str(target.get("model") or "unknown"),
+        str(target.get("reasoning_effort") or "unknown"),
+        str(target.get("selection_cohort") or "unknown"),
+        str(target.get("run_count") or 0),
+        str(review.get("comparable_quality_runs") or 0),
+        str(totals.get("known_total_tokens") or "-"),
+        duration_cell(latency.get("avg_seconds")),
+        compact_mapping(statuses),
+    ]
 
 
 def execution_display_value(row: dict[str, Any], key: str) -> str:

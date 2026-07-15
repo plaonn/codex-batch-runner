@@ -504,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     execution_report = sub.add_parser(
         "execution-report",
-        help="summarize actual processed task runs, worker selection, and token usage evidence",
+        help="summarize processed runs and descriptive exact-v3 model measurements",
     )
     execution_report.add_argument("--project", dest="project_id", help="filter by project id")
     execution_report.add_argument("--project-root", help="filter by project root")
