@@ -7,7 +7,7 @@ from .config import Config
 from .decision_cards import build_decision_card_inventory
 from .evidence import rate_limit_dir
 from .fs import read_json
-from .queue import list_tasks, task_labels, task_project_id, task_project_root
+from .queue import discarded_review_result, list_tasks, task_labels, task_project_id, task_project_root
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, render_table
 from .state import get_runner_pause, load_state
 from .timeutil import parse_time, utc_now
@@ -168,7 +168,11 @@ def _filter_tasks(
 def _queue_execution_area(tasks: list[dict[str, Any]]) -> dict[str, Any]:
     by_status = Counter(str(task.get("status") or "unknown") for task in tasks)
     active = sum(by_status.get(status, 0) for status in ("runnable", "needs_resume", "running", "cooldown"))
-    blockers = sum(by_status.get(status, 0) for status in ("failed", "blocked_user", "usage_exhausted"))
+    blockers = sum(
+        1
+        for task in tasks
+        if task.get("status") in {"failed", "blocked_user", "usage_exhausted"} and not task.get("resolution")
+    )
     completed = by_status.get("completed", 0)
     if blockers:
         status = "action_required"
@@ -361,6 +365,7 @@ def _review_backlog(task: dict[str, Any]) -> bool:
     return (
         task.get("status") == "completed"
         and not task.get("resolution")
+        and not discarded_review_result(task)
         and _review_status(task) in {"unreviewed", "rejected", "needs_followup", "reviewing"}
     )
 

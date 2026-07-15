@@ -3241,6 +3241,97 @@ class CliTests(unittest.TestCase):
             self.assertIn("cooldown_rate_limits", output)
             self.assertIn("ready_for_close_review", output)
 
+    def test_watching_report_excludes_resolved_and_discarded_terminal_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+
+            for task_id, status in (("resolved-failed", "failed"), ("resolved-blocked", "blocked_user")):
+                task = create_task(
+                    config,
+                    task_id,
+                    tmp,
+                    task_id=task_id,
+                    project_id="project-a",
+                    labels=["watching"],
+                )
+                task["status"] = status
+                task["resolution"] = "superseded"
+                save_task(config, task)
+
+            for task_id, review_status in (
+                ("discarded-rejected", "rejected"),
+                ("discarded-followup", "needs_followup"),
+            ):
+                task = create_task(
+                    config,
+                    task_id,
+                    tmp,
+                    task_id=task_id,
+                    project_id="project-a",
+                    labels=["watching"],
+                )
+                task.update(
+                    {
+                        "status": "completed",
+                        "review_status": review_status,
+                        "execution_mode": "git_worktree",
+                        "execution_worktree_status": "cleaned",
+                        "execution_cleanup_kind": "discard",
+                        "execution_cleanup_result_applied": False,
+                    }
+                )
+                save_task(config, task)
+
+            unresolved = create_task(
+                config,
+                "unresolved failure",
+                tmp,
+                task_id="unresolved-failed",
+                project_id="project-a",
+                labels=["watching"],
+            )
+            unresolved["status"] = "failed"
+            save_task(config, unresolved)
+            review = create_task(
+                config,
+                "genuine review",
+                tmp,
+                task_id="genuine-review",
+                project_id="project-a",
+                labels=["watching"],
+            )
+            review["status"] = "completed"
+            review["review_status"] = "unreviewed"
+            save_task(config, review)
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "watching-report",
+                    "--project",
+                    "project-a",
+                    "--label",
+                    "watching",
+                    "--limit",
+                    "0",
+                    "--json",
+                ]
+            )
+            report = json.loads(output)
+            areas = {area["area"]: area for area in report["areas"]}
+
+            self.assertEqual(0, code)
+            self.assertEqual("action_required", areas["queue_execution"]["evidence_status"])
+            self.assertIn("failed_or_blocked=1", areas["queue_execution"]["signals"])
+            self.assertEqual("action_required", areas["review_apply"]["evidence_status"])
+            self.assertIn("review_backlog=1", areas["review_apply"]["signals"])
+            self.assertEqual(
+                ["genuine-review"],
+                areas["review_apply"]["evidence"]["review_backlog_task_ids"],
+            )
+
     def test_decision_cards_inventory_summarizes_blocked_reasons(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(
