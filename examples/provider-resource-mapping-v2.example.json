@@ -1,0 +1,34 @@
+{
+  "schema_version": 2,
+  "contract": "provider-resource-mapping-v2",
+  "mapping_revision": "mapping-example-r2",
+  "target_inventory_snapshot_id": "inventory-example-a",
+  "status": "current",
+  "bindings": [
+    {
+      "binding_id": "binding-example-a",
+      "target_id": "target-example-a",
+      "capacity_pool": "codex",
+      "provider_id": "provider-example",
+      "quota_identity_id": "quota-context-example-a",
+      "identity_authority": "source_attested",
+      "observation_scope": {
+        "scope_id": "scope-example-a",
+        "scope_revision": "scope-example-r1",
+        "host_instance_id": "host-example-a",
+        "codex_home_instance_id": "home-example-a",
+        "source_surface": "cli",
+        "credential_context_id": "credential-context-example-a"
+      },
+      "producer": {
+        "adapter_id": "adapter-example",
+        "adapter_revision": "adapter-example-r2"
+      },
+      "verified_at": "2030-01-01T00:00:00Z",
+      "expires_at": "2030-02-01T00:00:00Z",
+      "status": "current",
+      "invalidation_reason": null,
+      "supersedes_binding_id": null
+    }
+  ]
+}

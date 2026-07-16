@@ -22,6 +22,10 @@ Requirement reference: `REQ-SEPARATE-ROUTING-EVIDENCE`
   evidence contract입니다. Requirement vector, exact-target fitness, selection order,
   override, execution evidence를 변경하지 않으며 D1에서는 selector에 참여하지 않습니다.
   `capacity_pool`, backend, wrapper, model, model group은 quota identity로 취급하지 않습니다.
+  `provider-resource-mapping-v2`와 `provider-resource-admission-policy-v1`은
+  source-attested quota identity, exact observation scope/producer revision, accepted
+  event-time provenance를 scheduling-authority 후보로 검증합니다. 현재 CLI는 eligibility
+  preview만 만들고 target selection, claim, cooldown, wake를 변경하지 않습니다.
   상세 계약은 [provider resource report](provider-resource-report.md)를 참조합니다.
 
 ## Requirement v2 envelope

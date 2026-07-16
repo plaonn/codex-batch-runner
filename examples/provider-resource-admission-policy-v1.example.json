@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "contract": "provider-resource-admission-policy-v1",
+  "policy_revision": "policy-example-r1",
+  "status": "current",
+  "enabled": false,
+  "identity_authority": "source_attested",
+  "allowed_mapping_revisions": [
+    "mapping-example-r2"
+  ],
+  "target_rules": [
+    {
+      "target_id": "target-example-a",
+      "provider_id": "provider-example",
+      "window_rules": [
+        {
+          "window_id": "primary",
+          "remaining_unit": "percent",
+          "gate_at_or_below": 5
+        }
+      ]
+    }
+  ],
+  "accepted_timestamp_provenance": [
+    "client_event_at"
+  ],
+  "timing": {
+    "max_age_seconds": 300,
+    "allowed_clock_skew_seconds": 60,
+    "reset_grace_seconds": 30
+  },
+  "unknown_behavior": {
+    "missing": "allow_existing_execution",
+    "stale": "allow_existing_execution",
+    "invalid": "allow_existing_execution"
+  },
+  "global_gate_interaction": {
+    "evaluation_order": "global_first",
+    "when_global_gated": "skip_target_evaluation",
+    "same_reset": "covered_by_global_no_duplicate_wake"
+  },
+  "rollback": {
+    "disable_behavior": "stop_new_target_decisions",
+    "typed_state_behavior": "preserve_append_only_evidence",
+    "legacy_scalar_behavior": "remain_global_only"
+  }
+}

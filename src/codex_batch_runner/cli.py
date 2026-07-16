@@ -130,6 +130,7 @@ from .provider_resource_report import (
     validate_mapping as validate_provider_resource_mapping,
     validate_snapshot as validate_provider_resource_snapshot,
 )
+from .provider_resource_authority import validate_admission_policy
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, build_routing_report, render_routing_report
 from .safe_exploration import ExplorationError, exploration_admission
 from .runner import RunOutcome, run_next
@@ -595,6 +596,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provider_resource_report.add_argument("--snapshot-json", action="append", default=[], metavar="PATH")
     provider_resource_report.add_argument("--mapping-json", metavar="PATH")
+    provider_resource_report.add_argument(
+        "--policy-json",
+        metavar="PATH",
+        help="provider-resource-admission-policy-v1 used only for read-only authority preview",
+    )
     provider_resource_report.add_argument(
         "--snapshot-command-json",
         action="append",
@@ -4232,10 +4238,12 @@ def cmd_provider_resource_report(config: Config, args: argparse.Namespace) -> in
     if args.include_antigravity_unavailable:
         snapshots.append(antigravity_unavailable_snapshot(generated_at=evaluated_at))
     mapping = validate_provider_resource_mapping(load_provider_resource_json(args.mapping_json)) if args.mapping_json else None
+    policy = validate_admission_policy(load_provider_resource_json(args.policy_json)) if args.policy_json else None
     report = build_provider_resource_report(
         config,
         snapshots=snapshots,
         mapping=mapping,
+        policy=policy,
         evaluated_at=evaluated_at,
         max_age_seconds=args.max_age_seconds,
         adapter_results=adapter_results,

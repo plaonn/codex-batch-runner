@@ -16,6 +16,7 @@ from .timeutil import utc_now
 SNAPSHOT_CONTRACT = "provider-resource-snapshot-v1"
 MAPPING_CONTRACT = "provider-resource-mapping-v1"
 REPORT_CONTRACT = "provider-resource-report-v1"
+AUTHORITY_REPORT_CONTRACT = "provider-resource-report-v2"
 MAX_INPUT_BYTES = 1_048_576
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$")
 FORBIDDEN_KEYS = {
@@ -73,15 +74,20 @@ def validate_snapshot(value: object) -> dict[str, Any]:
     _literal("snapshot.producer.read_only", producer.get("read_only"), True)
 
     resource = _object("snapshot.resource", item.get("resource"))
-    _keys("snapshot.resource", resource, {"provider_id", "quota_identity"})
+    _keys_with_optional(
+        "snapshot.resource",
+        resource,
+        {"provider_id", "quota_identity"},
+        {"observation_scope"},
+    )
     _safe_id("snapshot.resource.provider_id", resource.get("provider_id"))
     identity = _object("snapshot.resource.quota_identity", resource.get("quota_identity"))
     _keys("snapshot.resource.quota_identity", identity, {"status", "id", "source", "confidence"})
     identity_status = _enum("snapshot.resource.quota_identity.status", identity.get("status"), {"verified", "unknown", "unavailable"})
     if identity_status == "verified":
         _safe_id("snapshot.resource.quota_identity.id", identity.get("id"))
-        if identity.get("source") != "operator_verified" or identity.get("confidence") != "verified":
-            raise ProviderResourceValidationError("verified quota identity requires operator-verified provenance")
+        if identity.get("source") not in {"operator_verified", "source_attested"} or identity.get("confidence") != "verified":
+            raise ProviderResourceValidationError("verified quota identity requires verified provenance")
     elif identity.get("id") is not None:
         raise ProviderResourceValidationError("unverified quota identity must not contain an id")
     elif identity_status == "unknown" and (
@@ -92,8 +98,28 @@ def validate_snapshot(value: object) -> dict[str, Any]:
         identity.get("source") != "unavailable" or identity.get("confidence") != "unavailable"
     ):
         raise ProviderResourceValidationError("unavailable quota identity requires unavailable provenance")
-    _enum("snapshot.resource.quota_identity.source", identity.get("source"), {"operator_verified", "source_reported_opaque_id", "unavailable"})
+    _enum(
+        "snapshot.resource.quota_identity.source",
+        identity.get("source"),
+        {"operator_verified", "source_attested", "source_reported_opaque_id", "unavailable"},
+    )
     _enum("snapshot.resource.quota_identity.confidence", identity.get("confidence"), {"verified", "unverified", "unavailable"})
+    if resource.get("observation_scope") is not None:
+        scope = _object("snapshot.resource.observation_scope", resource.get("observation_scope"))
+        _keys(
+            "snapshot.resource.observation_scope",
+            scope,
+            {
+                "scope_id",
+                "scope_revision",
+                "host_instance_id",
+                "codex_home_instance_id",
+                "source_surface",
+                "credential_context_id",
+            },
+        )
+        for key in scope:
+            _safe_id(f"snapshot.resource.observation_scope.{key}", scope.get(key))
 
     windows = item.get("windows")
     if not isinstance(windows, list):
@@ -133,10 +159,21 @@ def validate_snapshot(value: object) -> dict[str, Any]:
             _timestamp(f"snapshot.windows[{index}].freshness.expires_at", freshness.get("expires_at"))
         _safe_id(f"snapshot.windows[{index}].freshness.reason", freshness.get("reason"))
         source = _object(f"snapshot.windows[{index}].source", window.get("source"))
-        _keys(f"snapshot.windows[{index}].source", source, {"kind", "field", "confidence"})
+        _keys_with_optional(
+            f"snapshot.windows[{index}].source",
+            source,
+            {"kind", "field", "confidence"},
+            {"timestamp_provenance"},
+        )
         _enum(f"snapshot.windows[{index}].source.kind", source.get("kind"), {"local_cached_event", "provided_snapshot", "capability_projection"})
         _safe_id(f"snapshot.windows[{index}].source.field", source.get("field"))
         _enum(f"snapshot.windows[{index}].source.confidence", source.get("confidence"), {"verified_source_timestamp", "experimental_observed_shape", "source_file_mtime", "unavailable"})
+        if source.get("timestamp_provenance") is not None:
+            _enum(
+                f"snapshot.windows[{index}].source.timestamp_provenance",
+                source.get("timestamp_provenance"),
+                {"provider_observed_at", "client_event_at", "generated_at", "source_file_mtime"},
+            )
         if reset[0] == "observed" and observed_at and reset[1] and observed_at > reset[1]:
             raise ProviderResourceValidationError("reset_time_inconsistent")
 
@@ -155,6 +192,10 @@ def validate_snapshot(value: object) -> dict[str, Any]:
 
 def validate_mapping(value: object) -> dict[str, Any]:
     item = _object("mapping", value)
+    if item.get("contract") == "provider-resource-mapping-v2":
+        from .provider_resource_authority import validate_mapping_v2
+
+        return validate_mapping_v2(item)
     _keys("mapping", item, {"schema_version", "contract", "mapping_revision", "status", "bindings"})
     _literal("mapping.schema_version", item.get("schema_version"), 1)
     _literal("mapping.contract", item.get("contract"), MAPPING_CONTRACT)
@@ -352,7 +393,16 @@ def mapping_preview(mapping: dict[str, Any] | None, inventory: dict[str, Any], *
     }
 
 
-def build_provider_resource_report(config: Config, *, snapshots: list[dict[str, Any]], mapping: dict[str, Any] | None = None, evaluated_at: datetime | None = None, max_age_seconds: int | None = None, adapter_results: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def build_provider_resource_report(
+    config: Config,
+    *,
+    snapshots: list[dict[str, Any]],
+    mapping: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None,
+    evaluated_at: datetime | None = None,
+    max_age_seconds: int | None = None,
+    adapter_results: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     baseline = evaluated_at or utc_now()
     if max_age_seconds is not None and (
         isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, int) or max_age_seconds < 0
@@ -373,7 +423,18 @@ def build_provider_resource_report(config: Config, *, snapshots: list[dict[str, 
             max_age_seconds=max_age_seconds,
         ))
     validated_mapping = validate_mapping(mapping) if mapping is not None else None
-    preview = mapping_preview(validated_mapping, config.execution_target_inventory, evaluated_at=baseline)
+    is_mapping_v2 = validated_mapping is not None and validated_mapping.get("contract") == "provider-resource-mapping-v2"
+    preview = (
+        {
+            "mapping_revision": validated_mapping.get("mapping_revision"),
+            "target_inventory_snapshot_id": config.execution_target_inventory.get("snapshot_id"),
+            "target_inventory_status": config.execution_target_inventory.get("status"),
+            "targets": [],
+            "pool_projection": [],
+        }
+        if is_mapping_v2
+        else mapping_preview(validated_mapping, config.execution_target_inventory, evaluated_at=baseline)
+    )
     snapshot_index: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for snapshot in evaluated:
         identity = snapshot["resource"]["quota_identity"]
@@ -389,10 +450,21 @@ def build_provider_resource_report(config: Config, *, snapshots: list[dict[str, 
                 for window in snapshot["windows"]
             )
         )
+    authority_preview = None
+    if is_mapping_v2 or policy is not None:
+        from .provider_resource_authority import build_authority_preview
+
+        authority_preview = build_authority_preview(
+            snapshots=evaluated,
+            mapping=validated_mapping if is_mapping_v2 else None,
+            policy=policy,
+            inventory=config.execution_target_inventory,
+            evaluated_at=baseline,
+        )
     sanitized_adapter_results = [_validate_adapter_result(item) for item in list(adapter_results or [])]
     local_status = build_status_report(config)
     capacity = local_status.get("queue", {}).get("capacity", {})
-    return {
+    report = {
         "schema_version": 1, "contract": REPORT_CONTRACT, "generated_at": baseline.isoformat(),
         "read_only": True, "mutation_allowed": False, "scheduling_authoritative": False,
         "local_capacity": {
@@ -412,6 +484,11 @@ def build_provider_resource_report(config: Config, *, snapshots: list[dict[str, 
             "ambiguous_resource_count": sum(1 for items in snapshot_index.values() if len(items) > 1),
         },
     }
+    if authority_preview is not None:
+        report["schema_version"] = 2
+        report["contract"] = AUTHORITY_REPORT_CONTRACT
+        report["authority_preview"] = authority_preview
+    return report
 
 
 def render_provider_resource_report(report: dict[str, Any]) -> str:
@@ -448,6 +525,16 @@ def render_provider_resource_report(report: dict[str, Any]) -> str:
         lines.append("  none")
     for row in targets:
         lines.append(f"  {row['target_id']}: {row['status']} candidate={'yes' if row['resource_aware_candidate'] else 'no'} reason={row['reason'] or '-'}")
+    authority = report.get("authority_preview")
+    if authority is not None:
+        lines.extend(["", "authority preview (read-only; not active)"])
+        if not authority["targets"]:
+            lines.append("  none")
+        for row in authority["targets"]:
+            reasons = ",".join(row["reasons"]) if row["reasons"] else "-"
+            lines.append(
+                f"  {row['target_id']}: eligible={'yes' if row['eligible'] else 'no'} reasons={reasons}"
+            )
     lines.extend(["", f"summary: snapshots={summary['snapshot_count']} fresh_windows={summary['fresh_window_count']} candidates={summary['resource_aware_candidate_count']} unavailable={summary['unavailable_count']} ambiguous_resources={summary['ambiguous_resource_count']}"])
     return "\n".join(lines) + "\n"
 
@@ -504,6 +591,18 @@ def _object(key: str, value: object) -> dict[str, Any]:
 def _keys(key: str, value: dict[str, Any], allowed: set[str]) -> None:
     missing = allowed - set(value)
     extra = set(value) - allowed
+    if missing or extra:
+        raise ProviderResourceValidationError(f"{key} fields are invalid")
+
+
+def _keys_with_optional(
+    key: str,
+    value: dict[str, Any],
+    required: set[str],
+    optional: set[str],
+) -> None:
+    missing = required - set(value)
+    extra = set(value) - required - optional
     if missing or extra:
         raise ProviderResourceValidationError(f"{key} fields are invalid")
 

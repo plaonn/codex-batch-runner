@@ -261,6 +261,7 @@ class ProviderResourceReportCliTests(unittest.TestCase):
             )
             self.assertFalse(report["local_capacity"]["provider_quota"])
             self.assertTrue(report["mapping_preview"]["targets"][0]["resource_aware_candidate"])
+            self.assertNotIn("authority_preview", report)
 
             config_path = root / "config.json"
             config_path.write_text(json.dumps({"root": str(root), "capacity_pools": {"codex": {"max_running": 2}}}), encoding="utf-8")
