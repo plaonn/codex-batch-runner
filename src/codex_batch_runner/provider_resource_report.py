@@ -251,8 +251,33 @@ def project_native_codex_cached_rollout(value: object, *, snapshot_id: str = "na
     source = _object("native_codex_cached", value)
     baseline = generated_at or utc_now()
     available = source.get("available") is True
-    observed_raw = source.get("observed_at")
-    observed = _strict_timestamp_or_none(observed_raw)
+    adapter_revision_raw = source.get("source_adapter_revision")
+    adapter_revision = (
+        adapter_revision_raw
+        if isinstance(adapter_revision_raw, str) and SAFE_ID.fullmatch(adapter_revision_raw)
+        else "experimental-v1"
+    )
+    event_time_contract = adapter_revision_raw is not None
+    client_event = _strict_timestamp_or_none(source.get("client_event_at"))
+    compatibility_observed = _strict_timestamp_or_none(source.get("observed_at"))
+    event_time_valid = (
+        adapter_revision_raw == "codex-session-rollout-v2"
+        and client_event is not None
+        and source.get("timestamp_provenance") == "rollout-envelope-timestamp"
+        and source.get("observed_at_provenance") == "client_event_at"
+        and compatibility_observed == client_event
+    )
+    observed = client_event if event_time_valid else (
+        None if event_time_contract else compatibility_observed
+    )
+    source_confidence = (
+        "experimental_observed_shape"
+        if event_time_valid
+        else "unavailable" if event_time_contract else "source_file_mtime"
+    )
+    timestamp_provenance = "client_event_at" if event_time_valid else (
+        None if event_time_contract else "source_file_mtime"
+    )
     windows: list[dict[str, Any]] = []
     diagnostics: list[dict[str, str]] = []
     for slot in ("primary", "secondary"):
@@ -275,6 +300,13 @@ def project_native_codex_cached_rollout(value: object, *, snapshot_id: str = "na
             diagnostics.append({"code": "remaining_out_of_range" if remaining is not None else "remaining_unknown", "scope": slot})
         if available and reset_raw is not None and reset is None:
             diagnostics.append({"code": "reset_unknown", "scope": slot})
+        window_source = {
+            "kind": "local_cached_event",
+            "field": f"rate_limits.{slot}",
+            "confidence": source_confidence,
+        }
+        if timestamp_provenance is not None:
+            window_source["timestamp_provenance"] = timestamp_provenance
         windows.append({
             "window_id": slot,
             "window_duration_seconds": duration * 60,
@@ -283,7 +315,7 @@ def project_native_codex_cached_rollout(value: object, *, snapshot_id: str = "na
             "resets_at": {"status": "observed", "value": reset.isoformat()} if reset else {"status": "unknown" if available else "unavailable", "value": None},
             "observed_at": observed.isoformat() if observed else None,
             "freshness": {"status": "unknown", "evaluated_at": baseline.isoformat(), "max_age_seconds": None, "expires_at": None, "reason": "freshness_policy_unset"},
-            "source": {"kind": "local_cached_event", "field": f"rate_limits.{slot}", "confidence": "source_file_mtime"},
+            "source": window_source,
         })
     if not available:
         diagnostics.append({"code": "adapter_unavailable", "scope": "native-codex-rollout"})
@@ -291,12 +323,13 @@ def project_native_codex_cached_rollout(value: object, *, snapshot_id: str = "na
         diagnostics.append({"code": "observation_time_invalid", "scope": "native-codex-rollout"})
     if available and not windows:
         diagnostics.append({"code": "remaining_unknown", "scope": "native-codex-rollout"})
+    diagnostics.append({"code": "quota_identity_unknown", "scope": "native-codex-rollout"})
     snapshot = {
         "schema_version": 1,
         "contract": SNAPSHOT_CONTRACT,
         "snapshot_id": snapshot_id,
         "generated_at": baseline.isoformat(),
-        "producer": {"adapter_id": "native-codex-rollout", "adapter_version": "experimental-v1", "observation_mode": "cached_local", "read_only": True},
+        "producer": {"adapter_id": "native-codex-rollout", "adapter_version": adapter_revision, "observation_mode": "cached_local", "read_only": True},
         "resource": {"provider_id": "codex", "quota_identity": {"status": "unknown", "id": None, "source": "source_reported_opaque_id", "confidence": "unverified"}},
         "windows": windows,
         "diagnostics": diagnostics,

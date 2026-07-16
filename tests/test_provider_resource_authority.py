@@ -29,6 +29,7 @@ from codex_batch_runner.provider_resource_report import (
     ProviderResourceValidationError,
     build_provider_resource_report,
     evaluate_snapshot_freshness,
+    project_native_codex_cached_rollout,
     validate_snapshot,
 )
 
@@ -334,6 +335,39 @@ class ProviderResourceAuthorityContractTests(unittest.TestCase):
             self.assertFalse(report["scheduling_authoritative"])
             self.assertEqual(report["mapping_preview"]["targets"], [])
             self.assertEqual(report["provider_resources"][0]["windows"][0]["freshness"]["status"], "unknown")
+
+    def test_radar_event_time_reaches_preview_but_unknown_identity_is_ineligible(self) -> None:
+        radar_value = json.loads(
+            (Path(__file__).parent / "fixtures" / "codex-radar-usage-v2.json").read_text()
+        )
+        projected = project_native_codex_cached_rollout(radar_value, generated_at=NOW)
+        native_mapping = mapping_v2()
+        native_mapping["bindings"][0]["provider_id"] = "codex"
+        native_mapping["bindings"][0]["producer"] = {
+            "adapter_id": "native-codex-rollout",
+            "adapter_revision": "codex-session-rollout-v2",
+        }
+        native_policy = policy()
+        native_policy["target_rules"][0]["provider_id"] = "codex"
+        preview = build_authority_preview(
+            snapshots=[projected],
+            mapping=native_mapping,
+            policy=native_policy,
+            inventory=inventory(),
+            evaluated_at=NOW,
+        )
+        self.assertEqual(
+            projected["windows"][0]["source"]["timestamp_provenance"],
+            "client_event_at",
+        )
+        self.assertEqual(
+            projected["windows"][0]["observed_at"],
+            radar_value["client_event_at"],
+        )
+        self.assertFalse(preview["targets"][0]["eligible"])
+        self.assertIn("snapshot_missing", preview["targets"][0]["reasons"])
+        self.assertEqual(preview["eligible_target_count"], 0)
+        self.assertFalse(preview["scheduling_authoritative"])
 
     def test_cli_policy_preview_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

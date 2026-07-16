@@ -1,0 +1,27 @@
+{
+  "available": true,
+  "source": "codex-session-rollout",
+  "source_adapter_revision": "codex-session-rollout-v2",
+  "generated_at": "2030-01-02T04:00:00+00:00",
+  "checked_files": 2,
+  "client_event_at": "2030-01-02T03:59:00+00:00",
+  "timestamp_provenance": "rollout-envelope-timestamp",
+  "observed_at": "2030-01-02T03:59:00+00:00",
+  "observed_at_provenance": "client_event_at",
+  "limit_id": "synthetic-limit",
+  "plan_type": "synthetic",
+  "primary": {
+    "used_percent": 40,
+    "remaining_percent": 60,
+    "window_minutes": 300,
+    "resets_at": 1893553200,
+    "resets_at_iso": "2030-01-02T05:00:00+00:00"
+  },
+  "secondary": null,
+  "credits": null,
+  "individual_limit": null,
+  "rate_limit_reached_type": null,
+  "context_window": 200000,
+  "last_token_usage": null,
+  "total_token_usage": null
+}

@@ -19,7 +19,7 @@
 
 Strict validator는 unknown field, naive/malformed timestamp, inconsistent observation/reset timestamp, non-finite number, out-of-range percent, duplicate window ID, unsafe identifier를 거부합니다. Report timestamp보다 60초 넘게 미래인 generated/observed timestamp도 invalid입니다.
 
-Native Codex cached-rollout projection은 experimental입니다. Cached `primary`/`secondary` window를 projection하고 quota identity를 `unknown`, observation confidence를 `source_file_mtime`으로 표시합니다. Scheduling-authoritative evidence가 아닙니다. Antigravity projection은 quota identity나 window를 추론하지 않으며 실제 quota/reset source가 생기기 전까지 `resource_capability_unavailable`만 보고합니다.
+Native Codex cached-rollout projection은 experimental입니다. Current `codex-session-rollout-v2` input은 `client_event_at`을 window `observed_at`으로, `rollout-envelope-timestamp`를 canonical `client_event_at` provenance로, `source_adapter_revision`을 producer adapter version으로 보존합니다. 이 contract의 timestamp가 missing, malformed, provenance-mismatched이면 file mtime이나 `generated_at`으로 fallback하지 않고 observation time을 invalid로 표시합니다. Adapter revision이 없는 legacy cached shape만 `source_file_mtime` confidence의 advisory compatibility로 유지합니다. 두 shape 모두 quota identity는 `unknown`이며 scheduling-authoritative evidence가 아닙니다. Antigravity projection은 quota identity나 window를 추론하지 않으며 실제 quota/reset source가 생기기 전까지 `resource_capability_unavailable`만 보고합니다.
 
 Sanitized shape는 [synthetic snapshot example](../examples/provider-resource-snapshot-v1.example.json)을 참조합니다.
 
@@ -104,6 +104,8 @@ cbr provider-resource-report \
   --codex-cached-command-json '["cached-usage-reader", "--json"]' \
   --include-antigravity-unavailable
 ```
+
+`codex-context/scripts/codex-usage-snapshot.sh`처럼 `codex-radar usage --json`을 변환 없이 전달하는 adapter를 사용할 수 있습니다. Current Radar event-time field는 위 projection에서 보존되지만, account/quota identity가 source-attested되지 않은 한 authority preview eligibility는 `false`로 유지됩니다.
 
 Adapter는 implicit shell evaluation 없이 argv list로 실행하며 timeout 상한은 60초, accepted JSON input 상한은 1 MiB입니다. Nonzero exit, timeout, invalid JSON, invalid snapshot은 sanitized status/reason으로 축약합니다. Command argv, stdout, stderr는 report에 복사하지 않습니다.
 

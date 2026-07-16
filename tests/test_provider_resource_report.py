@@ -180,7 +180,29 @@ class ProviderResourceAdapterTests(unittest.TestCase):
         self.assertNotIn("argv", invalid)
         self.assertNotIn("stdout", invalid)
 
-    def test_codex_projection_marks_file_mtime_confidence_and_unknown_identity(self) -> None:
+    def test_codex_projection_preserves_radar_event_time_and_unknown_identity(self) -> None:
+        value = json.loads(
+            (Path(__file__).parent / "fixtures" / "codex-radar-usage-v2.json").read_text()
+        )
+        projected = project_native_codex_cached_rollout(value, generated_at=NOW)
+        self.assertEqual(projected["producer"]["adapter_version"], "codex-session-rollout-v2")
+        self.assertEqual(projected["resource"]["quota_identity"]["status"], "unknown")
+        self.assertEqual(projected["windows"][0]["observed_at"], value["client_event_at"])
+        self.assertEqual(
+            projected["windows"][0]["source"],
+            {
+                "kind": "local_cached_event",
+                "field": "rate_limits.primary",
+                "confidence": "experimental_observed_shape",
+                "timestamp_provenance": "client_event_at",
+            },
+        )
+        self.assertIn(
+            {"code": "quota_identity_unknown", "scope": "native-codex-rollout"},
+            projected["diagnostics"],
+        )
+
+    def test_codex_projection_keeps_legacy_file_mtime_advisory_only(self) -> None:
         value = {
             "available": True,
             "observed_at": "2030-01-02T03:59:00Z",
@@ -195,6 +217,36 @@ class ProviderResourceAdapterTests(unittest.TestCase):
             generated_at=NOW,
         )
         self.assertEqual(missing["windows"][0]["remaining"]["status"], "unknown")
+
+    def test_codex_projection_does_not_fallback_for_invalid_radar_event_time(self) -> None:
+        base = json.loads(
+            (Path(__file__).parent / "fixtures" / "codex-radar-usage-v2.json").read_text()
+        )
+        mutations = (
+            lambda value: value.pop("client_event_at"),
+            lambda value: value.update(client_event_at="not-a-timestamp"),
+            lambda value: value.update(timestamp_provenance="unavailable"),
+            lambda value: value.update(observed_at_provenance="source_file_mtime"),
+            lambda value: value.update(observed_at="2030-01-02T03:58:00Z"),
+        )
+        for mutation in mutations:
+            value = json.loads(json.dumps(base))
+            mutation(value)
+            projected = project_native_codex_cached_rollout(value, generated_at=NOW)
+            with self.subTest(value=value):
+                self.assertIsNone(projected["windows"][0]["observed_at"])
+                self.assertEqual(
+                    projected["windows"][0]["source"]["confidence"],
+                    "unavailable",
+                )
+                self.assertNotIn(
+                    "timestamp_provenance",
+                    projected["windows"][0]["source"],
+                )
+                self.assertIn(
+                    {"code": "observation_time_invalid", "scope": "native-codex-rollout"},
+                    projected["diagnostics"],
+                )
 
     def test_antigravity_is_unavailable_only(self) -> None:
         projected = antigravity_unavailable_snapshot(generated_at=NOW)
