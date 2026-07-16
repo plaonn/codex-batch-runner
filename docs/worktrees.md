@@ -17,6 +17,65 @@ Opt-in placeholder config는 다음과 같습니다.
 
 `worktree_mode`의 허용값은 `disabled`와 `task`입니다. `disabled`에서는 기존처럼 task의 원래 `cwd`에서 실행합니다. `task`에서는 `run-next`가 실행 가능한 task를 처리하기 직전에 task별 branch/worktree를 만들거나 기존 연결 상태를 재확인하고, 통과한 worktree를 worker process `cwd`로 사용합니다. `worktree_root`는 relative path이면 runner root 기준으로 해석하며, 기본값은 runtime directory 아래 local-only 경로입니다. Public example에는 실제 absolute path, private queue path, 작업자 계정명을 넣지 않습니다.
 
+### Project-declared reusable pool
+
+Task worktree directory 재사용은 project repository root의 tracked `.cbr.toml`이 opt-in한
+경우에만 허용합니다. 파일이 없으면 기존 task별 disposable worktree를 사용합니다.
+파일이 존재하지만 Git에 tracked되지 않았거나 parse/schema/path validation이 실패하면
+pool을 추측 적용하거나 disposable mode로 조용히 fallback하지 않고 task 실행 전에
+fail closed합니다.
+
+```toml
+[worktree]
+copy = [".env", ".npmrc"]
+retain = ["node_modules", ".cache"]
+
+[worktree.pool]
+max_slots = 2
+idle_ttl_hours = 24
+
+[[worktree.prepare]]
+command = ["npm", "install"]
+cwd = "."
+
+[[worktree.prepare]]
+command = ["npm", "run", "codegen"]
+cwd = "."
+```
+
+- `copy`는 canonical checkout의 같은 relative path를 task lease 시작마다 slot에 새로
+  복사하는 항목입니다. 이전 slot 항목은 먼저 제거하며 source가 없으면 prepare를
+  거부합니다. Optional copy를 위한 별도 암묵 규칙은 두지 않습니다.
+- `retain`은 task lease 사이에 slot 내부 값을 유지할 수 있는 untracked path입니다.
+  Dependency/cache directory처럼 다음 task의 정상 prepare command가 검증·갱신할 수
+  있는 항목만 선언해야 합니다.
+- `copy`와 `retain`은 repository-relative path만 허용하고 absolute path, `..`, `.git`,
+  중복·상하위 overlap을 거부합니다.
+- `[[worktree.prepare]]`는 선언 순서대로 실행하는 bounded argv입니다. `cwd`는 slot
+  내부 relative directory여야 합니다. Shell string evaluation은 지원하지 않으며
+  runner의 bounded shell timeout을 적용하고 stdout/stderr를 task metadata에 보존하지
+  않습니다. Repository 자체를 신뢰할 수 없는 경우 project-declared prepare command를
+  실행하면 안 됩니다.
+- `max_slots`는 해당 repository와 policy fingerprint에 유지할 최대 slot 수입니다.
+  `idle_ttl_hours`를 지난 idle slot은 다음 pool maintenance/acquire 시 제거 후보가 됩니다.
+- Policy fingerprint 단위는 canonical repository identity, schema version, normalized
+  `copy`/`retain`/prepare/pool declaration입니다. Base commit은 fingerprint에 넣지 않고
+  lease 시작 시 Git reset/switch guard로 갱신합니다.
+
+Pool slot은 task review unit이 아닙니다. Task branch와 task metadata가 review/apply
+provenance를 계속 소유하며, slot은 한 번에 하나의 task lease만 가질 수 있습니다.
+Lease 시작 시 CBR는 tracked state를 requested base commit으로 맞추고, `retain` 이외의
+기존 untracked state를 제거하고, `copy`를 canonical checkout에서 refresh한 뒤 prepare
+commands를 실행합니다. Prepare command가 tracked state를 변경하면 실행을 거부합니다.
+
+Lease 종료 시 applied/no-change/discard disposition과 branch 보존 정책은 기존 계약을
+그대로 따릅니다. Reusable slot은 task branch에서 detach하고 tracked state를 canonical
+baseline으로 reset한 뒤 `retain` 외 untracked state를 제거하여 idle로 전환합니다.
+Task metadata의 terminal `execution_worktree_status=cleaned`와 pool slot의
+`idle|leased` 상태는 별도 lifecycle입니다. 따라서 archived task에 active task lease가
+남는 것은 invariant 위반이지만, 해당 task와 연결이 해제된 idle pool slot이 존재하는
+것은 위반이 아닙니다.
+
 Worktree mode의 핵심 모델:
 
 - Main worktree는 stable baseline으로 유지합니다. Raw task execution은 기본적으로 main에 직접 commit/merge하지 않습니다.

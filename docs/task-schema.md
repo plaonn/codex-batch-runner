@@ -130,6 +130,15 @@
 
 `archived`는 완료/실패/blocked task를 삭제하지 않고 운영 목록에서 숨기기 위한 상태임. archive 전 상태는 `previous_status`, archive 시각은 `archived_at`에 저장함.
 
+Reusable worktree pool을 사용한 task는 기존 branch/base/path metadata에 더해
+`execution_worktree_pool=true`, `execution_worktree_pool_slot_id`,
+`execution_worktree_policy_fingerprint`, `execution_worktree_lease_status`를 기록할 수
+있음. 이 필드는 task review unit의 provenance를 대체하지 않음. Terminal cleanup 뒤
+task의 `execution_worktree_status=cleaned`와 `execution_worktree_lease_status=released`가
+기록되어도 같은 directory의 pool slot은 task linkage 없이 `idle` 상태로 남을 수 있음.
+Task가 archived/running/retained인지와 idle slot 존재 여부를 같은 lifecycle로 판정하지
+않음.
+
 
 ## Review status
 

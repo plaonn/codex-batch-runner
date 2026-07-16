@@ -12,6 +12,13 @@ from .events import transition_payload, write_event_nonfatal
 from .lock import FileLock
 from .queue import create_task, load_task, save_task, task_labels, task_project_id, task_title, truncate_text
 from .timeutil import iso_now
+from .worktree_pool import (
+    acquire_pool_slot,
+    load_worktree_pool_policy,
+    pool_acquire_preview,
+    release_pool_slot,
+    validate_pool_lease,
+)
 
 
 PREPARE_OK_STATUSES = {"runnable", "needs_resume"}
@@ -146,20 +153,58 @@ def _build_prepare_report_locked(config: Config, task_id: str, *, apply: bool) -
     try:
         repo = repo_context(task)
         branch = sanitize_branch_name(str(task.get("id") or task_id))
-        worktree_path = guarded_worktree_path(config, branch)
+        pool_policy = load_worktree_pool_policy(repo["repo_root"])
+        pooled_existing = bool(task.get("execution_worktree_pool"))
+        if pooled_existing and pool_policy is None:
+            raise ValueError("pooled task requires the tracked .cbr.toml used to acquire its slot")
+        if pooled_existing and task.get("execution_worktree_path"):
+            worktree_path = guarded_existing_worktree_path(
+                config, Path(str(task["execution_worktree_path"]))
+            )
+        else:
+            worktree_path = guarded_worktree_path(config, branch)
         registry = worktree_registry(repo["repo_root"])
         branch_state = local_branch_state(repo["repo_root"], branch)
-        classification = classify_prepare_state(task, branch, worktree_path, registry, branch_state)
+        if pool_policy is not None and not pooled_existing:
+            if branch_state["exists"]:
+                classification = {
+                    "status": "existing_branch",
+                    "reason": "branch exists without matching task metadata",
+                }
+            else:
+                classification = {
+                    "status": "pool_candidate",
+                    "reason": "tracked .cbr.toml enables reusable worktree pool",
+                }
+        else:
+            classification = classify_prepare_state(
+                task, branch, worktree_path, registry, branch_state
+            )
         report.update(
             {
                 "repo_root": str(repo["repo_root"]),
                 "base_ref": repo["base_ref"],
                 "base_head": repo["base_head"],
                 "branch": branch,
-                "worktree_path": str(worktree_path),
+                "worktree_path": str(worktree_path) if pooled_existing or pool_policy is None else None,
                 "classification": classification,
+                "pool": (
+                    {
+                        "enabled": True,
+                        "policy_fingerprint": pool_policy.fingerprint,
+                        "max_slots": pool_policy.max_slots,
+                        "idle_ttl_hours": pool_policy.idle_ttl_hours,
+                    }
+                    if pool_policy is not None
+                    else {"enabled": False}
+                ),
             }
         )
+        if pool_policy is not None and classification["status"] == "pool_candidate":
+            preview = pool_acquire_preview(config, repo["repo_root"], pool_policy)
+            report["pool"]["acquire_preview"] = preview
+            if not preview["eligible"]:
+                report["errors"].append(str(preview["reason"]))
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         report["errors"].append(str(exc))
         return report
@@ -178,23 +223,57 @@ def _build_prepare_report_locked(config: Config, task_id: str, *, apply: bool) -
     if report["errors"] or not apply:
         return report
 
-    if classification["status"] == "absent":
+    pool_slot: dict[str, Any] | None = None
+    if classification["status"] == "pool_candidate":
+        try:
+            pool_slot = acquire_pool_slot(
+                config,
+                repo["repo_root"],
+                repo["base_head"],
+                branch,
+                task_id,
+                pool_policy,
+            )
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            report["errors"].append(str(exc))
+            return report
+        worktree_path = pool_slot["path"]
+        report["worktree_path"] = str(worktree_path)
+        report["pool"].update(
+            {
+                "slot_id": pool_slot["slot_id"],
+                "created": pool_slot["created"],
+            }
+        )
+    elif classification["status"] == "absent":
         git(repo["repo_root"], "worktree", "add", "-b", branch, str(worktree_path), repo["base_head"])
 
-    task.update(
-        {
-            "execution_mode": "git_worktree",
-            "execution_original_cwd": task.get("cwd"),
-            "execution_repo_root": str(repo["repo_root"]),
-            "execution_worktree_path": str(worktree_path),
-            "execution_worktree_root": str(config.worktree_root),
-            "execution_branch": branch,
-            "execution_base_ref": repo["base_ref"],
-            "execution_base_head": repo["base_head"],
-            "execution_worktree_status": "prepared",
-            "execution_prepared_at": iso_now(),
-        }
-    )
+    metadata = {
+        "execution_mode": "git_worktree",
+        "execution_original_cwd": task.get("cwd"),
+        "execution_repo_root": str(repo["repo_root"]),
+        "execution_worktree_path": str(worktree_path),
+        "execution_worktree_root": str(config.worktree_root),
+        "execution_branch": branch,
+        "execution_base_ref": repo["base_ref"],
+        "execution_base_head": repo["base_head"],
+        "execution_worktree_status": "prepared",
+        "execution_prepared_at": iso_now(),
+    }
+    if pool_policy is not None:
+        metadata.update(
+            {
+                "execution_worktree_pool": True,
+                "execution_worktree_pool_slot_id": (
+                    pool_slot["slot_id"]
+                    if pool_slot is not None
+                    else task.get("execution_worktree_pool_slot_id")
+                ),
+                "execution_worktree_policy_fingerprint": pool_policy.fingerprint,
+                "execution_worktree_lease_status": "leased",
+            }
+        )
+    task.update(metadata)
     save_task(config, task)
     report["applied"] = True
     report["classification"] = {**classification, "status": "prepared", "reason": "worktree prepared"}
@@ -248,6 +327,28 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
         repo_root = Path(str(task.get("execution_repo_root") or task.get("project_root") or task.get("cwd"))).expanduser().resolve()
         registry = worktree_registry(repo_root)
         classification = classify_cleanup_state(task, branch, worktree_path, registry)
+        if task.get("execution_worktree_pool"):
+            current_policy = load_worktree_pool_policy(repo_root)
+            if current_policy is None:
+                raise ValueError("pooled task requires the tracked .cbr.toml used to acquire its slot")
+            task_policy_fingerprint = str(
+                task.get("execution_worktree_policy_fingerprint") or ""
+            )
+            if current_policy.fingerprint != task_policy_fingerprint:
+                raise ValueError("pool policy changed while the task lease was active")
+            validate_pool_lease(
+                config,
+                repo_root,
+                worktree_path,
+                branch,
+                task_id,
+                task_policy_fingerprint,
+            )
+            report["pool"] = {
+                "enabled": True,
+                "slot_id": task.get("execution_worktree_pool_slot_id"),
+                "status": "leased",
+            }
         if classification["status"] == "cleanup_candidate" and eligibility.get("cleanup_kind") == "applied":
             applied_check = verify_applied_cleanup_target(task, repo_root)
             report["applied_metadata"] = applied_check
@@ -281,14 +382,32 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
     if report["errors"] or not apply:
         return report
 
+    pool_release: dict[str, Any] | None = None
     if classification["status"] == "cleanup_candidate":
-        git(repo_root, "worktree", "remove", str(worktree_path))
+        if task.get("execution_worktree_pool"):
+            pool_release = release_pool_slot(
+                config,
+                repo_root,
+                worktree_path,
+                branch,
+                task_id,
+            )
+        else:
+            git(repo_root, "worktree", "remove", str(worktree_path))
     task["execution_worktree_status"] = "cleaned"
     task["execution_cleaned_at"] = iso_now()
     task["execution_cleanup_kind"] = eligibility.get("cleanup_kind")
     task["execution_cleanup_reason"] = eligibility.get("cleanup_reason")
     task["execution_cleanup_branch_retained"] = True
     task["execution_cleanup_result_applied"] = eligibility.get("cleanup_kind") == "applied"
+    if pool_release is not None:
+        task["execution_worktree_lease_status"] = "released"
+        task["execution_worktree_pool_released_at"] = iso_now()
+        report["pool"] = {
+            "enabled": True,
+            "slot_id": pool_release["slot_id"],
+            "status": "idle",
+        }
     save_task(config, task)
     report["applied"] = True
     if eligibility.get("cleanup_kind") == "discard":
@@ -745,7 +864,10 @@ def verify_no_change_cleanup_target(task: dict[str, Any], repo_root: Path, workt
     if not base_head:
         return {"status": "blocked", "reason": "no-change cleanup requires execution_base_head"}
 
-    dirty = git(worktree_path, "status", "--porcelain")
+    status_args = ["status", "--porcelain"]
+    if task.get("execution_worktree_pool"):
+        status_args.append("--untracked-files=no")
+    dirty = git(worktree_path, *status_args)
     if dirty.strip():
         return {"status": "blocked", "reason": "no-change cleanup requires a clean retained worktree"}
 
@@ -1594,6 +1716,11 @@ def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
         ("execution_branch_pruned_at", "branch_pruned_at"),
         ("execution_branch_prune_reason", "branch_prune_reason"),
         ("execution_branch_pruned_head", "branch_pruned_head"),
+        ("execution_worktree_pool", "pool_enabled"),
+        ("execution_worktree_pool_slot_id", "pool_slot_id"),
+        ("execution_worktree_policy_fingerprint", "pool_policy_fingerprint"),
+        ("execution_worktree_lease_status", "pool_lease_status"),
+        ("execution_worktree_pool_released_at", "pool_released_at"),
     ):
         value = task.get(source)
         if value not in (None, ""):

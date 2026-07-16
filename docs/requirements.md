@@ -90,6 +90,21 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 - Revisit signal status: not observed
 - Evidence: [docs/worktrees.md](worktrees.md)
 
+## REQ-DECLARED-WORKTREE-REUSE: 프로젝트가 선언한 범위에서만 worktree slot 재사용
+
+- Parent: REQ-ISOLATED-REVIEW-UNITS
+- Decision class: Durable Requirement
+- Status: active
+- Validity scope: Durable
+- Requirement: worktree directory 재사용은 repository root의 tracked `.cbr.toml`이 명시적으로 opt-in한 프로젝트에만 허용하고, task branch lease와 idle pool slot lifecycle을 분리해야 한다. 설정이 없으면 task별 disposable worktree를 사용하며, 설정이 존재하지만 유효하지 않으면 재사용을 추측 적용하지 않고 실행 전에 거부한다.
+- Rationale: dependency cache처럼 재생성 비용이 큰 untracked directory는 보존하면서도 secret, local config, generated state와 이전 task 변경이 다음 task로 암묵적으로 승계되지 않게 하기 위해.
+- Failure prevented: 다른 프로젝트 설정의 추측 적용, stale tracked state 승계, 이전 task의 untracked output 누출, task 종료와 slot 삭제를 같은 lifecycle로 취급해 발생하는 불필요한 filesystem churn.
+- Assumptions: Git이 tracked state와 branch provenance를 소유하고, 프로젝트가 재사용 가능한 untracked path와 매 task refresh가 필요한 path를 명시할 수 있으며, prepare command는 bounded argv로 표현할 수 있다.
+- Derived specs: tracked `.cbr.toml`, `copy`/`retain`, repeated prepare command, `max_slots`, `idle_ttl_hours`, fail-closed validation, lease release 시 tracked reset과 unlisted untracked cleanup.
+- Revisit when: Git 이외의 isolation primitive, container/image cache, shared remote workspace, multi-host pool, 또는 untrusted repository config 실행을 도입할 때.
+- Revisit signal status: not observed
+- Evidence: [docs/worktrees.md](worktrees.md)
+
 ## REQ-BOUNDED-OPT-IN-AUTOMATION: 자동화는 보고 우선·범위 제한
 
 - Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION

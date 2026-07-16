@@ -25,6 +25,7 @@ from .state import load_state
 from .timeutil import parse_time, utc_now
 from .transcript import sanitize
 from .worktree import WORKTREE_RETAINED_STATUSES, sanitize_report_value, task_worktree_report, worktree_task_counts
+from .worktree_pool import pool_state_summary
 
 CODEX_VERSION_TIMEOUT_SECONDS = 2.0
 DOCTOR_TASK_BRANCH_HUMAN_DETAIL_LIMIT = 20
@@ -649,6 +650,7 @@ def worktree_summary(config: Config, tasks: list[dict[str, Any]]) -> dict[str, A
         "mode": config.worktree_mode,
         "root": sanitize(config.worktree_root) if config.worktree_root is not None else None,
         "tasks": worktree_task_counts(tasks),
+        "pool": pool_state_summary(config),
         "task_branches": task_branch_lifecycle_summary(tasks),
     }
 
@@ -946,6 +948,15 @@ def render_doctor_report(report: dict[str, Any]) -> str:
         lines.append("  by_status:")
         for status, count in by_status.items():
             lines.append(f"    {status}: {count}")
+    pool = worktree.get("pool") or {}
+    lines.append(
+        "  pool: "
+        f"status={pool.get('status')} "
+        f"total={pool.get('total')} "
+        f"idle={pool.get('idle')} "
+        f"leased={pool.get('leased')} "
+        f"recovery_required={pool.get('recovery_required')}"
+    )
     task_branches = worktree.get("task_branches") or []
     if task_branches:
         displayed_task_branches = task_branches[:DOCTOR_TASK_BRANCH_HUMAN_DETAIL_LIMIT]
