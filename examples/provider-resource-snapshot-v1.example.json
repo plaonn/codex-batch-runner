@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "contract": "provider-resource-snapshot-v1",
+  "snapshot_id": "synthetic-snapshot-001",
+  "generated_at": "2030-01-02T04:00:00Z",
+  "producer": {
+    "adapter_id": "synthetic-read-only-adapter",
+    "adapter_version": "v1",
+    "observation_mode": "provided_snapshot",
+    "read_only": true
+  },
+  "resource": {
+    "provider_id": "provider-example",
+    "quota_identity": {
+      "status": "verified",
+      "id": "quota-example-a",
+      "source": "operator_verified",
+      "confidence": "verified"
+    }
+  },
+  "windows": [
+    {
+      "window_id": "short-window",
+      "window_duration_seconds": 18000,
+      "availability": "observed",
+      "remaining": {
+        "status": "observed",
+        "value": 42.0,
+        "unit": "percent",
+        "derivation": "provider_reported"
+      },
+      "resets_at": {"status": "observed", "value": "2030-01-02T05:00:00Z"},
+      "observed_at": "2030-01-02T03:59:00Z",
+      "freshness": {
+        "status": "fresh",
+        "evaluated_at": "2030-01-02T04:00:00Z",
+        "max_age_seconds": 300,
+        "expires_at": "2030-01-02T04:04:00Z",
+        "reason": "within_max_age"
+      },
+      "source": {"kind": "provided_snapshot", "field": "windows.short", "confidence": "verified_source_timestamp"}
+    },
+    {
+      "window_id": "long-window",
+      "window_duration_seconds": 604800,
+      "availability": "observed",
+      "remaining": {
+        "status": "observed",
+        "value": 71.0,
+        "unit": "percent",
+        "derivation": "provider_reported"
+      },
+      "resets_at": {"status": "observed", "value": "2030-01-08T00:00:00Z"},
+      "observed_at": "2030-01-02T03:59:00Z",
+      "freshness": {
+        "status": "fresh",
+        "evaluated_at": "2030-01-02T04:00:00Z",
+        "max_age_seconds": 300,
+        "expires_at": "2030-01-02T04:04:00Z",
+        "reason": "within_max_age"
+      },
+      "source": {"kind": "provided_snapshot", "field": "windows.long", "confidence": "verified_source_timestamp"}
+    }
+  ],
+  "diagnostics": []
+}

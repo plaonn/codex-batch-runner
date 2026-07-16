@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "contract": "provider-resource-mapping-v1",
+  "mapping_revision": "synthetic-mapping-r1",
+  "status": "current",
+  "bindings": [
+    {
+      "binding_id": "synthetic-binding-a",
+      "target_id": "exact-target-a",
+      "capacity_pool": "local-pool-a",
+      "provider_id": "provider-example",
+      "quota_identity_id": "quota-example-a",
+      "source": "operator_verified",
+      "verified_at": "2030-01-01T00:00:00Z",
+      "expires_at": "2030-02-01T00:00:00Z"
+    },
+    {
+      "binding_id": "synthetic-binding-b",
+      "target_id": "exact-target-b",
+      "capacity_pool": "local-pool-b",
+      "provider_id": "provider-example",
+      "quota_identity_id": "quota-example-a",
+      "source": "operator_verified",
+      "verified_at": "2030-01-01T00:00:00Z",
+      "expires_at": "2030-02-01T00:00:00Z"
+    }
+  ]
+}

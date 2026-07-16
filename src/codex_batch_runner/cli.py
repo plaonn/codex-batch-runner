@@ -118,6 +118,18 @@ from .routing_recommendation import (
     render_routing_recommendation,
 )
 from .parent_attention import acknowledge_parent_attention, deliver_parent_attention, list_parent_attention
+from .provider_resource_report import (
+    ProviderResourceValidationError,
+    antigravity_unavailable_snapshot,
+    build_provider_resource_report,
+    load_json_object as load_provider_resource_json,
+    parse_resource_timestamp,
+    project_native_codex_cached_rollout,
+    render_provider_resource_report,
+    run_snapshot_adapter,
+    validate_mapping as validate_provider_resource_mapping,
+    validate_snapshot as validate_provider_resource_snapshot,
+)
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, build_routing_report, render_routing_report
 from .safe_exploration import ExplorationError, exploration_admission
 from .runner import RunOutcome, run_next
@@ -576,6 +588,42 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="show lightweight cbr admission and queue status")
     status.add_argument("--json", action="store_true", help="print JSON")
     status.set_defaults(func=cmd_status)
+
+    provider_resource_report = sub.add_parser(
+        "provider-resource-report",
+        help="show read-only local capacity and provider-resource evidence without changing routing",
+    )
+    provider_resource_report.add_argument("--snapshot-json", action="append", default=[], metavar="PATH")
+    provider_resource_report.add_argument("--mapping-json", metavar="PATH")
+    provider_resource_report.add_argument(
+        "--snapshot-command-json",
+        action="append",
+        default=[],
+        metavar="JSON_ARGV",
+        help="bounded read-only argv adapter returning provider-resource-snapshot-v1 JSON",
+    )
+    provider_resource_report.add_argument("--codex-cached-json", action="append", default=[], metavar="PATH")
+    provider_resource_report.add_argument(
+        "--codex-cached-command-json",
+        action="append",
+        default=[],
+        metavar="JSON_ARGV",
+        help="bounded read-only argv adapter returning cached native Codex usage JSON",
+    )
+    provider_resource_report.add_argument(
+        "--include-antigravity-unavailable",
+        action="store_true",
+        help="include the explicit resource_capability_unavailable projection",
+    )
+    provider_resource_report.add_argument("--adapter-timeout", type=int, default=5, metavar="SECONDS")
+    provider_resource_report.add_argument(
+        "--max-age-seconds",
+        type=int,
+        help="report-time freshness policy; omitted means freshness unknown",
+    )
+    provider_resource_report.add_argument("--evaluated-at", help="timezone-aware report timestamp")
+    provider_resource_report.add_argument("--json", action="store_true", help="print JSON")
+    provider_resource_report.set_defaults(func=cmd_provider_resource_report)
 
     cooldown = sub.add_parser("cooldown", help="show, set, or clear global cooldown")
     cooldown_sub = cooldown.add_subparsers(dest="cooldown_command", required=True)
@@ -4145,6 +4193,68 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
     else:
         print(render_cbr_status_report(report), end="")
     return 0
+
+
+def cmd_provider_resource_report(config: Config, args: argparse.Namespace) -> int:
+    if args.max_age_seconds is not None and args.max_age_seconds < 0:
+        raise ValueError("--max-age-seconds must be non-negative")
+    evaluated_at = parse_resource_timestamp(args.evaluated_at) if args.evaluated_at else utc_now()
+    snapshots = [validate_provider_resource_snapshot(load_provider_resource_json(path)) for path in args.snapshot_json]
+    adapter_results: list[dict[str, Any]] = []
+
+    for command_json in args.snapshot_command_json:
+        result = run_snapshot_adapter(provider_resource_argv(command_json), timeout_seconds=args.adapter_timeout)
+        if result["status"] == "observed":
+            try:
+                snapshots.append(validate_provider_resource_snapshot(result["value"]))
+            except ProviderResourceValidationError:
+                adapter_results.append({"status": "invalid", "reason": "snapshot_json_invalid", "value": None})
+        else:
+            adapter_results.append(result)
+
+    cached_values = [load_provider_resource_json(path) for path in args.codex_cached_json]
+    for command_json in args.codex_cached_command_json:
+        result = run_snapshot_adapter(provider_resource_argv(command_json), timeout_seconds=args.adapter_timeout)
+        if result["status"] == "observed":
+            cached_values.append(result["value"])
+        else:
+            adapter_results.append(result)
+    for index, value in enumerate(cached_values, start=1):
+        try:
+            snapshots.append(project_native_codex_cached_rollout(
+                value,
+                snapshot_id=f"native-codex-cached-{index}",
+                generated_at=evaluated_at,
+            ))
+        except ProviderResourceValidationError:
+            adapter_results.append({"status": "invalid", "reason": "snapshot_json_invalid", "value": None})
+
+    if args.include_antigravity_unavailable:
+        snapshots.append(antigravity_unavailable_snapshot(generated_at=evaluated_at))
+    mapping = validate_provider_resource_mapping(load_provider_resource_json(args.mapping_json)) if args.mapping_json else None
+    report = build_provider_resource_report(
+        config,
+        snapshots=snapshots,
+        mapping=mapping,
+        evaluated_at=evaluated_at,
+        max_age_seconds=args.max_age_seconds,
+        adapter_results=adapter_results,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_provider_resource_report(report), end="")
+    return 0
+
+
+def provider_resource_argv(value: str) -> list[str]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("provider resource adapter argv must be a JSON string list") from exc
+    if not isinstance(parsed, list) or not parsed or not all(isinstance(part, str) and part for part in parsed):
+        raise ValueError("provider resource adapter argv must be a non-empty JSON string list")
+    return parsed
 
 
 def cmd_cooldown_show(config: Config, args: argparse.Namespace) -> int:

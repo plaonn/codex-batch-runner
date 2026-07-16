@@ -18,6 +18,11 @@ Requirement reference: `REQ-SEPARATE-ROUTING-EVIDENCE`
   제출합니다. Parent requirement나 `routing_override`는 자동 상속하지 않습니다.
 - Report와 recommendation은 evidence를 읽는 advisory surface이며 requirement, inventory,
   routing policy, active config를 자동 변경하지 않습니다.
+- `provider-resource-snapshot-v1`과 `provider-resource-mapping-v1`은 별도 read-only
+  evidence contract입니다. Requirement vector, exact-target fitness, selection order,
+  override, execution evidence를 변경하지 않으며 D1에서는 selector에 참여하지 않습니다.
+  `capacity_pool`, backend, wrapper, model, model group은 quota identity로 취급하지 않습니다.
+  상세 계약은 [provider resource report](provider-resource-report.md)를 참조합니다.
 
 ## Requirement v2 envelope
 
