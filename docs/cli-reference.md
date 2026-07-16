@@ -225,6 +225,17 @@ Index warning behavior: SQLite read index가 없거나 schema mismatch, stale so
 
 `cbr worktree discard-stale-applied TASK_ID --dry-run|--apply --resolution superseded|wont_fix|duplicate|manual --reason REASON`은 retained worktree task의 `execution_apply_status=applied` metadata가 현재 apply target에 포함되지 않는 stale state일 때만 사용합니다. `--dry-run`은 stale applied metadata와 eligibility만 보고합니다. `--apply`는 worktree나 branch를 삭제하지 않고, stale applied metadata를 `execution_stale_applied_discard`에 보존한 뒤 task를 `review_status=rejected`, `resolution=<resolution>`, `execution_apply_status=discarded` 상태로 전환해 기존 discard cleanup path가 처리할 수 있게 합니다. 이후 운영자는 `cbr worktree cleanup TASK_ID --dry-run`으로 discard cleanup 가능 여부를 다시 확인하고, 적합하면 `--apply`로 worktree만 제거합니다. Branch pruning policy는 바뀌지 않으며 discard-cleaned branch는 evidence로 보존됩니다.
 
+`cbr archive TASK_ID --check`는 mutation 없이 terminal archive consistency를 검사합니다.
+실제 `cbr archive TASK_ID`도 같은 gate를 강제하며 active status, 미종결 review/resolution,
+active review/fix chain, retained worktree, unreleased pool lease가 있으면 거부합니다.
+
+`cbr execution-report`의 기본 `--purpose routing`은 model-quality comparable evidence만
+표시합니다. Legacy 운영 진단은 `--purpose diagnostic`, archived retained evidence까지
+보는 감사 조회는 `--purpose audit`을 사용합니다.
+
+`cbr prune`은 오래된 safe runtime log와 cursor-safe event file만 삭제하며 canonical task
+JSON은 별도 deletion/cold-storage 정책이 없으므로 blocked/skipped 상태로 보존합니다.
+
 `cbr policy-proposals execution-target-freshness`는 configured `execution_targets`의 freshness metadata를 읽고 read-only policy proposal report를 생성합니다. 이 command는 apply mode, config rewrite, task mutation, model replacement, rule replacement를 지원하지 않습니다. JSON report는 `schema_version`, `kind`, `proposal_class`, `mode`, `generated_at`, `mutation`, `summary`, `items`, `proposals`, `decision_cards`, `warnings`, `errors`를 포함합니다. Fresh target은 `items`에만 표시되고 proposal을 만들지 않으며, stale 또는 missing freshness metadata target만 `proposals`에 `review_execution_target_freshness` 또는 `add_execution_target_freshness_metadata` action으로 표시됩니다. `decision_cards`는 실행 보고 상태와 사용자 결정 상태를 분리해 표시합니다. Normal execution target freshness proposal은 `user_decision_status=decision_required`이고, direct model pin migration proposal은 `user_decision_status=approval_blocked`로 표시됩니다. `default_execution_config` 또는 `model_selection_rules`의 direct model pin은 raw model value 없이 `target_kind=direct_model_pin` item으로 표시되고, `migrate_direct_model_pin_to_execution_target` read-only proposal로만 노출됩니다. Direct model pin proposal은 local config freshness apply 대상이 아니며, model/rule 변경에는 별도 operator decision이 필요합니다.
 
 `cbr policy-proposals direct-model-pin-migration`은 `default_execution_config`와 `model_selection_rules`에서 `execution_target` 대신 `model`을 직접 고정한 항목만 필터링해 별도 read-only migration proposal report를 생성합니다. JSON report는 `proposal_class=direct_model_pin_migration`을 사용하고, raw model value 없이 target path, sanitized selection refs, `draft_execution_target_migration_proposal` action, `approval_blocked` decision card, `direct_model_pin_requires_separate_migration_approval` blocker를 표시합니다. 이 command는 report-only surface이며 preview, approval-template, guarded apply, config rewrite, model replacement, rule replacement, routing/provider 변경, task/event/runtime mutation을 수행하지 않습니다.

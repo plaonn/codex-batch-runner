@@ -15,6 +15,7 @@ from .timeutil import iso_now, parse_time
 from .transcript import sanitize
 
 DEFAULT_EXECUTION_REPORT_LIMIT = 50
+EXECUTION_REPORT_PURPOSES = ("routing", "diagnostic", "audit")
 TOKEN_USAGE_KEYS = (
     "input_tokens",
     "cached_input_tokens",
@@ -55,7 +56,11 @@ def build_execution_report(
     label: str | None = None,
     limit: int = DEFAULT_EXECUTION_REPORT_LIMIT,
     include_archived: bool = False,
+    purpose: str = "routing",
 ) -> dict[str, Any]:
+    if purpose not in EXECUTION_REPORT_PURPOSES:
+        raise ValueError(f"invalid execution report purpose: {purpose}")
+    effective_include_archived = include_archived or purpose == "audit"
     tasks = list_tasks(config)
     total_available = len(tasks)
     tasks = filter_processed_tasks(
@@ -64,9 +69,12 @@ def build_execution_report(
         project_root=project_root,
         category=category,
         label=label,
-        include_archived=include_archived,
+        include_archived=effective_include_archived,
     )
     filtered_count = len(tasks)
+    if purpose == "routing":
+        tasks = [task for task in tasks if routing_comparable_task(task)]
+    purpose_eligible_count = len(tasks)
     tasks.sort(key=execution_sort_key, reverse=True)
     if limit > 0:
         tasks = tasks[:limit]
@@ -78,15 +86,27 @@ def build_execution_report(
             "project_root": project_root,
             "category": category,
             "label": label,
-            "include_archived": include_archived,
+            "include_archived": effective_include_archived,
+            "purpose": purpose,
             "limit": limit,
         },
         "total_available": total_available,
         "filtered_count": filtered_count,
+        "purpose_eligible_count": purpose_eligible_count,
+        "purpose_excluded_count": filtered_count - purpose_eligible_count,
         "row_count": len(rows),
         "rows": rows,
         "summary": summarize_rows(rows),
     }
+
+
+def routing_comparable_task(task: dict[str, Any]) -> bool:
+    evidence = reporting_evidence_view(task)
+    cohort = evidence.get("cohort") if isinstance(evidence.get("cohort"), dict) else {}
+    comparability = (
+        cohort.get("comparability") if isinstance(cohort.get("comparability"), dict) else {}
+    )
+    return bool(comparability.get("model_quality"))
 
 
 def filter_processed_tasks(

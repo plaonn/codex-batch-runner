@@ -3645,7 +3645,7 @@ class CliTests(unittest.TestCase):
             }
             save_task(config, shell_task)
 
-            code, output = run_cli(["--config", str(config_path), "execution-report", "--project", "project-a", "--limit", "0", "--json"])
+            code, output = run_cli(["--config", str(config_path), "execution-report", "--project", "project-a", "--purpose", "diagnostic", "--limit", "0", "--json"])
             report = json.loads(output)
             rows = {row["task_id"]: row for row in report["rows"]}
 
@@ -3662,7 +3662,25 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, report["summary"]["token_usage_rows"])
             self.assertEqual(2120, report["summary"]["token_totals"]["known_total_tokens"])
 
-            human_code, human_output = run_cli(["--config", str(config_path), "execution-report", "--project", "project-a"])
+            default_code, default_output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "execution-report",
+                    "--project",
+                    "project-a",
+                    "--limit",
+                    "0",
+                    "--json",
+                ]
+            )
+            default_report = json.loads(default_output)
+            self.assertEqual(0, default_code)
+            self.assertEqual("routing", default_report["filters"]["purpose"])
+            self.assertEqual(0, default_report["row_count"])
+            self.assertEqual(3, default_report["purpose_excluded_count"])
+
+            human_code, human_output = run_cli(["--config", str(config_path), "execution-report", "--project", "project-a", "--purpose", "diagnostic"])
 
             self.assertEqual(0, human_code)
             self.assertIn("EXECUTION REPORT", human_output)
@@ -5888,7 +5906,10 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)
             config = Config.load(str(config_path))
-            create_task(config, "task", tmp, task_id="task")
+            task = create_task(config, "task", tmp, task_id="task")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
 
             code, output = run_cli(["--config", str(config_path), "archive", "task"])
             task = load_task(config, "task")
@@ -5896,8 +5917,25 @@ class CliTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual("task\tarchived\n", output)
             self.assertEqual("archived", task["status"])
-            self.assertEqual("runnable", task["previous_status"])
+            self.assertEqual("completed", task["previous_status"])
             self.assertIsNotNone(task["archived_at"])
+            self.assertEqual("passed", task["archive_gate_result"]["status"])
+
+    def test_archive_check_blocks_active_and_unresolved_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            create_task(config, "active", tmp, task_id="active")
+
+            code, output = run_cli(
+                ["--config", str(config_path), "archive", "active", "--check", "--json"]
+            )
+            report = json.loads(output)
+
+            self.assertEqual(1, code)
+            self.assertEqual("blocked", report["archive_gate"]["status"])
+            self.assertIn("active task status", report["archive_gate"]["blockers"][0])
+            self.assertEqual("runnable", load_task(config, "active")["status"])
 
     def test_resolve_command_records_resolution_and_hides_from_default_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6107,7 +6145,7 @@ class CliTests(unittest.TestCase):
             outside = [file for file in files if file["path"] == str(outside_log.resolve())][0]
 
             self.assertEqual(0, code)
-            self.assertFalse((config.queue_dir / "safe.json").exists())
+            self.assertTrue((config.queue_dir / "safe.json").exists())
             self.assertFalse(safe_log.exists())
             self.assertTrue(outside_log.exists())
             self.assertFalse(outside["safe"])

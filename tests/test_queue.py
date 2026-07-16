@@ -250,15 +250,56 @@ class QueueTests(unittest.TestCase):
     def test_archive_task_preserves_task_file_and_previous_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config.load(root=Path(tmp))
-            create_task(config, "done", tmp, task_id="done")
+            task = create_task(config, "done", tmp, task_id="done")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            save_task(config, task)
 
             archived = archive_task(config, "done")
             loaded = load_task(config, "done")
 
             self.assertEqual("archived", archived["status"])
             self.assertEqual("archived", loaded["status"])
-            self.assertEqual("runnable", loaded["previous_status"])
+            self.assertEqual("completed", loaded["previous_status"])
             self.assertIsNotNone(loaded["archived_at"])
+            self.assertEqual("passed", loaded["archive_gate_result"]["status"])
+
+    def test_archive_task_blocks_unreleased_pooled_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            task = create_task(config, "done", tmp, task_id="done")
+            task.update(
+                status="completed",
+                review_status="accepted",
+                execution_mode="git_worktree",
+                execution_worktree_status="cleaned",
+                execution_worktree_pool=True,
+                execution_worktree_lease_status="leased",
+                execution_cleanup_kind="applied",
+            )
+            save_task(config, task)
+
+            with self.assertRaisesRegex(ValueError, "released slot lease"):
+                archive_task(config, "done")
+
+            self.assertEqual("completed", load_task(config, "done")["status"])
+
+    def test_archive_task_leaves_legacy_archived_task_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(root=Path(tmp))
+            task = create_task(config, "legacy", tmp, task_id="legacy")
+            task.update(
+                status="archived",
+                previous_status="completed",
+                archived_at="2026-01-01T00:00:00+00:00",
+            )
+            save_task(config, task, touch_updated_at=False)
+            before = load_task(config, "legacy")
+
+            archived = archive_task(config, "legacy")
+
+            self.assertEqual(before, archived)
+            self.assertEqual(before, load_task(config, "legacy"))
 
     def test_create_task_initializes_review_and_project_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -58,6 +58,21 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 - Revisit signal status: not observed
 - Evidence: [docs/task-schema.md](task-schema.md), [docs/events-and-index.md](events-and-index.md), [docs/spec.md](spec.md)
 
+## REQ-PURPOSE-BOUND-RETENTION: 보존 여부와 분석 사용 가능성 분리
+
+- Parent: REQ-AUDITABLE-RECOVERABLE-STATE
+- Decision class: Durable Requirement
+- Status: active
+- Validity scope: Durable
+- Requirement: task/evidence/log/event의 보존 lifecycle과 routing/diagnostic/audit 분석 포함 여부를 분리하고, legacy 또는 non-comparable evidence를 보존했다는 이유만으로 routing cohort에 포함하지 않는다.
+- Rationale: 과거 운영·debug·감사 가치를 유지하면서도 불완전한 provenance가 model routing 판단을 오염시키지 않게 하기 위해.
+- Failure prevented: legacy evidence 물리 삭제로 audit 근거가 사라지는 문제, 반대로 retained legacy row가 routing denominator와 model-quality comparison에 섞이는 문제.
+- Assumptions: evidence comparability를 structured cohort metadata로 판정할 수 있고, canonical task record와 raw runtime log의 retention horizon을 별도로 운영할 수 있다.
+- Derived specs: `execution-report --purpose routing|diagnostic|audit`, routing 기본 comparable-only, canonical task JSON은 generic prune에서 제외, raw logs/events는 cursor/age gate 아래 별도 정리.
+- Revisit when: cold storage/restore manifest, legal retention horizon, canonical task deletion policy, 또는 새로운 comparable evidence contract를 도입할 때.
+- Revisit signal status: cold storage and explicit task deletion policy not implemented.
+- Evidence: [docs/execution.md](execution.md), [docs/events-and-index.md](events-and-index.md)
+
 ## REQ-SEPARATE-EXECUTION-AND-ACCEPTANCE: 실행 완료와 리뷰 수용 분리
 
 - Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
@@ -104,6 +119,21 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 - Revisit when: Git 이외의 isolation primitive, container/image cache, shared remote workspace, multi-host pool, 또는 untrusted repository config 실행을 도입할 때.
 - Revisit signal status: not observed
 - Evidence: [docs/worktrees.md](worktrees.md)
+
+## REQ-TERMINAL-LIFECYCLE-CONSISTENCY: archive 전 실행·리뷰·worktree 책임 종결
+
+- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Decision class: Durable Requirement
+- Status: active
+- Validity scope: Durable
+- Requirement: 새 archive mutation은 task status, review/resolution, review/fix chain, worktree cleanup, pooled lease가 terminal consistency gate를 통과한 뒤에만 허용한다.
+- Rationale: archive는 단순 visibility 전환이지만 active 실행·미검토 결과·retained review unit을 숨기면 운영 책임이 유실되기 때문이다.
+- Failure prevented: archived+running/prepared/retained worktree, unresolved failure archive, accepted-but-unapplied result 은닉, active follow-up chain 누락.
+- Assumptions: terminal 책임을 task metadata와 worktree lifecycle metadata에서 mutation 전에 판정할 수 있다.
+- Derived specs: `archive --check`, active status 거부, completed terminal review 요구, failed/blocked terminal resolution 요구, worktree `cleaned`, pooled lease `released`.
+- Revisit when: explicit retention hold, parent-attention acknowledgement gate, archive override/migration command, 또는 non-Git review unit을 도입할 때.
+- Revisit signal status: legacy archived tasks are grandfathered and require separate migration diagnostics.
+- Evidence: [docs/task-schema.md](task-schema.md), [docs/worktrees.md](worktrees.md)
 
 ## REQ-BOUNDED-OPT-IN-AUTOMATION: 자동화는 보고 우선·범위 제한
 

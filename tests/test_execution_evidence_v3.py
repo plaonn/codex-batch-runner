@@ -13,7 +13,12 @@ from codex_batch_runner.config import Config
 from codex_batch_runner.execution_evidence_v2 import build_codex_execution_evidence, evidence_view, reporting_evidence_view
 from codex_batch_runner.evaluation import derive_evaluation_row
 from codex_batch_runner.routing_cost_evidence import build_routing_cost_evidence
-from codex_batch_runner.execution_report import render_execution_report, summarize_model_measurements, task_execution_row
+from codex_batch_runner.execution_report import (
+    build_execution_report,
+    render_execution_report,
+    summarize_model_measurements,
+    task_execution_row,
+)
 from codex_batch_runner.execution_evidence_v3 import (
     CommandIdentityError,
     attach_execution_evidence_v3,
@@ -24,6 +29,7 @@ from codex_batch_runner.execution_evidence_v3 import (
 )
 from codex_batch_runner.external_json_command import run_external_json_command_task
 from codex_batch_runner.model_requirements import ResolvedExecutionConfig
+from codex_batch_runner.queue import save_task
 from codex_batch_runner.review_outcome_evidence import attach_review_outcome_evidence, build_review_outcome_evidence
 
 
@@ -202,6 +208,50 @@ class ExecutionEvidenceV3Tests(unittest.TestCase):
         self.assertIn("EXACT MODEL MEASUREMENTS", human)
         self.assertIn("cross_model_quality: descriptive_only", human)
         self.assertIn("exact-model-a", human)
+
+    def test_default_execution_report_includes_routing_comparable_v3_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config(Path(tmp))
+            item = task()
+            item.update({
+                "title": "Routing comparable",
+                "status": "completed",
+                "review_status": "accepted",
+                "project_id": "evidence-project",
+                "project_root": str(Path(tmp).resolve()),
+                "created_at": "2026-07-15T00:00:00+00:00",
+                "last_run": {
+                    "execution_backend": "codex",
+                    "command_kind": "exec",
+                    "returncode": 0,
+                    "duration_seconds": 10,
+                    "started_at": "2026-07-15T00:00:01+00:00",
+                    "finished_at": "2026-07-15T00:00:11+00:00",
+                },
+                "last_result": {"status": "completed", "changed_files": [], "verification": ["unit"]},
+            })
+            selected = settings()
+            attach_execution_evidence_v3(
+                item,
+                build_codex_execution_evidence_v3(
+                    item,
+                    SimpleNamespace(events=[{
+                        "type": "turn.completed",
+                        "model": "exact-model",
+                        "usage": {"input_tokens": 100, "cached_input_tokens": 25, "output_tokens": 10},
+                    }]),
+                    selected,
+                    cfg,
+                ),
+            )
+            save_task(cfg, item)
+
+            report = build_execution_report(cfg, project_id="evidence-project", limit=0)
+
+        self.assertEqual("routing", report["filters"]["purpose"])
+        self.assertEqual(1, report["purpose_eligible_count"])
+        self.assertEqual(0, report["purpose_excluded_count"])
+        self.assertEqual(["public-v3-task"], [row["task_id"] for row in report["rows"]])
 
     def test_model_measurements_keep_legacy_rows_out_of_exact_cohorts(self) -> None:
         measurements = summarize_model_measurements([

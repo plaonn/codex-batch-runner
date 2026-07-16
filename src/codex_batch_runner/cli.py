@@ -32,6 +32,7 @@ from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write
 from .execution_evidence import ExecutionEvidenceError, load_execution_evidence_records
 from .execution_report import (
     DEFAULT_EXECUTION_REPORT_LIMIT,
+    EXECUTION_REPORT_PURPOSES,
     build_execution_report,
     render_execution_report,
 )
@@ -83,6 +84,7 @@ from .queue import (
     ROUTING_SIZES,
     rejected_discarded_result,
     VERIFICATION_SCOPES,
+    archive_gate_result,
     archive_task,
     capacity_blockers,
     create_task,
@@ -530,6 +532,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"maximum recent processed runs to include after filtering; 0 means no limit (default: {DEFAULT_EXECUTION_REPORT_LIMIT})",
     )
     execution_report.add_argument("--include-archived", action="store_true", help="include archived tasks")
+    execution_report.add_argument(
+        "--purpose",
+        choices=EXECUTION_REPORT_PURPOSES,
+        default="routing",
+        help="routing includes only model-quality comparable evidence; diagnostic includes all selected runs; audit also includes archived runs",
+    )
     execution_report.add_argument("--json", action="store_true", help="print JSON")
     execution_report.set_defaults(func=cmd_execution_report)
 
@@ -570,6 +578,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     archive = sub.add_parser("archive", help="archive a task")
     archive.add_argument("task_id")
+    archive.add_argument(
+        "--check",
+        action="store_true",
+        help="report terminal archive consistency without changing task state",
+    )
     archive.add_argument("--json", action="store_true", help="print raw JSON")
     archive.set_defaults(func=cmd_archive)
 
@@ -4034,6 +4047,7 @@ def cmd_execution_report(config: Config, args: argparse.Namespace) -> int:
         label=args.label,
         limit=args.limit,
         include_archived=args.include_archived,
+        purpose=args.purpose,
     )
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
@@ -4168,6 +4182,26 @@ def render_post_accept_status(post_accept: dict) -> str:
 
 
 def cmd_archive(config: Config, args: argparse.Namespace) -> int:
+    if args.check:
+        task = load_task(config, args.task_id)
+        report = {
+            "task_id": task.get("id"),
+            "mutation": {"allowed": False, "applied": False},
+            "archive_gate": archive_gate_result(task),
+        }
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            gate = report["archive_gate"]
+            print(
+                f"{task.get('id')}\tarchive-check\t{gate.get('status')}"
+                + (
+                    "\t" + "; ".join(str(item) for item in gate.get("blockers") or [])
+                    if gate.get("blockers")
+                    else ""
+                )
+            )
+        return 0 if report["archive_gate"]["status"] in {"passed", "grandfathered"} else 1
     task = archive_task(config, args.task_id)
     run_post_mutation_trigger(config)
     if args.json:

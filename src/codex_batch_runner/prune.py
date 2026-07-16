@@ -134,7 +134,16 @@ def first_text(task: dict, *keys: str) -> str | None:
 
 
 def candidate_files(task: dict, task_file: Path, queue_dir: Path, log_dir: Path) -> list[PruneFile]:
-    files = [safe_file("task", task_file, queue_dir, "queue_dir")]
+    files = [
+        PruneFile(
+            kind="task",
+            path=str(task_file),
+            exists=task_file.exists(),
+            safe=False,
+            skipped=True,
+            reason="canonical task retention requires a separate explicit deletion policy",
+        )
+    ]
     for log_path in task_log_paths(task):
         files.append(safe_file("log", Path(log_path).expanduser(), log_dir, "log_dir"))
     return files

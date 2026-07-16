@@ -97,11 +97,17 @@ def save_task(config: Config, task: dict, *, touch_updated_at: bool = True) -> N
 
 def archive_task(config: Config, task_id: str) -> dict:
     task = load_task(config, task_id)
+    gate = archive_gate_result(task)
+    if task.get("status") == "archived" and gate["status"] in {"passed", "grandfathered"}:
+        return task
+    if gate["status"] != "passed":
+        raise ValueError("archive consistency gate failed: " + "; ".join(gate["blockers"]))
     previous_status = task.get("status")
     if task.get("status") != "archived":
         task["previous_status"] = previous_status
         task["status"] = "archived"
     task["archived_at"] = iso_now()
+    task["archive_gate_result"] = gate
     save_task(config, task)
     emit_task_event(
         config,
@@ -112,6 +118,68 @@ def archive_task(config: Config, task_id: str) -> dict:
         payload=transition_payload(task, previous_status=previous_status, archived_at=task.get("archived_at")),
     )
     return task
+
+
+def archive_gate_result(task: dict) -> dict:
+    checked_at = iso_now()
+    if task.get("status") == "archived":
+        existing = task.get("archive_gate_result")
+        if isinstance(existing, dict) and existing.get("status") == "passed":
+            return existing
+        return {
+            "status": "grandfathered",
+            "checked_at": checked_at,
+            "blockers": [],
+            "warnings": ["existing archived task predates the terminal consistency gate"],
+        }
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    status = str(task.get("status") or "")
+    review = str(task.get("review_status") or "")
+    resolution = str(task.get("resolution") or "")
+    if status in {"runnable", "running", "needs_resume"}:
+        blockers.append(f"active task status cannot be archived: {status}")
+    elif status == "completed":
+        if review not in {"accepted", "rejected"}:
+            blockers.append(
+                "completed task requires terminal review_status=accepted|rejected before archive"
+            )
+    elif status in {"failed", "blocked_user"}:
+        if resolution not in RESOLUTIONS:
+            blockers.append(
+                f"{status} task requires terminal resolution before archive"
+            )
+    else:
+        blockers.append(f"task status is not archive-terminal: {status or '-'}")
+
+    chain_status = str(task.get("chain_status") or "")
+    if chain_status in {"awaiting_review", "reviewing", "needs_fix", "fixing", "needs_human"}:
+        blockers.append(f"review/fix chain is still active: {chain_status}")
+
+    if task.get("execution_mode") == "git_worktree":
+        worktree_status = str(task.get("execution_worktree_status") or "")
+        if worktree_status != "cleaned":
+            blockers.append(
+                "git worktree task requires execution_worktree_status=cleaned before archive"
+            )
+        if task.get("execution_worktree_pool") and task.get(
+            "execution_worktree_lease_status"
+        ) != "released":
+            blockers.append("pooled worktree task requires released slot lease before archive")
+        if review == "accepted":
+            cleanup_kind = str(task.get("execution_cleanup_kind") or "")
+            if cleanup_kind not in {"applied", "no_change"}:
+                blockers.append(
+                    "accepted worktree task requires applied or no_change cleanup before archive"
+                )
+
+    return {
+        "status": "blocked" if blockers else "passed",
+        "checked_at": checked_at,
+        "blockers": blockers,
+        "warnings": warnings,
+    }
 
 
 def set_review_status(

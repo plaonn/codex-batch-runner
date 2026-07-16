@@ -130,6 +130,14 @@
 
 `archived`는 완료/실패/blocked task를 삭제하지 않고 운영 목록에서 숨기기 위한 상태임. archive 전 상태는 `previous_status`, archive 시각은 `archived_at`에 저장함.
 
+새 archive mutation은 terminal consistency gate를 통과해야 함. `runnable`, `running`,
+`needs_resume`는 archive할 수 없고, `completed`는 terminal
+`review_status=accepted|rejected`, `failed|blocked_user`는 terminal resolution이 필요함.
+Git worktree task는 `execution_worktree_status=cleaned`, pooled task는
+`execution_worktree_lease_status=released`여야 함. 통과 결과는
+`archive_gate_result`에 저장함. Gate 도입 전에 이미 archived였던 task는 자동 수정하지
+않고 read-only check에서 `grandfathered`로 구분함.
+
 Reusable worktree pool을 사용한 task는 기존 branch/base/path metadata에 더해
 `execution_worktree_pool=true`, `execution_worktree_pool_slot_id`,
 `execution_worktree_policy_fingerprint`, `execution_worktree_lease_status`를 기록할 수
