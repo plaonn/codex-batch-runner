@@ -151,8 +151,11 @@ Config discovery order:
 
 1. `--config path/to/config.json`
 2. `CBR_CONFIG` environment variable
+3. `$XDG_CONFIG_HOME/codex-batch-runner/config.json`, or `$HOME/.config/codex-batch-runner/config.json`
 
-If neither is provided, `cbr` exits with an error instead of creating a runtime directory under the current working directory. Example configs are available in [examples/config.example.json](examples/config.example.json) and [examples/config.automation.example.json](examples/config.automation.example.json).
+The first selected path is authoritative. A missing, unreadable, invalid, or non-object config fails closed without falling through to a lower tier. Discovery never creates a config or runtime directory and never searches the current working directory. Example configs are available in [examples/config.example.json](examples/config.example.json) and [examples/config.automation.example.json](examples/config.automation.example.json).
+
+`cbr launchd plan` is a read-only managed LaunchAgent planning surface. It renders the intended plist and optionally classifies an explicitly supplied existing plist as missing, managed, drifted, foreign, or unhealthy. It never writes a plist, invokes `launchctl`, adopts an unmarked LaunchAgent, or exposes an apply path.
 
 Optional `root` makes relative runtime paths independent of the process current working directory. `worktree_mode=task` enables task-specific git worktrees. A project can opt into reusable worktree directories with a tracked root `.cbr.toml`; projects without it keep disposable task worktrees, and invalid/untracked policy files fail closed. See [worktree isolation and apply](docs/worktrees.md). `model_requirement_vector`, `model_selection_rules`, and `default_execution_config` keep task intent separate from local Codex model/profile choices. `worker_targets` and `worker_selection_rules` can route matching default Codex tasks to a configured shell or external JSON worker before claim.
 

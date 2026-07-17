@@ -102,8 +102,12 @@ config 탐색 순서:
 
 1. `--config` 명시값
 2. `CBR_CONFIG` 환경 변수
+3. `$XDG_CONFIG_HOME/codex-batch-runner/config.json`
+4. `XDG_CONFIG_HOME`이 없으면 `$HOME/.config/codex-batch-runner/config.json`
 
-둘 다 없으면 `cbr`는 실패합니다. 자동화와 launchd에서는 명시적 config 또는 절대 경로 기반 호출을 사용하고, 운영자가 직접 viewer/review 용도로 사용할 때는 `CBR_CONFIG`를 설정한 shell에서 `cbr` console script를 사용합니다.
+먼저 선택된 path가 missing, unreadable, invalid JSON, non-object이면 lower tier로 fallback하지 않고 실패합니다. Discovery는 config/runtime directory를 만들거나 cwd-local config를 찾지 않습니다. 자동화와 launchd에서는 명시적 absolute `--config`를 권장하며 interactive operator는 XDG 또는 `CBR_CONFIG`를 사용할 수 있습니다.
+
+`cbr launchd plan --label LABEL --executable ABS_PATH --working-directory ABS_PATH --stdout-path ABS_PATH --stderr-path ABS_PATH --environment-path PATH_VALUE --start-interval-seconds SECONDS [--existing-plist PATH] [--json]`은 managed LaunchAgent의 intended plist를 렌더링하는 read-only command입니다. Config path/source는 normal config discovery에서 주입하며 operator가 별도로 override할 수 없습니다. `--existing-plist`가 있을 때만 해당 regular/readable file을 읽어 `not_installed`, `managed_ok`, `drifted`, `foreign_conflict`, `unhealthy`를 분류합니다. Human/JSON output은 status, action, reason, digest, sanitized config provenance/path, intended plist를 포함합니다. `foreign_conflict`와 `unhealthy`는 `blocked` action 및 exit status 2를 반환합니다. Command에는 mutation flag가 없고 plist write, `launchctl`, install/update/uninstall, foreign plist adoption을 수행하지 않습니다.
 
 `enqueue --title`은 list scanability를 위한 사람이 붙이는 짧은 제목입니다. 보통 4-8 words 정도의 `action + object + short qualifier` 형태를 쓰되, 글자 수 목표를 맞추려고 늘리지 않습니다. 같은 list에서 충분히 구분될 정도면 되고 전역 고유성은 필요하지 않습니다. Canonical identifier는 task id입니다. Full prompt 첫 문장, 긴 배경 설명, private detail, raw path, session/thread id, runtime/log 내용은 title에 넣지 않습니다. 저장 및 표시 title은 whitespace를 한 칸으로 접고 80자에서 deterministic ellipsis 처리합니다. `--title`이 없으면 prompt의 첫 non-empty line을 같은 규칙으로 fallback 표시하고, 그것도 없으면 task id를 표시합니다.
 

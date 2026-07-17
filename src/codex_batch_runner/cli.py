@@ -6,6 +6,7 @@ import os
 import select
 import shutil
 import shlex
+import stat
 import sys
 import time
 import unicodedata
@@ -61,6 +62,7 @@ from .evidence import list_rate_limit_evidence
 from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, FollowOptions, follow_task
 from .index import build_rebuild_report, build_status_report, render_rebuild_report, render_status_report
 from .lock import FileLock
+from .launchd_lifecycle import LaunchdPlan, LaunchdPlanInput, plan_launchd_lifecycle
 from .maintenance import (
     build_codex_cli_maintenance_report,
     dump_json,
@@ -738,6 +740,31 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="check local cbr health and Codex CLI version without running Codex exec")
     doctor.add_argument("--json", action="store_true", help="print JSON")
     doctor.set_defaults(func=cmd_doctor)
+
+    launchd = sub.add_parser("launchd", help="plan a guarded macOS LaunchAgent lifecycle without mutation")
+    launchd_sub = launchd.add_subparsers(dest="launchd_command", required=True)
+    launchd_plan = launchd_sub.add_parser(
+        "plan",
+        help="render the intended managed plist and classify an explicitly supplied existing plist",
+    )
+    launchd_plan.add_argument("--label", required=True, help="LaunchAgent label")
+    launchd_plan.add_argument("--executable", required=True, help="absolute path to the cbr executable")
+    launchd_plan.add_argument("--working-directory", required=True, help="absolute scheduler working directory")
+    launchd_plan.add_argument("--stdout-path", required=True, help="absolute LaunchAgent stdout path")
+    launchd_plan.add_argument("--stderr-path", required=True, help="absolute LaunchAgent stderr path")
+    launchd_plan.add_argument("--environment-path", required=True, help="explicit PATH value for the LaunchAgent")
+    launchd_plan.add_argument(
+        "--start-interval-seconds",
+        required=True,
+        type=int,
+        help="positive launchd StartInterval value",
+    )
+    launchd_plan.add_argument(
+        "--existing-plist",
+        help="optional existing plist to read and classify; never modified",
+    )
+    launchd_plan.add_argument("--json", action="store_true", help="print JSON")
+    launchd_plan.set_defaults(func=cmd_launchd_plan)
 
     policy_proposals = sub.add_parser("policy-proposals", help="manage guarded policy proposals")
     policy_proposals_sub = policy_proposals.add_subparsers(dest="policy_proposal_command", required=True)
@@ -4555,6 +4582,106 @@ def cmd_doctor(config: Config, args: argparse.Namespace) -> int:
     else:
         print(render_doctor_report(report), end="")
     return 0 if report["ok"] else 1
+
+
+MAX_EXISTING_LAUNCHD_PLIST_BYTES = 1024 * 1024
+
+
+def cmd_launchd_plan(config: Config, args: argparse.Namespace) -> int:
+    if config.config_path is None:
+        raise ValueError("launchd planning requires a discovered config path")
+    existing_path, existing_plist = load_existing_launchd_plist(args.existing_plist)
+    plan = plan_launchd_lifecycle(
+        LaunchdPlanInput(
+            label=args.label,
+            executable_path=args.executable,
+            config_path=str(config.config_path),
+            config_provenance=config.config_source,
+            working_directory=args.working_directory,
+            stdout_path=args.stdout_path,
+            stderr_path=args.stderr_path,
+            environment_path=args.environment_path,
+            start_interval_seconds=args.start_interval_seconds,
+        ),
+        existing_plist,
+    )
+    report = launchd_plan_report(plan, existing_path)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_launchd_plan_report(report), end="")
+    return 2 if plan.action == "blocked" else 0
+
+
+def load_existing_launchd_plist(value: str | None) -> tuple[Path | None, bytes | None]:
+    if value is None:
+        return None, None
+    path = Path(value).expanduser().resolve()
+    try:
+        file_stat = path.stat()
+    except FileNotFoundError as exc:
+        raise ValueError(f"existing plist not found: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"existing plist inaccessible: {path}: {exc}") from exc
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError(f"existing plist is not a regular file: {path}")
+    if file_stat.st_size > MAX_EXISTING_LAUNCHD_PLIST_BYTES:
+        raise ValueError(
+            f"existing plist exceeds {MAX_EXISTING_LAUNCHD_PLIST_BYTES} byte limit: {path}"
+        )
+    try:
+        return path, path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"existing plist is not readable: {path}: {exc}") from exc
+
+
+def launchd_plan_report(plan: LaunchdPlan, existing_path: Path | None) -> dict[str, object]:
+    return {
+        "contract": "launchd-lifecycle-plan-v1",
+        "read_only": True,
+        "mutation_allowed": False,
+        "status": plan.status,
+        "action": plan.action,
+        "reason": plan.reason,
+        "digest": plan.managed_digest,
+        "config": {
+            "source": plan.config_provenance,
+            "path": plan.config_path,
+        },
+        "existing_plist": {
+            "supplied": existing_path is not None,
+            "path": str(existing_path) if existing_path else None,
+        },
+        "intended_plist": plan.rendered_plist.decode("utf-8"),
+    }
+
+
+def render_launchd_plan_report(report: dict[str, object]) -> str:
+    config = report["config"] if isinstance(report.get("config"), dict) else {}
+    existing = report["existing_plist"] if isinstance(report.get("existing_plist"), dict) else {}
+    intended = str(report.get("intended_plist") or "")
+    lines = [
+        "cbr launchd plan",
+        "",
+        f"read_only: {str(bool(report.get('read_only'))).lower()}",
+        f"mutation_allowed: {str(bool(report.get('mutation_allowed'))).lower()}",
+        f"status: {report.get('status')}",
+        f"action: {report.get('action')}",
+        f"reason: {report.get('reason')}",
+        f"digest: {report.get('digest')}",
+        "",
+        "config:",
+        f"  source: {config.get('source')}",
+        f"  path: {config.get('path')}",
+        "",
+        "existing_plist:",
+        f"  supplied: {str(bool(existing.get('supplied'))).lower()}",
+        f"  path: {existing.get('path')}",
+        "",
+        "intended_plist:",
+    ]
+    lines.extend(f"  {line}" for line in intended.rstrip().splitlines())
+    return "\n".join(lines) + "\n"
 
 
 def cmd_policy_proposals_execution_target_freshness(config: Config, args: argparse.Namespace) -> int:

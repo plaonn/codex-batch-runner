@@ -73,11 +73,45 @@ package manager로 설치한 CLI에서 흔한 상황입니다.
 
 1. `--config /path/to/config.json`
 2. `CBR_CONFIG=/path/to/config.json`
+3. `$XDG_CONFIG_HOME/codex-batch-runner/config.json`
+4. `XDG_CONFIG_HOME`이 없으면 `$HOME/.config/codex-batch-runner/config.json`
 
-둘 다 없으면 `cbr`는 실패합니다. 운영 queue는 현재 working directory에 묵시적으로
-생성하지 않습니다. Interactive shell에서 기본 queue를 반복해서 쓰고 싶으면
-`CBR_CONFIG`를 shell profile에 설정하고, launchd/systemd 같은 자동화에서는
-`--config`에 absolute path를 넘깁니다.
+먼저 선택된 path가 authoritative합니다. 명시적 `--config`나 non-empty `CBR_CONFIG`가
+missing, unreadable, invalid JSON 또는 non-object이면 XDG로 fallback하지 않습니다.
+XDG path가 없거나 잘못된 경우도 같은 방식으로 실패합니다. Discovery는 config,
+runtime directory 또는 current-working-directory queue를 생성하지 않습니다.
+Interactive shell에서는 XDG config 또는 `CBR_CONFIG`를 사용할 수 있고,
+launchd/systemd 같은 자동화에서는 `--config`에 absolute path를 넘기는 방식을 권장합니다.
+
+## Read-only managed LaunchAgent plan
+
+`cbr launchd plan`은 future guarded lifecycle과 같은 managed plist contract를 사용하지만,
+현재 단계에서는 intended plist를 stdout/JSON으로 렌더링하고 기존 plist를 분류만 합니다.
+모든 launchd input은 명시적으로 전달하며 config path와 provenance는 위 discovery 결과에서
+가져옵니다.
+
+```bash
+cbr --config /etc/example/cbr/config.json launchd plan \
+  --label com.example.codex-batch-runner \
+  --executable /opt/example/bin/cbr \
+  --working-directory /opt/example/codex-batch-runner \
+  --stdout-path /var/tmp/cbr/launchd.out.log \
+  --stderr-path /var/tmp/cbr/launchd.err.log \
+  --environment-path /opt/example/bin:/usr/bin:/bin \
+  --start-interval-seconds 600 \
+  --existing-plist /var/tmp/cbr/existing.plist \
+  --json
+```
+
+`--existing-plist`를 생략하면 filesystem에서 plist를 추측하거나 검색하지 않고
+`not_installed/create` 계획을 반환합니다. 명시된 plist가 managed marker와 digest에
+일치하면 `managed_ok/none`, valid managed content가 requested input과 다르면
+`drifted/update_needed`입니다. Unmarked foreign plist와 malformed/tampered managed plist는
+`blocked`이고 exit status 2를 반환합니다.
+
+이 command는 plist를 쓰거나 수정하지 않고 `launchctl`을 호출하지 않습니다. `--apply`,
+install/update/uninstall, 기존 수동 LaunchAgent 자동 adoption은 구현되지 않았습니다.
+아래 수동 설치 절차와 기존 plist는 operator-owned 상태로 유지됩니다.
 
 ## macOS launchd 설정
 
