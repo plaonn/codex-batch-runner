@@ -106,6 +106,7 @@ Load 전에 아래 값을 확인합니다.
 
 - `ProgramArguments`: Python 3.11 이상으로 설치한 `cbr` absolute path, 보통 `run-loop --json`
 - `--config`: 운영자 config 파일 경로
+- `EnvironmentVariables.PATH`: `cbr`의 Python bin directory와 configured Codex executable directory를 포함한 non-interactive child-process path
 - `PYTHONPATH`: checkout에서 module invocation을 쓸 때 필요한 `src` 경로
 - `WorkingDirectory`: checkout 또는 안정적인 runtime root
 - `StandardOutPath`, `StandardErrorPath`: local runtime log 파일
@@ -147,6 +148,7 @@ Queue admission과 unattended execution health는 별개입니다. `cbr status -
 
 - `doctor --json`의 `python_runtime.supported`가 `true`이고 scheduler와 같은 executable을 사용함
 - supervisor가 load되어 있고 실제 argv가 그 executable과 config를 가리킴
+- supervisor의 effective `PATH`에서 Python 3.11+와 configured Codex executable이 실제로 resolve됨
 - 빈 queue에서도 bounded `run-next --json` 또는 1회 scheduler tick이 exit code 0으로 끝남
 - supervisor의 latest exit status가 0이며 새 stderr 오류가 없음
 

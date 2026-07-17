@@ -18,6 +18,12 @@
   <key>WorkingDirectory</key>
   <string>/path/to/codex-batch-runner</string>
 
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/absolute/path/to/python-and-cbr-bin:/absolute/path/to/codex-bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
   <key>StartInterval</key>
   <integer>600</integer>
 
