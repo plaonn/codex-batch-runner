@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "contract": "provider-resource-simulation-request-v1",
+  "selected_target_id": "target-example-a",
+  "requirement": {
+    "schema_version": 2,
+    "derivation_version": "requirement-rubric-v1",
+    "revision_id": "requirement-example-r1",
+    "quality_requirements": {
+      "semantic_reasoning": {
+        "score": 500,
+        "confidence": 1000,
+        "anchor": 500,
+        "evidence_codes": []
+      },
+      "context_integration": {
+        "score": 500,
+        "confidence": 1000,
+        "anchor": 500,
+        "evidence_codes": []
+      },
+      "planning_depth": {
+        "score": 500,
+        "confidence": 1000,
+        "anchor": 500,
+        "evidence_codes": []
+      },
+      "instruction_fidelity": {
+        "score": 500,
+        "confidence": 1000,
+        "anchor": 500,
+        "evidence_codes": []
+      },
+      "tool_execution_reliability": {
+        "score": 500,
+        "confidence": 1000,
+        "anchor": 500,
+        "evidence_codes": []
+      },
+      "adversarial_detection": {
+        "score": 500,
+        "confidence": 1000,
+        "anchor": 500,
+        "evidence_codes": []
+      }
+    },
+    "hard_constraints": {
+      "required_execution_surfaces": [
+        "codex"
+      ]
+    },
+    "utility_preferences": {
+      "latency_weight": 500,
+      "cost_weight": 500
+    }
+  },
+  "global_gate": {
+    "status": "allowed",
+    "reason": "synthetic-global-allowed",
+    "reset_at": null
+  }
+}

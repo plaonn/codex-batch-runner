@@ -187,55 +187,33 @@ def select_execution_target(config: Any, task: dict[str, Any], requirement: dict
     inventory = getattr(config, "execution_target_inventory", {}) or {}
     if not inventory:
         return None
-    if requirement.get("schema_version") != 2:
-        raise TargetSelectionError("invalid_requirement_vector", "automatic target selection requires requirement v2")
-    if requirement.get("derivation_identity", {}).get("kind") == "legacy-derived":
+    assessment = assess_execution_target_candidates(config, requirement)
+    if assessment["legacy_derived"]:
         return None
-    registry = getattr(config, "constraint_registry", {}) or {}
-    if inventory.get("status") != "current":
-        raise TargetSelectionError("stale_model_inventory", "inventory snapshot is marked stale")
-    if registry.get("version") != inventory.get("constraint_registry_version"):
-        raise TargetSelectionError("stale_model_inventory", "inventory and constraint registry versions differ")
-    candidates: list[tuple[str, dict[str, Any]]] = []
-    for target_id, raw_target in inventory["targets"].items():
-        # Re-validate programmatically constructed or mutated Config state so
-        # malformed automatic targets cannot bypass config loading before claim.
-        target = target_value(f"execution_target_inventory.targets.{target_id}", target_id, raw_target)
-        if target.get("trust_state") not in ELIGIBLE_TRUST_STATES:
-            continue
-        if _hard_constraints_pass(requirement.get("hard_constraints", {}), target, registry):
-            candidates.append((target_id, target))
+    candidates = [
+        (row["target_id"], row["target"])
+        for row in assessment["targets"]
+        if row["hard_constraints_pass"]
+    ]
     if not candidates:
         raise TargetSelectionError("no_eligible_model", "no trusted target satisfies all hard constraints")
-    quality_requirements = requirement.get("quality_requirements", {})
     evidenced_candidates = [
         (name, target) for name, target in candidates if target["quality_evidence_status"] == "static_non_learned"
     ]
     if not evidenced_candidates:
         raise TargetSelectionError("insufficient_quality_evidence", "eligible targets have no D2 cold-start static fitness")
     quality_candidates = [
-        (name, target) for name, target in evidenced_candidates
-        if all(
-            target["static_fitness"].get(axis, -1) >= axis_requirement.get("score", 0)
-            for axis, axis_requirement in quality_requirements.items() if isinstance(axis_requirement, dict)
-        )
+        (row["target_id"], row["target"])
+        for row in assessment["targets"]
+        if row["eligible"]
     ]
     override = task.get("routing_override") if isinstance(task.get("routing_override"), dict) else None
     if override and override.get("mode") == "pin" and str(override.get("target_id") or "") not in dict(quality_candidates):
         raise TargetSelectionError("manual_pin_unavailable", "pinned target is missing, unavailable, ineligible, or below quality floor")
     if not quality_candidates:
         raise TargetSelectionError("below_quality_floor", "no eligible target meets cold-start static quality floor")
-    preferences = requirement.get("utility_preferences", {})
-    latency_weight = int(preferences.get("latency_weight", 0))
-    cost_weight = int(preferences.get("cost_weight", 0))
-    ranked = sorted(
-        quality_candidates,
-        key=lambda item: (
-            -(item[1]["latency_score"] * latency_weight + item[1]["cost_score"] * cost_weight),
-            -min(item[1]["static_fitness"].values(), default=0),
-            item[0],
-        ),
-    )
+    by_id = dict(quality_candidates)
+    ranked = [(target_id, by_id[target_id]) for target_id in assessment["ranked_eligible_target_ids"]]
     if override:
         preferred = str(override.get("target_id") or "")
         eligible = dict(ranked)
@@ -247,15 +225,120 @@ def select_execution_target(config: Any, task: dict[str, Any], requirement: dict
     return SelectedExecutionTarget(ranked[0][0], ranked[0][1], "automatic_static_non_learned")
 
 
+def assess_execution_target_candidates(config: Any, requirement: dict[str, Any]) -> dict[str, Any]:
+    """Return the selector's exact hard-constraint and quality-floor assessment.
+
+    This is a read-only explanation surface. It deliberately uses the same
+    validation, trust, constraint, quality, and utility ordering as
+    ``select_execution_target`` so advisory consumers cannot relax selector
+    eligibility while proposing an alternative exact target.
+    """
+
+    inventory = getattr(config, "execution_target_inventory", {}) or {}
+    if not inventory:
+        return {
+            "selection_policy_version": SELECTION_POLICY_VERSION,
+            "inventory_snapshot_id": None,
+            "legacy_derived": False,
+            "targets": [],
+            "ranked_eligible_target_ids": [],
+        }
+    if requirement.get("schema_version") != 2:
+        raise TargetSelectionError("invalid_requirement_vector", "automatic target selection requires requirement v2")
+    if requirement.get("derivation_identity", {}).get("kind") == "legacy-derived":
+        return {
+            "selection_policy_version": SELECTION_POLICY_VERSION,
+            "inventory_snapshot_id": inventory.get("snapshot_id"),
+            "legacy_derived": True,
+            "targets": [],
+            "ranked_eligible_target_ids": [],
+        }
+    registry = getattr(config, "constraint_registry", {}) or {}
+    if inventory.get("status") != "current":
+        raise TargetSelectionError("stale_model_inventory", "inventory snapshot is marked stale")
+    if registry.get("version") != inventory.get("constraint_registry_version"):
+        raise TargetSelectionError("stale_model_inventory", "inventory and constraint registry versions differ")
+
+    quality_requirements = requirement.get("quality_requirements", {})
+    rows: list[dict[str, Any]] = []
+    for target_id, raw_target in sorted(inventory["targets"].items()):
+        # Re-validate programmatically constructed or mutated Config state so
+        # malformed automatic targets cannot bypass config loading before claim.
+        target = target_value(f"execution_target_inventory.targets.{target_id}", target_id, raw_target)
+        reasons: list[str] = []
+        if target.get("trust_state") not in ELIGIBLE_TRUST_STATES:
+            reasons.append("trust_state_not_eligible")
+        constraint_reasons = _hard_constraint_failure_reasons(
+            requirement.get("hard_constraints", {}),
+            target,
+            registry,
+        )
+        reasons.extend(constraint_reasons)
+        hard_constraints_pass = not reasons
+        if hard_constraints_pass and target["quality_evidence_status"] != "static_non_learned":
+            reasons.append("quality_evidence_insufficient")
+        if hard_constraints_pass and target["quality_evidence_status"] == "static_non_learned":
+            for axis, axis_requirement in quality_requirements.items():
+                if (
+                    isinstance(axis_requirement, dict)
+                    and target["static_fitness"].get(axis, -1) < axis_requirement.get("score", 0)
+                ):
+                    reasons.append(f"below_quality_floor:{axis}")
+        rows.append(
+            {
+                "target_id": target_id,
+                "target": target,
+                "hard_constraints_pass": hard_constraints_pass,
+                "quality_floor_pass": hard_constraints_pass
+                and not any(
+                    reason == "quality_evidence_insufficient"
+                    or reason.startswith("below_quality_floor:")
+                    for reason in reasons
+                ),
+                "eligible": not reasons,
+                "reasons": reasons,
+            }
+        )
+
+    preferences = requirement.get("utility_preferences", {})
+    latency_weight = int(preferences.get("latency_weight", 0))
+    cost_weight = int(preferences.get("cost_weight", 0))
+    ranked = sorted(
+        (row for row in rows if row["eligible"]),
+        key=lambda row: (
+            -(row["target"]["latency_score"] * latency_weight + row["target"]["cost_score"] * cost_weight),
+            -min(row["target"]["static_fitness"].values(), default=0),
+            row["target_id"],
+        ),
+    )
+    return {
+        "selection_policy_version": SELECTION_POLICY_VERSION,
+        "inventory_snapshot_id": inventory.get("snapshot_id"),
+        "legacy_derived": False,
+        "targets": rows,
+        "ranked_eligible_target_ids": [row["target_id"] for row in ranked],
+    }
+
+
 def _hard_constraints_pass(requirements: object, target: dict[str, Any], registry: dict[str, Any]) -> bool:
+    return not _hard_constraint_failure_reasons(requirements, target, registry)
+
+
+def _hard_constraint_failure_reasons(
+    requirements: object,
+    target: dict[str, Any],
+    registry: dict[str, Any],
+) -> list[str]:
     if not isinstance(requirements, dict):
-        return False
+        return ["hard_constraints_invalid"]
     capabilities = target.get("capabilities", {})
     evidence = target.get("capability_evidence", {})
+    reasons: list[str] = []
     for name, required in requirements.items():
         rule = registry.get("constraints", {}).get(name)
         if not rule:
-            return False
+            reasons.append(f"hard_constraint_registry_missing:{name}")
+            continue
         actual = _constraint_actual(name, target, capabilities)
         source = evidence.get(name, {}).get("source") if isinstance(evidence.get(name), dict) else "unknown"
         trusted = source in {"provider_declared", "surface_reported"} or (
@@ -264,12 +347,13 @@ def _hard_constraints_pass(requirements: object, target: dict[str, Any], registr
         if not trusted:
             policy = rule["unknown_policy"]
             if policy in {"reject", "probe_only", "soft_penalty"}:
-                return False
+                reasons.append(f"hard_constraint_evidence_rejected:{name}")
+                continue
             if policy == "ignore":
                 continue
         if not _constraint_matches(name, required, actual):
-            return False
-    return True
+            reasons.append(f"hard_constraint_not_satisfied:{name}")
+    return reasons
 
 
 def _constraint_actual(name: str, target: dict[str, Any], capabilities: dict[str, Any]) -> Any:

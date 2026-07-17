@@ -133,6 +133,10 @@ from .provider_resource_report import (
     validate_snapshot as validate_provider_resource_snapshot,
 )
 from .provider_resource_authority import validate_admission_policy
+from .provider_resource_simulator import (
+    build_provider_resource_simulation,
+    render_provider_resource_simulation,
+)
 from .routing_report import DEFAULT_ROUTING_REPORT_LIMIT, build_routing_report, render_routing_report
 from .safe_exploration import ExplorationError, exploration_admission
 from .runner import RunOutcome, run_next
@@ -643,6 +647,26 @@ def build_parser() -> argparse.ArgumentParser:
     provider_resource_report.add_argument("--evaluated-at", help="timezone-aware report timestamp")
     provider_resource_report.add_argument("--json", action="store_true", help="print JSON")
     provider_resource_report.set_defaults(func=cmd_provider_resource_report)
+
+    provider_resource_simulate = sub.add_parser(
+        "provider-resource-simulate",
+        help="preview D2-A exact-target resource decisions without changing runtime state",
+    )
+    provider_resource_simulate.add_argument("--request-json", required=True, metavar="PATH")
+    provider_resource_simulate.add_argument(
+        "--snapshot-json",
+        action="append",
+        required=True,
+        metavar="PATH",
+    )
+    provider_resource_simulate.add_argument("--mapping-json", required=True, metavar="PATH")
+    provider_resource_simulate.add_argument("--policy-json", required=True, metavar="PATH")
+    provider_resource_simulate.add_argument(
+        "--evaluated-at",
+        help="timezone-aware deterministic simulation timestamp",
+    )
+    provider_resource_simulate.add_argument("--json", action="store_true", help="print JSON")
+    provider_resource_simulate.set_defaults(func=cmd_provider_resource_simulate)
 
     cooldown = sub.add_parser("cooldown", help="show, set, or clear global cooldown")
     cooldown_sub = cooldown.add_subparsers(dest="cooldown_command", required=True)
@@ -4286,6 +4310,26 @@ def cmd_provider_resource_report(config: Config, args: argparse.Namespace) -> in
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_provider_resource_report(report), end="")
+    return 0
+
+
+def cmd_provider_resource_simulate(config: Config, args: argparse.Namespace) -> int:
+    evaluated_at = parse_resource_timestamp(args.evaluated_at) if args.evaluated_at else utc_now()
+    report = build_provider_resource_simulation(
+        config,
+        request=load_provider_resource_json(args.request_json),
+        snapshots=[
+            load_provider_resource_json(path)
+            for path in args.snapshot_json
+        ],
+        mapping=load_provider_resource_json(args.mapping_json),
+        policy=load_provider_resource_json(args.policy_json),
+        evaluated_at=evaluated_at,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_provider_resource_simulation(report), end="")
     return 0
 
 

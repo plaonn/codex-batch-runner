@@ -2,7 +2,7 @@
 
 `cbr provider-resource-report`는 provider resource 관측을 위한 read-only evidence surface입니다. Provider quota evidence를 local scheduler capacity, exact-target selector, execution evidence, 기존 global Codex usage admission gate와 분리합니다.
 
-이 report는 advisory-only입니다. Queue claim, cooldown, wake, target substitution, routing policy rewrite, operator config activation을 수행하지 않습니다. Unknown, stale, invalid, unavailable evidence는 resource-aware candidate에서만 제외하며 기존 실행을 막지 않습니다. Mapping v1 입력은 기존 `provider-resource-report-v1` shape를 유지합니다. Mapping v2 또는 admission policy를 제공하면 `provider-resource-report-v2`의 `authority_preview`를 생성하지만 report 자체의 `scheduling_authoritative`는 `false`로 유지됩니다.
+이 report는 advisory-only입니다. Queue claim, cooldown, wake, target substitution, routing policy rewrite, operator config activation을 수행하지 않습니다. Unknown, stale, invalid, unavailable evidence는 resource-aware candidate에서만 제외하며 기존 실행을 막지 않습니다. Mapping v1 입력은 기존 `provider-resource-report-v1` shape를 유지합니다. Mapping v2 또는 admission policy를 제공하면 `provider-resource-report-v2`의 `authority_preview`를 생성하지만 report 자체의 `scheduling_authoritative`는 `false`로 유지됩니다. D2-A의 별도 `provider-resource-simulate` node도 같은 no-mutation 경계를 유지하며 D2-B runtime activation을 수행하지 않습니다.
 
 ## Snapshot contract
 
@@ -76,6 +76,47 @@ Public example은 [admission policy example](../examples/provider-resource-admis
 
 `provider-resource-gate-state-v1`의 migration mode는 typed state를 primary로 두되 기존 scalar를 global-only compatibility projection으로 유지합니다. Rollback은 typed evaluation을 비활성화하되 기록을 삭제하거나 scalar에 target gate를 승격하지 않습니다. 이 schema는 아직 runtime state에 저장되지 않습니다.
 
+## D2-A read-only simulator
+
+`cbr provider-resource-simulate`는 selected exact target의 provider-resource 결정을
+preview하고 alternative exact target을 비교하는 read-only node입니다. 입력은 다음
+versioned contract로 고정합니다.
+
+- `provider-resource-simulation-request-v1`: selected exact target id, immutable
+  requirement v2 revision, explicit global gate result를 소유합니다.
+- `provider-resource-mapping-v2`: exact target과 source-attested resource identity,
+  scope, producer revision을 소유합니다.
+- `provider-resource-admission-policy-v1`: threshold, accepted event-time provenance,
+  max age, clock skew, reset grace를 소유합니다.
+
+Simulator는 current execution target inventory와 constraint registry를 사용해 모든
+alternative에 기존 hard constraint와 static quality floor를 다시 적용합니다.
+Selector에서 제외된 target이나 provider-resource authority가 missing, stale, invalid,
+unavailable, ambiguous인 target은 alternative recommendation에 포함하지 않습니다.
+Selected target의 evidence가 불완전해도 기존 실행은 유지하며 action은
+`evidence_only`입니다. 불완전한 evidence에서 `defer`를 만들지 않습니다.
+
+Recommendation action은 `allow`, `defer`, `covered_by_global`,
+`evidence_only`만 사용합니다. Authoritative remaining이 versioned policy threshold
+이하이고 reset이 유효할 때만 `defer` preview를 만들며, wake preview는 policy의
+`reset_grace_seconds`만 더해 계산합니다. Typed decision의 resource, decision, wake
+key는 D1.6 canonical key helper로 계산합니다. 이 key와 wake time은 report evidence일
+뿐 scheduler wake로 등록되지 않습니다.
+
+Global gate는 항상 먼저 평가합니다. Explicit global input이 terminal `gated`이면
+target-scoped defer evaluation을 진행하지 않습니다. Low-resource target reset이 global
+reset에 포함되면 `covered_by_global` evidence와 canonical keys를 표시하되 duplicate
+wake는 만들지 않습니다. 포함되지 않거나 target이 low-resource가 아니면
+`evidence_only`로 남깁니다. Global input 자체가 `unknown` 또는 `fail_open`이면 target
+resource가 낮아도 `evidence_only`로 유지하며 defer하지 않습니다.
+
+JSON과 human output은 `read_only=true`, `mutation_allowed=false`,
+`scheduling_authoritative=false`, `automatic_substitution=false`,
+`d2b_activation=false`를 명시합니다. Queue, event, state, cooldown, wake, config,
+routing policy를 읽기 결과로 수정하지 않습니다. D2-B activation, automatic
+substitution, provider identity exception, 운영 threshold 선택은 이 command의 범위가
+아닙니다.
+
 ## CLI
 
 이미 projection된 file을 읽는 예시:
@@ -110,3 +151,21 @@ cbr provider-resource-report \
 Adapter는 implicit shell evaluation 없이 argv list로 실행하며 timeout 상한은 60초, accepted JSON input 상한은 1 MiB입니다. Nonzero exit, timeout, invalid JSON, invalid snapshot은 sanitized status/reason으로 축약합니다. Command argv, stdout, stderr는 report에 복사하지 않습니다.
 
 `--max-age-seconds`를 생략하면 v1 advisory freshness는 `unknown`입니다. Authority preview는 policy revision의 timing만 사용합니다. Global usage-admission max age를 암묵적으로 재사용하지 않습니다. `--evaluated-at`은 deterministic report/test를 위한 option이며 timezone-aware timestamp만 허용합니다.
+
+D2-A simulation 예시:
+
+```bash
+cbr provider-resource-simulate \
+  --request-json simulation-request.json \
+  --snapshot-json snapshot.json \
+  --mapping-json mapping-v2.json \
+  --policy-json policy.json \
+  --evaluated-at 2030-01-02T04:00:00Z \
+  --json
+```
+
+Sanitized request shape는
+[simulation request example](../examples/provider-resource-simulation-request-v1.example.json)을
+참조합니다. Example threshold와 timing 값은 synthetic fixture이며 운영 권고값이
+아닙니다. Simulator는 provider API나 credential을 조회하지 않으므로 snapshot,
+mapping, policy, global gate result를 모두 explicit file input으로 받아야 합니다.
