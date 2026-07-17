@@ -99,6 +99,8 @@ class DoctorTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertTrue(report["ok"])
+            self.assertEqual("cli", report["config"]["source"])
+            self.assertEqual(str(config_path.resolve()), report["config"]["path"])
             self.assertEqual(str(Path(tmp) / "tasks"), report["paths"]["queue_dir"])
             self.assertEqual(str(Path(tmp) / "logs"), report["paths"]["log_dir"])
             self.assertTrue(report["codex_command"]["available"])
@@ -119,6 +121,9 @@ class DoctorTests(unittest.TestCase):
             code, output = run_cli(["--config", str(config_path), "doctor"])
 
             self.assertEqual(0, code)
+            self.assertIn("config:", output)
+            self.assertIn("source: cli", output)
+            self.assertIn(f"path: {config_path.resolve()}", output)
             self.assertIn("codex_command:", output)
             self.assertIn("python_runtime:", output)
             self.assertIn("minimum_version: 3.11", output)
@@ -132,6 +137,29 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("warning_count: 3", output)
             self.assertIn("error_count: 0", output)
             self.assertNotIn("ok: queue_dir:", output)
+
+    def test_doctor_reports_environment_config_provenance_without_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex"
+            executable.write_text("#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n", encoding="utf-8")
+            executable.chmod(0o755)
+            config_path = write_config(
+                tmp,
+                [str(executable), "exec", "--json"],
+                extra={"credential_token": "must-not-appear"},
+            )
+
+            with mock.patch.dict(os.environ, {"CBR_CONFIG": str(config_path)}, clear=False):
+                code, output = run_cli(["doctor", "--json"])
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual(
+                {"source": "environment", "path": str(config_path.resolve())},
+                report["config"],
+            )
+            self.assertNotIn("credential_token", output)
+            self.assertNotIn("must-not-appear", output)
 
     def test_doctor_python_runtime_check_rejects_unsupported_version(self) -> None:
         from codex_batch_runner import doctor

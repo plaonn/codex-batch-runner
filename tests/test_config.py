@@ -25,10 +25,15 @@ class ConfigTests(unittest.TestCase):
             config_path = Path(tmp) / "config.json"
             queue_dir = Path(tmp) / "queue"
             write_config(config_path, queue_dir)
+            env_path = Path(tmp) / "env.json"
+            write_config(env_path, Path(tmp) / "env-queue")
 
-            config = Config.load(str(config_path), root=Path(tmp) / "other")
+            with patch.dict("os.environ", {"CBR_CONFIG": str(env_path)}, clear=False):
+                config = Config.load(str(config_path), root=Path(tmp) / "other")
 
             self.assertEqual(queue_dir, config.queue_dir)
+            self.assertEqual(config_path.resolve(), config.config_path)
+            self.assertEqual("cli", config.config_source)
 
     def test_event_dir_defaults_next_to_log_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -50,14 +55,100 @@ class ConfigTests(unittest.TestCase):
                 config = Config.load(root=Path(tmp) / "cwd")
 
             self.assertEqual(queue_dir, config.queue_dir)
+            self.assertEqual(config_path.resolve(), config.config_path)
+            self.assertEqual("environment", config.config_source)
 
-    def test_missing_config_requires_explicit_path_or_env(self) -> None:
+    def test_xdg_config_home_is_used_after_empty_environment_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with (
-                patch.dict("os.environ", {"HOME": str(Path(tmp) / "home")}, clear=True),
-                self.assertRaisesRegex(ValueError, "config required"),
+            xdg_home = Path(tmp) / "xdg"
+            config_path = xdg_home / "codex-batch-runner" / "config.json"
+            queue_dir = Path(tmp) / "xdg-queue"
+            write_config(config_path, queue_dir)
+
+            with patch.dict(
+                "os.environ",
+                {"CBR_CONFIG": "", "XDG_CONFIG_HOME": str(xdg_home), "HOME": str(Path(tmp) / "home")},
+                clear=True,
+            ):
+                self.assertEqual(config_path.resolve(), resolve_config_path())
+                config = Config.load()
+
+            self.assertEqual(queue_dir, config.queue_dir)
+            self.assertEqual(config_path.resolve(), config.config_path)
+            self.assertEqual("xdg", config.config_source)
+
+    def test_home_config_is_used_when_xdg_config_home_is_unset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            config_path = home / ".config" / "codex-batch-runner" / "config.json"
+            queue_dir = Path(tmp) / "home-queue"
+            write_config(config_path, queue_dir)
+
+            with patch.dict("os.environ", {"CBR_CONFIG": "", "HOME": str(home)}, clear=True):
+                config = Config.load()
+
+            self.assertEqual(queue_dir, config.queue_dir)
+            self.assertEqual(config_path.resolve(), config.config_path)
+            self.assertEqual("xdg", config.config_source)
+
+    def test_explicit_and_environment_selection_fail_closed_without_xdg_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg_home = Path(tmp) / "xdg"
+            xdg_path = xdg_home / "codex-batch-runner" / "config.json"
+            write_config(xdg_path, Path(tmp) / "xdg-queue")
+            missing = Path(tmp) / "missing.json"
+
+            with self.subTest(source="cli"), patch.dict(
+                "os.environ", {"CBR_CONFIG": "", "XDG_CONFIG_HOME": str(xdg_home)}, clear=True
+            ), self.assertRaises(ValueError) as raised:
+                Config.load(str(missing))
+            self.assertEqual(f"config not found (cli): {missing.resolve()}", str(raised.exception))
+
+            with self.subTest(source="environment"), patch.dict(
+                "os.environ", {"CBR_CONFIG": str(missing), "XDG_CONFIG_HOME": str(xdg_home)}, clear=True
+            ), self.assertRaises(ValueError) as raised:
+                Config.load()
+            self.assertEqual(f"config not found (environment): {missing.resolve()}", str(raised.exception))
+
+    def test_xdg_missing_and_no_location_errors_are_actionable_without_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            expected = home / ".config" / "codex-batch-runner" / "config.json"
+            with patch.dict("os.environ", {"CBR_CONFIG": "", "HOME": str(home)}, clear=True), self.assertRaises(
+                ValueError
+            ) as raised:
+                Config.load()
+            self.assertIn(f"config not found (xdg): {expected.resolve()}", str(raised.exception))
+            self.assertFalse(home.exists())
+
+            with patch.dict("os.environ", {}, clear=True), self.assertRaisesRegex(
+                ValueError, "no XDG config location available"
             ):
                 Config.load()
+
+    def test_selected_config_must_be_regular_readable_json_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = root / "directory.json"
+            directory.mkdir()
+            invalid = root / "invalid.json"
+            invalid.write_text("{", encoding="utf-8")
+            array = root / "array.json"
+            array.write_text("[]", encoding="utf-8")
+            readable = root / "readable.json"
+            readable.write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "not a regular file"):
+                Config.load(str(directory))
+            with self.assertRaisesRegex(ValueError, "contains invalid JSON"):
+                Config.load(str(invalid))
+            with self.assertRaisesRegex(ValueError, "must contain a JSON object"):
+                Config.load(str(array))
+            with patch(
+                "codex_batch_runner.config.Path.open",
+                side_effect=PermissionError("denied"),
+            ), self.assertRaisesRegex(ValueError, "not readable"):
+                Config.load(str(readable))
 
     def test_config_root_makes_relative_runtime_paths_independent_of_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,7 +222,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(1800, config.auto_review_codex_cooldown_seconds)
             self.assertEqual(120000, config.auto_review_codex_max_bundle_chars)
             self.assertEqual(60000, config.auto_review_codex_max_diff_chars)
-            self.assertIsNone(resolve_config_path())
+            self.assertIsNone(config.config_path)
+            self.assertEqual("internal", config.config_source)
             self.assertEqual("disabled", config.manual_cooldown_wake_scheduler)
             self.assertEqual([], config.manual_cooldown_wake_command)
             self.assertFalse(config.usage_admission_enabled)

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .fs import read_json
 from .execution_target_selector import constraint_registry_value, execution_target_inventory_value
 from .model_requirements import (
     REQUIREMENT_DIMENSIONS,
@@ -17,6 +18,12 @@ from .model_requirements import (
     optional_string_value,
     string_value,
 )
+
+
+@dataclass(frozen=True)
+class ConfigSelection:
+    path: Path
+    source: str
 
 
 @dataclass(frozen=True)
@@ -85,15 +92,20 @@ class Config:
     worker_selection_rules: list[dict[str, Any]] = field(default_factory=list)
     execution_target_inventory: dict[str, Any] = field(default_factory=dict)
     constraint_registry: dict[str, Any] = field(default_factory=dict)
+    config_path: Path | None = None
+    config_source: str = "internal"
 
     @classmethod
     def load(cls, config_path: str | None = None, root: Path | None = None) -> "Config":
-        resolved_config_path = resolve_config_path(config_path)
-        if root is None and resolved_config_path is None:
-            raise ValueError("config required: pass --config /path/to/config.json or set CBR_CONFIG")
+        selection = (
+            resolve_config_selection(config_path)
+            if config_path or os.environ.get("CBR_CONFIG") or root is None
+            else None
+        )
+        resolved_config_path = selection.path if selection else None
         data: dict[str, Any] = {}
-        if resolved_config_path:
-            data = read_json(resolved_config_path, {}) or {}
+        if selection:
+            data = load_selected_config(selection)
         fallback_root = (root or Path.cwd()).resolve()
         base = fallback_root if root is not None else root_value(data.get("root"), fallback_root, resolved_config_path)
 
@@ -301,6 +313,8 @@ class Config:
             worker_selection_rules=worker_selection_rules,
             execution_target_inventory=execution_target_inventory,
             constraint_registry=constraint_registry,
+            config_path=resolved_config_path,
+            config_source=selection.source if selection else "internal",
         )
 
 
@@ -595,10 +609,58 @@ def normalize_project_priority_key(value: str) -> str:
     return text
 
 
-def resolve_config_path(config_path: str | None = None) -> Path | None:
+def resolve_config_selection(config_path: str | None = None) -> ConfigSelection:
     if config_path:
-        return Path(config_path).expanduser().resolve()
+        return ConfigSelection(Path(config_path).expanduser().resolve(), "cli")
     env_path = os.environ.get("CBR_CONFIG")
     if env_path:
-        return Path(env_path).expanduser().resolve()
-    return None
+        return ConfigSelection(Path(env_path).expanduser().resolve(), "environment")
+
+    xdg_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_home:
+        base = Path(xdg_home).expanduser()
+    else:
+        home = os.environ.get("HOME")
+        if not home:
+            raise ValueError(
+                "config not found: no XDG config location available; pass --config PATH, "
+                "set CBR_CONFIG, or set XDG_CONFIG_HOME/HOME"
+            )
+        base = Path(home).expanduser() / ".config"
+    return ConfigSelection((base / "codex-batch-runner" / "config.json").resolve(), "xdg")
+
+
+def resolve_config_path(config_path: str | None = None) -> Path:
+    return resolve_config_selection(config_path).path
+
+
+def load_selected_config(selection: ConfigSelection) -> dict[str, Any]:
+    path = selection.path
+    source = selection.source
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError as exc:
+        hint = (
+            "; pass --config PATH, set CBR_CONFIG, or create config at the XDG path"
+            if source == "xdg"
+            else ""
+        )
+        raise ValueError(f"config not found ({source}): {path}{hint}") from exc
+    except OSError as exc:
+        raise ValueError(f"config inaccessible ({source}): {path}: {exc.strerror or exc}") from exc
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"config is not a regular file ({source}): {path}")
+    if not os.access(path, os.R_OK):
+        raise ValueError(f"config is not readable ({source}): {path}")
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            value = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"config contains invalid JSON ({source}): {path}: line {exc.lineno} column {exc.colno}"
+        ) from exc
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"config is not readable ({source}): {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"config must contain a JSON object ({source}): {path}")
+    return value

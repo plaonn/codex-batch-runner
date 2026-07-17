@@ -501,7 +501,11 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(1, code)
         self.assertEqual("", output)
-        self.assertEqual("error: config required: pass --config /path/to/config.json or set CBR_CONFIG\n", stderr)
+        self.assertEqual(
+            "error: config not found: no XDG config location available; pass --config PATH, "
+            "set CBR_CONFIG, or set XDG_CONFIG_HOME/HOME\n",
+            stderr,
+        )
 
     def test_cooldown_set_time_only_zero_pads_and_stores_safety_offset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

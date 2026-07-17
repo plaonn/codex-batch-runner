@@ -66,6 +66,10 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
     checks.extend(warning("git", message) for message in git["warnings"])
     report = {
         "ok": not any(check["level"] == "error" for check in checks),
+        "config": {
+            "source": config.config_source,
+            "path": str(config.config_path) if config.config_path else None,
+        },
         "paths": {
             "root": str(config.root),
             "queue_dir": str(config.queue_dir),
@@ -868,7 +872,16 @@ def stall_evidence(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def render_doctor_report(report: dict[str, Any]) -> str:
-    lines = ["cbr doctor", "", "paths:"]
+    config = report.get("config") or {}
+    lines = [
+        "cbr doctor",
+        "",
+        "config:",
+        f"  source: {config.get('source')}",
+        f"  path: {config.get('path')}",
+        "",
+        "paths:",
+    ]
     for name, path in report["paths"].items():
         lines.append(f"  {name}: {path}")
     python_runtime = report["python_runtime"]
