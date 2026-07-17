@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from collections import Counter
 from datetime import timedelta
 from pathlib import Path
@@ -28,6 +29,7 @@ from .worktree import WORKTREE_RETAINED_STATUSES, sanitize_report_value, task_wo
 from .worktree_pool import pool_state_summary
 
 CODEX_VERSION_TIMEOUT_SECONDS = 2.0
+MINIMUM_PYTHON_VERSION = (3, 11)
 DOCTOR_TASK_BRANCH_HUMAN_DETAIL_LIMIT = 20
 DECISION_CARD_OPEN_NEXT_ACTIONS = {
     "fix_invalid_decision_cards",
@@ -39,6 +41,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
     tasks, task_warnings = load_tasks_for_doctor(config.queue_dir)
     by_id = {task.get("id"): task for task in tasks}
     codex_info = inspect_codex_command(config.codex_command)
+    python_info = inspect_python_runtime()
     model_config = model_requirement_summary(config)
     codex_checks = codex_command_checks(codex_info)
     git = git_summary(config.root)
@@ -48,6 +51,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
         check_directory("event_dir", config.event_dir),
         check_parent("lock_file_parent", config.lock_file),
         check_parent("state_file_parent", config.state_file),
+        python_runtime_check(python_info),
         *codex_checks,
     ]
     checks.extend(
@@ -71,6 +75,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
             "state_file": str(config.state_file),
         },
         "codex_command": codex_info,
+        "python_runtime": python_info,
         "state": state_summary(config),
         "lock": lock_summary(config),
         "git": git,
@@ -84,6 +89,26 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
         "checks": checks,
     }
     return report
+
+
+def inspect_python_runtime() -> dict[str, Any]:
+    version = tuple(sys.version_info[:3])
+    executable = str(Path(sys.executable).resolve()) if sys.executable else None
+    return {
+        "executable": executable,
+        "version": ".".join(str(part) for part in version),
+        "minimum_version": ".".join(str(part) for part in MINIMUM_PYTHON_VERSION),
+        "supported": version >= MINIMUM_PYTHON_VERSION,
+    }
+
+
+def python_runtime_check(info: dict[str, Any]) -> dict[str, str]:
+    version = info.get("version")
+    executable = info.get("executable")
+    minimum = info.get("minimum_version")
+    if info.get("supported"):
+        return ok("python_runtime", f"Python {version}: {executable}")
+    return error("python_runtime", f"Python {minimum}+ required; running Python {version}: {executable}")
 
 
 def execution_evidence_summary(tasks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -846,6 +871,17 @@ def render_doctor_report(report: dict[str, Any]) -> str:
     lines = ["cbr doctor", "", "paths:"]
     for name, path in report["paths"].items():
         lines.append(f"  {name}: {path}")
+    python_runtime = report["python_runtime"]
+    lines.extend(
+        [
+            "",
+            "python_runtime:",
+            f"  executable: {python_runtime.get('executable')}",
+            f"  version: {python_runtime.get('version')}",
+            f"  minimum_version: {python_runtime.get('minimum_version')}",
+            f"  supported: {str(python_runtime.get('supported')).lower()}",
+        ]
+    )
     codex = report["codex_command"]
     lines.extend(
         [

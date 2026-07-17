@@ -102,6 +102,9 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(str(Path(tmp) / "tasks"), report["paths"]["queue_dir"])
             self.assertEqual(str(Path(tmp) / "logs"), report["paths"]["log_dir"])
             self.assertTrue(report["codex_command"]["available"])
+            self.assertTrue(report["python_runtime"]["supported"])
+            self.assertEqual("3.11", report["python_runtime"]["minimum_version"])
+            self.assertTrue(Path(report["python_runtime"]["executable"]).is_absolute())
             self.assertEqual(str(executable.resolve()), report["codex_command"]["resolved_executable"])
             self.assertEqual("codex-cli 1.2.3", report["codex_command"]["version_output"])
             self.assertIsNone(report["codex_command"]["version_error"])
@@ -117,15 +120,32 @@ class DoctorTests(unittest.TestCase):
 
             self.assertEqual(0, code)
             self.assertIn("codex_command:", output)
+            self.assertIn("python_runtime:", output)
+            self.assertIn("minimum_version: 3.11", output)
+            self.assertIn("supported: true", output)
             self.assertIn(f"configured_executable: {executable}", output)
             self.assertIn(f"resolved_executable: {executable.resolve()}", output)
             self.assertIn("available: true", output)
             self.assertIn("version_output: codex-cli 2.0.0", output)
             self.assertIn("checks:", output)
-            self.assertIn("ok_count: 6", output)
+            self.assertIn("ok_count: 7", output)
             self.assertIn("warning_count: 3", output)
             self.assertIn("error_count: 0", output)
             self.assertNotIn("ok: queue_dir:", output)
+
+    def test_doctor_python_runtime_check_rejects_unsupported_version(self) -> None:
+        from codex_batch_runner import doctor
+
+        with mock.patch.object(doctor.sys, "version_info", (3, 10, 14)), mock.patch.object(
+            doctor.sys, "executable", "/opt/python3.10/bin/python3"
+        ):
+            info = doctor.inspect_python_runtime()
+            check = doctor.python_runtime_check(info)
+
+        self.assertFalse(info["supported"])
+        self.assertEqual("3.10.14", info["version"])
+        self.assertEqual("error", check["level"])
+        self.assertIn("Python 3.11+ required", check["message"])
 
     def test_doctor_reports_runner_pause_state_in_json_and_human_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

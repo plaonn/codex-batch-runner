@@ -8,20 +8,12 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
-    <string>-m</string>
-    <string>codex_batch_runner</string>
+    <string>/absolute/path/to/cbr</string>
     <string>--config</string>
     <string>/path/to/codex-batch-runner/examples/config.example.json</string>
     <string>run-loop</string>
     <string>--json</string>
   </array>
-
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PYTHONPATH</key>
-    <string>/path/to/codex-batch-runner/src</string>
-  </dict>
 
   <key>WorkingDirectory</key>
   <string>/path/to/codex-batch-runner</string>
