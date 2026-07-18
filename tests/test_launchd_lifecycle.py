@@ -77,11 +77,43 @@ class LaunchdLifecycleTests(unittest.TestCase):
         self.assertEqual(("unhealthy", "blocked"), (plan.status, plan.action))
         self.assertIn("does not match", plan.reason)
 
+    def test_owned_plist_with_extra_behavior_or_environment_key_is_unhealthy(self) -> None:
+        extra_behavior = plistlib.loads(render_launchd_plist(plan_input()))
+        extra_behavior["KeepAlive"] = True
+        behavior_plan = plan_launchd_lifecycle(plan_input(), plistlib.dumps(extra_behavior))
+
+        extra_environment = plistlib.loads(render_launchd_plist(plan_input()))
+        extra_environment["EnvironmentVariables"]["PYTHONPATH"] = "/opt/cbr/src"
+        environment_plan = plan_launchd_lifecycle(plan_input(), plistlib.dumps(extra_environment))
+
+        self.assertEqual(("unhealthy", "blocked"), (behavior_plan.status, behavior_plan.action))
+        self.assertIn("top-level keys", behavior_plan.reason)
+        self.assertEqual(("unhealthy", "blocked"), (environment_plan.status, environment_plan.action))
+        self.assertIn("EnvironmentVariables keys", environment_plan.reason)
+
     def test_invalid_input_is_rejected_before_rendering(self) -> None:
         with self.assertRaisesRegex(ValueError, "absolute path"):
             render_launchd_plist(plan_input(config_path="relative/config.json"))
         with self.assertRaisesRegex(ValueError, "config_provenance"):
             render_launchd_plist(plan_input(config_provenance="unknown"))
+
+    def test_environment_path_requires_only_nonempty_absolute_segments(self) -> None:
+        self.assertEqual(
+            "/opt/cbr/bin:/usr/bin:/bin",
+            plistlib.loads(render_launchd_plist(plan_input()))["EnvironmentVariables"]["PATH"],
+        )
+        for value in (
+            ":/usr/bin",
+            "/usr/bin:",
+            "/usr/bin::/bin",
+            "/usr/bin:.",
+            "/usr/bin:relative/bin",
+        ):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError,
+                "environment_path segments must be non-empty absolute paths",
+            ):
+                render_launchd_plist(plan_input(environment_path=value))
 
 
 if __name__ == "__main__":

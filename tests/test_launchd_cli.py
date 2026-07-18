@@ -39,7 +39,14 @@ def plan_values(root: Path, config_path: Path, *, interval: int = 600, provenanc
     )
 
 
-def plan_args(root: Path, config_path: Path, *, interval: int = 600, existing: Path | None = None) -> list[str]:
+def plan_args(
+    root: Path,
+    config_path: Path,
+    *,
+    interval: int = 600,
+    existing: Path | None = None,
+    environment_path: str = "/opt/cbr/bin:/usr/bin:/bin",
+) -> list[str]:
     args = [
         "--config",
         str(config_path),
@@ -56,7 +63,7 @@ def plan_args(root: Path, config_path: Path, *, interval: int = 600, existing: P
         "--stderr-path",
         str(root / "logs" / "launchd.err.log"),
         "--environment-path",
-        "/opt/cbr/bin:/usr/bin:/bin",
+        environment_path,
         "--start-interval-seconds",
         str(interval),
     ]
@@ -130,6 +137,36 @@ class LaunchdCliTests(unittest.TestCase):
                     self.assertRegex(report["digest"], r"^[0-9a-f]{64}$")
                     self.assertEqual(before, file_snapshot(root))
 
+    def test_owned_plist_extra_behavior_and_environment_keys_are_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(root)
+            extra_behavior = plistlib.loads(render_launchd_plist(plan_values(root, config_path)))
+            extra_behavior["KeepAlive"] = True
+            behavior_path = root / "extra-behavior.plist"
+            behavior_path.write_bytes(plistlib.dumps(extra_behavior))
+
+            extra_environment = plistlib.loads(render_launchd_plist(plan_values(root, config_path)))
+            extra_environment["EnvironmentVariables"]["PYTHONPATH"] = "/opt/cbr/src"
+            environment_path = root / "extra-environment.plist"
+            environment_path.write_bytes(plistlib.dumps(extra_environment))
+
+            for path, reason in (
+                (behavior_path, "top-level keys"),
+                (environment_path, "EnvironmentVariables keys"),
+            ):
+                with self.subTest(path=path.name):
+                    before = file_snapshot(root)
+                    code, output, stderr = run_cli(
+                        [*plan_args(root, config_path, existing=path), "--json"]
+                    )
+                    report = json.loads(output)
+                    self.assertEqual(2, code)
+                    self.assertEqual("", stderr)
+                    self.assertEqual(("unhealthy", "blocked"), (report["status"], report["action"]))
+                    self.assertIn(reason, report["reason"])
+                    self.assertEqual(before, file_snapshot(root))
+
     def test_foreign_and_malformed_plists_report_blocked_with_exit_two(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -163,6 +200,25 @@ class LaunchdCliTests(unittest.TestCase):
             self.assertEqual(1, code)
             self.assertEqual("", output)
             self.assertIn(f"existing plist not found: {missing.resolve()}", stderr)
+
+    def test_relative_or_empty_environment_path_segment_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(root)
+
+            for value in ("/usr/bin:relative/bin", "/usr/bin::/bin", "/usr/bin:."):
+                with self.subTest(value=value):
+                    before = file_snapshot(root)
+                    code, output, stderr = run_cli(
+                        [*plan_args(root, config_path, environment_path=value), "--json"]
+                    )
+                    self.assertEqual(1, code)
+                    self.assertEqual("", output)
+                    self.assertIn(
+                        "environment_path segments must be non-empty absolute paths",
+                        stderr,
+                    )
+                    self.assertEqual(before, file_snapshot(root))
 
     def test_xdg_provenance_is_injected_and_human_output_is_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

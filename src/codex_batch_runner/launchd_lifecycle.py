@@ -20,6 +20,17 @@ MARKER_KEY = "CBRLaunchdLifecycle"
 MARKER_VERSION = 1
 _LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_MANAGED_TOP_LEVEL_KEYS = {
+    "Label",
+    "ProgramArguments",
+    "WorkingDirectory",
+    "EnvironmentVariables",
+    "StartInterval",
+    "StandardOutPath",
+    "StandardErrorPath",
+    MARKER_KEY,
+}
+_MANAGED_ENVIRONMENT_KEYS = {"PATH"}
 
 
 @dataclass(frozen=True)
@@ -99,6 +110,13 @@ def plan_launchd_lifecycle(plan_input: LaunchdPlanInput, existing_plist: bytes |
     marker = existing.get(MARKER_KEY)
     if marker is None:
         return LaunchdPlan(status="foreign_conflict", action="blocked", reason="missing CBR ownership marker", **common)
+    if set(existing) != _MANAGED_TOP_LEVEL_KEYS:
+        return LaunchdPlan(
+            status="unhealthy",
+            action="blocked",
+            reason="managed plist top-level keys do not match contract",
+            **common,
+        )
     if not isinstance(marker, dict) or marker.get("version") != MARKER_VERSION:
         return LaunchdPlan(status="unhealthy", action="blocked", reason="invalid CBR ownership marker", **common)
     stored_digest = marker.get("digest")
@@ -130,7 +148,9 @@ def _managed_fields(plan_input: LaunchdPlanInput) -> dict[str, Any]:
         if not _is_absolute(value):
             raise ValueError(f"{name} must be an absolute path")
     if not isinstance(plan_input.environment_path, str) or not plan_input.environment_path:
-        raise ValueError("environment_path must be a non-empty string")
+        raise ValueError("environment_path must be a non-empty absolute PATH list")
+    if any(not _is_absolute(segment) for segment in plan_input.environment_path.split(":")):
+        raise ValueError("environment_path segments must be non-empty absolute paths")
     if not isinstance(plan_input.start_interval_seconds, int) or isinstance(plan_input.start_interval_seconds, bool) or plan_input.start_interval_seconds <= 0:
         raise ValueError("start_interval_seconds must be a positive integer")
     if plan_input.config_provenance not in {"cli", "environment", "xdg"}:
@@ -154,6 +174,8 @@ def _fields_from_existing(plist: dict[str, Any]) -> dict[str, Any]:
     environment = plist.get("EnvironmentVariables")
     if not isinstance(environment, dict):
         raise ValueError("EnvironmentVariables must be a dictionary")
+    if set(environment) != _MANAGED_ENVIRONMENT_KEYS:
+        raise ValueError("EnvironmentVariables keys do not match managed contract")
     fields = {
         "label": plist.get("Label"),
         "executable_path": arguments[0],
