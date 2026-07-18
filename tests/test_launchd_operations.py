@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import plistlib
+import platform
 import tempfile
 import unittest
 from dataclasses import replace
@@ -15,6 +16,7 @@ from codex_batch_runner.launchd_operations import (
     LaunchctlResult,
     LaunchdEnvironment,
     LocalLaunchdFilesystem,
+    ParentHandle,
     PathState,
     lifecycle_result_report,
     run_launchd_install,
@@ -75,7 +77,15 @@ class FakeFilesystem:
             return self._state(path, "file")
         return PathState("absent")
 
-    def read_snapshot(self, path: Path, max_bytes: int) -> FileSnapshot:
+    def open_parent(self, path: Path, expected: PathState) -> ParentHandle:
+        self.calls.append("open_parent")
+        self._require(self._peek(path), expected)
+        return ParentHandle(path, expected, self)
+
+    def close_parent(self, parent: ParentHandle) -> None:
+        self.calls.append("close_parent")
+
+    def read_snapshot(self, path: Path, max_bytes: int, parent: ParentHandle) -> FileSnapshot:
         self.calls.append("read")
         if "read" in self.fail:
             raise OSError("injected")
@@ -88,14 +98,13 @@ class FakeFilesystem:
         self,
         path: Path,
         expected: PathState,
-        parent: Path,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> None:
         self.calls.append("assert")
         self.assert_count += 1
         if self.race_at_assert == self.assert_count:
             self._inject_race()
-        self._require(self._peek(parent), expected_parent)
+        self._require(self._peek(parent.path), parent.state)
         self._require(self._peek(path), expected)
 
     def write_atomic(
@@ -103,12 +112,12 @@ class FakeFilesystem:
         path: Path,
         data: bytes,
         expected: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> PathState:
         self.calls.append("write")
         if "write" in self.fail:
             raise OSError("injected")
-        self.assert_unchanged(path, expected, path.parent, expected_parent)
+        self.assert_unchanged(path, expected, parent)
         self.files[path] = data
         self.kinds.pop(path, None)
         self.identities[path] = self._new_identity()
@@ -119,12 +128,12 @@ class FakeFilesystem:
         path: Path,
         data: bytes,
         expected: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> BackupSnapshot:
         self.calls.append("backup")
         if "backup" in self.fail:
             raise OSError("injected")
-        self.assert_unchanged(path, expected, path.parent, expected_parent)
+        self.assert_unchanged(path, expected, parent)
         backup = self._backup_path(path)
         self.files[backup] = data
         self.identities[backup] = self._new_identity()
@@ -134,16 +143,16 @@ class FakeFilesystem:
         self,
         path: Path,
         expected: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> BackupSnapshot:
         self.calls.append("move")
         if "move" in self.fail:
             raise OSError("injected")
-        self.assert_unchanged(path, expected, path.parent, expected_parent)
+        self.assert_unchanged(path, expected, parent)
         backup = self._backup_path(path)
         self.files[backup] = self.files.pop(path)
         self.identities[backup] = self.identities.pop(path)
-        self.assert_unchanged(path, PathState("absent"), path.parent, expected_parent)
+        self.assert_unchanged(path, PathState("absent"), parent)
         return BackupSnapshot(backup, self._state(backup, "file"), self.files[backup])
 
     def restore_backup_atomic(
@@ -151,31 +160,31 @@ class FakeFilesystem:
         backup: BackupSnapshot,
         destination: Path,
         expected_destination: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> PathState:
         self.calls.append("restore")
         if "restore" in self.fail:
             raise OSError("injected")
-        self.assert_unchanged(destination, expected_destination, destination.parent, expected_parent)
+        self.assert_unchanged(destination, expected_destination, parent)
         self._require(self._peek(backup.path), backup.state)
         self.files[destination] = self.files.pop(backup.path)
         self.identities[destination] = self.identities.pop(backup.path)
         return self._state(destination, "file")
 
-    def remove(self, path: Path, expected: PathState, expected_parent: PathState) -> None:
+    def remove(self, path: Path, expected: PathState, parent: ParentHandle) -> None:
         self.calls.append("remove")
         if "remove" in self.fail:
             raise OSError("injected")
-        self.assert_unchanged(path, expected, path.parent, expected_parent)
+        self.assert_unchanged(path, expected, parent)
         self.files.pop(path)
         self.identities.pop(path)
-        self.assert_unchanged(path, PathState("absent"), path.parent, expected_parent)
+        self.assert_unchanged(path, PathState("absent"), parent)
 
-    def discard_backup(self, backup: BackupSnapshot, expected_parent: PathState) -> None:
+    def discard_backup(self, backup: BackupSnapshot, parent: ParentHandle) -> None:
         self.calls.append("discard")
         if "discard" in self.fail:
             raise OSError("injected")
-        self.assert_unchanged(backup.path, backup.state, backup.path.parent, expected_parent)
+        self.assert_unchanged(backup.path, backup.state, parent)
         self.files.pop(backup.path)
         self.identities.pop(backup.path)
 
@@ -249,22 +258,168 @@ class LaunchdOperationTests(unittest.TestCase):
             destination.write_bytes(b"managed")
             filesystem = LocalLaunchdFilesystem()
             parent_state = filesystem.inspect(parent)
-            snapshot = filesystem.read_snapshot(destination, 1024)
+            parent_handle = filesystem.open_parent(parent, parent_state)
+            snapshot = filesystem.read_snapshot(destination, 1024, parent_handle)
 
             destination.unlink()
             destination.symlink_to(root / "foreign.plist")
             with self.assertRaises(IdentityChangedError):
-                filesystem.assert_unchanged(destination, snapshot.state, parent, parent_state)
+                filesystem.assert_unchanged(destination, snapshot.state, parent_handle)
 
             destination.unlink()
             destination.write_bytes(b"managed")
-            snapshot = filesystem.read_snapshot(destination, 1024)
+            snapshot = filesystem.read_snapshot(destination, 1024, parent_handle)
             old_parent = root / "LaunchAgents-old"
             parent.rename(old_parent)
             parent.mkdir()
             (parent / destination.name).write_bytes(b"managed")
             with self.assertRaises(IdentityChangedError):
-                filesystem.assert_unchanged(parent / destination.name, snapshot.state, parent, parent_state)
+                filesystem.assert_unchanged(parent / destination.name, snapshot.state, parent_handle)
+            filesystem.close_parent(parent_handle)
+
+    @unittest.skipUnless(platform.system() == "Darwin", "requires Darwin renameatx_np")
+    def test_local_final_check_races_restore_foreign_entries_for_all_mutations(self) -> None:
+        foreign = b"foreign-entry"
+
+        for action in ("write", "backup", "move", "remove"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                parent_path = Path(tmp) / "LaunchAgents"
+                parent_path.mkdir()
+                destination = parent_path / "managed.plist"
+                destination.write_bytes(b"managed-old")
+
+                def replace_destination(observed: str, parent: ParentHandle, name: str) -> None:
+                    if observed != action:
+                        return
+                    target = parent.path / name
+                    target.unlink()
+                    target.write_bytes(foreign)
+
+                filesystem = LocalLaunchdFilesystem(before_mutation=replace_destination)
+                parent = filesystem.open_parent(parent_path, filesystem.inspect(parent_path))
+                snapshot = filesystem.read_snapshot(destination, 1024, parent)
+                try:
+                    with self.assertRaises(OSError):
+                        if action == "write":
+                            filesystem.write_atomic(destination, b"managed-new", snapshot.state, parent)
+                        elif action == "backup":
+                            filesystem.create_unique_backup(destination, snapshot.data, snapshot.state, parent)
+                        elif action == "move":
+                            filesystem.move_to_unique_backup(destination, snapshot.state, parent)
+                        else:
+                            filesystem.remove(destination, snapshot.state, parent)
+                    self.assertEqual(foreign, destination.read_bytes())
+                    self.assertEqual([], list(parent_path.glob("*.cbr-*")))
+                finally:
+                    filesystem.close_parent(parent)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            parent_path = Path(tmp) / "LaunchAgents"
+            parent_path.mkdir()
+            destination = parent_path / "managed.plist"
+
+            def create_destination(action: str, parent: ParentHandle, name: str) -> None:
+                if action == "write":
+                    (parent.path / name).write_bytes(foreign)
+
+            filesystem = LocalLaunchdFilesystem(before_mutation=create_destination)
+            parent = filesystem.open_parent(parent_path, filesystem.inspect(parent_path))
+            try:
+                with self.assertRaises(OSError):
+                    filesystem.write_atomic(destination, b"managed-new", PathState("absent"), parent)
+                self.assertEqual(foreign, destination.read_bytes())
+            finally:
+                filesystem.close_parent(parent)
+
+        for action in ("restore", "discard"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                parent_path = Path(tmp) / "LaunchAgents"
+                parent_path.mkdir()
+                destination = parent_path / "managed.plist"
+                backup_path = parent_path / ".managed.plist.cbr-backup-test"
+                destination.write_bytes(b"managed-new")
+                backup_path.write_bytes(b"managed-old")
+
+                def replace_selected(observed: str, parent: ParentHandle, name: str) -> None:
+                    if observed != action:
+                        return
+                    target = parent.path / name
+                    target.unlink()
+                    target.write_bytes(foreign)
+
+                filesystem = LocalLaunchdFilesystem(before_mutation=replace_selected)
+                parent = filesystem.open_parent(parent_path, filesystem.inspect(parent_path))
+                destination_snapshot = filesystem.read_snapshot(destination, 1024, parent)
+                backup_snapshot = filesystem.read_snapshot(backup_path, 1024, parent)
+                backup = BackupSnapshot(backup_path, backup_snapshot.state, backup_snapshot.data)
+                try:
+                    with self.assertRaises(OSError):
+                        if action == "restore":
+                            filesystem.restore_backup_atomic(backup, destination, destination_snapshot.state, parent)
+                        else:
+                            filesystem.discard_backup(backup, parent)
+                    selected = destination if action == "restore" else backup_path
+                    self.assertEqual(foreign, selected.read_bytes())
+                    if action == "restore":
+                        self.assertEqual(b"managed-old", backup_path.read_bytes())
+                finally:
+                    filesystem.close_parent(parent)
+
+    @unittest.skipUnless(platform.system() == "Darwin", "requires Darwin renameatx_np")
+    def test_local_parent_swap_after_final_check_does_not_touch_replacement_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_path = root / "LaunchAgents"
+            parent_path.mkdir()
+            destination = parent_path / "managed.plist"
+            destination.write_bytes(b"managed-old")
+            replacement = b"foreign-parent-entry"
+
+            def replace_parent(action: str, parent: ParentHandle, name: str) -> None:
+                if action != "write":
+                    return
+                parent.path.rename(root / "LaunchAgents-old")
+                parent.path.mkdir()
+                (parent.path / name).write_bytes(replacement)
+
+            filesystem = LocalLaunchdFilesystem(before_mutation=replace_parent)
+            parent = filesystem.open_parent(parent_path, filesystem.inspect(parent_path))
+            snapshot = filesystem.read_snapshot(destination, 1024, parent)
+            try:
+                with self.assertRaises(OSError):
+                    filesystem.write_atomic(destination, b"managed-new", snapshot.state, parent)
+                self.assertEqual(replacement, (parent_path / destination.name).read_bytes())
+            finally:
+                filesystem.close_parent(parent)
+
+    @unittest.skipUnless(platform.system() == "Darwin", "requires Darwin renameatx_np")
+    def test_local_temp_cleanup_race_does_not_unlink_foreign_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent_path = Path(tmp) / "LaunchAgents"
+            parent_path.mkdir()
+            destination = parent_path / "managed.plist"
+            destination.write_bytes(b"managed-old")
+            foreign = b"foreign-cleanup-entry"
+
+            def replace_destination_and_temp(action: str, parent: ParentHandle, name: str) -> None:
+                target = parent.path / name
+                if action == "write":
+                    target.unlink()
+                    target.write_bytes(b"foreign-destination")
+                elif action == "cleanup":
+                    target.unlink()
+                    target.write_bytes(foreign)
+
+            filesystem = LocalLaunchdFilesystem(before_mutation=replace_destination_and_temp)
+            parent = filesystem.open_parent(parent_path, filesystem.inspect(parent_path))
+            snapshot = filesystem.read_snapshot(destination, 1024, parent)
+            try:
+                with self.assertRaises(OSError):
+                    filesystem.write_atomic(destination, b"managed-new", snapshot.state, parent)
+                self.assertEqual(b"foreign-destination", destination.read_bytes())
+                self.assertIn(foreign, [path.read_bytes() for path in parent_path.iterdir()])
+            finally:
+                filesystem.close_parent(parent)
 
     def test_default_dry_run_has_no_mutation_or_launchctl_calls(self) -> None:
         filesystem = FakeFilesystem()
@@ -436,7 +591,11 @@ class LaunchdOperationTests(unittest.TestCase):
         self.assertEqual(new, success_fs.files[DESTINATION])
         self.assertEqual(
             ["read", "backup", "write", "discard"],
-            [c for c in success_fs.calls if not c.startswith("inspect") and c != "assert"],
+            [
+                c
+                for c in success_fs.calls
+                if not c.startswith("inspect") and c not in {"assert", "open_parent", "close_parent"}
+            ],
         )
         self.assertEqual(["bootout", "bootstrap"], [c.split(":", 1)[0] for c in success_ctl.calls])
 

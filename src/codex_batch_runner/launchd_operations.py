@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 import platform
 import stat
 import subprocess
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from .launchd_lifecycle import (
     LaunchdPlanInput,
@@ -54,6 +55,13 @@ class BackupSnapshot:
     data: bytes
 
 
+@dataclass(frozen=True)
+class ParentHandle:
+    path: Path
+    state: PathState
+    token: object
+
+
 class IdentityChangedError(OSError):
     """Raised before mutation when a guarded path no longer matches its snapshot."""
 
@@ -87,16 +95,20 @@ class LaunchdLifecycleResult:
 class LaunchdFilesystem(Protocol):
     def inspect(self, path: Path) -> PathState: ...
 
-    def read_snapshot(self, path: Path, max_bytes: int) -> FileSnapshot: ...
+    def open_parent(self, path: Path, expected: PathState) -> ParentHandle: ...
 
-    def assert_unchanged(self, path: Path, expected: PathState, parent: Path, expected_parent: PathState) -> None: ...
+    def close_parent(self, parent: ParentHandle) -> None: ...
+
+    def read_snapshot(self, path: Path, max_bytes: int, parent: ParentHandle) -> FileSnapshot: ...
+
+    def assert_unchanged(self, path: Path, expected: PathState, parent: ParentHandle) -> None: ...
 
     def write_atomic(
         self,
         path: Path,
         data: bytes,
         expected: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> PathState: ...
 
     def create_unique_backup(
@@ -104,14 +116,14 @@ class LaunchdFilesystem(Protocol):
         path: Path,
         data: bytes,
         expected: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> BackupSnapshot: ...
 
     def move_to_unique_backup(
         self,
         path: Path,
         expected: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> BackupSnapshot: ...
 
     def restore_backup_atomic(
@@ -119,12 +131,12 @@ class LaunchdFilesystem(Protocol):
         backup: BackupSnapshot,
         destination: Path,
         expected_destination: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> PathState: ...
 
-    def remove(self, path: Path, expected: PathState, expected_parent: PathState) -> None: ...
+    def remove(self, path: Path, expected: PathState, parent: ParentHandle) -> None: ...
 
-    def discard_backup(self, backup: BackupSnapshot, expected_parent: PathState) -> None: ...
+    def discard_backup(self, backup: BackupSnapshot, parent: ParentHandle) -> None: ...
 
 
 class LaunchctlExecutor(Protocol):
@@ -134,94 +146,93 @@ class LaunchctlExecutor(Protocol):
 
 
 class LocalLaunchdFilesystem:
-    """Local filesystem implementation; callers decide whether apply is authorized."""
+    """Directory-fd anchored filesystem implementation for guarded lifecycle apply."""
+
+    def __init__(self, before_mutation: Callable[[str, ParentHandle, str], None] | None = None) -> None:
+        self._before_mutation = before_mutation
+        self._rename = _DarwinAtomicRename()
 
     def inspect(self, path: Path) -> PathState:
         try:
-            value = path.lstat()
+            return _state_from_stat(path.lstat())
         except FileNotFoundError:
             return PathState("absent")
-        if stat.S_ISLNK(value.st_mode):
-            kind = "symlink"
-        elif stat.S_ISREG(value.st_mode):
-            kind = "file"
-        elif stat.S_ISDIR(value.st_mode):
-            kind = "directory"
-        else:
-            kind = "other"
-        return PathState(kind, value.st_size, value.st_dev, value.st_ino, value.st_mtime_ns)
 
-    def read_snapshot(self, path: Path, max_bytes: int) -> FileSnapshot:
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    def open_parent(self, path: Path, expected: PathState) -> ParentHandle:
+        _require_dir_fd_support()
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY
         fd = os.open(path, flags)
+        try:
+            state = _state_from_stat(os.fstat(fd))
+            _require_identity(state, expected, "LaunchAgents directory")
+            return ParentHandle(path, state, fd)
+        except Exception:
+            os.close(fd)
+            raise
+
+    def close_parent(self, parent: ParentHandle) -> None:
+        os.close(_parent_fd(parent))
+
+    def read_snapshot(self, path: Path, max_bytes: int, parent: ParentHandle) -> FileSnapshot:
+        self._assert_parent_current(parent)
+        fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=_parent_fd(parent))
         try:
             before = os.fstat(fd)
             if not stat.S_ISREG(before.st_mode):
                 raise IdentityChangedError("LaunchAgent destination is not a regular file")
             if before.st_size > max_bytes:
                 raise ValueError("LaunchAgent destination exceeds size limit")
-            chunks: list[bytes] = []
-            remaining = max_bytes + 1
-            while remaining > 0:
-                chunk = os.read(fd, min(65536, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            data = b"".join(chunks)
-            after = os.fstat(fd)
-            state = _state_from_stat(after)
-            if len(data) > max_bytes:
-                raise ValueError("LaunchAgent destination exceeds size limit")
+            data = _read_bounded_fd(fd, max_bytes)
+            state = _state_from_stat(os.fstat(fd))
             if _state_from_stat(before) != state or len(data) != state.size:
                 raise IdentityChangedError("LaunchAgent destination changed while being read")
             return FileSnapshot(data, state)
         finally:
             os.close(fd)
 
-    def assert_unchanged(
-        self,
-        path: Path,
-        expected: PathState,
-        parent: Path,
-        expected_parent: PathState,
-    ) -> None:
-        _require_identity(_open_identity_no_follow(parent, expected_parent.kind), expected_parent, "LaunchAgents directory")
-        if expected.kind in {"file", "directory"}:
-            actual = _open_identity_no_follow(path, expected.kind)
-        else:
-            actual = self.inspect(path)
+    def assert_unchanged(self, path: Path, expected: PathState, parent: ParentHandle) -> None:
+        self._assert_parent_current(parent)
+        actual = self._inspect_entry(parent, path.name)
         _require_identity(actual, expected, "LaunchAgent destination")
-        _require_identity(_open_identity_no_follow(parent, expected_parent.kind), expected_parent, "LaunchAgents directory")
+        self._assert_parent_current(parent)
 
     def write_atomic(
         self,
         path: Path,
         data: bytes,
         expected: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> PathState:
-        self.assert_unchanged(path, expected, path.parent, expected_parent)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-        tmp_path = Path(tmp_name)
-        tmp_state: PathState | None = None
+        temp_name, temp_state = self._create_file(parent, f".{path.name}.tmp-", data)
         try:
-            with os.fdopen(fd, "wb") as file:
-                file.write(data)
-                file.flush()
-                os.fsync(file.fileno())
-                tmp_state = _state_from_stat(os.fstat(file.fileno()))
-            os.chmod(tmp_path, 0o600)
-            self.assert_unchanged(path, expected, path.parent, expected_parent)
-            os.replace(tmp_path, path)
-            _fsync_directory(path.parent)
-            snapshot = self.read_snapshot(path, len(data))
+            self.assert_unchanged(path, expected, parent)
+            self._inject("write", parent, path.name)
+            if expected.kind == "absent":
+                self._rename.exclusive(parent, temp_name, path.name)
+                try:
+                    self._assert_parent_current(parent)
+                except OSError:
+                    self._rename.exclusive(parent, path.name, temp_name)
+                    raise
+            else:
+                self._rename.swap(parent, temp_name, path.name)
+                moved = self._inspect_entry(parent, temp_name)
+                if not _identity_matches(moved, expected):
+                    self._rename.swap(parent, temp_name, path.name)
+                    raise IdentityChangedError("destination changed immediately before replacement")
+                try:
+                    self._assert_parent_current(parent)
+                except OSError:
+                    self._rename.swap(parent, temp_name, path.name)
+                    raise
+                self._unlink_exact(parent, temp_name, expected)
+            _fsync_parent(parent)
+            snapshot = self.read_snapshot(path, len(data), parent)
             if snapshot.data != data:
                 raise IdentityChangedError("atomic replacement bytes changed unexpectedly")
             return snapshot.state
         except Exception:
-            if tmp_state is not None:
-                _remove_owned_temporary(tmp_path, tmp_state, path.parent, expected_parent)
+            self._unlink_exact(parent, temp_name, temp_state, tolerate_missing=True)
             raise
 
     def create_unique_backup(
@@ -229,77 +240,163 @@ class LocalLaunchdFilesystem:
         path: Path,
         data: bytes,
         expected: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> BackupSnapshot:
-        self.assert_unchanged(path, expected, path.parent, expected_parent)
-        fd, backup_name = tempfile.mkstemp(prefix=f".{path.name}.cbr-backup-", dir=path.parent)
-        backup = Path(backup_name)
-        created_state: PathState | None = None
+        self.assert_unchanged(path, expected, parent)
+        self._inject("backup", parent, path.name)
+        name, state = self._create_file(parent, f".{path.name}.cbr-backup-", data)
+        backup = path.with_name(name)
         try:
-            with os.fdopen(fd, "wb") as file:
-                file.write(data)
-                file.flush()
-                os.fsync(file.fileno())
-                created_state = _state_from_stat(os.fstat(file.fileno()))
-            os.chmod(backup, 0o600)
-            _fsync_directory(path.parent)
-            snapshot = self.read_snapshot(backup, len(data))
+            self.assert_unchanged(path, expected, parent)
+            snapshot = self.read_snapshot(backup, len(data), parent)
             if snapshot.data != data:
                 raise IdentityChangedError("backup bytes changed unexpectedly")
             return BackupSnapshot(backup, snapshot.state, data)
         except Exception:
-            if created_state is not None:
-                _remove_owned_temporary(backup, created_state, path.parent, expected_parent)
+            self._unlink_exact(parent, name, state, tolerate_missing=True)
             raise
 
     def move_to_unique_backup(
         self,
         path: Path,
         expected: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> BackupSnapshot:
-        source = self.read_snapshot(path, MAX_MANAGED_PLIST_BYTES)
+        source = self.read_snapshot(path, MAX_MANAGED_PLIST_BYTES, parent)
         _require_identity(source.state, expected, "LaunchAgent destination")
-        for _ in range(100):
-            backup = _unique_backup_path(path)
-            if self.inspect(backup).kind != "absent":
-                continue
-            self.assert_unchanged(path, expected, path.parent, expected_parent)
-            os.replace(path, backup)
-            _fsync_directory(path.parent)
-            snapshot = self.read_snapshot(backup, MAX_MANAGED_PLIST_BYTES)
-            if snapshot.data != source.data:
-                raise IdentityChangedError("uninstall move did not preserve managed bytes")
-            self.assert_unchanged(path, PathState("absent"), path.parent, expected_parent)
-            return BackupSnapshot(backup, snapshot.state, snapshot.data)
-        raise OSError("could not allocate unique launchd backup path")
+        backup_name = _unique_backup_path(path).name
+        self.assert_unchanged(path, expected, parent)
+        self._inject("move", parent, path.name)
+        self._rename.exclusive(parent, path.name, backup_name)
+        moved = self._inspect_entry(parent, backup_name)
+        if not _identity_matches(moved, expected):
+            self._rename.exclusive(parent, backup_name, path.name)
+            raise IdentityChangedError("destination changed immediately before uninstall move")
+        try:
+            self._assert_parent_current(parent)
+            snapshot = self.read_snapshot(path.with_name(backup_name), MAX_MANAGED_PLIST_BYTES, parent)
+            self.assert_unchanged(path, PathState("absent"), parent)
+            _fsync_parent(parent)
+            return BackupSnapshot(path.with_name(backup_name), snapshot.state, snapshot.data)
+        except Exception:
+            self._rename.exclusive(parent, backup_name, path.name)
+            raise
 
     def restore_backup_atomic(
         self,
         backup: BackupSnapshot,
         destination: Path,
         expected_destination: PathState,
-        expected_parent: PathState,
+        parent: ParentHandle,
     ) -> PathState:
-        self.assert_unchanged(destination, expected_destination, destination.parent, expected_parent)
-        _require_identity(_open_identity_no_follow(backup.path, "file"), backup.state, "LaunchAgent backup")
-        os.replace(backup.path, destination)
-        _fsync_directory(destination.parent)
-        snapshot = self.read_snapshot(destination, MAX_MANAGED_PLIST_BYTES)
+        self.assert_unchanged(destination, expected_destination, parent)
+        self.assert_unchanged(backup.path, backup.state, parent)
+        self._inject("restore", parent, destination.name)
+        self._rename.swap(parent, backup.path.name, destination.name)
+        displaced = self._inspect_entry(parent, backup.path.name)
+        restored = self._inspect_entry(parent, destination.name)
+        if not _identity_matches(displaced, expected_destination) or not _identity_matches(restored, backup.state):
+            self._rename.swap(parent, backup.path.name, destination.name)
+            raise IdentityChangedError("restore targets changed immediately before atomic swap")
+        try:
+            self._assert_parent_current(parent)
+        except OSError:
+            self._rename.swap(parent, backup.path.name, destination.name)
+            raise
+        self._unlink_exact(parent, backup.path.name, expected_destination)
+        _fsync_parent(parent)
+        snapshot = self.read_snapshot(destination, MAX_MANAGED_PLIST_BYTES, parent)
         if snapshot.data != backup.data:
             raise IdentityChangedError("restore did not preserve backup bytes")
         return snapshot.state
 
-    def remove(self, path: Path, expected: PathState, expected_parent: PathState) -> None:
-        self.assert_unchanged(path, expected, path.parent, expected_parent)
-        path.unlink()
-        _fsync_directory(path.parent)
-        self.assert_unchanged(path, PathState("absent"), path.parent, expected_parent)
+    def remove(self, path: Path, expected: PathState, parent: ParentHandle) -> None:
+        self._guarded_unlink(path, expected, parent, "remove")
 
-    def discard_backup(self, backup: BackupSnapshot, expected_parent: PathState) -> None:
-        self.assert_unchanged(backup.path, backup.state, backup.path.parent, expected_parent)
-        backup.path.unlink()
-        _fsync_directory(backup.path.parent)
+    def discard_backup(self, backup: BackupSnapshot, parent: ParentHandle) -> None:
+        self._guarded_unlink(backup.path, backup.state, parent, "discard")
+
+    def _guarded_unlink(self, path: Path, expected: PathState, parent: ParentHandle, action: str) -> None:
+        quarantine = f".{path.name}.cbr-remove-{uuid.uuid4().hex}"
+        self.assert_unchanged(path, expected, parent)
+        self._inject(action, parent, path.name)
+        self._rename.exclusive(parent, path.name, quarantine)
+        moved = self._inspect_entry(parent, quarantine)
+        if not _identity_matches(moved, expected):
+            self._rename.exclusive(parent, quarantine, path.name)
+            raise IdentityChangedError("guarded file changed immediately before removal")
+        try:
+            self._assert_parent_current(parent)
+        except OSError:
+            self._rename.exclusive(parent, quarantine, path.name)
+            raise
+        self._unlink_exact(parent, quarantine, expected)
+        _fsync_parent(parent)
+
+    def _create_file(self, parent: ParentHandle, prefix: str, data: bytes) -> tuple[str, PathState]:
+        for _ in range(100):
+            name = f"{prefix}{uuid.uuid4().hex}"
+            try:
+                fd = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=_parent_fd(parent),
+                )
+            except FileExistsError:
+                continue
+            state: PathState | None = None
+            try:
+                _write_all_fd(fd, data)
+                os.fsync(fd)
+                state = _state_from_stat(os.fstat(fd))
+            except Exception:
+                state = _state_from_stat(os.fstat(fd))
+                os.close(fd)
+                self._unlink_exact(parent, name, state, tolerate_missing=True)
+                raise
+            else:
+                os.close(fd)
+            _fsync_parent(parent)
+            return name, state
+        raise OSError("could not allocate unique launchd temporary path")
+
+    def _unlink_exact(
+        self,
+        parent: ParentHandle,
+        name: str,
+        expected: PathState,
+        *,
+        tolerate_missing: bool = False,
+    ) -> None:
+        actual = self._inspect_entry(parent, name)
+        if tolerate_missing and actual.kind == "absent":
+            return
+        _require_identity(actual, expected, "temporary launchd file")
+        self._inject("cleanup", parent, name)
+        quarantine = f".{name}.cbr-cleanup-{uuid.uuid4().hex}"
+        self._rename.exclusive(parent, name, quarantine)
+        moved = self._inspect_entry(parent, quarantine)
+        if not _identity_matches(moved, expected):
+            self._rename.exclusive(parent, quarantine, name)
+            raise IdentityChangedError("temporary path changed immediately before cleanup")
+        os.unlink(quarantine, dir_fd=_parent_fd(parent))
+
+    def _inspect_entry(self, parent: ParentHandle, name: str) -> PathState:
+        try:
+            value = os.stat(name, dir_fd=_parent_fd(parent), follow_symlinks=False)
+        except FileNotFoundError:
+            return PathState("absent")
+        return _state_from_stat(value)
+
+    def _assert_parent_current(self, parent: ParentHandle) -> None:
+        _require_identity(_state_from_stat(os.fstat(_parent_fd(parent))), parent.state, "held LaunchAgents directory")
+        current = _open_identity_no_follow(parent.path, "directory")
+        _require_identity(current, parent.state, "LaunchAgents directory")
+
+    def _inject(self, action: str, parent: ParentHandle, name: str) -> None:
+        if self._before_mutation is not None:
+            self._before_mutation(action, parent, name)
 
 
 class SubprocessLaunchctlExecutor:
@@ -372,7 +469,7 @@ def run_launchd_install(
             destination=destination,
             plan_input=plan_input,
         )
-    destination, parent_state, blocked = _validated_destination(
+    destination, parent, blocked = _validated_destination(
         destination,
         label=plan_input.label,
         environment=environment,
@@ -388,7 +485,30 @@ def run_launchd_install(
             destination=destination,
             plan_input=plan_input,
         )
-    existing, blocked = _read_existing_managed_candidate(destination, filesystem)
+    try:
+        return _run_launchd_install_with_parent(
+            plan_input,
+            destination,
+            parent,
+            apply,
+            filesystem,
+            launchctl,
+            environment,
+        )
+    finally:
+        filesystem.close_parent(parent)
+
+
+def _run_launchd_install_with_parent(
+    plan_input: LaunchdPlanInput,
+    destination: Path,
+    parent: ParentHandle,
+    apply: bool,
+    filesystem: LaunchdFilesystem,
+    launchctl: LaunchctlExecutor,
+    environment: LaunchdEnvironment,
+) -> LaunchdLifecycleResult:
+    existing, blocked = _read_existing_managed_candidate(destination, parent, filesystem)
     if blocked:
         return _result(
             operation="install",
@@ -436,7 +556,7 @@ def run_launchd_install(
             plan_input,
             destination,
             plan.rendered_plist,
-            parent_state,
+            parent,
             filesystem,
             launchctl,
             environment,
@@ -448,7 +568,7 @@ def run_launchd_install(
         destination,
         plan.rendered_plist,
         existing,
-        parent_state,
+        parent,
         filesystem,
         launchctl,
         environment,
@@ -493,7 +613,7 @@ def run_launchd_uninstall(
             destination=destination,
             plan_input=base_input,
         )
-    destination, parent_state, blocked = _validated_destination(
+    destination, parent, blocked = _validated_destination(
         destination,
         label=label,
         environment=environment,
@@ -509,7 +629,34 @@ def run_launchd_uninstall(
             destination=destination,
             plan_input=base_input,
         )
-    existing, blocked = _read_existing_managed_candidate(destination, filesystem)
+    try:
+        return _run_launchd_uninstall_with_parent(
+            base_input,
+            label,
+            config_path,
+            destination,
+            parent,
+            apply,
+            filesystem,
+            launchctl,
+            environment,
+        )
+    finally:
+        filesystem.close_parent(parent)
+
+
+def _run_launchd_uninstall_with_parent(
+    base_input: LaunchdPlanInput,
+    label: str,
+    config_path: str,
+    destination: Path,
+    parent: ParentHandle,
+    apply: bool,
+    filesystem: LaunchdFilesystem,
+    launchctl: LaunchctlExecutor,
+    environment: LaunchdEnvironment,
+) -> LaunchdLifecycleResult:
+    existing, blocked = _read_existing_managed_candidate(destination, parent, filesystem)
     if blocked:
         return _result(
             operation="uninstall",
@@ -566,7 +713,7 @@ def run_launchd_uninstall(
         base_input,
         destination,
         existing,
-        parent_state,
+        parent,
         filesystem,
         launchctl,
         environment,
@@ -610,7 +757,7 @@ def _apply_install(
     plan_input: LaunchdPlanInput,
     destination: Path,
     rendered: bytes,
-    parent_state: PathState,
+    parent: ParentHandle,
     filesystem: LaunchdFilesystem,
     launchctl: LaunchctlExecutor,
     environment: LaunchdEnvironment,
@@ -620,7 +767,7 @@ def _apply_install(
             destination,
             rendered,
             PathState("absent"),
-            parent_state,
+            parent,
         )
     except OSError:
         return _result(
@@ -633,7 +780,7 @@ def _apply_install(
             plan_input,
         )
     try:
-        filesystem.assert_unchanged(destination, installed_state, destination.parent, parent_state)
+        filesystem.assert_unchanged(destination, installed_state, parent)
     except OSError:
         return _result(
             "install",
@@ -661,7 +808,7 @@ def _apply_install(
             launchctl_results=(command,),
         )
     try:
-        filesystem.remove(destination, installed_state, parent_state)
+        filesystem.remove(destination, installed_state, parent)
     except OSError:
         return _result(
             "install",
@@ -695,7 +842,7 @@ def _apply_update(
     destination: Path,
     rendered: bytes,
     existing: FileSnapshot,
-    parent_state: PathState,
+    parent: ParentHandle,
     filesystem: LaunchdFilesystem,
     launchctl: LaunchctlExecutor,
     environment: LaunchdEnvironment,
@@ -705,7 +852,7 @@ def _apply_update(
             destination,
             existing.data,
             existing.state,
-            parent_state,
+            parent,
         )
     except OSError:
         return _result(
@@ -718,9 +865,9 @@ def _apply_update(
             plan_input,
         )
     try:
-        filesystem.assert_unchanged(destination, existing.state, destination.parent, parent_state)
+        filesystem.assert_unchanged(destination, existing.state, parent)
     except OSError:
-        retained = not _discard_backup(filesystem, backup, parent_state)
+        retained = not _discard_backup(filesystem, backup, parent)
         return _result(
             "install",
             True,
@@ -734,7 +881,7 @@ def _apply_update(
         )
     bootout = launchctl.bootout(environment.user_domain, destination)
     if not bootout.ok:
-        retained = not _discard_backup(filesystem, backup, parent_state)
+        retained = not _discard_backup(filesystem, backup, parent)
         return _result(
             "install",
             True,
@@ -752,7 +899,7 @@ def _apply_update(
             destination,
             rendered,
             existing.state,
-            parent_state,
+            parent,
         )
     except OSError:
         return _recover_update(
@@ -761,7 +908,7 @@ def _apply_update(
             rendered,
             backup,
             existing.state,
-            parent_state,
+            parent,
             filesystem,
             launchctl,
             environment,
@@ -769,7 +916,7 @@ def _apply_update(
             "atomic replacement failed",
         )
     try:
-        filesystem.assert_unchanged(destination, updated_state, destination.parent, parent_state)
+        filesystem.assert_unchanged(destination, updated_state, parent)
     except OSError:
         return _recover_update(
             plan_input,
@@ -777,7 +924,7 @@ def _apply_update(
             rendered,
             backup,
             updated_state,
-            parent_state,
+            parent,
             filesystem,
             launchctl,
             environment,
@@ -792,14 +939,14 @@ def _apply_update(
             rendered,
             backup,
             updated_state,
-            parent_state,
+            parent,
             filesystem,
             launchctl,
             environment,
             (bootout, bootstrap),
             "bootstrap of updated plist failed",
         )
-    retained = not _discard_backup(filesystem, backup, parent_state)
+    retained = not _discard_backup(filesystem, backup, parent)
     return _result(
         "install",
         True,
@@ -821,7 +968,7 @@ def _recover_update(
     rendered: bytes,
     backup: BackupSnapshot,
     expected_destination: PathState,
-    parent_state: PathState,
+    parent: ParentHandle,
     filesystem: LaunchdFilesystem,
     launchctl: LaunchctlExecutor,
     environment: LaunchdEnvironment,
@@ -833,7 +980,7 @@ def _recover_update(
             backup,
             destination,
             expected_destination,
-            parent_state,
+            parent,
         )
     except OSError:
         return _result(
@@ -852,7 +999,7 @@ def _recover_update(
             launchctl_results=commands,
         )
     try:
-        filesystem.assert_unchanged(destination, restored_state, destination.parent, parent_state)
+        filesystem.assert_unchanged(destination, restored_state, parent)
     except OSError:
         return _result(
             "install",
@@ -899,13 +1046,13 @@ def _apply_uninstall(
     plan_input: LaunchdPlanInput,
     destination: Path,
     existing: FileSnapshot,
-    parent_state: PathState,
+    parent: ParentHandle,
     filesystem: LaunchdFilesystem,
     launchctl: LaunchctlExecutor,
     environment: LaunchdEnvironment,
 ) -> LaunchdLifecycleResult:
     try:
-        filesystem.assert_unchanged(destination, existing.state, destination.parent, parent_state)
+        filesystem.assert_unchanged(destination, existing.state, parent)
     except OSError:
         return _result(
             "uninstall",
@@ -929,10 +1076,10 @@ def _apply_uninstall(
             launchctl_results=(bootout,),
         )
     try:
-        backup = filesystem.move_to_unique_backup(destination, existing.state, parent_state)
+        backup = filesystem.move_to_unique_backup(destination, existing.state, parent)
     except OSError:
         try:
-            filesystem.assert_unchanged(destination, existing.state, destination.parent, parent_state)
+            filesystem.assert_unchanged(destination, existing.state, parent)
         except OSError:
             return _result(
                 "uninstall",
@@ -982,10 +1129,10 @@ def _validated_destination(
     label: str,
     environment: LaunchdEnvironment,
     filesystem: LaunchdFilesystem,
-) -> tuple[Path, PathState, str | None]:
+) -> tuple[Path, ParentHandle, str | None]:
     validate_launchd_label(label)
     raw = destination.expanduser()
-    unknown_parent = PathState("unknown")
+    unknown_parent = ParentHandle(raw.parent, PathState("unknown"), None)
     if environment.platform_name != "Darwin":
         return raw, unknown_parent, "launchd lifecycle is only available on macOS"
     if environment.uid <= 0:
@@ -1000,12 +1147,17 @@ def _validated_destination(
         return raw, unknown_parent, "LaunchAgent destination must exactly match HOME/Library/LaunchAgents/LABEL.plist"
     parent_state = filesystem.inspect(expected_parent)
     if parent_state.kind != "directory":
-        return raw, parent_state, "user LaunchAgents directory must already exist and must not be a symlink"
-    return raw, parent_state, None
+        return raw, ParentHandle(expected_parent, parent_state, None), "user LaunchAgents directory must already exist and must not be a symlink"
+    try:
+        parent = filesystem.open_parent(expected_parent, parent_state)
+    except OSError:
+        return raw, ParentHandle(expected_parent, parent_state, None), "user LaunchAgents directory could not be opened with guarded directory-fd semantics"
+    return raw, parent, None
 
 
 def _read_existing_managed_candidate(
     destination: Path,
+    parent: ParentHandle,
     filesystem: LaunchdFilesystem,
 ) -> tuple[FileSnapshot | None, str | None]:
     state = filesystem.inspect(destination)
@@ -1016,7 +1168,7 @@ def _read_existing_managed_candidate(
     if state.size is None or state.size > MAX_MANAGED_PLIST_BYTES:
         return None, f"existing LaunchAgent exceeds {MAX_MANAGED_PLIST_BYTES} byte limit"
     try:
-        snapshot = filesystem.read_snapshot(destination, MAX_MANAGED_PLIST_BYTES)
+        snapshot = filesystem.read_snapshot(destination, MAX_MANAGED_PLIST_BYTES, parent)
     except ValueError:
         return None, f"existing LaunchAgent exceeds {MAX_MANAGED_PLIST_BYTES} byte limit"
     except OSError:
@@ -1094,10 +1246,10 @@ def _result(
 def _discard_backup(
     filesystem: LaunchdFilesystem,
     backup: BackupSnapshot,
-    parent_state: PathState,
+    parent: ParentHandle,
 ) -> bool:
     try:
-        filesystem.discard_backup(backup, parent_state)
+        filesystem.discard_backup(backup, parent)
     except OSError:
         return False
     return True
@@ -1119,10 +1271,82 @@ def _state_from_stat(value: os.stat_result) -> PathState:
     return PathState(kind, value.st_size, value.st_dev, value.st_ino, value.st_mtime_ns)
 
 
+class _DarwinAtomicRename:
+    RENAME_SWAP = 0x00000002
+    RENAME_EXCL = 0x00000004
+
+    def exclusive(self, parent: ParentHandle, source: str, destination: str) -> None:
+        self._call(parent, source, destination, self.RENAME_EXCL)
+
+    def swap(self, parent: ParentHandle, source: str, destination: str) -> None:
+        self._call(parent, source, destination, self.RENAME_SWAP)
+
+    def _call(self, parent: ParentHandle, source: str, destination: str, flags: int) -> None:
+        if platform.system() != "Darwin":
+            raise OSError(errno.ENOTSUP, "guarded atomic rename requires Darwin renameatx_np")
+        function = getattr(ctypes.CDLL(None, use_errno=True), "renameatx_np", None)
+        if function is None:
+            raise OSError(errno.ENOTSUP, "renameatx_np is unavailable")
+        function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        function.restype = ctypes.c_int
+        fd = _parent_fd(parent)
+        if function(fd, os.fsencode(source), fd, os.fsencode(destination), flags) != 0:
+            error = ctypes.get_errno()
+            if flags == self.RENAME_EXCL and error in {errno.EEXIST, errno.ENOTEMPTY}:
+                raise IdentityChangedError("atomic exclusive rename destination appeared")
+            raise OSError(error, os.strerror(error))
+
+
+def _require_dir_fd_support() -> None:
+    required_flags = ("O_CLOEXEC", "O_NOFOLLOW", "O_DIRECTORY")
+    if any(not hasattr(os, name) for name in required_flags):
+        raise OSError(errno.ENOTSUP, "required no-follow directory flags are unavailable")
+    if not all(function in os.supports_dir_fd for function in (os.open, os.stat, os.unlink)):
+        raise OSError(errno.ENOTSUP, "required directory-fd operations are unavailable")
+
+
+def _parent_fd(parent: ParentHandle) -> int:
+    if not isinstance(parent.token, int) or parent.token < 0:
+        raise OSError(errno.EBADF, "guarded parent directory handle is unavailable")
+    return parent.token
+
+
+def _read_bounded_fd(fd: int, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = max_bytes + 1
+    while remaining > 0:
+        chunk = os.read(fd, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    data = b"".join(chunks)
+    if len(data) > max_bytes:
+        raise ValueError("LaunchAgent destination exceeds size limit")
+    return data
+
+
+def _write_all_fd(fd: int, data: bytes) -> None:
+    offset = 0
+    while offset < len(data):
+        written = os.write(fd, data[offset:])
+        if written <= 0:
+            raise OSError(errno.EIO, "short write while creating guarded launchd file")
+        offset += written
+
+
+def _fsync_parent(parent: ParentHandle) -> None:
+    try:
+        os.fsync(_parent_fd(parent))
+    except OSError:
+        pass
+
+
 def _open_identity_no_follow(path: Path, expected_kind: str) -> PathState:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    _require_dir_fd_support()
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
     if expected_kind == "directory":
-        flags |= getattr(os, "O_DIRECTORY", 0)
+        flags |= os.O_DIRECTORY
     try:
         fd = os.open(path, flags)
     except FileNotFoundError:
@@ -1143,40 +1367,17 @@ def _require_identity(actual: PathState, expected: PathState, description: str) 
         raise IdentityChangedError(f"{description} identity changed")
 
 
+def _identity_matches(actual: PathState, expected: PathState) -> bool:
+    try:
+        _require_identity(actual, expected, "guarded path")
+    except OSError:
+        return False
+    return True
+
+
 def _safe_launchctl_reason(result: LaunchctlResult) -> str:
     if result.ok:
         return "launchctl command succeeded"
     if result.returncode is None:
         return "launchctl command unavailable or timed out"
     return "launchctl command failed"
-
-
-def _remove_owned_temporary(
-    path: Path,
-    expected: PathState,
-    parent: Path,
-    expected_parent: PathState,
-) -> None:
-    try:
-        _require_identity(_open_identity_no_follow(parent, "directory"), expected_parent, "LaunchAgents directory")
-        _require_identity(_open_identity_no_follow(path, "file"), expected, "temporary launchd file")
-        path.unlink()
-    except OSError:
-        # Never clean up a pathname after its identity or parent becomes ambiguous.
-        return
-
-
-def _fsync_directory(path: Path) -> None:
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        try:
-            os.fsync(fd)
-        except OSError:
-            # The rename/link has already completed. Avoid reporting a false
-            # pre-mutation failure that could trigger an unsafe second action.
-            pass
-    finally:
-        os.close(fd)
