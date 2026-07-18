@@ -75,6 +75,33 @@ class LaunchctlResult:
 
 
 @dataclass(frozen=True)
+class LaunchdBootstrapTarget:
+    """Public launchctl bootstrap contract: a domain plus absolute plist path."""
+
+    user_domain: str
+    plist_path: Path
+
+    def __post_init__(self) -> None:
+        if not self.plist_path.is_absolute():
+            raise ValueError("launchd bootstrap plist path must be absolute")
+
+
+@dataclass(frozen=True)
+class LaunchdServiceTarget:
+    """Path-independent launchctl service target used for bootout."""
+
+    user_domain: str
+    label: str
+
+    def __post_init__(self) -> None:
+        validate_launchd_label(self.label)
+
+    @property
+    def argument(self) -> str:
+        return f"{self.user_domain}/{self.label}"
+
+
+@dataclass(frozen=True)
 class LaunchdLifecycleResult:
     operation: str
     mode: str
@@ -140,9 +167,9 @@ class LaunchdFilesystem(Protocol):
 
 
 class LaunchctlExecutor(Protocol):
-    def bootstrap(self, user_domain: str, plist_path: Path) -> LaunchctlResult: ...
+    def bootstrap(self, target: LaunchdBootstrapTarget) -> LaunchctlResult: ...
 
-    def bootout(self, user_domain: str, plist_path: Path) -> LaunchctlResult: ...
+    def bootout(self, target: LaunchdServiceTarget) -> LaunchctlResult: ...
 
 
 class LocalLaunchdFilesystem:
@@ -212,18 +239,20 @@ class LocalLaunchdFilesystem:
                 try:
                     self._assert_parent_current(parent)
                 except OSError:
-                    self._rename.exclusive(parent, path.name, temp_name)
+                    self._rollback_move(parent, path.name, temp_name, temp_state)
                     raise
             else:
                 self._rename.swap(parent, temp_name, path.name)
                 moved = self._inspect_entry(parent, temp_name)
                 if not _identity_matches(moved, expected):
-                    self._rename.swap(parent, temp_name, path.name)
+                    installed = self._inspect_entry(parent, path.name)
+                    self._rollback_swap(parent, temp_name, path.name, moved, installed)
                     raise IdentityChangedError("destination changed immediately before replacement")
                 try:
                     self._assert_parent_current(parent)
                 except OSError:
-                    self._rename.swap(parent, temp_name, path.name)
+                    installed = self._inspect_entry(parent, path.name)
+                    self._rollback_swap(parent, temp_name, path.name, moved, installed)
                     raise
                 self._unlink_exact(parent, temp_name, expected)
             _fsync_parent(parent)
@@ -270,7 +299,7 @@ class LocalLaunchdFilesystem:
         self._rename.exclusive(parent, path.name, backup_name)
         moved = self._inspect_entry(parent, backup_name)
         if not _identity_matches(moved, expected):
-            self._rename.exclusive(parent, backup_name, path.name)
+            self._rollback_move(parent, backup_name, path.name, moved)
             raise IdentityChangedError("destination changed immediately before uninstall move")
         try:
             self._assert_parent_current(parent)
@@ -279,7 +308,8 @@ class LocalLaunchdFilesystem:
             _fsync_parent(parent)
             return BackupSnapshot(path.with_name(backup_name), snapshot.state, snapshot.data)
         except Exception:
-            self._rename.exclusive(parent, backup_name, path.name)
+            moved = self._inspect_entry(parent, backup_name)
+            self._rollback_move(parent, backup_name, path.name, moved)
             raise
 
     def restore_backup_atomic(
@@ -296,12 +326,12 @@ class LocalLaunchdFilesystem:
         displaced = self._inspect_entry(parent, backup.path.name)
         restored = self._inspect_entry(parent, destination.name)
         if not _identity_matches(displaced, expected_destination) or not _identity_matches(restored, backup.state):
-            self._rename.swap(parent, backup.path.name, destination.name)
+            self._rollback_swap(parent, backup.path.name, destination.name, displaced, restored)
             raise IdentityChangedError("restore targets changed immediately before atomic swap")
         try:
             self._assert_parent_current(parent)
         except OSError:
-            self._rename.swap(parent, backup.path.name, destination.name)
+            self._rollback_swap(parent, backup.path.name, destination.name, displaced, restored)
             raise
         self._unlink_exact(parent, backup.path.name, expected_destination)
         _fsync_parent(parent)
@@ -323,12 +353,12 @@ class LocalLaunchdFilesystem:
         self._rename.exclusive(parent, path.name, quarantine)
         moved = self._inspect_entry(parent, quarantine)
         if not _identity_matches(moved, expected):
-            self._rename.exclusive(parent, quarantine, path.name)
+            self._rollback_move(parent, quarantine, path.name, moved)
             raise IdentityChangedError("guarded file changed immediately before removal")
         try:
             self._assert_parent_current(parent)
         except OSError:
-            self._rename.exclusive(parent, quarantine, path.name)
+            self._rollback_move(parent, quarantine, path.name, moved)
             raise
         self._unlink_exact(parent, quarantine, expected)
         _fsync_parent(parent)
@@ -378,9 +408,40 @@ class LocalLaunchdFilesystem:
         self._rename.exclusive(parent, name, quarantine)
         moved = self._inspect_entry(parent, quarantine)
         if not _identity_matches(moved, expected):
-            self._rename.exclusive(parent, quarantine, name)
+            self._rollback_move(parent, quarantine, name, moved)
             raise IdentityChangedError("temporary path changed immediately before cleanup")
         os.unlink(quarantine, dir_fd=_parent_fd(parent))
+
+    def _rollback_swap(
+        self,
+        parent: ParentHandle,
+        left: str,
+        right: str,
+        expected_left: PathState,
+        expected_right: PathState,
+    ) -> None:
+        """Best-effort rollback after rechecking both observed swapped identities."""
+
+        self._inject("rollback", parent, left)
+        self._assert_parent_current(parent)
+        _require_identity(self._inspect_entry(parent, left), expected_left, "rollback left entry")
+        _require_identity(self._inspect_entry(parent, right), expected_right, "rollback right entry")
+        self._rename.swap(parent, left, right)
+
+    def _rollback_move(
+        self,
+        parent: ParentHandle,
+        source: str,
+        destination: str,
+        expected_source: PathState,
+    ) -> None:
+        """Best-effort rollback after rechecking the moved identity and absent target."""
+
+        self._inject("rollback", parent, source)
+        self._assert_parent_current(parent)
+        _require_identity(self._inspect_entry(parent, source), expected_source, "rollback source entry")
+        _require_identity(self._inspect_entry(parent, destination), PathState("absent"), "rollback destination")
+        self._rename.exclusive(parent, source, destination)
 
     def _inspect_entry(self, parent: ParentHandle, name: str) -> PathState:
         try:
@@ -402,11 +463,14 @@ class LocalLaunchdFilesystem:
 class SubprocessLaunchctlExecutor:
     """Bounded argv-only launchctl adapter with sanitized results."""
 
-    def bootstrap(self, user_domain: str, plist_path: Path) -> LaunchctlResult:
-        return self._run("bootstrap", ["launchctl", "bootstrap", user_domain, str(plist_path)])
+    def bootstrap(self, target: LaunchdBootstrapTarget) -> LaunchctlResult:
+        return self._run(
+            "bootstrap",
+            ["launchctl", "bootstrap", target.user_domain, str(target.plist_path)],
+        )
 
-    def bootout(self, user_domain: str, plist_path: Path) -> LaunchctlResult:
-        return self._run("bootout", ["launchctl", "bootout", user_domain, str(plist_path)])
+    def bootout(self, target: LaunchdServiceTarget) -> LaunchctlResult:
+        return self._run("bootout", ["launchctl", "bootout", target.argument])
 
     def _run(self, action: str, argv: list[str]) -> LaunchctlResult:
         try:
@@ -740,6 +804,12 @@ def lifecycle_result_report(result: LaunchdLifecycleResult) -> dict[str, Any]:
             "attempted": result.recovery_attempted,
             "succeeded": result.recovery_succeeded,
         },
+        "namespace_concurrency": {
+            "supported_threat_model": "accidental_or_non_adversarial",
+            "behavior": "detect identity changes and roll back best-effort",
+            "unsupported": "active_same_uid_adversarial_namespace_mutation",
+            "strict_protection_requires": "protected directory or privileged helper",
+        },
         "launchctl": [
             {
                 "action": item.action,
@@ -751,6 +821,24 @@ def lifecycle_result_report(result: LaunchdLifecycleResult) -> dict[str, Any]:
         ],
         "intended_plist_included": False,
     }
+
+
+def _service_target(environment: LaunchdEnvironment, label: str) -> LaunchdServiceTarget:
+    return LaunchdServiceTarget(environment.user_domain, label)
+
+
+def _bootstrap_after_final_revalidation(
+    destination: Path,
+    expected: PathState,
+    parent: ParentHandle,
+    filesystem: LaunchdFilesystem,
+    launchctl: LaunchctlExecutor,
+    environment: LaunchdEnvironment,
+) -> LaunchctlResult:
+    """Perform the last supported identity check immediately before path bootstrap."""
+
+    filesystem.assert_unchanged(destination, expected, parent)
+    return launchctl.bootstrap(LaunchdBootstrapTarget(environment.user_domain, destination))
 
 
 def _apply_install(
@@ -780,7 +868,14 @@ def _apply_install(
             plan_input,
         )
     try:
-        filesystem.assert_unchanged(destination, installed_state, parent)
+        command = _bootstrap_after_final_revalidation(
+            destination,
+            installed_state,
+            parent,
+            filesystem,
+            launchctl,
+            environment,
+        )
     except OSError:
         return _result(
             "install",
@@ -794,7 +889,6 @@ def _apply_install(
             recovery_attempted=False,
             recovery_succeeded=False,
         )
-    command = launchctl.bootstrap(environment.user_domain, destination)
     if command.ok:
         return _result(
             "install",
@@ -879,7 +973,7 @@ def _apply_update(
             backup_path=backup.path if retained else None,
             backup_retained=retained,
         )
-    bootout = launchctl.bootout(environment.user_domain, destination)
+    bootout = launchctl.bootout(_service_target(environment, plan_input.label))
     if not bootout.ok:
         retained = not _discard_backup(filesystem, backup, parent)
         return _result(
@@ -916,7 +1010,14 @@ def _apply_update(
             "atomic replacement failed",
         )
     try:
-        filesystem.assert_unchanged(destination, updated_state, parent)
+        bootstrap = _bootstrap_after_final_revalidation(
+            destination,
+            updated_state,
+            parent,
+            filesystem,
+            launchctl,
+            environment,
+        )
     except OSError:
         return _recover_update(
             plan_input,
@@ -931,7 +1032,6 @@ def _apply_update(
             (bootout,),
             "updated plist identity changed before bootstrap",
         )
-    bootstrap = launchctl.bootstrap(environment.user_domain, destination)
     if not bootstrap.ok:
         return _recover_update(
             plan_input,
@@ -999,7 +1099,14 @@ def _recover_update(
             launchctl_results=commands,
         )
     try:
-        filesystem.assert_unchanged(destination, restored_state, parent)
+        restore_bootstrap = _bootstrap_after_final_revalidation(
+            destination,
+            restored_state,
+            parent,
+            filesystem,
+            launchctl,
+            environment,
+        )
     except OSError:
         return _result(
             "install",
@@ -1013,7 +1120,6 @@ def _recover_update(
             recovery_succeeded=False,
             launchctl_results=commands,
         )
-    restore_bootstrap = launchctl.bootstrap(environment.user_domain, destination)
     all_commands = (*commands, restore_bootstrap)
     if not restore_bootstrap.ok:
         return _result(
@@ -1063,7 +1169,7 @@ def _apply_uninstall(
             destination,
             plan_input,
         )
-    bootout = launchctl.bootout(environment.user_domain, destination)
+    bootout = launchctl.bootout(_service_target(environment, plan_input.label))
     if not bootout.ok:
         return _result(
             "uninstall",
@@ -1093,7 +1199,28 @@ def _apply_uninstall(
                 recovery_succeeded=False,
                 launchctl_results=(bootout,),
             )
-        restore_bootstrap = launchctl.bootstrap(environment.user_domain, destination)
+        try:
+            restore_bootstrap = _bootstrap_after_final_revalidation(
+                destination,
+                existing.state,
+                parent,
+                filesystem,
+                launchctl,
+                environment,
+            )
+        except OSError:
+            return _result(
+                "uninstall",
+                True,
+                "recovery_required",
+                "uninstall",
+                "atomic uninstall move failed and existing plist identity changed before re-bootstrap",
+                destination,
+                plan_input,
+                recovery_attempted=True,
+                recovery_succeeded=False,
+                launchctl_results=(bootout,),
+            )
         return _result(
             "uninstall",
             True,

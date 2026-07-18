@@ -165,6 +165,16 @@ backup, atomic replacement/move, rollback 또는 `recovery_required` result로 r
 보존함. Service lifecycle은 `bootstrap`/`bootout` contract이고 아래 `kickstart` hook은 이미
 설치된 job을 깨우는 별도 execution contract임.
 
+Lifecycle의 namespace concurrency threat model은 accidental/non-adversarial concurrency임.
+Held directory descriptor, no-follow identity snapshot, atomic rename, mutation 직전 재검증으로
+identity 변화를 탐지하고 rollback을 best-effort로 수행함. `bootout`은 plist path가 아니라 exact
+`gui/UID/LABEL` service target을 사용함. `bootstrap`은 public `launchctl` contract에 따라 검증된
+absolute plist path를 사용하고 호출 직전에 identity를 다시 검증하며, undocumented `/dev/fd`
+경로를 사용하지 않음. Public macOS rename/launchctl interface는 inode identity를 mutation 조건으로
+원자적으로 묶지 않으므로 active same-UID adversarial namespace mutation은 지원하지 않음. 그 위협을
+지원하려면 protected directory 또는 privileged helper 경계가 필요함. CLI/JSON operation result는
+이 supported/unsupported boundary를 `namespace_concurrency` contract로 명시함.
+
 권장 모델:
 
 - `StartInterval = 600`

@@ -143,6 +143,31 @@ class LaunchdCliTests(unittest.TestCase):
             self.assertFalse(report["changed"])
             self.assertFalse(destination.exists())
             self.assertEqual(before, file_snapshot(root))
+            self.assertEqual(
+                "accidental_or_non_adversarial",
+                report["namespace_concurrency"]["supported_threat_model"],
+            )
+
+    def test_install_human_report_exposes_namespace_threat_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            config_path = write_config(root)
+            (root / "Library" / "LaunchAgents").mkdir(parents=True)
+            env = LaunchdEnvironment("Darwin", 501, root, "gui/501")
+            args = install_args(root, config_path)
+            args.remove("--json")
+
+            with patch("codex_batch_runner.cli.current_launchd_environment", return_value=env):
+                code, output, stderr = run_cli(args)
+
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr)
+            self.assertIn("namespace_concurrency_supported: accidental_or_non_adversarial", output)
+            self.assertIn(
+                "namespace_concurrency_unsupported: active_same_uid_adversarial_namespace_mutation",
+                output,
+            )
+            self.assertIn("strict_protection_requires: protected directory or privileged helper", output)
 
     def test_install_apply_without_separate_confirmation_fails_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

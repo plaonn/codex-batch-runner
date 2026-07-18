@@ -6,18 +6,23 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from codex_batch_runner.launchd_lifecycle import LaunchdPlanInput, render_launchd_plist
 from codex_batch_runner.launchd_operations import (
     BackupSnapshot,
     FileSnapshot,
     IdentityChangedError,
+    LaunchdBootstrapTarget,
     MAX_MANAGED_PLIST_BYTES,
     LaunchctlResult,
     LaunchdEnvironment,
+    LaunchdServiceTarget,
     LocalLaunchdFilesystem,
     ParentHandle,
     PathState,
+    SubprocessLaunchctlExecutor,
     lifecycle_result_report,
     run_launchd_install,
     run_launchd_uninstall,
@@ -232,18 +237,28 @@ class FakeFilesystem:
 
 
 class FakeLaunchctl:
-    def __init__(self, outcomes: list[bool] | None = None) -> None:
+    def __init__(self, outcomes: list[bool] | None = None, *, before_bootstrap: object = None) -> None:
         self.outcomes = list(outcomes or [])
         self.calls: list[str] = []
+        self.targets: list[LaunchdBootstrapTarget | LaunchdServiceTarget] = []
+        self.before_bootstrap = before_bootstrap
 
-    def bootstrap(self, user_domain: str, plist_path: Path) -> LaunchctlResult:
-        return self._result("bootstrap", user_domain, plist_path)
+    def bootstrap(self, target: LaunchdBootstrapTarget) -> LaunchctlResult:
+        if not isinstance(target, LaunchdBootstrapTarget):
+            raise AssertionError("bootstrap requires LaunchdBootstrapTarget")
+        if callable(self.before_bootstrap):
+            self.before_bootstrap()
+        self.targets.append(target)
+        return self._result("bootstrap", target.user_domain, str(target.plist_path))
 
-    def bootout(self, user_domain: str, plist_path: Path) -> LaunchctlResult:
-        return self._result("bootout", user_domain, plist_path)
+    def bootout(self, target: LaunchdServiceTarget) -> LaunchctlResult:
+        if not isinstance(target, LaunchdServiceTarget):
+            raise AssertionError("bootout requires LaunchdServiceTarget")
+        self.targets.append(target)
+        return self._result("bootout", target.user_domain, target.argument)
 
-    def _result(self, action: str, user_domain: str, plist_path: Path) -> LaunchctlResult:
-        self.calls.append(f"{action}:{user_domain}:{plist_path}")
+    def _result(self, action: str, user_domain: str, argument: str) -> LaunchctlResult:
+        self.calls.append(f"{action}:{user_domain}:{argument}")
         ok = self.outcomes.pop(0) if self.outcomes else True
         return LaunchctlResult(action, ok, 0 if ok else 5, "fake success" if ok else "fake failure")
 
@@ -421,6 +436,78 @@ class LaunchdOperationTests(unittest.TestCase):
             finally:
                 filesystem.close_parent(parent)
 
+    @unittest.skipUnless(platform.system() == "Darwin", "requires Darwin renameatx_np")
+    def test_local_rollback_window_recheck_preserves_new_concurrent_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent_path = Path(tmp) / "LaunchAgents"
+            parent_path.mkdir()
+            destination = parent_path / "managed.plist"
+            destination.write_bytes(b"managed-old")
+            first_concurrent = b"concurrent-before-swap"
+            second_concurrent = b"concurrent-before-rollback"
+
+            def mutate_around_swap(action: str, parent: ParentHandle, name: str) -> None:
+                if action == "write":
+                    destination.unlink()
+                    destination.write_bytes(first_concurrent)
+                elif action == "rollback":
+                    destination.unlink()
+                    destination.write_bytes(second_concurrent)
+
+            filesystem = LocalLaunchdFilesystem(before_mutation=mutate_around_swap)
+            parent = filesystem.open_parent(parent_path, filesystem.inspect(parent_path))
+            snapshot = filesystem.read_snapshot(destination, 1024, parent)
+            try:
+                with self.assertRaises(OSError):
+                    filesystem.write_atomic(destination, b"managed-new", snapshot.state, parent)
+                self.assertEqual(second_concurrent, destination.read_bytes())
+                self.assertIn(first_concurrent, [path.read_bytes() for path in parent_path.iterdir()])
+            finally:
+                filesystem.close_parent(parent)
+
+    def test_subprocess_executor_uses_typed_public_targets_without_real_launchctl(self) -> None:
+        executor = SubprocessLaunchctlExecutor()
+        service = LaunchdServiceTarget("gui/501", LABEL)
+        bootstrap = LaunchdBootstrapTarget("gui/501", DESTINATION)
+
+        with patch(
+            "codex_batch_runner.launchd_operations.subprocess.run",
+            return_value=SimpleNamespace(returncode=0),
+        ) as run:
+            self.assertTrue(executor.bootout(service).ok)
+            self.assertTrue(executor.bootstrap(bootstrap).ok)
+
+        self.assertEqual(
+            ["launchctl", "bootout", f"gui/501/{LABEL}"],
+            run.call_args_list[0].args[0],
+        )
+        self.assertNotIn(str(DESTINATION), run.call_args_list[0].args[0])
+        self.assertEqual(
+            ["launchctl", "bootstrap", "gui/501", str(DESTINATION)],
+            run.call_args_list[1].args[0],
+        )
+        self.assertFalse(any("/dev/fd/" in arg for arg in run.call_args_list[1].args[0]))
+
+    def test_bootstrap_executor_is_called_immediately_after_final_identity_check(self) -> None:
+        filesystem = FakeFilesystem()
+
+        def assert_final_check() -> None:
+            self.assertEqual("assert", filesystem.calls[-1])
+
+        launchctl = FakeLaunchctl([True], before_bootstrap=assert_final_check)
+        result = run_launchd_install(
+            plan_input(),
+            DESTINATION,
+            apply=True,
+            confirm_label=LABEL,
+            environment=environment(),
+            filesystem=filesystem,
+            launchctl=launchctl,
+        )
+
+        self.assertEqual("applied", result.status)
+        self.assertIsInstance(launchctl.targets[0], LaunchdBootstrapTarget)
+
     def test_default_dry_run_has_no_mutation_or_launchctl_calls(self) -> None:
         filesystem = FakeFilesystem()
         launchctl = FakeLaunchctl()
@@ -438,6 +525,14 @@ class LaunchdOperationTests(unittest.TestCase):
         self.assertFalse(report["intended_plist_included"])
         self.assertNotIn("intended_plist", report)
         self.assertNotIn(plan_input().working_directory, repr(report))
+        self.assertEqual(
+            "accidental_or_non_adversarial",
+            report["namespace_concurrency"]["supported_threat_model"],
+        )
+        self.assertEqual(
+            "active_same_uid_adversarial_namespace_mutation",
+            report["namespace_concurrency"]["unsupported"],
+        )
 
     def test_operation_report_does_not_trust_executor_reason_text(self) -> None:
         filesystem = FakeFilesystem()
@@ -589,6 +684,11 @@ class LaunchdOperationTests(unittest.TestCase):
         )
         self.assertEqual("applied", success.status)
         self.assertEqual(new, success_fs.files[DESTINATION])
+        self.assertEqual(
+            f"bootout:gui/501:gui/501/{LABEL}",
+            success_ctl.calls[0],
+        )
+        self.assertIsInstance(success_ctl.targets[0], LaunchdServiceTarget)
         self.assertEqual(
             ["read", "backup", "write", "discard"],
             [

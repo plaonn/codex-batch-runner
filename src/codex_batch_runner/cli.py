@@ -4712,6 +4712,11 @@ def render_launchd_operation_report(report: dict[str, object]) -> str:
     config = report["config"] if isinstance(report.get("config"), dict) else {}
     backup = report["backup"] if isinstance(report.get("backup"), dict) else {}
     recovery = report["recovery"] if isinstance(report.get("recovery"), dict) else {}
+    concurrency = (
+        report["namespace_concurrency"]
+        if isinstance(report.get("namespace_concurrency"), dict)
+        else {}
+    )
     return "\n".join(
         [
             f"cbr launchd {report.get('operation')}",
@@ -4728,6 +4733,10 @@ def render_launchd_operation_report(report: dict[str, object]) -> str:
             f"backup_retained: {str(bool(backup.get('retained'))).lower()}",
             f"recovery_attempted: {str(bool(recovery.get('attempted'))).lower()}",
             f"recovery_succeeded: {recovery.get('succeeded')}",
+            f"namespace_concurrency_supported: {concurrency.get('supported_threat_model')}",
+            f"namespace_concurrency_behavior: {concurrency.get('behavior')}",
+            f"namespace_concurrency_unsupported: {concurrency.get('unsupported')}",
+            f"strict_protection_requires: {concurrency.get('strict_protection_requires')}",
         ]
     ) + "\n"
 
