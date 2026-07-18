@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -35,6 +36,26 @@ class LaunchdEnvironment:
 class PathState:
     kind: str
     size: int | None = None
+    device: int | None = None
+    inode: int | None = None
+    modified_ns: int | None = None
+
+
+@dataclass(frozen=True)
+class FileSnapshot:
+    data: bytes
+    state: PathState
+
+
+@dataclass(frozen=True)
+class BackupSnapshot:
+    path: Path
+    state: PathState
+    data: bytes
+
+
+class IdentityChangedError(OSError):
+    """Raised before mutation when a guarded path no longer matches its snapshot."""
 
 
 @dataclass(frozen=True)
@@ -60,26 +81,50 @@ class LaunchdLifecycleResult:
     backup_retained: bool = False
     recovery_attempted: bool = False
     recovery_succeeded: bool | None = None
-    intended_plist: bytes | None = None
     launchctl_results: tuple[LaunchctlResult, ...] = ()
 
 
 class LaunchdFilesystem(Protocol):
     def inspect(self, path: Path) -> PathState: ...
 
-    def read_bytes(self, path: Path) -> bytes: ...
+    def read_snapshot(self, path: Path, max_bytes: int) -> FileSnapshot: ...
 
-    def write_atomic(self, path: Path, data: bytes) -> None: ...
+    def assert_unchanged(self, path: Path, expected: PathState, parent: Path, expected_parent: PathState) -> None: ...
 
-    def create_unique_backup(self, path: Path) -> Path: ...
+    def write_atomic(
+        self,
+        path: Path,
+        data: bytes,
+        expected: PathState,
+        expected_parent: PathState,
+    ) -> PathState: ...
 
-    def move_to_unique_backup(self, path: Path) -> Path: ...
+    def create_unique_backup(
+        self,
+        path: Path,
+        data: bytes,
+        expected: PathState,
+        expected_parent: PathState,
+    ) -> BackupSnapshot: ...
 
-    def restore_backup_atomic(self, backup: Path, destination: Path) -> None: ...
+    def move_to_unique_backup(
+        self,
+        path: Path,
+        expected: PathState,
+        expected_parent: PathState,
+    ) -> BackupSnapshot: ...
 
-    def remove(self, path: Path) -> None: ...
+    def restore_backup_atomic(
+        self,
+        backup: BackupSnapshot,
+        destination: Path,
+        expected_destination: PathState,
+        expected_parent: PathState,
+    ) -> PathState: ...
 
-    def discard_backup(self, path: Path) -> None: ...
+    def remove(self, path: Path, expected: PathState, expected_parent: PathState) -> None: ...
+
+    def discard_backup(self, backup: BackupSnapshot, expected_parent: PathState) -> None: ...
 
 
 class LaunchctlExecutor(Protocol):
@@ -96,67 +141,165 @@ class LocalLaunchdFilesystem:
             value = path.lstat()
         except FileNotFoundError:
             return PathState("absent")
-        if path.is_symlink():
-            return PathState("symlink", value.st_size)
-        if path.is_file():
-            return PathState("file", value.st_size)
-        if path.is_dir():
-            return PathState("directory", value.st_size)
-        return PathState("other", value.st_size)
+        if stat.S_ISLNK(value.st_mode):
+            kind = "symlink"
+        elif stat.S_ISREG(value.st_mode):
+            kind = "file"
+        elif stat.S_ISDIR(value.st_mode):
+            kind = "directory"
+        else:
+            kind = "other"
+        return PathState(kind, value.st_size, value.st_dev, value.st_ino, value.st_mtime_ns)
 
-    def read_bytes(self, path: Path) -> bytes:
-        return path.read_bytes()
+    def read_snapshot(self, path: Path, max_bytes: int) -> FileSnapshot:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise IdentityChangedError("LaunchAgent destination is not a regular file")
+            if before.st_size > max_bytes:
+                raise ValueError("LaunchAgent destination exceeds size limit")
+            chunks: list[bytes] = []
+            remaining = max_bytes + 1
+            while remaining > 0:
+                chunk = os.read(fd, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            after = os.fstat(fd)
+            state = _state_from_stat(after)
+            if len(data) > max_bytes:
+                raise ValueError("LaunchAgent destination exceeds size limit")
+            if _state_from_stat(before) != state or len(data) != state.size:
+                raise IdentityChangedError("LaunchAgent destination changed while being read")
+            return FileSnapshot(data, state)
+        finally:
+            os.close(fd)
 
-    def write_atomic(self, path: Path, data: bytes) -> None:
+    def assert_unchanged(
+        self,
+        path: Path,
+        expected: PathState,
+        parent: Path,
+        expected_parent: PathState,
+    ) -> None:
+        _require_identity(_open_identity_no_follow(parent, expected_parent.kind), expected_parent, "LaunchAgents directory")
+        if expected.kind in {"file", "directory"}:
+            actual = _open_identity_no_follow(path, expected.kind)
+        else:
+            actual = self.inspect(path)
+        _require_identity(actual, expected, "LaunchAgent destination")
+        _require_identity(_open_identity_no_follow(parent, expected_parent.kind), expected_parent, "LaunchAgents directory")
+
+    def write_atomic(
+        self,
+        path: Path,
+        data: bytes,
+        expected: PathState,
+        expected_parent: PathState,
+    ) -> PathState:
+        self.assert_unchanged(path, expected, path.parent, expected_parent)
         fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         tmp_path = Path(tmp_name)
+        tmp_state: PathState | None = None
         try:
             with os.fdopen(fd, "wb") as file:
                 file.write(data)
                 file.flush()
                 os.fsync(file.fileno())
+                tmp_state = _state_from_stat(os.fstat(file.fileno()))
             os.chmod(tmp_path, 0o600)
+            self.assert_unchanged(path, expected, path.parent, expected_parent)
             os.replace(tmp_path, path)
             _fsync_directory(path.parent)
+            snapshot = self.read_snapshot(path, len(data))
+            if snapshot.data != data:
+                raise IdentityChangedError("atomic replacement bytes changed unexpectedly")
+            return snapshot.state
         except Exception:
-            try:
-                tmp_path.unlink()
-            except FileNotFoundError:
-                pass
+            if tmp_state is not None:
+                _remove_owned_temporary(tmp_path, tmp_state, path.parent, expected_parent)
             raise
 
-    def create_unique_backup(self, path: Path) -> Path:
-        for _ in range(100):
-            backup = _unique_backup_path(path)
-            try:
-                os.link(path, backup, follow_symlinks=False)
-            except FileExistsError:
-                continue
+    def create_unique_backup(
+        self,
+        path: Path,
+        data: bytes,
+        expected: PathState,
+        expected_parent: PathState,
+    ) -> BackupSnapshot:
+        self.assert_unchanged(path, expected, path.parent, expected_parent)
+        fd, backup_name = tempfile.mkstemp(prefix=f".{path.name}.cbr-backup-", dir=path.parent)
+        backup = Path(backup_name)
+        created_state: PathState | None = None
+        try:
+            with os.fdopen(fd, "wb") as file:
+                file.write(data)
+                file.flush()
+                os.fsync(file.fileno())
+                created_state = _state_from_stat(os.fstat(file.fileno()))
+            os.chmod(backup, 0o600)
             _fsync_directory(path.parent)
-            return backup
-        raise OSError("could not allocate unique launchd backup path")
+            snapshot = self.read_snapshot(backup, len(data))
+            if snapshot.data != data:
+                raise IdentityChangedError("backup bytes changed unexpectedly")
+            return BackupSnapshot(backup, snapshot.state, data)
+        except Exception:
+            if created_state is not None:
+                _remove_owned_temporary(backup, created_state, path.parent, expected_parent)
+            raise
 
-    def move_to_unique_backup(self, path: Path) -> Path:
+    def move_to_unique_backup(
+        self,
+        path: Path,
+        expected: PathState,
+        expected_parent: PathState,
+    ) -> BackupSnapshot:
+        source = self.read_snapshot(path, MAX_MANAGED_PLIST_BYTES)
+        _require_identity(source.state, expected, "LaunchAgent destination")
         for _ in range(100):
             backup = _unique_backup_path(path)
-            if backup.exists():
+            if self.inspect(backup).kind != "absent":
                 continue
+            self.assert_unchanged(path, expected, path.parent, expected_parent)
             os.replace(path, backup)
             _fsync_directory(path.parent)
-            return backup
+            snapshot = self.read_snapshot(backup, MAX_MANAGED_PLIST_BYTES)
+            if snapshot.data != source.data:
+                raise IdentityChangedError("uninstall move did not preserve managed bytes")
+            self.assert_unchanged(path, PathState("absent"), path.parent, expected_parent)
+            return BackupSnapshot(backup, snapshot.state, snapshot.data)
         raise OSError("could not allocate unique launchd backup path")
 
-    def restore_backup_atomic(self, backup: Path, destination: Path) -> None:
-        os.replace(backup, destination)
+    def restore_backup_atomic(
+        self,
+        backup: BackupSnapshot,
+        destination: Path,
+        expected_destination: PathState,
+        expected_parent: PathState,
+    ) -> PathState:
+        self.assert_unchanged(destination, expected_destination, destination.parent, expected_parent)
+        _require_identity(_open_identity_no_follow(backup.path, "file"), backup.state, "LaunchAgent backup")
+        os.replace(backup.path, destination)
         _fsync_directory(destination.parent)
+        snapshot = self.read_snapshot(destination, MAX_MANAGED_PLIST_BYTES)
+        if snapshot.data != backup.data:
+            raise IdentityChangedError("restore did not preserve backup bytes")
+        return snapshot.state
 
-    def remove(self, path: Path) -> None:
+    def remove(self, path: Path, expected: PathState, expected_parent: PathState) -> None:
+        self.assert_unchanged(path, expected, path.parent, expected_parent)
         path.unlink()
         _fsync_directory(path.parent)
+        self.assert_unchanged(path, PathState("absent"), path.parent, expected_parent)
 
-    def discard_backup(self, path: Path) -> None:
-        path.unlink()
-        _fsync_directory(path.parent)
+    def discard_backup(self, backup: BackupSnapshot, expected_parent: PathState) -> None:
+        self.assert_unchanged(backup.path, backup.state, backup.path.parent, expected_parent)
+        backup.path.unlink()
+        _fsync_directory(backup.path.parent)
 
 
 class SubprocessLaunchctlExecutor:
@@ -229,7 +372,7 @@ def run_launchd_install(
             destination=destination,
             plan_input=plan_input,
         )
-    destination, blocked = _validated_destination(
+    destination, parent_state, blocked = _validated_destination(
         destination,
         label=plan_input.label,
         environment=environment,
@@ -256,7 +399,7 @@ def run_launchd_install(
             destination=destination,
             plan_input=plan_input,
         )
-    plan = plan_launchd_lifecycle(plan_input, existing)
+    plan = plan_launchd_lifecycle(plan_input, existing.data if existing else None)
     if plan.action == "blocked":
         return _result(
             operation="install",
@@ -266,7 +409,6 @@ def run_launchd_install(
             reason=plan.reason,
             destination=destination,
             plan_input=plan_input,
-            intended_plist=plan.rendered_plist,
         )
     if plan.action == "none":
         return _result(
@@ -277,7 +419,6 @@ def run_launchd_install(
             reason=plan.reason,
             destination=destination,
             plan_input=plan_input,
-            intended_plist=plan.rendered_plist,
         )
     action = "install" if plan.action == "create" else "update"
     if not apply:
@@ -289,11 +430,29 @@ def run_launchd_install(
             reason=plan.reason,
             destination=destination,
             plan_input=plan_input,
-            intended_plist=plan.rendered_plist,
         )
     if action == "install":
-        return _apply_install(plan_input, destination, plan.rendered_plist, filesystem, launchctl, environment)
-    return _apply_update(plan_input, destination, plan.rendered_plist, filesystem, launchctl, environment)
+        return _apply_install(
+            plan_input,
+            destination,
+            plan.rendered_plist,
+            parent_state,
+            filesystem,
+            launchctl,
+            environment,
+        )
+    if existing is None:
+        raise AssertionError("update requires an existing snapshot")
+    return _apply_update(
+        plan_input,
+        destination,
+        plan.rendered_plist,
+        existing,
+        parent_state,
+        filesystem,
+        launchctl,
+        environment,
+    )
 
 
 def run_launchd_uninstall(
@@ -334,7 +493,7 @@ def run_launchd_uninstall(
             destination=destination,
             plan_input=base_input,
         )
-    destination, blocked = _validated_destination(
+    destination, parent_state, blocked = _validated_destination(
         destination,
         label=label,
         environment=environment,
@@ -371,7 +530,7 @@ def run_launchd_uninstall(
             destination=destination,
             plan_input=base_input,
         )
-    inspection = inspect_launchd_plist(existing)
+    inspection = inspect_launchd_plist(existing.data)
     if inspection.status != "managed":
         return _result(
             operation="uninstall",
@@ -403,7 +562,15 @@ def run_launchd_uninstall(
             destination=destination,
             plan_input=base_input,
         )
-    return _apply_uninstall(base_input, destination, filesystem, launchctl, environment)
+    return _apply_uninstall(
+        base_input,
+        destination,
+        existing,
+        parent_state,
+        filesystem,
+        launchctl,
+        environment,
+    )
 
 
 def lifecycle_result_report(result: LaunchdLifecycleResult) -> dict[str, Any]:
@@ -431,11 +598,11 @@ def lifecycle_result_report(result: LaunchdLifecycleResult) -> dict[str, Any]:
                 "action": item.action,
                 "ok": item.ok,
                 "returncode": item.returncode,
-                "reason": item.reason,
+                "reason": _safe_launchctl_reason(item),
             }
             for item in result.launchctl_results
         ],
-        "intended_plist": result.intended_plist.decode("utf-8") if result.intended_plist else None,
+        "intended_plist_included": False,
     }
 
 
@@ -443,14 +610,43 @@ def _apply_install(
     plan_input: LaunchdPlanInput,
     destination: Path,
     rendered: bytes,
+    parent_state: PathState,
     filesystem: LaunchdFilesystem,
     launchctl: LaunchctlExecutor,
     environment: LaunchdEnvironment,
 ) -> LaunchdLifecycleResult:
     try:
-        filesystem.write_atomic(destination, rendered)
+        installed_state = filesystem.write_atomic(
+            destination,
+            rendered,
+            PathState("absent"),
+            parent_state,
+        )
     except OSError:
-        return _result("install", True, "failed", "install", "atomic plist write failed", destination, plan_input)
+        return _result(
+            "install",
+            True,
+            "failed",
+            "install",
+            "atomic plist write failed or guarded path identity changed",
+            destination,
+            plan_input,
+        )
+    try:
+        filesystem.assert_unchanged(destination, installed_state, destination.parent, parent_state)
+    except OSError:
+        return _result(
+            "install",
+            True,
+            "recovery_required",
+            "install",
+            "installed plist identity changed before bootstrap; no launchctl action attempted",
+            destination,
+            plan_input,
+            changed=True,
+            recovery_attempted=False,
+            recovery_succeeded=False,
+        )
     command = launchctl.bootstrap(environment.user_domain, destination)
     if command.ok:
         return _result(
@@ -462,11 +658,10 @@ def _apply_install(
             destination,
             plan_input,
             changed=True,
-            intended_plist=rendered,
             launchctl_results=(command,),
         )
     try:
-        filesystem.remove(destination)
+        filesystem.remove(destination, installed_state, parent_state)
     except OSError:
         return _result(
             "install",
@@ -479,7 +674,6 @@ def _apply_install(
             changed=True,
             recovery_attempted=True,
             recovery_succeeded=False,
-            intended_plist=rendered,
             launchctl_results=(command,),
         )
     return _result(
@@ -492,7 +686,6 @@ def _apply_install(
         plan_input,
         recovery_attempted=True,
         recovery_succeeded=True,
-        intended_plist=rendered,
         launchctl_results=(command,),
     )
 
@@ -501,17 +694,47 @@ def _apply_update(
     plan_input: LaunchdPlanInput,
     destination: Path,
     rendered: bytes,
+    existing: FileSnapshot,
+    parent_state: PathState,
     filesystem: LaunchdFilesystem,
     launchctl: LaunchctlExecutor,
     environment: LaunchdEnvironment,
 ) -> LaunchdLifecycleResult:
     try:
-        backup = filesystem.create_unique_backup(destination)
+        backup = filesystem.create_unique_backup(
+            destination,
+            existing.data,
+            existing.state,
+            parent_state,
+        )
     except OSError:
-        return _result("install", True, "failed", "update", "atomic backup creation failed", destination, plan_input)
+        return _result(
+            "install",
+            True,
+            "failed",
+            "update",
+            "backup creation failed or guarded path identity changed",
+            destination,
+            plan_input,
+        )
+    try:
+        filesystem.assert_unchanged(destination, existing.state, destination.parent, parent_state)
+    except OSError:
+        retained = not _discard_backup(filesystem, backup, parent_state)
+        return _result(
+            "install",
+            True,
+            "failed",
+            "update",
+            "guarded path identity changed before bootout; no launchctl action attempted",
+            destination,
+            plan_input,
+            backup_path=backup.path if retained else None,
+            backup_retained=retained,
+        )
     bootout = launchctl.bootout(environment.user_domain, destination)
     if not bootout.ok:
-        retained = not _discard_backup(filesystem, backup)
+        retained = not _discard_backup(filesystem, backup, parent_state)
         return _result(
             "install",
             True,
@@ -520,24 +743,46 @@ def _apply_update(
             "bootout failed before managed plist replacement",
             destination,
             plan_input,
-            backup_path=backup if retained else None,
+            backup_path=backup.path if retained else None,
             backup_retained=retained,
-            intended_plist=rendered,
             launchctl_results=(bootout,),
         )
     try:
-        filesystem.write_atomic(destination, rendered)
+        updated_state = filesystem.write_atomic(
+            destination,
+            rendered,
+            existing.state,
+            parent_state,
+        )
     except OSError:
         return _recover_update(
             plan_input,
             destination,
             rendered,
             backup,
+            existing.state,
+            parent_state,
             filesystem,
             launchctl,
             environment,
             (bootout,),
             "atomic replacement failed",
+        )
+    try:
+        filesystem.assert_unchanged(destination, updated_state, destination.parent, parent_state)
+    except OSError:
+        return _recover_update(
+            plan_input,
+            destination,
+            rendered,
+            backup,
+            updated_state,
+            parent_state,
+            filesystem,
+            launchctl,
+            environment,
+            (bootout,),
+            "updated plist identity changed before bootstrap",
         )
     bootstrap = launchctl.bootstrap(environment.user_domain, destination)
     if not bootstrap.ok:
@@ -546,13 +791,15 @@ def _apply_update(
             destination,
             rendered,
             backup,
+            updated_state,
+            parent_state,
             filesystem,
             launchctl,
             environment,
             (bootout, bootstrap),
             "bootstrap of updated plist failed",
         )
-    retained = not _discard_backup(filesystem, backup)
+    retained = not _discard_backup(filesystem, backup, parent_state)
     return _result(
         "install",
         True,
@@ -562,9 +809,8 @@ def _apply_update(
         destination,
         plan_input,
         changed=True,
-        backup_path=backup if retained else None,
+        backup_path=backup.path if retained else None,
         backup_retained=retained,
-        intended_plist=rendered,
         launchctl_results=(bootout, bootstrap),
     )
 
@@ -573,7 +819,9 @@ def _recover_update(
     plan_input: LaunchdPlanInput,
     destination: Path,
     rendered: bytes,
-    backup: Path,
+    backup: BackupSnapshot,
+    expected_destination: PathState,
+    parent_state: PathState,
     filesystem: LaunchdFilesystem,
     launchctl: LaunchctlExecutor,
     environment: LaunchdEnvironment,
@@ -581,7 +829,12 @@ def _recover_update(
     failure_reason: str,
 ) -> LaunchdLifecycleResult:
     try:
-        filesystem.restore_backup_atomic(backup, destination)
+        restored_state = filesystem.restore_backup_atomic(
+            backup,
+            destination,
+            expected_destination,
+            parent_state,
+        )
     except OSError:
         return _result(
             "install",
@@ -592,11 +845,25 @@ def _recover_update(
             destination,
             plan_input,
             changed=True,
-            backup_path=backup,
+            backup_path=backup.path,
             backup_retained=True,
             recovery_attempted=True,
             recovery_succeeded=False,
-            intended_plist=rendered,
+            launchctl_results=commands,
+        )
+    try:
+        filesystem.assert_unchanged(destination, restored_state, destination.parent, parent_state)
+    except OSError:
+        return _result(
+            "install",
+            True,
+            "recovery_required",
+            "update",
+            f"{failure_reason}; previous plist restored but identity changed before re-bootstrap",
+            destination,
+            plan_input,
+            recovery_attempted=True,
+            recovery_succeeded=False,
             launchctl_results=commands,
         )
     restore_bootstrap = launchctl.bootstrap(environment.user_domain, destination)
@@ -612,7 +879,6 @@ def _recover_update(
             plan_input,
             recovery_attempted=True,
             recovery_succeeded=False,
-            intended_plist=rendered,
             launchctl_results=all_commands,
         )
     return _result(
@@ -625,7 +891,6 @@ def _recover_update(
         plan_input,
         recovery_attempted=True,
         recovery_succeeded=True,
-        intended_plist=rendered,
         launchctl_results=all_commands,
     )
 
@@ -633,10 +898,24 @@ def _recover_update(
 def _apply_uninstall(
     plan_input: LaunchdPlanInput,
     destination: Path,
+    existing: FileSnapshot,
+    parent_state: PathState,
     filesystem: LaunchdFilesystem,
     launchctl: LaunchctlExecutor,
     environment: LaunchdEnvironment,
 ) -> LaunchdLifecycleResult:
+    try:
+        filesystem.assert_unchanged(destination, existing.state, destination.parent, parent_state)
+    except OSError:
+        return _result(
+            "uninstall",
+            True,
+            "failed",
+            "uninstall",
+            "guarded path identity changed before bootout; no launchctl action attempted",
+            destination,
+            plan_input,
+        )
     bootout = launchctl.bootout(environment.user_domain, destination)
     if not bootout.ok:
         return _result(
@@ -650,8 +929,23 @@ def _apply_uninstall(
             launchctl_results=(bootout,),
         )
     try:
-        backup = filesystem.move_to_unique_backup(destination)
+        backup = filesystem.move_to_unique_backup(destination, existing.state, parent_state)
     except OSError:
+        try:
+            filesystem.assert_unchanged(destination, existing.state, destination.parent, parent_state)
+        except OSError:
+            return _result(
+                "uninstall",
+                True,
+                "recovery_required",
+                "uninstall",
+                "uninstall move failed and guarded identity changed; no re-bootstrap attempted",
+                destination,
+                plan_input,
+                recovery_attempted=True,
+                recovery_succeeded=False,
+                launchctl_results=(bootout,),
+            )
         restore_bootstrap = launchctl.bootstrap(environment.user_domain, destination)
         return _result(
             "uninstall",
@@ -676,7 +970,7 @@ def _apply_uninstall(
         destination,
         plan_input,
         changed=True,
-        backup_path=backup,
+        backup_path=backup.path,
         backup_retained=True,
         launchctl_results=(bootout,),
     )
@@ -688,30 +982,32 @@ def _validated_destination(
     label: str,
     environment: LaunchdEnvironment,
     filesystem: LaunchdFilesystem,
-) -> tuple[Path, str | None]:
+) -> tuple[Path, PathState, str | None]:
     validate_launchd_label(label)
     raw = destination.expanduser()
+    unknown_parent = PathState("unknown")
     if environment.platform_name != "Darwin":
-        return raw, "launchd lifecycle is only available on macOS"
+        return raw, unknown_parent, "launchd lifecycle is only available on macOS"
     if environment.uid <= 0:
-        return raw, "launchd lifecycle requires a non-root user"
+        return raw, unknown_parent, "launchd lifecycle requires a non-root user"
     if environment.user_domain != f"gui/{environment.uid}":
-        return raw, f"user domain must exactly match gui/{environment.uid}"
+        return raw, unknown_parent, f"user domain must exactly match gui/{environment.uid}"
     home = environment.home.expanduser().resolve()
     expected_parent = home / "Library" / "LaunchAgents"
     if not raw.is_absolute():
-        return raw, "LaunchAgent destination must be an explicit absolute path"
+        return raw, unknown_parent, "LaunchAgent destination must be an explicit absolute path"
     if raw.parent != expected_parent or raw.name != f"{label}.plist":
-        return raw, "LaunchAgent destination must exactly match HOME/Library/LaunchAgents/LABEL.plist"
-    if filesystem.inspect(expected_parent).kind != "directory":
-        return raw, "user LaunchAgents directory must already exist and must not be a symlink"
-    return raw, None
+        return raw, unknown_parent, "LaunchAgent destination must exactly match HOME/Library/LaunchAgents/LABEL.plist"
+    parent_state = filesystem.inspect(expected_parent)
+    if parent_state.kind != "directory":
+        return raw, parent_state, "user LaunchAgents directory must already exist and must not be a symlink"
+    return raw, parent_state, None
 
 
 def _read_existing_managed_candidate(
     destination: Path,
     filesystem: LaunchdFilesystem,
-) -> tuple[bytes | None, str | None]:
+) -> tuple[FileSnapshot | None, str | None]:
     state = filesystem.inspect(destination)
     if state.kind == "absent":
         return None, None
@@ -720,9 +1016,14 @@ def _read_existing_managed_candidate(
     if state.size is None or state.size > MAX_MANAGED_PLIST_BYTES:
         return None, f"existing LaunchAgent exceeds {MAX_MANAGED_PLIST_BYTES} byte limit"
     try:
-        return filesystem.read_bytes(destination), None
+        snapshot = filesystem.read_snapshot(destination, MAX_MANAGED_PLIST_BYTES)
+    except ValueError:
+        return None, f"existing LaunchAgent exceeds {MAX_MANAGED_PLIST_BYTES} byte limit"
     except OSError:
-        return None, "existing LaunchAgent is not readable"
+        return None, "existing LaunchAgent is not a stable readable regular file"
+    if snapshot.state.kind != "file":
+        return None, "existing LaunchAgent is not a regular file"
+    return snapshot, None
 
 
 def _confirmation_block_reason(apply: bool, confirm_label: str | None, label: str) -> str | None:
@@ -770,7 +1071,6 @@ def _result(
     backup_retained: bool = False,
     recovery_attempted: bool = False,
     recovery_succeeded: bool | None = None,
-    intended_plist: bytes | None = None,
     launchctl_results: tuple[LaunchctlResult, ...] = (),
 ) -> LaunchdLifecycleResult:
     return LaunchdLifecycleResult(
@@ -787,14 +1087,17 @@ def _result(
         backup_retained=backup_retained,
         recovery_attempted=recovery_attempted,
         recovery_succeeded=recovery_succeeded,
-        intended_plist=intended_plist,
         launchctl_results=launchctl_results,
     )
 
 
-def _discard_backup(filesystem: LaunchdFilesystem, backup: Path) -> bool:
+def _discard_backup(
+    filesystem: LaunchdFilesystem,
+    backup: BackupSnapshot,
+    parent_state: PathState,
+) -> bool:
     try:
-        filesystem.discard_backup(backup)
+        filesystem.discard_backup(backup, parent_state)
     except OSError:
         return False
     return True
@@ -802,6 +1105,65 @@ def _discard_backup(filesystem: LaunchdFilesystem, backup: Path) -> bool:
 
 def _unique_backup_path(path: Path) -> Path:
     return path.with_name(f".{path.name}.cbr-backup-{uuid.uuid4().hex}")
+
+
+def _state_from_stat(value: os.stat_result) -> PathState:
+    if stat.S_ISREG(value.st_mode):
+        kind = "file"
+    elif stat.S_ISDIR(value.st_mode):
+        kind = "directory"
+    elif stat.S_ISLNK(value.st_mode):
+        kind = "symlink"
+    else:
+        kind = "other"
+    return PathState(kind, value.st_size, value.st_dev, value.st_ino, value.st_mtime_ns)
+
+
+def _open_identity_no_follow(path: Path, expected_kind: str) -> PathState:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if expected_kind == "directory":
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return PathState("absent")
+    except OSError as exc:
+        raise IdentityChangedError("guarded path is not safely openable without following links") from exc
+    try:
+        return _state_from_stat(os.fstat(fd))
+    finally:
+        os.close(fd)
+
+
+def _require_identity(actual: PathState, expected: PathState, description: str) -> None:
+    fields = ("kind", "device", "inode")
+    if expected.kind == "file":
+        fields += ("size", "modified_ns")
+    if any(getattr(actual, field) != getattr(expected, field) for field in fields):
+        raise IdentityChangedError(f"{description} identity changed")
+
+
+def _safe_launchctl_reason(result: LaunchctlResult) -> str:
+    if result.ok:
+        return "launchctl command succeeded"
+    if result.returncode is None:
+        return "launchctl command unavailable or timed out"
+    return "launchctl command failed"
+
+
+def _remove_owned_temporary(
+    path: Path,
+    expected: PathState,
+    parent: Path,
+    expected_parent: PathState,
+) -> None:
+    try:
+        _require_identity(_open_identity_no_follow(parent, "directory"), expected_parent, "LaunchAgents directory")
+        _require_identity(_open_identity_no_follow(path, "file"), expected, "temporary launchd file")
+        path.unlink()
+    except OSError:
+        # Never clean up a pathname after its identity or parent becomes ambiguous.
+        return
 
 
 def _fsync_directory(path: Path) -> None:
