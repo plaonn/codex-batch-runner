@@ -13,7 +13,7 @@
 - [Worktree isolation and apply contract](worktrees.md): worktree execution isolation, apply/rebase/conflict-fix, cleanup, branch-prune, recovery.
 - [Events, index, and retention contract](events-and-index.md): event log, local SQLite read index, prune/retention behavior.
 - [CLI reference](cli-reference.md): command surface and human/JSON output semantics.
-- [Operator installation guide](operator-installation.md): fail-closed CLI/environment/XDG config discovery, read-only managed launchd planning, manual launchd setup, doctor, manual cooldown wake, cross-project enqueue/check flow.
+- [Operator installation guide](operator-installation.md): fail-closed CLI/environment/XDG config discovery, guarded managed launchd lifecycle, doctor, manual cooldown wake, cross-project enqueue/check flow.
 - [Beta operations guide](beta-operations.md): practical beta operating model, inbox triage, review workflow, JSON output use, smoke checklist.
 
 ## Core contract summary
@@ -157,6 +157,13 @@ codex-batch-runner/
 ## macOS launchd 운영
 
 macOS 기본 운영 방식은 launchd임.
+
+Guarded lifecycle operation은 기본 dry-run이고 apply에 explicit flag와 exact label confirmation을
+요구함. Current-user `gui/UID`와 exact `HOME/Library/LaunchAgents/LABEL.plist` destination만
+허용하며, foreign/manual plist를 adoption하지 않음. Owned update와 uninstall은 same-directory
+backup, atomic replacement/move, rollback 또는 `recovery_required` result로 recoverability를
+보존함. Service lifecycle은 `bootstrap`/`bootout` contract이고 아래 `kickstart` hook은 이미
+설치된 job을 깨우는 별도 execution contract임.
 
 권장 모델:
 

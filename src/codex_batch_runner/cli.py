@@ -63,6 +63,13 @@ from .follow import DEFAULT_INITIAL_LINES, DEFAULT_POLL_INTERVAL_SECONDS, Follow
 from .index import build_rebuild_report, build_status_report, render_rebuild_report, render_status_report
 from .lock import FileLock
 from .launchd_lifecycle import LaunchdPlan, LaunchdPlanInput, plan_launchd_lifecycle
+from .launchd_operations import (
+    LaunchdLifecycleResult,
+    current_launchd_environment,
+    lifecycle_result_report,
+    run_launchd_install,
+    run_launchd_uninstall,
+)
 from .maintenance import (
     build_codex_cli_maintenance_report,
     dump_json,
@@ -741,7 +748,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", action="store_true", help="print JSON")
     doctor.set_defaults(func=cmd_doctor)
 
-    launchd = sub.add_parser("launchd", help="plan a guarded macOS LaunchAgent lifecycle without mutation")
+    launchd = sub.add_parser("launchd", help="plan or run a guarded macOS user LaunchAgent lifecycle")
     launchd_sub = launchd.add_subparsers(dest="launchd_command", required=True)
     launchd_plan = launchd_sub.add_parser(
         "plan",
@@ -765,6 +772,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     launchd_plan.add_argument("--json", action="store_true", help="print JSON")
     launchd_plan.set_defaults(func=cmd_launchd_plan)
+
+    launchd_install = launchd_sub.add_parser(
+        "install",
+        help="dry-run or apply an owned install/update lifecycle operation",
+    )
+    _add_launchd_render_arguments(launchd_install)
+    _add_launchd_operation_arguments(launchd_install)
+    launchd_install.set_defaults(func=cmd_launchd_install)
+
+    launchd_uninstall = launchd_sub.add_parser(
+        "uninstall",
+        help="dry-run or apply removal of an exactly owned LaunchAgent",
+    )
+    launchd_uninstall.add_argument("--label", required=True, help="LaunchAgent label")
+    _add_launchd_operation_arguments(launchd_uninstall)
+    launchd_uninstall.set_defaults(func=cmd_launchd_uninstall)
 
     policy_proposals = sub.add_parser("policy-proposals", help="manage guarded policy proposals")
     policy_proposals_sub = policy_proposals.add_subparsers(dest="policy_proposal_command", required=True)
@@ -4587,30 +4610,126 @@ def cmd_doctor(config: Config, args: argparse.Namespace) -> int:
 MAX_EXISTING_LAUNCHD_PLIST_BYTES = 1024 * 1024
 
 
-def cmd_launchd_plan(config: Config, args: argparse.Namespace) -> int:
-    if config.config_path is None:
-        raise ValueError("launchd planning requires a discovered config path")
-    existing_path, existing_plist = load_existing_launchd_plist(args.existing_plist)
-    plan = plan_launchd_lifecycle(
-        LaunchdPlanInput(
-            label=args.label,
-            executable_path=args.executable,
-            config_path=str(config.config_path),
-            config_provenance=config.config_source,
-            working_directory=args.working_directory,
-            stdout_path=args.stdout_path,
-            stderr_path=args.stderr_path,
-            environment_path=args.environment_path,
-            start_interval_seconds=args.start_interval_seconds,
-        ),
-        existing_plist,
+def _add_launchd_render_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--label", required=True, help="LaunchAgent label")
+    parser.add_argument("--executable", required=True, help="absolute path to the cbr executable")
+    parser.add_argument("--working-directory", required=True, help="absolute scheduler working directory")
+    parser.add_argument("--stdout-path", required=True, help="absolute LaunchAgent stdout path")
+    parser.add_argument("--stderr-path", required=True, help="absolute LaunchAgent stderr path")
+    parser.add_argument("--environment-path", required=True, help="explicit PATH value for the LaunchAgent")
+    parser.add_argument(
+        "--start-interval-seconds",
+        required=True,
+        type=int,
+        help="positive launchd StartInterval value",
     )
+
+
+def _add_launchd_operation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--destination",
+        required=True,
+        help="explicit absolute HOME/Library/LaunchAgents/LABEL.plist destination",
+    )
+    parser.add_argument("--user-domain", required=True, help="explicit gui/UID launchd domain")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="plan without mutation (default)")
+    mode.add_argument("--apply", action="store_true", help="apply the guarded lifecycle operation")
+    parser.add_argument(
+        "--confirm-label",
+        help="separate confirmation required with --apply; must exactly match --label",
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON")
+
+
+def _launchd_plan_input(config: Config, args: argparse.Namespace) -> LaunchdPlanInput:
+    if config.config_path is None:
+        raise ValueError("launchd lifecycle requires a discovered config path")
+    return LaunchdPlanInput(
+        label=args.label,
+        executable_path=args.executable,
+        config_path=str(config.config_path),
+        config_provenance=config.config_source,
+        working_directory=args.working_directory,
+        stdout_path=args.stdout_path,
+        stderr_path=args.stderr_path,
+        environment_path=args.environment_path,
+        start_interval_seconds=args.start_interval_seconds,
+    )
+
+
+def cmd_launchd_plan(config: Config, args: argparse.Namespace) -> int:
+    existing_path, existing_plist = load_existing_launchd_plist(args.existing_plist)
+    plan = plan_launchd_lifecycle(_launchd_plan_input(config, args), existing_plist)
     report = launchd_plan_report(plan, existing_path)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_launchd_plan_report(report), end="")
     return 2 if plan.action == "blocked" else 0
+
+
+def cmd_launchd_install(config: Config, args: argparse.Namespace) -> int:
+    result = run_launchd_install(
+        _launchd_plan_input(config, args),
+        Path(args.destination),
+        apply=args.apply,
+        confirm_label=args.confirm_label,
+        environment=current_launchd_environment(args.user_domain),
+    )
+    return _print_launchd_operation_result(result, args.json)
+
+
+def cmd_launchd_uninstall(config: Config, args: argparse.Namespace) -> int:
+    if config.config_path is None:
+        raise ValueError("launchd lifecycle requires a discovered config path")
+    result = run_launchd_uninstall(
+        label=args.label,
+        config_path=str(config.config_path),
+        config_source=config.config_source,
+        destination=Path(args.destination),
+        apply=args.apply,
+        confirm_label=args.confirm_label,
+        environment=current_launchd_environment(args.user_domain),
+    )
+    return _print_launchd_operation_result(result, args.json)
+
+
+def _print_launchd_operation_result(result: LaunchdLifecycleResult, as_json: bool) -> int:
+    report = lifecycle_result_report(result)
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_launchd_operation_report(report), end="")
+    if report["status"] in {"blocked", "recovery_required"}:
+        return 2
+    if report["status"] in {"failed", "recovered"}:
+        return 1
+    return 0
+
+
+def render_launchd_operation_report(report: dict[str, object]) -> str:
+    config = report["config"] if isinstance(report.get("config"), dict) else {}
+    backup = report["backup"] if isinstance(report.get("backup"), dict) else {}
+    recovery = report["recovery"] if isinstance(report.get("recovery"), dict) else {}
+    return "\n".join(
+        [
+            f"cbr launchd {report.get('operation')}",
+            "",
+            f"mode: {report.get('mode')}",
+            f"status: {report.get('status')}",
+            f"action: {report.get('action')}",
+            f"reason: {report.get('reason')}",
+            f"changed: {str(bool(report.get('changed'))).lower()}",
+            f"destination: {report.get('destination')}",
+            f"config_source: {config.get('source')}",
+            f"config_path: {config.get('path')}",
+            f"backup_path: {backup.get('path')}",
+            f"backup_retained: {str(bool(backup.get('retained'))).lower()}",
+            f"recovery_attempted: {str(bool(recovery.get('attempted'))).lower()}",
+            f"recovery_succeeded: {recovery.get('succeeded')}",
+        ]
+    ) + "\n"
 
 
 def load_existing_launchd_plist(value: str | None) -> tuple[Path | None, bytes | None]:

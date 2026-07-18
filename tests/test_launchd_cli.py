@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from codex_batch_runner.cli import main
 from codex_batch_runner.launchd_lifecycle import LaunchdPlanInput, render_launchd_plist
+from codex_batch_runner.launchd_operations import LaunchdEnvironment
 
 
 def write_config(root: Path, *, xdg: bool = False) -> Path:
@@ -72,6 +73,38 @@ def plan_args(
     return args
 
 
+def install_args(root: Path, config_path: Path, *, apply: bool = False) -> list[str]:
+    label = "com.example.codex-batch-runner"
+    args = [
+        "--config",
+        str(config_path),
+        "launchd",
+        "install",
+        "--label",
+        label,
+        "--executable",
+        str(root / "bin" / "cbr"),
+        "--working-directory",
+        str(root / "work"),
+        "--stdout-path",
+        str(root / "logs" / "launchd.out.log"),
+        "--stderr-path",
+        str(root / "logs" / "launchd.err.log"),
+        "--environment-path",
+        "/opt/cbr/bin:/usr/bin:/bin",
+        "--start-interval-seconds",
+        "600",
+        "--destination",
+        str(root / "Library" / "LaunchAgents" / f"{label}.plist"),
+        "--user-domain",
+        "gui/501",
+        "--json",
+    ]
+    if apply:
+        args.append("--apply")
+    return args
+
+
 def run_cli(args: list[str]) -> tuple[int, str, str]:
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -89,6 +122,47 @@ def file_snapshot(root: Path) -> dict[str, bytes]:
 
 
 class LaunchdCliTests(unittest.TestCase):
+    def test_install_defaults_to_dry_run_with_explicit_destination_and_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            config_path = write_config(root)
+            launchagents = root / "Library" / "LaunchAgents"
+            launchagents.mkdir(parents=True)
+            destination = launchagents / "com.example.codex-batch-runner.plist"
+            before = file_snapshot(root)
+            env = LaunchdEnvironment("Darwin", 501, root, "gui/501")
+
+            with patch("codex_batch_runner.cli.current_launchd_environment", return_value=env):
+                code, output, stderr = run_cli(install_args(root, config_path))
+            report = json.loads(output)
+
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr)
+            self.assertEqual(("dry_run", "planned", "install"), (report["mode"], report["status"], report["action"]))
+            self.assertFalse(report["mutation_allowed"])
+            self.assertFalse(report["changed"])
+            self.assertFalse(destination.exists())
+            self.assertEqual(before, file_snapshot(root))
+
+    def test_install_apply_without_separate_confirmation_fails_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            config_path = write_config(root)
+            (root / "Library" / "LaunchAgents").mkdir(parents=True)
+            before = file_snapshot(root)
+            env = LaunchdEnvironment("Darwin", 501, root, "gui/501")
+
+            with patch("codex_batch_runner.cli.current_launchd_environment", return_value=env):
+                code, output, stderr = run_cli(install_args(root, config_path, apply=True))
+
+            self.assertEqual(2, code)
+            self.assertEqual("", stderr)
+            report = json.loads(output)
+            self.assertEqual(("blocked", "blocked"), (report["status"], report["action"]))
+            self.assertIn("--apply requires --confirm-label", report["reason"])
+            self.assertFalse(report["mutation_allowed"])
+            self.assertEqual(before, file_snapshot(root))
+
     def test_missing_plan_renders_json_without_reading_or_writing_implicit_plist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -61,6 +61,16 @@ class LaunchdPlan:
     config_path: str
 
 
+@dataclass(frozen=True)
+class LaunchdInspection:
+    """Fail-closed ownership inspection for an existing plist."""
+
+    status: str
+    reason: str
+    managed_digest: str | None
+    managed_fields: dict[str, Any] | None
+
+
 def render_launchd_plist(plan_input: LaunchdPlanInput) -> bytes:
     """Return deterministic XML plist bytes for a validated managed LaunchAgent."""
 
@@ -100,43 +110,62 @@ def plan_launchd_lifecycle(plan_input: LaunchdPlanInput, existing_plist: bytes |
     if existing_plist is None:
         return LaunchdPlan(status="not_installed", action="create", reason="no existing plist supplied", **common)
 
-    try:
-        existing = plistlib.loads(existing_plist)
-    except (ValueError, TypeError, plistlib.InvalidFileException) as exc:
-        return LaunchdPlan(status="unhealthy", action="blocked", reason=f"malformed plist: {exc}", **common)
-    if not isinstance(existing, dict):
-        return LaunchdPlan(status="unhealthy", action="blocked", reason="plist root must be a dictionary", **common)
-
-    marker = existing.get(MARKER_KEY)
-    if marker is None:
-        return LaunchdPlan(status="foreign_conflict", action="blocked", reason="missing CBR ownership marker", **common)
-    if set(existing) != _MANAGED_TOP_LEVEL_KEYS:
+    inspection = inspect_launchd_plist(existing_plist)
+    if inspection.status != "managed":
         return LaunchdPlan(
-            status="unhealthy",
+            status=inspection.status,
             action="blocked",
-            reason="managed plist top-level keys do not match contract",
+            reason=inspection.reason,
             **common,
         )
-    if not isinstance(marker, dict) or marker.get("version") != MARKER_VERSION:
-        return LaunchdPlan(status="unhealthy", action="blocked", reason="invalid CBR ownership marker", **common)
-    stored_digest = marker.get("digest")
-    if not isinstance(stored_digest, str) or not _DIGEST_PATTERN.fullmatch(stored_digest):
-        return LaunchdPlan(status="unhealthy", action="blocked", reason="invalid CBR ownership digest", **common)
-
-    try:
-        actual_fields = _fields_from_existing(existing)
-    except ValueError as exc:
-        return LaunchdPlan(status="unhealthy", action="blocked", reason=f"invalid managed plist: {exc}", **common)
-    if _managed_digest(actual_fields) != stored_digest:
-        return LaunchdPlan(status="unhealthy", action="blocked", reason="managed plist content does not match ownership digest", **common)
+    stored_digest = inspection.managed_digest
     if stored_digest == expected_digest:
         return LaunchdPlan(status="managed_ok", action="none", reason="managed plist matches requested inputs", **common)
     return LaunchdPlan(status="drifted", action="update_needed", reason="managed plist differs from requested inputs", **common)
 
 
+def inspect_launchd_plist(existing_plist: bytes) -> LaunchdInspection:
+    """Inspect exact CBR ownership without comparing against requested inputs."""
+
+    try:
+        existing = plistlib.loads(existing_plist)
+    except (ValueError, TypeError, plistlib.InvalidFileException) as exc:
+        return LaunchdInspection("unhealthy", f"malformed plist: {exc}", None, None)
+    if not isinstance(existing, dict):
+        return LaunchdInspection("unhealthy", "plist root must be a dictionary", None, None)
+
+    marker = existing.get(MARKER_KEY)
+    if marker is None:
+        return LaunchdInspection("foreign_conflict", "missing CBR ownership marker", None, None)
+    if set(existing) != _MANAGED_TOP_LEVEL_KEYS:
+        return LaunchdInspection(
+            "unhealthy",
+            "managed plist top-level keys do not match contract",
+            None,
+            None,
+        )
+    if not isinstance(marker, dict) or marker.get("version") != MARKER_VERSION:
+        return LaunchdInspection("unhealthy", "invalid CBR ownership marker", None, None)
+    stored_digest = marker.get("digest")
+    if not isinstance(stored_digest, str) or not _DIGEST_PATTERN.fullmatch(stored_digest):
+        return LaunchdInspection("unhealthy", "invalid CBR ownership digest", None, None)
+
+    try:
+        actual_fields = _fields_from_existing(existing)
+    except ValueError as exc:
+        return LaunchdInspection("unhealthy", f"invalid managed plist: {exc}", None, None)
+    if _managed_digest(actual_fields) != stored_digest:
+        return LaunchdInspection(
+            "unhealthy",
+            "managed plist content does not match ownership digest",
+            None,
+            None,
+        )
+    return LaunchdInspection("managed", "valid CBR-owned plist", stored_digest, actual_fields)
+
+
 def _managed_fields(plan_input: LaunchdPlanInput) -> dict[str, Any]:
-    if not _LABEL_PATTERN.fullmatch(plan_input.label):
-        raise ValueError("label must contain only letters, numbers, dots, and hyphens")
+    validate_launchd_label(plan_input.label)
     for name in (
         "executable_path",
         "config_path",
@@ -196,3 +225,9 @@ def _managed_digest(fields: dict[str, Any]) -> str:
 
 def _is_absolute(value: object) -> bool:
     return isinstance(value, str) and bool(value) and PurePath(value).is_absolute()
+
+
+def validate_launchd_label(value: object) -> str:
+    if not isinstance(value, str) or not _LABEL_PATTERN.fullmatch(value):
+        raise ValueError("label must contain only letters, numbers, dots, and hyphens")
+    return value
