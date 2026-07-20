@@ -167,6 +167,9 @@ Fresh snapshot에서 short window remaining이 configured threshold 이하이면
 잔여량은 planning pressure이며 hard gate가 아닙니다. 단, long window가 실제 0%이면 long reset
 까지 gate합니다. 둘 다 낮지만 long window가 0%는 아니면 short reset 뒤 재판정합니다.
 Triggering window의 reset이 없거나 invalid이면 다른 window reset으로 대체하지 않고 fail open합니다.
+단일 Codex window는 `300`분이면 short, `10080`분이면 long으로 식별합니다. 알 수 없는 기간의
+단일 window는 short로 추측하지 않고 fail open합니다. 두 window가 제공되면 provider slot
+순서와 무관하게 기간순으로 분류합니다.
 Cooldown state를 먼저 저장한 뒤 기존 manual cooldown one-shot wake
 adapter를 호출하므로 wake scheduling failure는 warning-only이고 polling이 fallback입니다.
 

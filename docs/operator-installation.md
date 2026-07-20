@@ -311,6 +311,11 @@ window reset으로 대체하지 않고 sanitized warning/event와 함께 fail op
 지났지만 latest low snapshot이 reset 전
 관측값인 경우에는 stale value로 무기한 연기하지 않고 실제 queued task 한 건을 정상 attempt로
 허용합니다. Provider가 여전히 거부하면 기존 rate-limit recovery가 새 cooldown을 기록합니다.
+Codex snapshot에 window가 하나만 있으면 `300`분은 short, `10080`분은 long으로 식별합니다.
+따라서 임시로 5시간 window가 사라지고 7일 window만 남아도 낮은 long remaining을 short
+threshold로 오인하지 않습니다. 알 수 없는 기간의 단일 window는 의미를 추측하지 않고 fail
+open합니다. 이후 두 window가 다시 제공되면 slot 순서와 무관하게 기간순으로 short/long을
+복원합니다.
 
 Snapshot command는 read-only adapter여야 하며 Codex를 직접 probe하거나 install/authenticate를
 수행하면 안 됩니다. Timeout, command failure, invalid JSON, unavailable snapshot은 sanitized

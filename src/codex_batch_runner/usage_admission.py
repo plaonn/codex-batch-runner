@@ -12,6 +12,10 @@ from .events import write_event_nonfatal
 from .timeutil import parse_time, utc_now
 
 
+CODEX_SHORT_WINDOW_MINUTES = 300
+CODEX_LONG_WINDOW_MINUTES = 10080
+
+
 @dataclass(frozen=True)
 class UsageAdmissionDecision:
     status: str
@@ -52,17 +56,30 @@ def check_usage_admission(
     long_remaining = percentage(long_window.get("remaining_percent"))
     short_threshold = config.usage_admission_short_window_threshold_percent
 
-    if short_remaining is None:
+    if not short_window and not long_window:
+        return fail_open(config, "usage_windows_ambiguous")
+    if short_window and short_remaining is None:
         return fail_open(config, "short_window_remaining_percent_invalid")
-    short_low = bool(short_threshold is not None and short_remaining <= short_threshold)
+    if not short_window and long_remaining is None:
+        return fail_open(config, "long_window_remaining_percent_invalid")
+    short_low = bool(
+        short_remaining is not None
+        and short_threshold is not None
+        and short_remaining <= short_threshold
+    )
     long_exhausted = long_remaining == 0
     if not short_low and not long_exhausted:
         age_seconds = max(0.0, (baseline - observed_at).total_seconds())
         if age_seconds > config.usage_admission_max_age_seconds:
             return fail_open(config, "snapshot_stale")
+        reason = (
+            "short_window_above_threshold_and_long_window_not_exhausted"
+            if short_window
+            else "short_window_absent_and_long_window_not_exhausted"
+        )
         return UsageAdmissionDecision(
             "allowed",
-            "short_window_above_threshold_and_long_window_not_exhausted",
+            reason,
             observed_at=observed_at,
             short_window_remaining_percent=short_remaining,
             long_window_remaining_percent=long_remaining,
@@ -171,7 +188,13 @@ def semantic_windows(snapshot: dict[str, Any]) -> tuple[dict[str, Any], dict[str
         key=lambda window: float(window["window_minutes"]),
     )
     if len(ranked) == 1:
-        return ranked[0], {}
+        window = ranked[0]
+        minutes = float(window["window_minutes"])
+        if minutes == CODEX_SHORT_WINDOW_MINUTES:
+            return window, {}
+        if minutes == CODEX_LONG_WINDOW_MINUTES:
+            return {}, window
+        return {}, {}
     if len(ranked) == 2 and float(ranked[0]["window_minutes"]) < float(ranked[1]["window_minutes"]):
         return ranked[0], ranked[1]
     return {}, {}

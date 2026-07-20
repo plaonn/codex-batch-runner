@@ -116,6 +116,62 @@ class UsageAdmissionTests(unittest.TestCase):
             self.assertEqual("short_window_remaining_at_or_below_threshold", decision.reason)
             self.assertEqual(("short_window",), decision.gate_windows)
 
+    def test_lone_long_window_does_not_gate_unless_exhausted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = admission_config(tmp)
+            value = snapshot(
+                observed_at=NOW - timedelta(seconds=20),
+                reset_at=NOW + timedelta(days=4),
+                primary=5,
+            )
+            value["primary"]["window_minutes"] = 10080
+            with patch.object(usage_module.subprocess, "run", return_value=command_result(value)):
+                decision = check_usage_admission(config, now=NOW)
+
+            self.assertEqual("allowed", decision.status)
+            self.assertEqual("short_window_absent_and_long_window_not_exhausted", decision.reason)
+            self.assertIsNone(decision.short_window_remaining_percent)
+            self.assertEqual(5.0, decision.long_window_remaining_percent)
+
+    def test_lone_exhausted_long_window_gates_until_long_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = admission_config(tmp, usage_admission_reset_grace_seconds=90)
+            reset_at = NOW + timedelta(days=4)
+            value = snapshot(
+                observed_at=NOW - timedelta(seconds=20),
+                reset_at=reset_at,
+                primary=0,
+            )
+            value["primary"]["window_minutes"] = 10080
+            with patch.object(usage_module.subprocess, "run", return_value=command_result(value)):
+                decision = check_usage_admission(config, now=NOW)
+
+            self.assertEqual("gated", decision.status)
+            self.assertEqual("long_window_exhausted", decision.reason)
+            self.assertEqual(("long_window",), decision.gate_windows)
+            self.assertEqual(reset_at, decision.reset_at)
+            self.assertEqual(reset_at + timedelta(seconds=90), decision.cooldown_until)
+
+    def test_unknown_lone_window_fails_open_instead_of_guessing_short(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = admission_config(tmp)
+            value = snapshot(
+                observed_at=NOW - timedelta(seconds=20),
+                reset_at=NOW + timedelta(days=1),
+                primary=0,
+            )
+            value["primary"]["window_minutes"] = 1440
+            stderr = io.StringIO()
+            with (
+                patch.object(usage_module.subprocess, "run", return_value=command_result(value)),
+                redirect_stderr(stderr),
+            ):
+                decision = check_usage_admission(config, now=NOW)
+
+            self.assertEqual("fail_open", decision.status)
+            self.assertEqual("usage_windows_ambiguous", decision.reason)
+            self.assertIn("usage_windows_ambiguous", stderr.getvalue())
+
     def test_low_long_window_does_not_gate_unless_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = admission_config(tmp)
@@ -132,6 +188,34 @@ class UsageAdmissionTests(unittest.TestCase):
                 decision = check_usage_admission(config, now=NOW)
 
             self.assertEqual("allowed", decision.status)
+
+    def test_restored_windows_are_classified_by_duration_when_slots_are_swapped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = admission_config(tmp)
+            short_reset_at = NOW + timedelta(hours=2)
+            long_reset_at = NOW + timedelta(days=4)
+            value = {
+                "available": True,
+                "observed_at": (NOW - timedelta(seconds=20)).isoformat(),
+                "primary": {
+                    "remaining_percent": 5,
+                    "resets_at": long_reset_at.isoformat(),
+                    "window_minutes": 10080,
+                },
+                "secondary": {
+                    "remaining_percent": 10,
+                    "resets_at": short_reset_at.isoformat(),
+                    "window_minutes": 300,
+                },
+            }
+            with patch.object(usage_module.subprocess, "run", return_value=command_result(value)):
+                decision = check_usage_admission(config, now=NOW)
+
+            self.assertEqual("gated", decision.status)
+            self.assertEqual(("short_window",), decision.gate_windows)
+            self.assertEqual(short_reset_at, decision.reset_at)
+            self.assertEqual(10.0, decision.short_window_remaining_percent)
+            self.assertEqual(5.0, decision.long_window_remaining_percent)
 
     def test_both_low_gates_only_until_short_window_reset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
