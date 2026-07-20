@@ -350,7 +350,6 @@ def build_reconciliation_shadow(
     trigger: dict[str, Any],
     manifest: dict[str, Any],
     envelope: dict[str, Any],
-    allow_guarded_activation: bool = False,
 ) -> dict[str, Any]:
     policy = validate_guard_policy(policy)
     trigger = validate_guard_trigger(trigger)
@@ -374,7 +373,7 @@ def build_reconciliation_shadow(
 
     if not policy["active"]:
         reasons.add("policy_inactive")
-    if policy["activation_mode"] != "shadow" and not allow_guarded_activation:
+    if policy["activation_mode"] != "shadow":
         reasons.add("activation_not_implemented")
     if (
         trigger["source_id"] != policy["source"]["source_id"]
@@ -468,15 +467,7 @@ def build_reconciliation_shadow(
         "execution_fingerprint": identity["execution_fingerprint"],
         "dispatch_id": identity["dispatch_id"],
         "task_id": identity["task_id"],
-        "decision_status": (
-            (
-                "eligible_guarded"
-                if policy["activation_mode"] == "guarded"
-                else "eligible_shadow"
-            )
-            if not ordered_reasons
-            else "blocked"
-        ),
+        "decision_status": "eligible_shadow" if not ordered_reasons else "blocked",
         "reason_codes": ordered_reasons,
         "evidence": {
             "minimum_successes": MINIMUM_EXPLICIT_SUCCESSES,

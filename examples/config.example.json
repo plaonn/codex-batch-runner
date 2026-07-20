@@ -114,7 +114,6 @@
   "manual_cooldown_wake_scheduler": "disabled",
   "manual_cooldown_wake_command": [],
   "usage_admission_enabled": false,
-  "guarded_orchestration_enabled": false,
   "usage_admission_command": [],
   "usage_admission_timeout_seconds": 5,
   "usage_admission_max_age_seconds": 300,

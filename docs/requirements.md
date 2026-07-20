@@ -38,7 +38,7 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 - Assumptions: D1 planner는 계속 sanitized manifest만 받고 mutation-free이며, D2 dispatch는 explicit operator invocation, Codex backend, selected `cbr_batch`, runtime-private envelope, existing queue/outbox lifecycle로 제한된다.
 - Derived specs: [Closed-loop orchestration planner](orchestration.md), [CLI reference](cli-reference.md).
 - Revisit when: dispatch adapter, durable completion transport, source planning ownership, 또는 execution surface vocabulary가 변경될 때.
-- Revisit signal status: D1 planner, D2 explicit CBR dispatch, D3-0 policy/trigger shadow, and a default-disabled D3-1 Todoist snapshot pilot are implemented. Runtime activation, credentialed polling/scheduling, Todoist disposition delivery, and coordination acknowledgement remain unauthorized.
+- Revisit signal status: D1 planner, D2 explicit CBR dispatch, and D3-0 policy/trigger reconciliation shadow implemented; guarded invocation, durable repair/retry state, disposition delivery, and coordination mutation remain unauthorized.
 - Evidence: [docs/orchestration.md](orchestration.md), [docs/spec.md](spec.md)
 
 ## REQ-EXECUTION-READINESS-GATES: 실행성 있는 작업에서만 Codex 호출

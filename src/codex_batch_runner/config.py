@@ -52,7 +52,6 @@ class Config:
     usage_admission_max_age_seconds: int = 300
     usage_admission_short_window_threshold_percent: float | None = None
     usage_admission_reset_grace_seconds: int = 60
-    guarded_orchestration_enabled: bool = False
     manual_cooldown_wake_scheduler: str = "disabled"
     manual_cooldown_wake_command: list[str] = field(default_factory=list)
     codex_cli_update_command: list[str] = field(default_factory=list)
@@ -231,10 +230,6 @@ class Config:
             usage_admission_reset_grace_seconds=non_negative_int_value(
                 "usage_admission_reset_grace_seconds",
                 data.get("usage_admission_reset_grace_seconds", 60),
-            ),
-            guarded_orchestration_enabled=bool_value(
-                "guarded_orchestration_enabled",
-                data.get("guarded_orchestration_enabled", False),
             ),
             dependency_requires_accepted_review=bool_value(
                 "dependency_requires_accepted_review",
