@@ -220,3 +220,82 @@ best-effort basis. Trigger delivery is not receipt truth. When the queued task
 later reaches an attention state, the stored opaque parent reference makes it
 eligible for the existing runtime-private `parent_attention_required` outbox.
 D2 neither delivers nor acknowledges that record.
+
+## D3 guarded reconciliation shadow
+
+`cbr [--config CONFIG] orchestration reconcile-shadow --policy PRIVATE_PATH
+--trigger PRIVATE_PATH --manifest MANIFEST
+--execution-envelope PRIVATE_PATH [--json]` is the D3-0 read-only contract and
+status surface. It validates one immutable trigger bundle against one exact
+local/private policy revision, recomputes the D1 plan and D2 identity, and reads
+already-existing task, receipt, and parent-attention state. It never acquires
+the queue lock, creates directories or records, dispatches a task, repairs a
+receipt or outbox, invokes a trigger/adapter/subprocess, or changes a
+coordination surface. Public output omits prompt, cwd, parent reference, input
+paths, and raw policy contents.
+
+The exact `orchestration-guard-policy-v1` object has top-level keys
+`schema_version`, `contract`, `policy_id`, `revision`, `active`,
+`activation_mode`, `source`, `scope`, `evidence`, and `rollout`.
+
+- `activation_mode` is `shadow` or `guarded`. D3-0 accepts the versioned value
+  but reports `activation_not_implemented` for `guarded`; there is no guarded
+  mutation path in this phase.
+- `source` binds exact `source_id` and `adapter_revision`.
+- `scope` binds non-empty allowlists for source kind, project, canonical
+  repository root, work kind, decision authority, impact, worker mutation,
+  isolation, work verification, and capacity pool. It also binds the required
+  verification-scope subset. Required prohibited mutations are exactly
+  `external_state` and `destructive`; worker `runtime_state` mutation is not an
+  allowed D3 policy value.
+- `evidence` records `provenance=operator_attested_explicit_d2`, a public-safe
+  cohort ID, successful explicit D2 dispatch count, identity-conflict count,
+  and safety-violation count. The policy author owns this attestation; D3-0
+  does not infer success from receipt existence. Eligibility requires at least
+  five attested successful explicit dispatches and zero conflicts or
+  violations.
+- `rollout.max_new_admissions_per_run` must be exactly one. The value is a
+  future guarded-activation ceiling, not permission for D3-0 to admit work.
+
+Policy fingerprints are SHA-256 over the normalized exact policy object. Unknown
+fields, invalid enum/list values, relative or nonexistent repository roots,
+duplicate list items, and broader rollout values fail closed.
+
+The exact immutable `orchestration-trigger-v1` object contains
+`schema_version`, `contract`, `trigger_id`, `source_id`,
+`source_adapter_revision`, `source_event_id`, `explicit_opt_in`, `policy_id`,
+`policy_revision`, `policy_fingerprint`, `request_id`,
+`request_fingerprint`, `execution_fingerprint`, and timezone-aware
+`created_at`. `trigger_id` is deterministic from the trigger contract, source
+ID, and source event ID. The D2 manifest idempotency key must be the fixed D3
+namespace plus the trigger digest. Policy revisions are bindings, not part of
+trigger identity: changing a policy cannot turn the same source event into a
+new dispatch.
+
+Shadow eligibility additionally requires:
+
+- an active policy and explicit trigger opt-in;
+- exact source, adapter, policy, request, execution, and idempotency bindings;
+- `bounded_automatic`, resolved `delegated_decision` or
+  `bounded_experiment`, low/medium impact, and exact allowlist membership;
+- required external/destructive prohibitions and verification scope;
+- D1 `ready` with exact `cbr_batch`; and
+- a non-conflicting D2 preview.
+
+Any missing opt-in, insufficient evidence, policy/source/request drift,
+repository/scope mismatch, unsupported activation, unreadable attention state,
+unreadable D2 task/receipt state, or D2 block/conflict returns `blocked` with
+`mutation={"allowed":false,"applied":false}`. The shadow report keeps queue
+admission, execution, review, apply, attention delivery, attention
+acknowledgement, and source disposition as separate fields. A D2 receipt can
+therefore produce `queue_admission=admitted` while execution remains
+`runnable`, review/apply remain unstarted, and attention remains un-emitted.
+Unreadable attention files are reported as `unknown` with
+`attention_state_unreadable`; they are never treated as absence.
+
+D3-0 does not implement durable reconciliation-state writes, receipt or
+attention repair, retry leases, guarded dispatch, disposition outbox delivery,
+parent-attention delivery/acknowledgement, non-CBR adapters, or coordination
+surface mutation. Those operations require a later activation contract and
+must reuse the deterministic D2 task/receipt identity rather than introducing a
+second queue-admission path.

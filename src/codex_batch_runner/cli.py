@@ -151,6 +151,14 @@ from .orchestration_dispatch import (
     request_binding_reason_codes,
     render_dispatch_result,
 )
+from .orchestration_guard import (
+    GuardContractError,
+    build_reconciliation_shadow,
+    error_report as guard_error_report,
+    load_guard_policy,
+    load_guard_trigger,
+    render_reconciliation_shadow,
+)
 from .parent_attention import acknowledge_parent_attention, deliver_parent_attention, list_parent_attention
 from .provider_resource_report import (
     ProviderResourceValidationError,
@@ -461,6 +469,20 @@ def build_parser() -> argparse.ArgumentParser:
     orchestration_dispatch.add_argument("--confirm-request-id")
     orchestration_dispatch.add_argument("--json", action="store_true", help="print JSON")
     orchestration_dispatch.set_defaults(func=cmd_orchestration_dispatch_cbr)
+    orchestration_shadow = orchestration_sub.add_parser(
+        "reconcile-shadow",
+        help="validate a D3 guarded trigger and report reconciliation state without mutation",
+    )
+    orchestration_shadow.add_argument("--policy", required=True, metavar="PRIVATE_PATH")
+    orchestration_shadow.add_argument("--trigger", required=True, metavar="PRIVATE_PATH")
+    orchestration_shadow.add_argument("--manifest", required=True, metavar="PATH")
+    orchestration_shadow.add_argument(
+        "--execution-envelope",
+        required=True,
+        metavar="PRIVATE_PATH",
+    )
+    orchestration_shadow.add_argument("--json", action="store_true", help="print JSON")
+    orchestration_shadow.set_defaults(func=cmd_orchestration_reconcile_shadow)
 
     routing_policy_candidates = sub.add_parser(
         "routing-policy-candidates",
@@ -4184,11 +4206,59 @@ def cmd_orchestration_dispatch_cbr(config: Config, args: argparse.Namespace) -> 
         return 1
 
 
+def cmd_orchestration_reconcile_shadow(
+    config: Config | None, args: argparse.Namespace
+) -> int:
+    del config  # Loading belongs inside this redacted, read-only boundary.
+    try:
+        try:
+            policy = load_guard_policy(args.policy)
+            trigger = load_guard_trigger(args.trigger)
+            manifest = load_manifest(args.manifest)
+            envelope = load_execution_envelope(args.execution_envelope)
+        except GuardContractError as exc:
+            report = guard_error_report(list(exc.codes))
+            return _emit_guard_shadow(report, args.json, 2)
+        except OrchestrationManifestError:
+            report = guard_error_report(["manifest_invalid"])
+            return _emit_guard_shadow(report, args.json, 2)
+        except ExecutionEnvelopeError as exc:
+            report = guard_error_report(list(exc.codes))
+            return _emit_guard_shadow(report, args.json, 2)
+        try:
+            loaded_config = Config.load(args.config)
+        except Exception:
+            report = guard_error_report(["config_invalid"])
+            return _emit_guard_shadow(report, args.json, 2)
+        report = build_reconciliation_shadow(
+            loaded_config,
+            policy=policy,
+            trigger=trigger,
+            manifest=manifest,
+            envelope=envelope,
+        )
+        exit_code = 0 if report["decision_status"] == "eligible_shadow" else 2
+        return _emit_guard_shadow(report, args.json, exit_code)
+    except Exception:
+        print("error: orchestration reconciliation shadow failed", file=sys.stderr)
+        return 1
+
+
 def _emit_dispatch(report: dict[str, object], as_json: bool, exit_code: int) -> int:
     if as_json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_dispatch_result(report), end="")
+    return exit_code
+
+
+def _emit_guard_shadow(
+    report: dict[str, object], as_json: bool, exit_code: int
+) -> int:
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_reconciliation_shadow(report), end="")
     return exit_code
 
 
