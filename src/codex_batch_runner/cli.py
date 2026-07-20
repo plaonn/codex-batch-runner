@@ -159,6 +159,14 @@ from .orchestration_guard import (
     load_guard_trigger,
     render_reconciliation_shadow,
 )
+from .orchestration_todoist_pilot import (
+    TodoistPilotContractError,
+    load_local_request_bundle,
+    load_todoist_snapshot,
+    load_todoist_source,
+    reconcile_todoist_pilot,
+    render_todoist_reconciliation,
+)
 from .parent_attention import acknowledge_parent_attention, deliver_parent_attention, list_parent_attention
 from .provider_resource_report import (
     ProviderResourceValidationError,
@@ -483,6 +491,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     orchestration_shadow.add_argument("--json", action="store_true", help="print JSON")
     orchestration_shadow.set_defaults(func=cmd_orchestration_reconcile_shadow)
+    orchestration_todoist = orchestration_sub.add_parser(
+        "reconcile-todoist",
+        help="reconcile one explicit Todoist opt-in against a local private request bundle",
+    )
+    orchestration_todoist.add_argument(
+        "--source", required=True, metavar="PRIVATE_PATH"
+    )
+    orchestration_todoist.add_argument(
+        "--snapshot", required=True, metavar="PRIVATE_PATH"
+    )
+    orchestration_todoist.add_argument(
+        "--bundle", required=True, metavar="PRIVATE_PATH"
+    )
+    orchestration_todoist.add_argument(
+        "--policy", required=True, metavar="PRIVATE_PATH"
+    )
+    todoist_mode = orchestration_todoist.add_mutually_exclusive_group(required=True)
+    todoist_mode.add_argument("--dry-run", action="store_true")
+    todoist_mode.add_argument("--apply", action="store_true")
+    orchestration_todoist.add_argument("--confirm-trigger-id")
+    orchestration_todoist.add_argument(
+        "--json", action="store_true", help="print JSON"
+    )
+    orchestration_todoist.set_defaults(func=cmd_orchestration_reconcile_todoist)
 
     routing_policy_candidates = sub.add_parser(
         "routing-policy-candidates",
@@ -4244,6 +4276,49 @@ def cmd_orchestration_reconcile_shadow(
         return 1
 
 
+def cmd_orchestration_reconcile_todoist(
+    config: Config | None, args: argparse.Namespace
+) -> int:
+    del config  # Load only after private inputs pass their redacted boundary.
+    try:
+        try:
+            source = load_todoist_source(args.source)
+            snapshot = load_todoist_snapshot(args.snapshot)
+            bundle = load_local_request_bundle(args.bundle)
+            policy = load_guard_policy(args.policy)
+            loaded_config = Config.load(args.config)
+        except (TodoistPilotContractError, GuardContractError, ValueError):
+            report = {
+                "schema_version": 1,
+                "contract": "orchestration-todoist-error-v1",
+                "decision_status": "invalid",
+                "reason_codes": ["pilot_contract_invalid"],
+                "mutation": {
+                    "requested": False,
+                    "durable_state": False,
+                    "queue_admission": False,
+                    "todoist": False,
+                    "external_delivery": False,
+                },
+            }
+            return _emit_todoist_reconciliation(report, args.json, 2)
+        report, success = reconcile_todoist_pilot(
+            loaded_config,
+            source=source,
+            snapshot=snapshot,
+            bundle=bundle,
+            policy=policy,
+            apply=args.apply,
+            confirm_trigger_id=args.confirm_trigger_id,
+        )
+        if success and report["mutation"]["queue_admission"]:
+            run_post_mutation_trigger(loaded_config)
+        return _emit_todoist_reconciliation(report, args.json, 0 if success else 2)
+    except Exception:
+        print("error: Todoist orchestration reconciliation failed", file=sys.stderr)
+        return 1
+
+
 def _emit_dispatch(report: dict[str, object], as_json: bool, exit_code: int) -> int:
     if as_json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
@@ -4259,6 +4334,16 @@ def _emit_guard_shadow(
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_reconciliation_shadow(report), end="")
+    return exit_code
+
+
+def _emit_todoist_reconciliation(
+    report: dict[str, object], as_json: bool, exit_code: int
+) -> int:
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_todoist_reconciliation(report), end="")
     return exit_code
 
 
