@@ -26,6 +26,21 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 - Revisit signal status: not observed
 - Evidence: [README.md](../README.md), [docs/spec.md](spec.md)
 
+## REQ-CLOSED-LOOP-ORCHESTRATION: source workstream의 읽기 전용 execution surface 계획
+
+- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Decision class: Durable Requirement
+- Status: active
+- Validity scope: Durable
+- Requirement: versioned orchestration intake manifest를 엄격히 검증하고 issuer preference 순서와 고정 eligibility table만으로 execution surface와 fallback을 read-only로 추천한다.
+- Rationale: source workstream의 execution handoff와 completion disposition 책임을 분리하면서 runtime queue를 project planning truth로 오해하지 않기 위해.
+- Failure prevented: 모호한 authority의 unattended dispatch, planner와 dispatcher 결합, queue/config/event mutation, private context의 plan output 반사.
+- Assumptions: D1은 sanitized manifest만 받고 actual dispatch, completion adapter, queue lifecycle은 후속 phase의 별도 authority를 요구한다.
+- Derived specs: [Closed-loop orchestration planner](orchestration.md), [CLI reference](cli-reference.md).
+- Revisit when: dispatch adapter, durable completion transport, source planning ownership, 또는 execution surface vocabulary가 변경될 때.
+- Revisit signal status: D1 read-only planner only.
+- Evidence: [docs/orchestration.md](orchestration.md), [docs/spec.md](spec.md)
+
 ## REQ-EXECUTION-READINESS-GATES: 실행성 있는 작업에서만 Codex 호출
 
 - Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION

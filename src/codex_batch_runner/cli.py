@@ -128,6 +128,13 @@ from .routing_recommendation import (
     load_routing_cost_evidence_records,
     render_routing_recommendation,
 )
+from .orchestration import (
+    OrchestrationManifestError,
+    build_orchestration_plan,
+    error_plan,
+    load_manifest,
+    render_orchestration_plan,
+)
 from .parent_attention import acknowledge_parent_attention, deliver_parent_attention, list_parent_attention
 from .provider_resource_report import (
     ProviderResourceValidationError,
@@ -201,6 +208,15 @@ COMPACT_TABLE_NARROW_STATUS_LABELS = {
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "orchestration":
+        if args.config:
+            print("error: --config is not supported by orchestration plan", file=sys.stderr)
+            return 2
+        try:
+            return args.func(None, args)
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     try:
         config = Config.load(args.config)
         return args.func(config, args)
@@ -398,6 +414,19 @@ def build_parser() -> argparse.ArgumentParser:
     recommend_routing.add_argument("--routing-cost-evidence-json", action="append", default=[], metavar="PATH")
     recommend_routing.add_argument("--json", action="store_true", help="print JSON")
     recommend_routing.set_defaults(func=cmd_recommend_routing)
+
+    orchestration = sub.add_parser(
+        "orchestration",
+        help="validate a read-only orchestration intake and recommend an execution surface",
+    )
+    orchestration_sub = orchestration.add_subparsers(dest="orchestration_command", required=True)
+    orchestration_plan = orchestration_sub.add_parser(
+        "plan",
+        help="build a deterministic read-only orchestration plan",
+    )
+    orchestration_plan.add_argument("--manifest", required=True, metavar="PATH")
+    orchestration_plan.add_argument("--json", action="store_true", help="print JSON")
+    orchestration_plan.set_defaults(func=cmd_orchestration_plan)
 
     routing_policy_candidates = sub.add_parser(
         "routing-policy-candidates",
@@ -3998,6 +4027,23 @@ def cmd_recommend_routing(config: Config, args: argparse.Namespace) -> int:
     else:
         print(render_routing_recommendation(report), end="")
     return 0
+
+
+def cmd_orchestration_plan(config: Config | None, args: argparse.Namespace) -> int:
+    del config  # This command deliberately does not load or mutate runtime state.
+    try:
+        manifest = load_manifest(args.manifest)
+    except OrchestrationManifestError as exc:
+        report = error_plan(exc.codes)
+        exit_code = 2
+    else:
+        report = build_orchestration_plan(manifest)
+        exit_code = 0
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_orchestration_plan(report), end="")
+    return exit_code
 
 
 def cmd_routing_policy_candidates(config: Config, args: argparse.Namespace) -> int:

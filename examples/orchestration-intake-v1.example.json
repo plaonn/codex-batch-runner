@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "contract": "orchestration-intake-v1",
+  "request_id": "example-request",
+  "idempotency_key": "example-correlation",
+  "source": {
+    "kind": "codex_parent_thread",
+    "collection_owner": "source_parent"
+  },
+  "summary": {
+    "root_goal": "Sanitized example goal",
+    "requirement": "Sanitized example requirement",
+    "stop_condition": "Sanitized example stop condition",
+    "done_means": "Sanitized example completion condition"
+  },
+  "authority": {
+    "decision_authority": "delegated_decision",
+    "resolution": "resolved",
+    "impact": "low",
+    "approval_state": "not_required"
+  },
+  "work": {
+    "kind": "implementation",
+    "interaction": "none",
+    "duration": "short",
+    "persistence": "turn_bound",
+    "resume": "not_needed",
+    "dependency": "none",
+    "collection": "immediate_parent",
+    "context": "self_contained",
+    "isolation": "worktree",
+    "verification": "objective",
+    "external_worker_boundary": "unavailable",
+    "repository_scope": "present"
+  },
+  "mutation": {
+    "allowed": ["tracked_files"],
+    "prohibited": ["runtime_state", "external_state", "destructive"]
+  },
+  "automation_boundary": "advisory_only",
+  "surface_preferences": ["codex_subagent", "codex_parent_thread"]
+}
