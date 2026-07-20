@@ -56,6 +56,25 @@ CHAIN_METADATA_FIELDS = (
 )
 SCHEMA_VERSION = 1
 TASK_TITLE_DISPLAY_LIMIT = 80
+ORCHESTRATION_IMMUTABLE_FIELDS = (
+    "prompt",
+    "cwd",
+    "project_root",
+    "title",
+    "description",
+    "project_id",
+    "category",
+    "labels",
+    "depends_on",
+    "verification_scope",
+    "capacity_pool",
+    "task_priority",
+    "execution_backend",
+    "origin_parent_ref",
+    "orchestration_dispatch_id",
+    "orchestration_request_fingerprint",
+    "orchestration_execution_fingerprint",
+)
 
 
 def slugify(value: str) -> str:
@@ -79,6 +98,12 @@ def save_task(config: Config, task: dict, *, touch_updated_at: bool = True) -> N
     path = task_path(config, task["id"])
     existing = read_json(path)
     if isinstance(existing, dict):
+        if existing.get("orchestration_dispatch_id"):
+            for field in ORCHESTRATION_IMMUTABLE_FIELDS:
+                if existing.get(field) != task.get(field):
+                    raise ValueError(
+                        f"{field} is immutable for an orchestrated task"
+                    )
         for field in ("model_requirement_vector", "routing_override"):
             if existing.get(field) != task.get(field):
                 raise ValueError(
@@ -326,6 +351,10 @@ def create_task(
     subtask_for: str | None = None,
     review_followup_for: str | None = None,
     blocks_root_completion: bool = False,
+    origin_parent_ref: str | None = None,
+    orchestration_dispatch_id: str | None = None,
+    orchestration_request_fingerprint: str | None = None,
+    orchestration_execution_fingerprint: str | None = None,
 ) -> dict:
     ensure_dir(config.queue_dir)
     now = iso_now()
@@ -420,6 +449,10 @@ def create_task(
         "started_at": None,
         "completed_at": None,
         "log_paths": [],
+        "origin_parent_ref": origin_parent_ref,
+        "orchestration_dispatch_id": orchestration_dispatch_id,
+        "orchestration_request_fingerprint": orchestration_request_fingerprint,
+        "orchestration_execution_fingerprint": orchestration_execution_fingerprint,
     }
     requirement_metadata = task_requirement_metadata(
         model_requirement_vector=model_requirement_vector,
@@ -430,33 +463,49 @@ def create_task(
         requirement_metadata = {"model_requirement_vector": issuer(task)}
     task.update(requirement_metadata)
     write_json_atomic(path, task)
-    emit_task_event(
-        config,
-        "task_created",
-        task,
-        actor=created_by or "cbr",
-        source="enqueue",
-        summary=f"created task {task_id}",
-        payload=transition_payload(
+    if orchestration_dispatch_id:
+        emit_task_event(
+            config,
+            "orchestration_task_admitted",
+            {"id": task_id},
+            source="orchestration-dispatch",
+            summary="orchestration task admitted",
+            payload={
+                "dispatch_id": orchestration_dispatch_id,
+                "task_id": task_id,
+                "surface": "cbr_batch",
+                "request_fingerprint": orchestration_request_fingerprint,
+                "execution_fingerprint": orchestration_execution_fingerprint,
+            },
+        )
+    else:
+        emit_task_event(
+            config,
+            "task_created",
             task,
-            depends_on_count=len(task["depends_on"]),
-            category=task.get("category"),
-            labels=task.get("labels"),
-            created_by=task.get("created_by"),
-            title=task.get("title"),
-            has_description=bool(task.get("description")),
-            has_routing_reason=bool(task.get("routing_reason")),
-            routing_risk_factor_count=len(task.get("routing_risk_factors") or []),
-            routing_experiment=task.get("routing_experiment"),
-            routing_size=task.get("routing_size"),
-            routing_risk=task.get("routing_risk"),
-            verification_scope_count=len(task.get("verification_scope") or []),
-            subtask_type=task.get("subtask_type"),
-            subtask_for=task.get("subtask_for"),
-            review_followup_for=task.get("review_followup_for"),
-            blocks_root_completion=task.get("blocks_root_completion"),
-        ),
-    )
+            actor=created_by or "cbr",
+            source="enqueue",
+            summary=f"created task {task_id}",
+            payload=transition_payload(
+                task,
+                depends_on_count=len(task["depends_on"]),
+                category=task.get("category"),
+                labels=task.get("labels"),
+                created_by=task.get("created_by"),
+                title=task.get("title"),
+                has_description=bool(task.get("description")),
+                has_routing_reason=bool(task.get("routing_reason")),
+                routing_risk_factor_count=len(task.get("routing_risk_factors") or []),
+                routing_experiment=task.get("routing_experiment"),
+                routing_size=task.get("routing_size"),
+                routing_risk=task.get("routing_risk"),
+                verification_scope_count=len(task.get("verification_scope") or []),
+                subtask_type=task.get("subtask_type"),
+                subtask_for=task.get("subtask_for"),
+                review_followup_for=task.get("review_followup_for"),
+                blocks_root_completion=task.get("blocks_root_completion"),
+            ),
+        )
     return task
 
 

@@ -1,4 +1,4 @@
-# Closed-loop orchestration planner
+# Closed-loop orchestration
 
 `cbr orchestration plan --manifest PATH [--json]` is a manifest-only,
 deterministic, read-only planner. It does not load CBR configuration, read or
@@ -127,3 +127,82 @@ surface code. Preflight is respectively none, `confirm_user_continuation`,
 `verify_immediate_parent_collection`, `verify_cbr_admission`, or
 `verify_external_worker_contract`. `collection_owner` only assigns result
 collection/disposition responsibility; it does not prove root-goal completion.
+
+## Explicit CBR dispatch
+
+`cbr [--config CONFIG] orchestration dispatch-cbr --manifest MANIFEST
+--execution-envelope PRIVATE_PATH (--dry-run | --apply)
+[--confirm-request-id REQUEST_ID] [--json]` is the only D2 dispatch surface.
+It recomputes the D1 plan and fails closed unless the exact recommended surface
+is `cbr_batch`. It does not accept a fallback surface. Dispatch supports only
+the Codex execution backend.
+
+The execution envelope is a runtime-private UTF-8 JSON object no larger than
+256 KiB. It has exact keys `schema_version=1`,
+`contract=orchestration-cbr-execution-v1`, `request_id`,
+`request_fingerprint`, `prompt`, `cwd`, `origin_parent_ref`, and `task`.
+`task` has exact keys `title`, `description`, `project_id`, `category`,
+`labels`, `depends_on`, `verification_scope`, `capacity_pool`, and `priority`.
+The prompt is non-empty and at most 128 KiB after NFC normalization. The cwd is
+an existing absolute directory and is resolved strictly without `~` or
+environment expansion. The parent reference is opaque, non-empty, and at most
+512 characters.
+
+Task title and description use collapsed whitespace and are bounded to 80 and
+2,048 characters. Public-safe identifiers use
+`^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$`. Labels and dependencies are unique,
+at most 32 items, and sorted. Verification values are unique and ordered as
+`docs`, `lint`, `typecheck`, `unit`, `integration`, `e2e`, `smoke`, `manual`,
+`build`. Priority is `asap`, `high`, `normal`, `low`, or `background`.
+Commands, credentials, environment dumps, session/thread IDs, transcripts,
+logs, and arbitrary nested metadata are rejected.
+
+`--dry-run` rejects confirmation, does not acquire the queue lock, and does not
+create directories, tasks, receipts, events, triggers, subprocesses, threads,
+or adapter calls. It reads only already-existing config-derived paths and
+returns `orchestration-dispatch-preview-v1`. `ready` and
+`already_dispatched` exit 0; `blocked` and `conflict` exit 2. Capacity pressure
+and existing-but-not-ready dependencies are ordered advisory
+`admission_blockers`; missing dependencies, deterministic self-dependency,
+unknown capacity pools, worktree isolation mismatch, pause, and identity
+conflicts block admission.
+
+`--apply` requires an exact request-id confirmation. Under the queue lock it
+revalidates the plan, envelope, authority, config-derived gates, pause, task,
+and receipt. It permits only `delegated_decision` or `bounded_experiment`,
+manual or bounded-automatic issuer boundaries, resolved low/medium-impact work
+without external or destructive worker mutations. Proposal, recommend-and-pause,
+advisory-only, fallback, shell, external-command, and automatic dispatch are
+not supported.
+
+The normalized immutable execution projection is canonical JSON with sorted
+keys, UTF-8, `ensure_ascii=false`, and compact separators.
+`execution_fingerprint` is its SHA-256. A private SHA-256 digest of the manifest
+idempotency key and the fixed `cbr_batch` surface produces deterministic
+`od-<32 hex>` dispatch and `orch-<32 hex>` task IDs. The raw idempotency key,
+its digest, and canonical bytes are never stored or returned. A changed
+manifest or envelope under the same idempotency key conflicts.
+
+The task's first atomic write includes `origin_parent_ref`,
+`orchestration_dispatch_id`, `orchestration_request_fingerprint`, and
+`orchestration_execution_fingerprint`. Those values and the execution
+projection are immutable. Orchestrated admission suppresses `task_created` and
+emits a best-effort `orchestration_task_admitted` event containing only
+dispatch/task IDs, surface, and the two fingerprints.
+
+Receipts are stored below the configured runtime at
+`orchestration-dispatch-receipts/{dispatch_id}.json` as exact immutable
+`orchestration-dispatch-receipt-v1` objects. A matching retry returns the exact
+stored receipt without rewriting it. A task created before a process
+interruption but missing its receipt is matched from immutable task fields and
+recovered without creating another task. A receipt without a task, malformed
+receipt, or task/provenance drift conflicts. Receipts prove only queue admission:
+execution, review, root-goal completion, parent-attention creation, delivery,
+and acknowledgement remain separate canonical states.
+
+After each successful apply invocation (created, recovered, or matching retry),
+the existing post-mutation trigger is invoked once after lock release on a
+best-effort basis. Trigger delivery is not receipt truth. When the queued task
+later reaches an attention state, the stored opaque parent reference makes it
+eligible for the existing runtime-private `parent_attention_required` outbox.
+D2 neither delivers nor acknowledges that record.

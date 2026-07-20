@@ -111,6 +111,7 @@
 - `model_requirement_vector`: canonical 신규 task가 저장하는 immutable requirement v2 revision. 모든 quality axis와 issuer가 제출한 hard constraint/utility 값만 저장하며 누락값을 의미상 추정하지 않습니다. 기존 v1 task는 read 시 deterministic `legacy-derived` projection을 사용하고 exact v2 cohort에서 제외합니다. [Model routing requirement contract](model-routing-contract.md)를 참고합니다.
 - `routing_override`: optional advanced operator input. `preference|pin`, exact target id, public-safe reason, `scope=single_task`, fallback flag, `provenance=operator_override`만 저장합니다. D1에서는 검증·저장만 하며 selector에 적용하지 않고 child/retry/review/fix/follow-up에 상속하지 않습니다.
 - `origin_parent_ref`: parent attention delivery에 필요한 runtime-private opaque reference. Public fixture/docs에는 실제 값이나 thread id를 넣지 않습니다.
+- `orchestration_dispatch_id`, `orchestration_request_fingerprint`, `orchestration_execution_fingerprint`: explicit orchestration dispatch가 first atomic task write에 저장하는 runtime-private provenance. 이 provenance가 있으면 prompt, canonical cwd와 derived project root, title/description, project/category/labels/dependencies, verification scope, capacity pool, priority, execution backend, parent ref와 세 provenance field는 enqueue 이후 immutable합니다. Recovery identity는 envelope에서 정의된 execution projection과 provenance를 비교합니다.
 - `last_result.parent_attention_state`: worker가 명시할 수 있는 `needs_review`, `needs_decision`, `needs_follow_up`, `blocked_external`, `completed`. 생략 시 completed result는 `needs_review`, `blocked_user`는 `needs_decision`으로 수집됩니다.
 
 

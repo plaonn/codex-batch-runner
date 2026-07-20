@@ -24,6 +24,8 @@
 
 `cbr orchestration plan --manifest PATH [--json]`은 fixed `orchestration-intake-v1` JSON manifest만 검증해 `orchestration-plan-v1`을 만드는 deterministic read-only planner입니다. Summary text는 opaque display context이며 surface selection은 validated enum fields와 issuer-supplied preference order만 사용합니다. 이 command는 CBR config를 load하지 않고 queue/event/state/config file을 읽거나 쓰지 않으며 adapter 호출, thread 생성, dispatch를 하지 않습니다. Invalid manifest는 fixed `orchestration-plan-error-v1` JSON을 stdout에 출력하고 exit 2를 반환하며 valid `ready`, `needs_user_decision`, `blocked` plan은 exit 0입니다. 이 manifest-only command에는 global `--config`를 사용할 수 없습니다.
 
+`cbr [--config CONFIG] orchestration dispatch-cbr --manifest MANIFEST --execution-envelope PRIVATE_PATH (--dry-run | --apply) [--confirm-request-id REQUEST_ID] [--json]`은 recomputed D1 plan이 exact `cbr_batch`를 선택한 경우에만 Codex queue task를 명시적으로 dispatch합니다. `--dry-run`은 read-only preview이고 confirmation을 거부합니다. `--apply`는 request id exact confirmation과 authority/config/pause/identity gate를 통과해야 하며 deterministic task id와 immutable receipt로 retry/crash recovery 중 duplicate admission을 막습니다. Capacity pressure와 not-ready dependency는 advisory이고 pause, missing/self dependency, unknown pool, isolation mismatch, identity conflict는 blocking입니다. Receipt는 queue admission만 증명하며 execution, review, completion, parent-attention delivery/ack를 증명하지 않습니다. Private prompt, cwd, parent ref, envelope path, command, credential은 preview/receipt/error output에 포함되지 않습니다.
+
 초기 CLI:
 
 ```bash

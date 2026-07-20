@@ -13,6 +13,7 @@ import unicodedata
 import zlib
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from .apply_plan import apply_queue_mutation_plan, build_apply_plan_report, render_apply_plan_report
 from .capability_belief import CapabilityBeliefError, rebuild_capability_report
@@ -97,6 +98,7 @@ from .queue import (
     archive_task,
     capacity_blockers,
     create_task,
+    dependency_blockers,
     dependency_status,
     is_in_cooldown,
     list_tasks,
@@ -134,6 +136,17 @@ from .orchestration import (
     error_plan,
     load_manifest,
     render_orchestration_plan,
+)
+from .orchestration_dispatch import (
+    DispatchLockBusy,
+    ExecutionEnvelopeError,
+    apply_dispatch,
+    build_dispatch_preview,
+    dispatch_error,
+    identity_for,
+    load_execution_envelope,
+    preview_as_error,
+    render_dispatch_result,
 )
 from .parent_attention import acknowledge_parent_attention, deliver_parent_attention, list_parent_attention
 from .provider_resource_report import (
@@ -209,14 +222,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "orchestration":
-        if args.config:
-            print("error: --config is not supported by orchestration plan", file=sys.stderr)
-            return 2
-        try:
-            return args.func(None, args)
-        except Exception as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
+        if args.orchestration_command == "plan":
+            if args.config:
+                print("error: --config is not supported by orchestration plan", file=sys.stderr)
+                return 2
+            try:
+                return args.func(None, args)
+            except Exception as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+        return args.func(None, args)
     try:
         config = Config.load(args.config)
         return args.func(config, args)
@@ -427,6 +442,22 @@ def build_parser() -> argparse.ArgumentParser:
     orchestration_plan.add_argument("--manifest", required=True, metavar="PATH")
     orchestration_plan.add_argument("--json", action="store_true", help="print JSON")
     orchestration_plan.set_defaults(func=cmd_orchestration_plan)
+    orchestration_dispatch = orchestration_sub.add_parser(
+        "dispatch-cbr",
+        help="explicitly dispatch a ready cbr_batch plan exactly once",
+    )
+    orchestration_dispatch.add_argument("--manifest", required=True, metavar="PATH")
+    orchestration_dispatch.add_argument(
+        "--execution-envelope",
+        required=True,
+        metavar="PRIVATE_PATH",
+    )
+    dispatch_mode = orchestration_dispatch.add_mutually_exclusive_group(required=True)
+    dispatch_mode.add_argument("--dry-run", action="store_true")
+    dispatch_mode.add_argument("--apply", action="store_true")
+    orchestration_dispatch.add_argument("--confirm-request-id")
+    orchestration_dispatch.add_argument("--json", action="store_true", help="print JSON")
+    orchestration_dispatch.set_defaults(func=cmd_orchestration_dispatch_cbr)
 
     routing_policy_candidates = sub.add_parser(
         "routing-policy-candidates",
@@ -4043,6 +4074,98 @@ def cmd_orchestration_plan(config: Config | None, args: argparse.Namespace) -> i
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_orchestration_plan(report), end="")
+    return exit_code
+
+
+def cmd_orchestration_dispatch_cbr(config: Config, args: argparse.Namespace) -> int:
+    del config  # Config loading belongs inside the sanitized dispatch boundary.
+    request_id: str | None = None
+    dispatch_id: str | None = None
+    try:
+        try:
+            manifest = load_manifest(args.manifest)
+        except OrchestrationManifestError:
+            report = dispatch_error(
+                decision_status="invalid",
+                reason_codes=["manifest_invalid"],
+                validation_errors=["manifest_invalid"],
+            )
+            return _emit_dispatch(report, args.json, 2)
+        try:
+            envelope = load_execution_envelope(args.execution_envelope)
+        except ExecutionEnvelopeError as exc:
+            report = dispatch_error(
+                decision_status="invalid",
+                reason_codes=["envelope_invalid"],
+                validation_errors=list(exc.codes),
+            )
+            return _emit_dispatch(report, args.json, 2)
+
+        request_id = manifest["request_id"]
+        identity = identity_for(manifest, envelope)
+        dispatch_id = identity["dispatch_id"]
+        if args.dry_run and args.confirm_request_id is not None:
+            report = dispatch_error(
+                decision_status="invalid",
+                reason_codes=["confirmation_not_allowed"],
+                request_id=request_id,
+                dispatch_id=dispatch_id,
+            )
+            return _emit_dispatch(report, args.json, 2)
+        if args.apply and args.confirm_request_id is None:
+            report = dispatch_error(
+                decision_status="invalid",
+                reason_codes=["confirmation_required"],
+                request_id=request_id,
+                dispatch_id=dispatch_id,
+            )
+            return _emit_dispatch(report, args.json, 2)
+        if args.apply and args.confirm_request_id != request_id:
+            report = dispatch_error(
+                decision_status="invalid",
+                reason_codes=["confirmation_mismatch"],
+                request_id=request_id,
+                dispatch_id=dispatch_id,
+            )
+            return _emit_dispatch(report, args.json, 2)
+        try:
+            loaded_config = Config.load(args.config)
+        except Exception:
+            report = dispatch_error(
+                decision_status="invalid",
+                reason_codes=["config_invalid"],
+                request_id=request_id,
+                dispatch_id=dispatch_id,
+            )
+            return _emit_dispatch(report, args.json, 2)
+        if args.dry_run:
+            preview = build_dispatch_preview(loaded_config, manifest, envelope)
+            exit_code = 0 if preview["status"] in {"ready", "already_dispatched"} else 2
+            return _emit_dispatch(preview, args.json, exit_code)
+        try:
+            report, success = apply_dispatch(loaded_config, manifest, envelope)
+        except DispatchLockBusy:
+            report = dispatch_error(
+                decision_status="blocked",
+                reason_codes=["lock_busy"],
+                request_id=request_id,
+                dispatch_id=dispatch_id,
+            )
+            return _emit_dispatch(report, args.json, 2)
+        if not success:
+            return _emit_dispatch(preview_as_error(report), args.json, 2)
+        run_post_mutation_trigger(loaded_config)
+        return _emit_dispatch(report, args.json, 0)
+    except Exception:
+        print("error: orchestration dispatch failed", file=sys.stderr)
+        return 1
+
+
+def _emit_dispatch(report: dict[str, object], as_json: bool, exit_code: int) -> int:
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_dispatch_result(report), end="")
     return exit_code
 
 
