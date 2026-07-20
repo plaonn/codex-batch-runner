@@ -9,7 +9,7 @@ from pathlib import Path
 from .config import Config
 from .events import emit_task_event, transition_payload
 from .model_requirements import derive_model_requirement_vector, issue_native_requirement_v2, task_requirement_metadata
-from .fs import ensure_dir, read_json, write_json_atomic
+from .fs import ensure_dir, read_json, write_json_atomic, write_json_atomic_create
 from .lock import lock_pid, pid_exists
 from .timeutil import iso_now, parse_time, utc_now
 from .worker_routing import planned_worker_capacity_pool
@@ -386,8 +386,6 @@ def create_task(
         validate_external_timeout(external_timeout_seconds) if external_timeout_seconds is not None else None
     )
     path = task_path(config, task_id)
-    if path.exists():
-        raise FileExistsError(f"task already exists: {task_id}")
     task = {
         "schema_version": SCHEMA_VERSION,
         "id": task_id,
@@ -462,7 +460,10 @@ def create_task(
         issuer = issue_native_requirement_v2 if task.get("subtask_type") else derive_model_requirement_vector
         requirement_metadata = {"model_requirement_vector": issuer(task)}
     task.update(requirement_metadata)
-    write_json_atomic(path, task)
+    try:
+        write_json_atomic_create(path, task)
+    except FileExistsError as exc:
+        raise FileExistsError(f"task already exists: {task_id}") from exc
     if orchestration_dispatch_id:
         emit_task_event(
             config,

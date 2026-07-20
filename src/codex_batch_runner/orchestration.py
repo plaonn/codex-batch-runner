@@ -120,18 +120,22 @@ def validate_manifest(value: object) -> dict[str, Any]:
 
 def build_orchestration_plan(manifest: dict[str, Any]) -> dict[str, Any]:
     """Build a pure plan from an already validated manifest."""
-    fingerprint = _fingerprint(manifest)
+    fingerprint = orchestration_request_fingerprint(manifest)
     authority, work = manifest["authority"], manifest["work"]
     base = _plan_base(manifest["request_id"], fingerprint, manifest["source"]["collection_owner"], manifest)
     if authority["resolution"] == "needs_user_decision" or authority["approval_state"] == "required":
         codes = []
-        if authority["resolution"] == "needs_user_decision": codes.append("authority_resolution_requires_user_decision")
-        if authority["approval_state"] == "required": codes.append("approval_required")
+        if authority["resolution"] == "needs_user_decision":
+            codes.append("authority_resolution_requires_user_decision")
+        if authority["approval_state"] == "required":
+            codes.append("approval_required")
         return _complete(base, "needs_user_decision", None, [], [], codes, ["user_decision_required"], ["obtain_user_decision"])
     if authority["resolution"] == "blocked_external" or work["interaction"] == "external_required":
         codes = []
-        if authority["resolution"] == "blocked_external": codes.append("authority_blocked_external")
-        if work["interaction"] == "external_required": codes.append("external_interaction_required")
+        if authority["resolution"] == "blocked_external":
+            codes.append("authority_blocked_external")
+        if work["interaction"] == "external_required":
+            codes.append("external_interaction_required")
         return _complete(base, "blocked", None, [], [], codes, ["external_blocker"], ["resolve_external_blocker"])
     eligible: list[str] = []
     excluded: list[dict[str, Any]] = []
@@ -145,6 +149,11 @@ def build_orchestration_plan(manifest: dict[str, Any]) -> dict[str, Any]:
         return _complete(base, "blocked", None, [], excluded, ["no_eligible_surface"], ["surface_constraints_unsatisfied"], [])
     selected = eligible[0]
     return _complete(base, "ready", selected, eligible[1:], excluded, ["selected_first_eligible_surface", _selection_reason(selected)], [], _preflight(selected))
+
+
+def orchestration_request_fingerprint(manifest: dict[str, Any]) -> str:
+    """Return the canonical D1 request fingerprint without evaluating routing."""
+    return _fingerprint(manifest)
 
 
 def error_plan(codes: tuple[str, ...]) -> dict[str, Any]:
@@ -284,7 +293,8 @@ def _enum_list(value: object, allowed: set[str]) -> list[str]:
 
 def _summary_text(value: object) -> None:
     if not isinstance(value, str) or not value or len(value) > 512:
-        if not isinstance(value, str): raise OrchestrationManifestError("value_type_invalid")
+        if not isinstance(value, str):
+            raise OrchestrationManifestError("value_type_invalid")
         raise OrchestrationManifestError("value_bounds_invalid")
 
 
@@ -298,7 +308,13 @@ def _ordered_mutations(values: list[str]) -> list[str]:
 
 
 def _nfc(value: Any) -> Any:
-    if isinstance(value, str): return unicodedata.normalize("NFC", value)
-    if isinstance(value, list): return [_nfc(item) for item in value]
-    if isinstance(value, dict): return {unicodedata.normalize("NFC", key) if isinstance(key, str) else key: _nfc(item) for key, item in value.items()}
+    if isinstance(value, str):
+        return unicodedata.normalize("NFC", value)
+    if isinstance(value, list):
+        return [_nfc(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            unicodedata.normalize("NFC", key) if isinstance(key, str) else key: _nfc(item)
+            for key, item in value.items()
+        }
     return value

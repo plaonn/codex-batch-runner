@@ -135,6 +135,7 @@ from .orchestration import (
     build_orchestration_plan,
     error_plan,
     load_manifest,
+    orchestration_request_fingerprint,
     render_orchestration_plan,
 )
 from .orchestration_dispatch import (
@@ -142,10 +143,12 @@ from .orchestration_dispatch import (
     ExecutionEnvelopeError,
     apply_dispatch,
     build_dispatch_preview,
+    config_independent_gate_reason_codes,
     dispatch_error,
     identity_for,
     load_execution_envelope,
     preview_as_error,
+    request_binding_reason_codes,
     render_dispatch_result,
 )
 from .parent_attention import acknowledge_parent_attention, deliver_parent_attention, list_parent_attention
@@ -4101,9 +4104,29 @@ def cmd_orchestration_dispatch_cbr(config: Config, args: argparse.Namespace) -> 
             )
             return _emit_dispatch(report, args.json, 2)
 
+        request_fingerprint = orchestration_request_fingerprint(manifest)
+        binding_reasons = request_binding_reason_codes(
+            manifest, envelope, request_fingerprint
+        )
+        if binding_reasons:
+            report = dispatch_error(
+                decision_status="invalid",
+                reason_codes=binding_reasons,
+            )
+            return _emit_dispatch(report, args.json, 2)
         request_id = manifest["request_id"]
         identity = identity_for(manifest, envelope)
         dispatch_id = identity["dispatch_id"]
+        plan = build_orchestration_plan(manifest)
+        gate_reasons = config_independent_gate_reason_codes(manifest, plan)
+        if gate_reasons:
+            report = dispatch_error(
+                decision_status="blocked",
+                reason_codes=gate_reasons,
+                request_id=request_id,
+                dispatch_id=dispatch_id,
+            )
+            return _emit_dispatch(report, args.json, 2)
         if args.dry_run and args.confirm_request_id is not None:
             report = dispatch_error(
                 decision_status="invalid",

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .fs import read_json, write_json_atomic
+from .fs import read_json, write_json_atomic_create
 from .lock import FileLock
 from .orchestration import build_orchestration_plan, validate_manifest
 from .queue import (
@@ -287,6 +287,39 @@ def build_dispatch_preview(
     return _evaluate(config, manifest, envelope, plan, identity, locked=False)
 
 
+def request_binding_reason_codes(
+    manifest: dict[str, Any],
+    envelope: dict[str, Any],
+    request_fingerprint: str,
+) -> list[str]:
+    found: set[str] = set()
+    if envelope["request_id"] != manifest["request_id"]:
+        found.add("request_id_mismatch")
+    if envelope["request_fingerprint"] != request_fingerprint:
+        found.add("request_fingerprint_mismatch")
+    return [code for code in REASON_ORDER if code in found]
+
+
+def config_independent_gate_reason_codes(
+    manifest: dict[str, Any],
+    plan: dict[str, Any],
+) -> list[str]:
+    found: set[str] = set()
+    authority = manifest["authority"]
+    if plan["decision_status"] != "ready":
+        found.add("plan_not_ready")
+    if plan["recommended_surface"] != "cbr_batch":
+        found.add("recommended_surface_not_cbr_batch")
+    if authority["decision_authority"] not in {
+        "delegated_decision",
+        "bounded_experiment",
+    }:
+        found.add("decision_authority_incompatible")
+    if manifest["automation_boundary"] not in {"manual_only", "bounded_automatic"}:
+        found.add("automation_boundary_incompatible")
+    return [code for code in REASON_ORDER if code in found]
+
+
 def apply_dispatch(
     config: Config,
     manifest: dict[str, Any],
@@ -309,13 +342,46 @@ def apply_dispatch(
         if task_present and receipt_present:
             return _read_receipt(config, identity["dispatch_id"]), True
         if not task_present:
-            _create_orchestrated_task(config, envelope, plan, identity)
-            admission_result = "created"
+            try:
+                _create_orchestrated_task(config, envelope, plan, identity)
+            except FileExistsError:
+                raced = _read_task(config, identity["task_id"])
+                if not (
+                    isinstance(raced, dict)
+                    and _task_matches(raced, envelope, plan, identity)
+                ):
+                    return _task_barrier_conflict(
+                        preview, task_present=raced is not None
+                    ), False
+                admission_result = "recovered"
+                _emit_recovered_event(config, identity, plan["request_fingerprint"])
+            else:
+                admission_result = "created"
         else:
             _emit_recovered_event(config, identity, plan["request_fingerprint"])
             admission_result = "recovered"
+        admitted_task = _read_task(config, identity["task_id"])
+        if not (
+            isinstance(admitted_task, dict)
+            and _task_matches(admitted_task, envelope, plan, identity)
+        ):
+            return _task_barrier_conflict(
+                preview, task_present=admitted_task is not None
+            ), False
         receipt = _receipt(plan, identity, admission_result)
-        write_json_atomic(_receipt_path(config, identity["dispatch_id"]), receipt)
+        try:
+            write_json_atomic_create(
+                _receipt_path(config, identity["dispatch_id"]), receipt
+            )
+        except FileExistsError:
+            existing_receipt = _read_receipt_value(config, identity["dispatch_id"])
+            if not _receipt_matches(existing_receipt, plan, identity):
+                conflict = dict(preview)
+                conflict["status"] = "conflict"
+                conflict["receipt_present"] = True
+                conflict["reason_codes"] = ["receipt_identity_conflict"]
+                return conflict, False
+            return existing_receipt, True
         return receipt, True
     finally:
         lock.release()
@@ -382,24 +448,12 @@ def _evaluate(
     locked: bool,
 ) -> dict[str, Any]:
     reasons: set[str] = set()
-    authority = manifest["authority"]
     work = manifest["work"]
     task_data = envelope["task"]
-    if plan["decision_status"] != "ready":
-        reasons.add("plan_not_ready")
-    if plan["recommended_surface"] != "cbr_batch":
-        reasons.add("recommended_surface_not_cbr_batch")
-    if authority["decision_authority"] not in {
-        "delegated_decision",
-        "bounded_experiment",
-    }:
-        reasons.add("decision_authority_incompatible")
-    if manifest["automation_boundary"] not in {"manual_only", "bounded_automatic"}:
-        reasons.add("automation_boundary_incompatible")
-    if envelope["request_id"] != manifest["request_id"]:
-        reasons.add("request_id_mismatch")
-    if envelope["request_fingerprint"] != plan["request_fingerprint"]:
-        reasons.add("request_fingerprint_mismatch")
+    reasons.update(
+        request_binding_reason_codes(manifest, envelope, plan["request_fingerprint"])
+    )
+    reasons.update(config_independent_gate_reason_codes(manifest, plan))
     if work["isolation"] in {"worktree", "required"} and config.worktree_mode != "task":
         reasons.add("worktree_isolation_unavailable")
     if task_data["capacity_pool"] not in config.capacity_pools:
@@ -469,6 +523,16 @@ def _evaluate(
         "snapshot_consistency": "locked" if locked else "unlocked_read_only",
         "mutation": {"allowed": False, "applied": False},
     }
+
+
+def _task_barrier_conflict(
+    preview: dict[str, Any], *, task_present: bool
+) -> dict[str, Any]:
+    conflict = dict(preview)
+    conflict["status"] = "conflict"
+    conflict["task_present"] = task_present
+    conflict["reason_codes"] = ["task_identity_conflict"]
+    return conflict
 
 
 def _create_orchestrated_task(

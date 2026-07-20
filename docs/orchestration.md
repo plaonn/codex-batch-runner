@@ -175,6 +175,12 @@ without external or destructive worker mutations. Proposal, recommend-and-pause,
 advisory-only, fallback, shell, external-command, and automatic dispatch are
 not supported.
 
+Dispatch evaluates manifest, envelope, request binding, deterministic identity,
+plan/surface/authority, confirmation, config, then runtime state in that order.
+Binding and config-independent plan/authority failures do not discover config.
+Binding failures keep request and dispatch IDs null; later failures may report
+the validated IDs.
+
 The normalized immutable execution projection is canonical JSON with sorted
 keys, UTF-8, `ensure_ascii=false`, and compact separators.
 `execution_fingerprint` is its SHA-256. A private SHA-256 digest of the manifest
@@ -189,6 +195,14 @@ The task's first atomic write includes `origin_parent_ref`,
 projection are immutable. Orchestrated admission suppresses `task_created` and
 emits a best-effort `orchestration_task_admitted` event containing only
 dispatch/task IDs, surface, and the two fingerprints.
+
+Every queue creation path publishes a fully-written same-directory temporary
+JSON file with an atomic exclusive no-clobber operation. Concurrent ordinary
+enqueue and orchestration dispatch therefore cannot replace one another.
+Exclusive-create failure makes dispatch re-read and classify the deterministic
+task. Immediately before receipt creation, dispatch re-reads the task and
+requires the complete immutable identity to match; missing or drifted state
+cannot produce a receipt.
 
 Receipts are stored below the configured runtime at
 `orchestration-dispatch-receipts/{dispatch_id}.json` as exact immutable

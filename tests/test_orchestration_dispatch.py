@@ -5,6 +5,7 @@ import io
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,7 +13,11 @@ from unittest.mock import patch
 from codex_batch_runner.cli import main
 from codex_batch_runner.config import Config
 from codex_batch_runner.events import list_events
-from codex_batch_runner.fs import read_json, write_json_atomic
+from codex_batch_runner.fs import (
+    read_json,
+    write_json_atomic,
+    write_json_atomic_create,
+)
 from codex_batch_runner.orchestration import build_orchestration_plan, validate_manifest
 from codex_batch_runner.orchestration_dispatch import (
     IMMUTABLE_RECEIPT_KEYS,
@@ -25,7 +30,7 @@ from codex_batch_runner.orchestration_dispatch import (
     validate_execution_envelope,
 )
 from codex_batch_runner.parent_attention import list_parent_attention
-from codex_batch_runner.queue import load_task, save_task, task_path
+from codex_batch_runner.queue import create_task, load_task, save_task, task_path
 from codex_batch_runner.runner import emit_parent_attention_for_task
 
 
@@ -353,7 +358,7 @@ class OrchestrationDispatchTests(unittest.TestCase):
 
     def test_crash_after_task_write_recovers_without_duplicate(self) -> None:
         identity = identity_for(self.manifest, self.envelope)
-        original = write_json_atomic
+        original = write_json_atomic_create
 
         def fail_receipt(path: Path, data: object) -> None:
             if "orchestration-dispatch-receipts" in str(path):
@@ -361,7 +366,7 @@ class OrchestrationDispatchTests(unittest.TestCase):
             original(path, data)
 
         with patch(
-            "codex_batch_runner.orchestration_dispatch.write_json_atomic",
+            "codex_batch_runner.orchestration_dispatch.write_json_atomic_create",
             side_effect=fail_receipt,
         ):
             with self.assertRaises(OSError):
@@ -384,6 +389,112 @@ class OrchestrationDispatchTests(unittest.TestCase):
             if event["event_type"] == "orchestration_task_admitted"
         ]
         self.assertEqual(1, len(admitted))
+
+    def test_concurrent_ordinary_create_never_clobbers_or_yields_false_receipt(
+        self,
+    ) -> None:
+        for winner in ("ordinary", "d2"):
+            manifest_value = cbr_manifest()
+            manifest_value["idempotency_key"] = f"race-{winner}"
+            manifest = validate_manifest(manifest_value)
+            plan = build_orchestration_plan(manifest)
+            envelope_value = json.loads(json.dumps(self.envelope))
+            envelope_value["request_fingerprint"] = plan["request_fingerprint"]
+            envelope = validate_execution_envelope(envelope_value)
+            identity = identity_for(manifest, envelope)
+            barrier = threading.Barrier(2)
+            winner_published = threading.Event()
+            original_create = write_json_atomic_create
+            ordinary_result: dict[str, object] = {}
+
+            def synchronized_create(path: Path, data: object) -> None:
+                is_d2 = bool(
+                    isinstance(data, dict) and data.get("orchestration_dispatch_id")
+                )
+                this_writer = "d2" if is_d2 else "ordinary"
+                barrier.wait(timeout=5)
+                if this_writer == winner:
+                    try:
+                        original_create(path, data)
+                    finally:
+                        winner_published.set()
+                else:
+                    self.assertTrue(winner_published.wait(timeout=5))
+                    original_create(path, data)
+
+            def ordinary_enqueue() -> None:
+                try:
+                    ordinary_result["task"] = create_task(
+                        self.config,
+                        "Ordinary competing prompt",
+                        str(self.repo),
+                        task_id=identity["task_id"],
+                        project_id="ordinary-project",
+                    )
+                except Exception as exc:
+                    ordinary_result["error"] = exc
+
+            with (
+                self.subTest(winner=winner),
+                patch(
+                    "codex_batch_runner.queue.write_json_atomic_create",
+                    side_effect=synchronized_create,
+                ),
+            ):
+                thread = threading.Thread(target=ordinary_enqueue)
+                thread.start()
+                report, success = apply_dispatch(self.config, manifest, envelope)
+                thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            stored = load_task(self.config, identity["task_id"])
+            receipt_path = (
+                self.config.log_dir.parent
+                / "orchestration-dispatch-receipts"
+                / f"{identity['dispatch_id']}.json"
+            )
+            if winner == "d2":
+                self.assertTrue(success)
+                self.assertIsInstance(ordinary_result.get("error"), FileExistsError)
+                self.assertEqual(envelope["prompt"], stored["prompt"])
+                self.assertTrue(receipt_path.exists())
+                self.assertEqual(identity["task_id"], report["task_id"])
+            else:
+                self.assertFalse(success)
+                self.assertEqual("Ordinary competing prompt", stored["prompt"])
+                self.assertEqual("conflict", report["status"])
+                self.assertIn("task_identity_conflict", report["reason_codes"])
+                self.assertFalse(receipt_path.exists())
+
+    def test_receipt_barrier_rejects_task_missing_after_create(self) -> None:
+        identity = identity_for(self.manifest, self.envelope)
+        import codex_batch_runner.orchestration_dispatch as dispatch_module
+
+        original_read = dispatch_module._read_task
+        read_count = 0
+
+        def remove_before_receipt(config: Config, task_id: str) -> object:
+            nonlocal read_count
+            read_count += 1
+            if read_count == 2:
+                task_path(config, task_id).unlink(missing_ok=True)
+                return None
+            return original_read(config, task_id)
+
+        with patch(
+            "codex_batch_runner.orchestration_dispatch._read_task",
+            side_effect=remove_before_receipt,
+        ):
+            report, success = apply_dispatch(self.config, self.manifest, self.envelope)
+        self.assertFalse(success)
+        self.assertEqual("conflict", report["status"])
+        self.assertIn("task_identity_conflict", report["reason_codes"])
+        self.assertFalse(
+            (
+                self.config.log_dir.parent
+                / "orchestration-dispatch-receipts"
+                / f"{identity['dispatch_id']}.json"
+            ).exists()
+        )
 
     def test_identity_matrix_conflicts_fail_closed(self) -> None:
         receipt, success = apply_dispatch(self.config, self.manifest, self.envelope)
@@ -555,6 +666,98 @@ class OrchestrationDispatchTests(unittest.TestCase):
         self.assertEqual(2, code)
         self.assertEqual("blocked", report["decision_status"])
         trigger.assert_not_called()
+
+    def test_binding_failure_precedes_confirmation_and_config_with_null_ids(
+        self,
+    ) -> None:
+        manifest_path, envelope_path = self.write_inputs()
+        for field, value, reason in (
+            ("request_id", "different-request", "request_id_mismatch"),
+            (
+                "request_fingerprint",
+                "sha256:" + "0" * 64,
+                "request_fingerprint_mismatch",
+            ),
+        ):
+            changed = json.loads(envelope_path.read_text(encoding="utf-8"))
+            changed[field] = value
+            envelope_path.write_text(json.dumps(changed), encoding="utf-8")
+            with patch(
+                "codex_batch_runner.cli.Config.load",
+                side_effect=AssertionError("config must not load"),
+            ) as load:
+                code, report, _ = self.cli(
+                    "--config",
+                    str(self.root / "invalid-config.json"),
+                    "orchestration",
+                    "dispatch-cbr",
+                    "--manifest",
+                    str(manifest_path),
+                    "--execution-envelope",
+                    str(envelope_path),
+                    "--dry-run",
+                    "--confirm-request-id",
+                    "wrong-confirmation",
+                    "--json",
+                )
+            self.assertEqual(2, code)
+            self.assertIn(reason, report["reason_codes"])
+            self.assertIsNone(report["request_id"])
+            self.assertIsNone(report["dispatch_id"])
+            load.assert_not_called()
+            envelope_path.write_text(json.dumps(self.envelope), encoding="utf-8")
+
+    def test_plan_and_authority_gates_precede_confirmation_and_config(self) -> None:
+        cases: list[tuple[dict, str]] = []
+        subagent = cbr_manifest()
+        subagent["work"].update(
+            {
+                "duration": "short",
+                "persistence": "turn_bound",
+                "resume": "not_needed",
+                "dependency": "none",
+                "collection": "immediate_parent",
+            }
+        )
+        subagent["surface_preferences"] = ["codex_subagent"]
+        cases.append((subagent, "recommended_surface_not_cbr_batch"))
+        advisory = cbr_manifest()
+        advisory["authority"]["decision_authority"] = "recommend_and_pause"
+        advisory["automation_boundary"] = "advisory_only"
+        advisory["mutation"]["allowed"] = ["local_files"]
+        cases.append((advisory, "decision_authority_incompatible"))
+
+        for index, (manifest_value, expected_reason) in enumerate(cases):
+            manifest = validate_manifest(manifest_value)
+            plan = build_orchestration_plan(manifest)
+            envelope = json.loads(json.dumps(self.envelope))
+            envelope["request_id"] = manifest["request_id"]
+            envelope["request_fingerprint"] = plan["request_fingerprint"]
+            manifest_path = self.root / f"gate-manifest-{index}.json"
+            envelope_path = self.root / f"gate-envelope-{index}.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            envelope_path.write_text(json.dumps(envelope), encoding="utf-8")
+            with patch(
+                "codex_batch_runner.cli.Config.load",
+                side_effect=AssertionError("config must not load"),
+            ) as load:
+                code, report, _ = self.cli(
+                    "--config",
+                    str(self.root / "invalid-config.json"),
+                    "orchestration",
+                    "dispatch-cbr",
+                    "--manifest",
+                    str(manifest_path),
+                    "--execution-envelope",
+                    str(envelope_path),
+                    "--apply",
+                    "--json",
+                )
+            self.assertEqual(2, code)
+            self.assertIn(expected_reason, report["reason_codes"])
+            self.assertEqual(manifest["request_id"], report["request_id"])
+            self.assertIsNotNone(report["dispatch_id"])
+            load.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -6,6 +6,10 @@
 
 각 task는 사람이 읽을 수 있는 개별 JSON 파일로 저장함.
 
+신규 task 생성은 same-directory fully-written temporary file을 atomic
+exclusive no-clobber 방식으로 publish합니다. 동일 task id의 concurrent
+creator는 기존 target을 replace하지 않고 `FileExistsError`로 종료합니다.
+
 ```json
 {
   "id": "task-20260620-001",

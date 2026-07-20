@@ -16,7 +16,9 @@ def read_json(path: Path, default: Any = None) -> Any:
 
 def write_json_atomic(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as file:
@@ -30,6 +32,30 @@ def write_json_atomic(path: Path, data: Any) -> None:
             tmp_path.unlink()
         except FileNotFoundError:
             pass
+        raise
+
+
+def write_json_atomic_create(path: Path, data: Any) -> None:
+    """Atomically publish a fully-written JSON file without replacing a target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2, sort_keys=True)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        try:
+            os.link(tmp_path, path)
+        except FileExistsError:
+            raise
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
         raise
 
 
