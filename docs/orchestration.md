@@ -299,3 +299,63 @@ parent-attention delivery/acknowledgement, non-CBR adapters, or coordination
 surface mutation. Those operations require a later activation contract and
 must reuse the deterministic D2 task/receipt identity rather than introducing a
 second queue-admission path.
+
+## D3-1 local ingress and durable shadow state
+
+`cbr [--config CONFIG] orchestration publish-local-ingress --bundle
+PRIVATE_PATH (--dry-run | --apply) [--confirm-source-event-id EVENT_ID]
+[--json]` is the only implemented source publisher. It accepts one exact
+runtime-private `orchestration-local-ingress-v1` bundle and never dispatches a
+task. The producer identity is fixed to `cbr-local-operator-ingress` revision
+`cbr-local-ingress-v1`; arbitrary adapter, connector, task-dashboard, planning,
+handoff, issue, or thread records are not source inputs.
+
+The bundle contains exact `producer`, `source_event_id`, `explicit_opt_in`,
+timezone-aware `created_at`/`expires_at`, policy, manifest, and execution
+envelope fields. It is at most 384 KiB. The publisher derives the D3 trigger;
+callers cannot supply a replacement trigger. The event ID fixes the trigger
+and D2 idempotency identity. A bundle is publishable only when all of the
+following initial-lane constraints hold:
+
+- source and collection owner are exactly `operator`;
+- surface preference is exactly `cbr_batch` and automation is
+  `bounded_automatic`;
+- the exact policy has singleton source/project/repository/work/authority/
+  impact/mutation/isolation/verification/capacity scope matching the request;
+- work and task category are `verification`, verification is `objective`, no
+  dependency or interaction is present, and worker mutation is exactly
+  `read_only`;
+- impact is low, runtime/external/destructive worker mutation is prohibited,
+  and the policy keeps the existing one-admission future rollout ceiling; and
+- the event is not more than five minutes in the future, has not expired, and
+  has a lifetime no longer than 24 hours.
+
+`--dry-run` neither loads a queue lock nor creates runtime state. `--apply`
+requires the exact event-ID confirmation, uses the existing runner lock, and
+publishes a fully written record with exclusive no-clobber semantics below
+`orchestration-ingress/`. The directory and records must be regular,
+current-user-owned, and inaccessible to group/other users. Matching retries
+return `already_published`; malformed, insecure, or divergent records fail
+closed. Publish does not emit an orchestration receipt, task, event, outbox,
+trigger command, subprocess, or adapter call.
+
+`cbr [--config CONFIG] orchestration reconcile-local-shadow
+--source-event-id EVENT_ID (--dry-run | --apply)
+[--confirm-source-event-id EVENT_ID] [--json]` reloads the published bundle,
+derives its exact trigger, and reuses D3-0 reconciliation. Dry-run is strictly
+read-only. Apply requires exact confirmation and atomically stores only a
+sanitized `orchestration-reconciliation-state-v1` record below
+`orchestration-reconciliation/`. The record contains source/trigger/bundle
+identity, shadow decision and reason codes, the already separated lifecycle
+projection, observation timestamps, and observation count. It never contains
+prompt, cwd, parent reference, or input paths. Matching observations update the
+same state atomically; malformed or identity-drifted prior state is not
+overwritten.
+
+The local ingress publisher and reconciliation-state writer are not guarded
+activation. They do not poll for records, acquire retry leases, call D2
+dispatch, repair task/receipt/outbox state, deliver or acknowledge attention,
+write source disposition, mutate coordination systems, or expand policy from
+observations. `activation_mode=guarded` remains rejected. A later activation
+contract must retain exact source/event/D2 identity, define bounded consumer
+leases and retry/disposition semantics, and receive separate authorization.

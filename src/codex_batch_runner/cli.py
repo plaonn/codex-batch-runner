@@ -159,6 +159,16 @@ from .orchestration_guard import (
     load_guard_trigger,
     render_reconciliation_shadow,
 )
+from .orchestration_ingress import (
+    LocalIngressError,
+    LocalIngressLockBusy,
+    apply_local_reconciliation,
+    apply_publish,
+    build_local_reconciliation,
+    build_publish_preview,
+    load_local_ingress_bundle,
+    render_local_ingress,
+)
 from .parent_attention import acknowledge_parent_attention, deliver_parent_attention, list_parent_attention
 from .provider_resource_report import (
     ProviderResourceValidationError,
@@ -483,6 +493,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     orchestration_shadow.add_argument("--json", action="store_true", help="print JSON")
     orchestration_shadow.set_defaults(func=cmd_orchestration_reconcile_shadow)
+    orchestration_publish_local = orchestration_sub.add_parser(
+        "publish-local-ingress",
+        help="publish one explicit runtime-private local ingress bundle without dispatch",
+    )
+    orchestration_publish_local.add_argument("--bundle", required=True, metavar="PRIVATE_PATH")
+    publish_local_mode = orchestration_publish_local.add_mutually_exclusive_group(required=True)
+    publish_local_mode.add_argument("--dry-run", action="store_true")
+    publish_local_mode.add_argument("--apply", action="store_true")
+    orchestration_publish_local.add_argument("--confirm-source-event-id")
+    orchestration_publish_local.add_argument("--json", action="store_true", help="print JSON")
+    orchestration_publish_local.set_defaults(func=cmd_orchestration_publish_local_ingress)
+    orchestration_reconcile_local = orchestration_sub.add_parser(
+        "reconcile-local-shadow",
+        help="reconcile one published local ingress event without dispatch",
+    )
+    orchestration_reconcile_local.add_argument("--source-event-id", required=True)
+    reconcile_local_mode = orchestration_reconcile_local.add_mutually_exclusive_group(required=True)
+    reconcile_local_mode.add_argument("--dry-run", action="store_true")
+    reconcile_local_mode.add_argument("--apply", action="store_true")
+    orchestration_reconcile_local.add_argument("--confirm-source-event-id")
+    orchestration_reconcile_local.add_argument("--json", action="store_true", help="print JSON")
+    orchestration_reconcile_local.set_defaults(func=cmd_orchestration_reconcile_local_shadow)
 
     routing_policy_candidates = sub.add_parser(
         "routing-policy-candidates",
@@ -4242,6 +4274,95 @@ def cmd_orchestration_reconcile_shadow(
     except Exception:
         print("error: orchestration reconciliation shadow failed", file=sys.stderr)
         return 1
+
+
+def cmd_orchestration_publish_local_ingress(config: Config | None, args: argparse.Namespace) -> int:
+    del config  # Loading belongs after bundle and confirmation validation.
+    try:
+        try:
+            bundle = load_local_ingress_bundle(args.bundle)
+        except LocalIngressError as exc:
+            return _emit_local_ingress_error(str(exc), args.json)
+        event_id = bundle["source_event_id"]
+        confirmation_error = _local_ingress_confirmation_error(args, event_id)
+        if confirmation_error:
+            return _emit_local_ingress_error(confirmation_error, args.json)
+        try:
+            loaded_config = Config.load(args.config)
+        except Exception:
+            return _emit_local_ingress_error("config_invalid", args.json)
+        if args.dry_run:
+            report = build_publish_preview(loaded_config, bundle)
+            exit_code = 0 if report["status"] in {"ready", "already_published"} else 2
+        else:
+            try:
+                report, success = apply_publish(loaded_config, bundle)
+            except LocalIngressLockBusy:
+                return _emit_local_ingress_error("lock_busy", args.json)
+            exit_code = 0 if success else 2
+        return _emit_local_ingress(report, args.json, exit_code)
+    except Exception:
+        print("error: local orchestration ingress publish failed", file=sys.stderr)
+        return 1
+
+
+def cmd_orchestration_reconcile_local_shadow(config: Config | None, args: argparse.Namespace) -> int:
+    del config  # Loading belongs after confirmation validation.
+    event_id = args.source_event_id
+    confirmation_error = _local_ingress_confirmation_error(args, event_id)
+    if confirmation_error:
+        return _emit_local_ingress_error(confirmation_error, args.json)
+    try:
+        try:
+            loaded_config = Config.load(args.config)
+        except Exception:
+            return _emit_local_ingress_error("config_invalid", args.json)
+        if args.dry_run:
+            report = build_local_reconciliation(loaded_config, event_id)
+        else:
+            try:
+                report, success = apply_local_reconciliation(loaded_config, event_id)
+            except LocalIngressLockBusy:
+                return _emit_local_ingress_error("lock_busy", args.json)
+            if not success:
+                return _emit_local_ingress(report, args.json, 2)
+        exit_code = 0 if report["decision_status"] == "eligible_shadow" else 2
+        return _emit_local_ingress(report, args.json, exit_code)
+    except LocalIngressError as exc:
+        return _emit_local_ingress_error(str(exc), args.json)
+    except Exception:
+        print("error: local orchestration ingress reconciliation failed", file=sys.stderr)
+        return 1
+
+
+def _local_ingress_confirmation_error(args: argparse.Namespace, event_id: str) -> str | None:
+    confirmation = args.confirm_source_event_id
+    if args.dry_run and confirmation is not None:
+        return "confirmation_not_allowed"
+    if args.apply and confirmation is None:
+        return "confirmation_required"
+    if args.apply and confirmation != event_id:
+        return "confirmation_mismatch"
+    return None
+
+
+def _emit_local_ingress_error(reason: str, as_json: bool) -> int:
+    report = {
+        "schema_version": 1,
+        "contract": "orchestration-local-ingress-error-v1",
+        "decision_status": "invalid",
+        "reason_codes": [reason],
+        "mutation": {"allowed": False, "applied": False},
+    }
+    return _emit_local_ingress(report, as_json, 2)
+
+
+def _emit_local_ingress(report: dict[str, object], as_json: bool, exit_code: int) -> int:
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_local_ingress(report), end="")
+    return exit_code
 
 
 def _emit_dispatch(report: dict[str, object], as_json: bool, exit_code: int) -> int:

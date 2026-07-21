@@ -13,7 +13,7 @@
 - [Worktree isolation and apply contract](worktrees.md): worktree execution isolation, apply/rebase/conflict-fix, cleanup, branch-prune, recovery.
 - [Events, index, and retention contract](events-and-index.md): event log, local SQLite read index, prune/retention behavior.
 - [CLI reference](cli-reference.md): command surface and human/JSON output semantics.
-- [Closed-loop orchestration](orchestration.md): D1 deterministic read-only surface recommendation, D2 explicit idempotent CBR admission with runtime-private execution binding, and D3-0 guarded policy/trigger reconciliation shadow.
+- [Closed-loop orchestration](orchestration.md): D1 deterministic read-only surface recommendation, D2 explicit idempotent CBR admission, D3-0 generic policy/trigger reconciliation shadow, and D3-1 CBR-owned local operator ingress with durable shadow-only state.
 - [Operator installation guide](operator-installation.md): fail-closed CLI/environment/XDG config discovery, guarded managed launchd lifecycle, doctor, manual cooldown wake, cross-project enqueue/check flow.
 - [Beta operations guide](beta-operations.md): practical beta operating model, inbox triage, review workflow, JSON output use, smoke checklist.
 
