@@ -359,3 +359,46 @@ write source disposition, mutate coordination systems, or expand policy from
 observations. `activation_mode=guarded` remains rejected. A later activation
 contract must retain exact source/event/D2 identity, define bounded consumer
 leases and retry/disposition semantics, and receive separate authorization.
+
+## D3-2 explicit one-event guarded consumer
+
+`cbr [--config CONFIG] orchestration consume-local-ingress
+--source-event-id EVENT_ID (--dry-run | --apply)
+[--confirm-source-event-id EVENT_ID] [--json]` is the first guarded activation
+slice. It consumes exactly one named D3-1 event and delegates queue admission to
+the existing D2 dispatcher. It never scans the ingress directory and does not
+add a second queue writer.
+
+Eligibility requires an unexpired exact D3-1 bundle with
+`activation_mode=guarded`, the existing read-only verification singleton lane,
+and at least one matching durable D3-1 shadow observation whose only blocker
+was `activation_not_implemented`. The consumer rechecks source, policy, trigger,
+request, execution, idempotency, D2 state, and private record identity on every
+attempt. Generic `reconcile-shadow` continues to reject guarded activation;
+only this one-event consumer can opt into the guarded evaluator.
+
+Apply requires exact event-ID confirmation. Under the existing runner lock it
+claims a private `orchestration-consumer-state-v1` lease, then releases the lock
+before calling D2, which acquires the same lock for its atomic admission. The
+lease lasts 120 seconds. At most three admission attempts are allowed, with
+30-second and 120-second retry waits. Only `lock_busy` and `runner_paused` are
+automatic retry reasons. Expired leases are reclaimable; unknown failures,
+identity drift, policy violations, expiry, and D2 conflicts fail closed. If a
+process crashes after D2 admission, the next attempt recovers from the existing
+deterministic task and immutable D2 receipt rather than creating another task.
+
+Terminal consumption writes one immutable
+`orchestration-source-disposition-v1` record with result `admitted`,
+`blocked_terminal`, or `retry_exhausted`. It contains only source/trigger/bundle/
+dispatch/task identity and sanitized reason codes. The mutable consumer state
+can be reconstructed from that disposition after a crash. Neither record
+contains prompt, cwd, parent reference, raw error, transcript, or credentials.
+`cbr doctor` reports consumer phase counts, expired leases, disposition count,
+and invalid private records without repairing them.
+
+An admitted disposition proves source consumption and D2 queue admission only.
+Execution, completion, review, apply, parent-attention delivery/acknowledgement,
+and source-system delivery remain separate. D3-2 does not poll, modify launchd
+or runtime configuration, invoke a task in the same operation, deliver a
+disposition externally, mutate a coordination surface, or expand policy from
+observations. Automatic ingress discovery is a separate later rollout gate.

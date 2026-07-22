@@ -32,6 +32,8 @@
 
 `cbr [--config CONFIG] orchestration reconcile-local-shadow --source-event-id EVENT_ID (--dry-run | --apply) [--confirm-source-event-id EVENT_ID] [--json]`은 published local ingress를 exact derived trigger로 D3-0 shadow reconciliation합니다. Dry-run은 read-only입니다. Apply는 exact confirmation 뒤 sanitized `orchestration-reconciliation-state-v1`만 atomic update하며 observation count와 admission/execution/review/apply/attention/source-disposition 축을 보존합니다. Guarded dispatch, repair, delivery, acknowledgement, disposition write, coordination mutation은 수행하지 않습니다. Blocked shadow도 관찰 state로 기록할 수 있지만 admission eligibility나 policy authority로 승격되지 않습니다.
 
+`cbr [--config CONFIG] orchestration consume-local-ingress --source-event-id EVENT_ID (--dry-run | --apply) [--confirm-source-event-id EVENT_ID] [--json]`은 exact guarded D3-1 event 하나만 기존 D2 admission으로 전달합니다. Apply는 exact confirmation, matching shadow observation, private 120초 lease, 최대 3회 attempt를 요구합니다. `lock_busy`와 `runner_paused`만 30초/120초 backoff로 retry하며, crash 후에는 deterministic D2 task/receipt로 복구합니다. Terminal 결과는 immutable local `orchestration-source-disposition-v1`으로 기록됩니다. 이 command는 ingress scan, launchd/config 변경, same-call execution, external delivery, coordination mutation을 수행하지 않으며 disposition/receipt를 completion 증거로 해석하지 않습니다.
+
 초기 CLI:
 
 ```bash

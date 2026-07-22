@@ -15,6 +15,7 @@ from .execution_evidence_v2 import reporting_evidence_view
 from .fs import read_json
 from .lock import lock_status
 from .model_requirements import SAFE_CONFIG_OVERRIDE_KEYS, command_options, resolve_execution_config
+from .orchestration_consumer import consumer_doctor_summary
 from .queue import (
     RUNNABLE_STATUSES,
     capacity_blockers,
@@ -45,6 +46,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
     model_config = model_requirement_summary(config)
     codex_checks = codex_command_checks(codex_info)
     git = git_summary(config.root)
+    orchestration_consumer = consumer_doctor_summary(config)
     checks = [
         check_directory("queue_dir", config.queue_dir),
         check_directory("log_dir", config.log_dir),
@@ -64,6 +66,20 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
     )
     checks.extend(task_warnings)
     checks.extend(warning("git", message) for message in git["warnings"])
+    if orchestration_consumer["invalid_record_count"]:
+        checks.append(
+            error(
+                "orchestration_consumer_state",
+                f"{orchestration_consumer['invalid_record_count']} invalid consumer record(s)",
+            )
+        )
+    if orchestration_consumer["expired_lease_count"]:
+        checks.append(
+            warning(
+                "orchestration_consumer_lease",
+                f"{orchestration_consumer['expired_lease_count']} expired consumer lease(s)",
+            )
+        )
     report = {
         "ok": not any(check["level"] == "error" for check in checks),
         "config": {
@@ -87,6 +103,7 @@ def build_doctor_report(config: Config) -> dict[str, Any]:
         "capacity": capacity_summary(config, tasks),
         "model_requirements": model_config,
         "execution_evidence": execution_evidence_summary(tasks),
+        "orchestration_consumer": orchestration_consumer,
         "decision_cards": decision_card_summary(config),
         "auto_review": auto_review_summary(tasks, config),
         "tasks": task_summary(tasks, by_id, config),
@@ -943,6 +960,18 @@ def render_doctor_report(report: dict[str, Any]) -> str:
             f"  runner_pause_reason: {(state.get('runner_pause') or {}).get('reason')}",
             f"  runner_pause_paused_at: {(state.get('runner_pause') or {}).get('paused_at')}",
             f"  runner_pause_paused_by: {(state.get('runner_pause') or {}).get('paused_by')}",
+        ]
+    )
+    orchestration_consumer = report.get("orchestration_consumer") or {}
+    lines.extend(
+        [
+            "",
+            "orchestration_consumer:",
+            f"  state_count: {orchestration_consumer.get('state_count', 0)}",
+            f"  states_by_phase: {orchestration_consumer.get('states_by_phase', {})}",
+            f"  expired_lease_count: {orchestration_consumer.get('expired_lease_count', 0)}",
+            f"  disposition_count: {orchestration_consumer.get('disposition_count', 0)}",
+            f"  invalid_record_count: {orchestration_consumer.get('invalid_record_count', 0)}",
         ]
     )
     lock = report["lock"]

@@ -159,6 +159,13 @@ from .orchestration_guard import (
     load_guard_trigger,
     render_reconciliation_shadow,
 )
+from .orchestration_consumer import (
+    ConsumerError,
+    ConsumerLockBusy,
+    apply_consumer,
+    build_consumer_preview,
+    render_consumer,
+)
 from .orchestration_ingress import (
     LocalIngressError,
     LocalIngressLockBusy,
@@ -515,6 +522,17 @@ def build_parser() -> argparse.ArgumentParser:
     orchestration_reconcile_local.add_argument("--confirm-source-event-id")
     orchestration_reconcile_local.add_argument("--json", action="store_true", help="print JSON")
     orchestration_reconcile_local.set_defaults(func=cmd_orchestration_reconcile_local_shadow)
+    orchestration_consume_local = orchestration_sub.add_parser(
+        "consume-local-ingress",
+        help="explicitly consume one guarded local ingress event through D2 admission",
+    )
+    orchestration_consume_local.add_argument("--source-event-id", required=True)
+    consume_local_mode = orchestration_consume_local.add_mutually_exclusive_group(required=True)
+    consume_local_mode.add_argument("--dry-run", action="store_true")
+    consume_local_mode.add_argument("--apply", action="store_true")
+    orchestration_consume_local.add_argument("--confirm-source-event-id")
+    orchestration_consume_local.add_argument("--json", action="store_true", help="print JSON")
+    orchestration_consume_local.set_defaults(func=cmd_orchestration_consume_local_ingress)
 
     routing_policy_candidates = sub.add_parser(
         "routing-policy-candidates",
@@ -4335,6 +4353,34 @@ def cmd_orchestration_reconcile_local_shadow(config: Config | None, args: argpar
         return 1
 
 
+def cmd_orchestration_consume_local_ingress(config: Config | None, args: argparse.Namespace) -> int:
+    del config  # Loading belongs after confirmation validation.
+    event_id = args.source_event_id
+    confirmation_error = _local_ingress_confirmation_error(args, event_id)
+    if confirmation_error:
+        return _emit_consumer_error(confirmation_error, args.json)
+    try:
+        try:
+            loaded_config = Config.load(args.config)
+        except Exception:
+            return _emit_consumer_error("config_invalid", args.json)
+        if args.dry_run:
+            report = build_consumer_preview(loaded_config, event_id)
+            exit_code = 0 if report["status"] in {"ready", "already_admitted"} else 2
+        else:
+            try:
+                report, success = apply_consumer(loaded_config, event_id)
+            except ConsumerLockBusy:
+                return _emit_consumer_error("lock_busy", args.json)
+            exit_code = 0 if success else 2
+        return _emit_consumer(report, args.json, exit_code)
+    except (ConsumerError, LocalIngressError) as exc:
+        return _emit_consumer_error(str(exc), args.json)
+    except Exception:
+        print("error: local orchestration consumer failed", file=sys.stderr)
+        return 1
+
+
 def _local_ingress_confirmation_error(args: argparse.Namespace, event_id: str) -> str | None:
     confirmation = args.confirm_source_event_id
     if args.dry_run and confirmation is not None:
@@ -4362,6 +4408,25 @@ def _emit_local_ingress(report: dict[str, object], as_json: bool, exit_code: int
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_local_ingress(report), end="")
+    return exit_code
+
+
+def _emit_consumer_error(reason: str, as_json: bool) -> int:
+    report = {
+        "schema_version": 1,
+        "contract": "orchestration-local-consumer-error-v1",
+        "status": "invalid",
+        "reason_codes": [reason],
+        "mutation": {"allowed": False, "applied": False},
+    }
+    return _emit_consumer(report, as_json, 2)
+
+
+def _emit_consumer(report: dict[str, object], as_json: bool, exit_code: int) -> int:
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_consumer(report), end="")
     return exit_code
 
 

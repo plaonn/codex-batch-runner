@@ -391,6 +391,24 @@ def load_published_bundle(config: Config, source_event_id: str) -> dict[str, Any
     return validate_local_ingress_bundle(value)
 
 
+def load_reconciliation_state(config: Config, source_event_id: str) -> dict[str, Any]:
+    report = build_local_reconciliation(config, source_event_id)
+    path = reconciliation_state_path(config, source_event_id)
+    _validate_private_directory_if_present(path.parent)
+    value = _load_private_json(path, missing=None)
+    if value is None:
+        raise LocalIngressError("reconciliation_state_not_found")
+    if not _valid_reconciliation_state(value, report):
+        raise LocalIngressError("reconciliation_state_conflict")
+    return value
+
+
+def local_ingress_time_reasons(
+    bundle: dict[str, Any], *, now: datetime | None = None
+) -> list[str]:
+    return _time_reasons(validate_local_ingress_bundle(bundle), _aware_utc(now))
+
+
 def ingress_dir(config: Config) -> Path:
     return config.root / "orchestration-ingress"
 

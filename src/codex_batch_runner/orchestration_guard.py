@@ -350,6 +350,7 @@ def build_reconciliation_shadow(
     trigger: dict[str, Any],
     manifest: dict[str, Any],
     envelope: dict[str, Any],
+    allow_guarded_activation: bool = False,
 ) -> dict[str, Any]:
     policy = validate_guard_policy(policy)
     trigger = validate_guard_trigger(trigger)
@@ -373,7 +374,9 @@ def build_reconciliation_shadow(
 
     if not policy["active"]:
         reasons.add("policy_inactive")
-    if policy["activation_mode"] != "shadow":
+    if policy["activation_mode"] != "shadow" and not (
+        allow_guarded_activation and policy["activation_mode"] == "guarded"
+    ):
         reasons.add("activation_not_implemented")
     if (
         trigger["source_id"] != policy["source"]["source_id"]

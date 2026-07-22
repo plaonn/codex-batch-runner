@@ -9,6 +9,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,10 +20,19 @@ from codex_batch_runner.orchestration import (
     validate_manifest,
 )
 from codex_batch_runner.orchestration_dispatch import validate_execution_envelope
+from codex_batch_runner.orchestration_dispatch import DispatchLockBusy
 from codex_batch_runner.orchestration_guard import (
     guard_idempotency_key,
     trigger_id_for,
     validate_guard_policy,
+)
+from codex_batch_runner.orchestration_consumer import (
+    ConsumerError,
+    apply_consumer,
+    build_consumer_preview,
+    consumer_doctor_summary,
+    consumer_state_path,
+    disposition_path,
 )
 from codex_batch_runner.orchestration_ingress import (
     BUNDLE_CONTRACT,
@@ -39,6 +49,7 @@ from codex_batch_runner.orchestration_ingress import (
     reconciliation_state_path,
     validate_local_ingress_bundle,
 )
+from codex_batch_runner.state import set_runner_pause
 
 
 NOW = datetime(2030, 1, 1, 1, 0, tzinfo=timezone.utc)
@@ -467,6 +478,260 @@ class OrchestrationIngressTests(unittest.TestCase):
                 self.config, live_bundle["source_event_id"]
             ).exists()
         )
+
+    def guarded_bundle(self, *, event_id: str = "guarded-event") -> dict:
+        bundle = self.bundle_value(event_id=event_id)
+        bundle["policy"]["activation_mode"] = "guarded"
+        return validate_local_ingress_bundle(bundle)
+
+    def prepare_guarded_event(self, *, event_id: str = "guarded-event") -> dict:
+        bundle = self.guarded_bundle(event_id=event_id)
+        _, published = apply_publish(self.config, bundle, now=NOW)
+        self.assertTrue(published)
+        shadow, observed = apply_local_reconciliation(self.config, event_id, now=NOW)
+        self.assertTrue(observed)
+        self.assertEqual(["activation_not_implemented"], shadow["reason_codes"])
+        return bundle
+
+    def test_consumer_dry_run_requires_guarded_observation_and_is_read_only(
+        self,
+    ) -> None:
+        bundle = self.prepare_guarded_event()
+        before = sorted(
+            str(path.relative_to(self.root)) for path in self.root.rglob("*")
+        )
+        report = build_consumer_preview(self.config, bundle["source_event_id"], now=NOW)
+        after = sorted(
+            str(path.relative_to(self.root)) for path in self.root.rglob("*")
+        )
+        self.assertEqual(before, after)
+        self.assertEqual("ready", report["status"])
+        self.assertEqual("eligible_shadow", report["activation"]["decision_status"])
+        self.assertFalse(
+            consumer_state_path(self.config, bundle["source_event_id"]).exists()
+        )
+        self.assertFalse(self.config.queue_dir.exists())
+
+    def test_consumer_missing_shadow_observation_does_not_burn_event(self) -> None:
+        bundle = self.guarded_bundle(event_id="missing-observation")
+        _, published = apply_publish(self.config, bundle, now=NOW)
+        self.assertTrue(published)
+        report, success = apply_consumer(
+            self.config, bundle["source_event_id"], now=NOW
+        )
+        self.assertFalse(success)
+        self.assertEqual("blocked", report["status"])
+        self.assertIn("reconciliation_state_not_found", report["reason_codes"])
+        self.assertFalse(
+            consumer_state_path(self.config, bundle["source_event_id"]).exists()
+        )
+        self.assertFalse(self.config.queue_dir.exists())
+
+    def test_consumer_admits_once_and_writes_immutable_local_disposition(self) -> None:
+        bundle = self.prepare_guarded_event()
+        report, success = apply_consumer(
+            self.config, bundle["source_event_id"], now=NOW
+        )
+        self.assertTrue(success)
+        self.assertEqual("admitted", report["status"])
+        self.assertEqual(1, len(list(self.config.queue_dir.glob("*.json"))))
+        disposition = json.loads(
+            disposition_path(self.config, report["trigger_id"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual("admitted", disposition["result"])
+        self.assertNotIn(
+            bundle["execution_envelope"]["prompt"], json.dumps(disposition)
+        )
+        doctor = consumer_doctor_summary(self.config, now=NOW)
+        self.assertEqual({"admitted": 1}, doctor["states_by_phase"])
+        self.assertEqual(1, doctor["disposition_count"])
+        self.assertEqual(0, doctor["invalid_record_count"])
+
+        state_before = consumer_state_path(
+            self.config, bundle["source_event_id"]
+        ).read_bytes()
+        disposition_before = disposition_path(
+            self.config, report["trigger_id"]
+        ).read_bytes()
+        repeated, success = apply_consumer(
+            self.config, bundle["source_event_id"], now=NOW
+        )
+        self.assertTrue(success)
+        self.assertEqual("admitted", repeated["status"])
+        self.assertEqual({"allowed": False, "applied": False}, repeated["mutation"])
+        self.assertEqual(
+            state_before,
+            consumer_state_path(self.config, bundle["source_event_id"]).read_bytes(),
+        )
+        self.assertEqual(
+            disposition_before,
+            disposition_path(self.config, report["trigger_id"]).read_bytes(),
+        )
+        self.assertEqual(1, len(list(self.config.queue_dir.glob("*.json"))))
+
+    def test_consumer_retry_is_bounded_and_duplicate_call_respects_backoff(
+        self,
+    ) -> None:
+        bundle = self.prepare_guarded_event(event_id="retry-event")
+        with patch(
+            "codex_batch_runner.orchestration_consumer.apply_dispatch",
+            side_effect=DispatchLockBusy(),
+        ):
+            first, success = apply_consumer(
+                self.config, bundle["source_event_id"], now=NOW
+            )
+            self.assertFalse(success)
+            self.assertEqual("retry_wait", first["status"])
+            duplicate, success = apply_consumer(
+                self.config, bundle["source_event_id"], now=NOW
+            )
+            self.assertFalse(success)
+            self.assertEqual("retry_wait", duplicate["status"])
+            second, _ = apply_consumer(
+                self.config,
+                bundle["source_event_id"],
+                now=NOW + timedelta(seconds=31),
+            )
+            self.assertEqual("retry_wait", second["status"])
+            exhausted, _ = apply_consumer(
+                self.config,
+                bundle["source_event_id"],
+                now=NOW + timedelta(seconds=152),
+            )
+            self.assertEqual("exhausted", exhausted["status"])
+        self.assertFalse(self.config.queue_dir.exists())
+
+    def test_consumer_shadow_policy_and_malformed_state_fail_closed(self) -> None:
+        bundle = self.bundle_value(event_id="shadow-policy-event")
+        _, published = apply_publish(self.config, bundle, now=NOW)
+        self.assertTrue(published)
+        _, observed = apply_local_reconciliation(
+            self.config, bundle["source_event_id"], now=NOW
+        )
+        self.assertTrue(observed)
+        report, success = apply_consumer(
+            self.config, bundle["source_event_id"], now=NOW
+        )
+        self.assertFalse(success)
+        self.assertEqual("blocked", report["status"])
+        self.assertIn("consumer_activation_mode_not_guarded", report["reason_codes"])
+        self.assertFalse(self.config.queue_dir.exists())
+
+        guarded = self.prepare_guarded_event(event_id="malformed-consumer-state")
+        path = consumer_state_path(self.config, guarded["source_event_id"])
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        path.write_text('{"schema_version": 1}', encoding="utf-8")
+        os.chmod(path, 0o600)
+        with self.assertRaisesRegex(ConsumerError, "consumer_state_invalid"):
+            build_consumer_preview(self.config, guarded["source_event_id"], now=NOW)
+        self.assertFalse(
+            disposition_path(
+                self.config,
+                trigger_id_for(SOURCE_ID, guarded["source_event_id"]),
+            ).exists()
+        )
+
+    def test_runner_pause_retry_is_bounded_before_d2_call(self) -> None:
+        bundle = self.prepare_guarded_event(event_id="paused-event")
+        set_runner_pause(self.config, "maintenance", "test")
+        first, _ = apply_consumer(self.config, bundle["source_event_id"], now=NOW)
+        self.assertEqual("retry_wait", first["status"])
+        second, _ = apply_consumer(
+            self.config,
+            bundle["source_event_id"],
+            now=NOW + timedelta(seconds=31),
+        )
+        self.assertEqual("retry_wait", second["status"])
+        exhausted, _ = apply_consumer(
+            self.config,
+            bundle["source_event_id"],
+            now=NOW + timedelta(seconds=152),
+        )
+        self.assertEqual("exhausted", exhausted["status"])
+        self.assertFalse(self.config.queue_dir.exists())
+
+    def test_consumer_recovers_crash_after_d2_admission(self) -> None:
+        bundle = self.prepare_guarded_event(event_id="crash-event")
+        with patch(
+            "codex_batch_runner.orchestration_consumer._finalize_admitted",
+            side_effect=RuntimeError("synthetic crash"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "synthetic crash"):
+                apply_consumer(self.config, bundle["source_event_id"], now=NOW)
+        self.assertEqual(1, len(list(self.config.queue_dir.glob("*.json"))))
+        recovered, success = apply_consumer(
+            self.config,
+            bundle["source_event_id"],
+            now=NOW + timedelta(seconds=121),
+        )
+        self.assertTrue(success)
+        self.assertEqual("admitted", recovered["status"])
+        self.assertEqual(1, len(list(self.config.queue_dir.glob("*.json"))))
+
+    def test_consumer_recovers_existing_d2_after_third_attempt_crash(self) -> None:
+        bundle = self.prepare_guarded_event(event_id="third-attempt-crash")
+        with patch(
+            "codex_batch_runner.orchestration_consumer.apply_dispatch",
+            side_effect=DispatchLockBusy(),
+        ):
+            apply_consumer(self.config, bundle["source_event_id"], now=NOW)
+            apply_consumer(
+                self.config,
+                bundle["source_event_id"],
+                now=NOW + timedelta(seconds=31),
+            )
+        with patch(
+            "codex_batch_runner.orchestration_consumer._finalize_admitted",
+            side_effect=RuntimeError("synthetic third-attempt crash"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "third-attempt crash"):
+                apply_consumer(
+                    self.config,
+                    bundle["source_event_id"],
+                    now=NOW + timedelta(seconds=152),
+                )
+        recovered, success = apply_consumer(
+            self.config,
+            bundle["source_event_id"],
+            now=NOW + timedelta(seconds=273),
+        )
+        self.assertTrue(success)
+        self.assertEqual("admitted", recovered["status"])
+        self.assertEqual(3, recovered["consumer"]["attempt_count"])
+        self.assertEqual(1, len(list(self.config.queue_dir.glob("*.json"))))
+
+    def test_cli_consumer_requires_confirmation(self) -> None:
+        current = datetime.now(timezone.utc)
+        bundle = self.guarded_bundle(event_id="cli-consumer-event")
+        bundle["created_at"] = (current - timedelta(minutes=1)).isoformat()
+        bundle["expires_at"] = (current + timedelta(hours=1)).isoformat()
+        bundle = validate_local_ingress_bundle(bundle)
+        _, published = apply_publish(self.config, bundle)
+        self.assertTrue(published)
+        _, observed = apply_local_reconciliation(self.config, bundle["source_event_id"])
+        self.assertTrue(observed)
+        base = (
+            "--config",
+            str(self.config_path),
+            "orchestration",
+            "consume-local-ingress",
+            "--source-event-id",
+            bundle["source_event_id"],
+        )
+        code, report, _ = self.cli(*base, "--apply", "--json")
+        self.assertEqual(2, code)
+        self.assertEqual(["confirmation_required"], report["reason_codes"])
+        code, report, _ = self.cli(
+            *base,
+            "--apply",
+            "--confirm-source-event-id",
+            bundle["source_event_id"],
+            "--json",
+        )
+        self.assertEqual(0, code)
+        self.assertEqual("admitted", report["status"])
 
 
 if __name__ == "__main__":
