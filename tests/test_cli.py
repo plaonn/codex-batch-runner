@@ -7079,6 +7079,38 @@ class CliTests(unittest.TestCase):
             self.assertIn("token [REDACTED]", output)
             self.assertNotIn("private-value", output)
 
+    def test_transcript_falls_back_to_running_task_log_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "prompt", tmp, task_id="task-running-transcript")
+            task["status"] = "running"
+            save_task(config, task)
+            log_path = config.log_dir / "task-running-transcript" / "attempt-1.jsonl"
+            log_path.parent.mkdir(parents=True)
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": "live progress",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            code, output = run_cli(
+                ["--config", str(config_path), "transcript", "task-running-transcript"]
+            )
+
+            self.assertEqual(0, code)
+            self.assertEqual([], load_task(config, "task-running-transcript")["log_paths"])
+            self.assertIn("## attempt 1: attempt-1.jsonl", output)
+            self.assertIn("live progress", output)
+
     def test_follow_prints_compact_sanitized_attempt_stream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = write_config(tmp)

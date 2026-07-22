@@ -8,6 +8,8 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
@@ -19,6 +21,7 @@ from codex_batch_runner.codex import CodexResult
 from codex_batch_runner.evidence import list_rate_limit_evidence
 from codex_batch_runner.events import list_events
 from codex_batch_runner.fs import write_json_atomic
+from codex_batch_runner.lock import FileLock
 from codex_batch_runner.external_json_command import run_external_json_command_task
 from codex_batch_runner.model_requirements import ResolvedExecutionConfig
 from codex_batch_runner.prompts import build_prompt
@@ -178,6 +181,62 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("runnable", second["status"])
             self.assertEqual(0, second["attempts"])
             self.assertEqual("unlocked\n", marker.read_text(encoding="utf-8"))
+
+    def test_running_codex_publishes_live_log_identity_and_progress_without_clobbering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, "meaningful_then_hang")
+            create_task(config, "work", tmp, task_id="task-live")
+            outcomes = []
+
+            def execute() -> None:
+                outcomes.append(run_next(config))
+
+            with patch.object(runner_module, "LIVE_PROGRESS_UPDATE_INTERVAL_SECONDS", 0.0):
+                worker = threading.Thread(target=execute)
+                worker.start()
+                deadline = time.monotonic() + 3.0
+                live = None
+                while time.monotonic() < deadline:
+                    candidate = load_task(config, "task-live")
+                    progress = candidate.get("last_progress")
+                    if (
+                        candidate.get("status") == "running"
+                        and candidate.get("session_id") == "synthetic-session"
+                        and candidate.get("thread_id") == "synthetic-thread"
+                        and isinstance(progress, dict)
+                        and progress.get("meaningful_event_count", 0) >= 1
+                    ):
+                        live = candidate
+                        break
+                    time.sleep(0.02)
+
+                self.assertIsNotNone(live)
+                assert live is not None
+                self.assertEqual(1, len(live["log_paths"]))
+                self.assertEqual("attempt-1.jsonl", Path(live["log_paths"][0]).name)
+                self.assertTrue(Path(live["log_paths"][0]).exists())
+                self.assertNotIn("prompt", live["last_progress"])
+                self.assertNotIn("events", live["last_progress"])
+
+                lock = FileLock(config.lock_file, config.stale_lock_seconds)
+                self.assertTrue(lock.acquire(task_id="operator-update"))
+                try:
+                    latest = load_task(config, "task-live")
+                    latest["operator_observation"] = "preserve-me"
+                    save_task(config, latest)
+                finally:
+                    lock.release()
+
+                worker.join(timeout=5)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(1, len(outcomes))
+            self.assertEqual("completed", outcomes[0].status)
+            completed = load_task(config, "task-live")
+            self.assertEqual("completed", completed["status"])
+            self.assertEqual("preserve-me", completed["operator_observation"])
+            self.assertEqual(1, len(completed["log_paths"]))
+            self.assertNotIn("last_progress", completed)
 
     def test_run_next_runs_codex_cli_maintenance_after_last_task_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

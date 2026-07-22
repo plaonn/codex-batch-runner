@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import Config
 from .execution_evidence_v3 import enforce_codex_command_identity
@@ -22,6 +22,7 @@ STARTUP_STALL_REASON = "startup_stall"
 FIRST_MEANINGFUL_STALL_REASON = "first_meaningful_timeout"
 MID_RUN_IDLE_REASON = "mid_run_idle_timeout"
 TOTAL_RUNTIME_REASON = "total_runtime_timeout"
+LiveProgressCallback = Callable[[dict[str, Any], dict[str, Any]], None]
 
 
 @dataclass
@@ -145,6 +146,9 @@ def run_codex(
     enforce_codex_command_identity(task, settings, command, config)
     stderr_chunks: list[str] = []
     events: list[dict[str, Any]] = []
+    live_progress_callback = task.get("_live_progress_callback")
+    if not callable(live_progress_callback):
+        live_progress_callback = None
 
     try:
         process = subprocess.Popen(
@@ -185,7 +189,14 @@ def run_codex(
     tracker = ProgressTracker(start_monotonic=time.monotonic())
     assert process.stdout is not None
     with process.stdout, log_path.open("w", encoding="utf-8") as log_file:
-        read_stdout_with_watchdog(process, log_file, events, tracker, config)
+        read_stdout_with_watchdog(
+            process,
+            log_file,
+            events,
+            tracker,
+            config,
+            live_progress_callback=live_progress_callback,
+        )
 
     returncode = process.wait()
     stderr_thread.join(timeout=5)
@@ -220,6 +231,8 @@ def read_stdout_with_watchdog(
     events: list[dict[str, Any]],
     tracker: ProgressTracker,
     config: Config,
+    *,
+    live_progress_callback: LiveProgressCallback | None = None,
 ) -> None:
     assert process.stdout is not None
     line_queue: queue.Queue[str] = queue.Queue()
@@ -237,14 +250,23 @@ def read_stdout_with_watchdog(
         except queue.Empty:
             line = None
         if line:
-            record_stdout_line(line, log_file, events, tracker)
-            drain_stdout_queue(line_queue, log_file, events, tracker)
+            record_stdout_line(
+                line, log_file, events, tracker,
+                live_progress_callback=live_progress_callback,
+            )
+            drain_stdout_queue(
+                line_queue, log_file, events, tracker,
+                live_progress_callback=live_progress_callback,
+            )
         reason = watchdog_reason(tracker, config)
         if reason:
             terminate_for_watchdog(process, tracker, reason, config.codex_watchdog_grace_seconds)
             break
     stdout_thread.join(timeout=1)
-    drain_stdout_queue(line_queue, log_file, events, tracker)
+    drain_stdout_queue(
+        line_queue, log_file, events, tracker,
+        live_progress_callback=live_progress_callback,
+    )
 
 
 def drain_stdout_queue(
@@ -252,13 +274,18 @@ def drain_stdout_queue(
     log_file: Any,
     events: list[dict[str, Any]],
     tracker: ProgressTracker,
+    *,
+    live_progress_callback: LiveProgressCallback | None = None,
 ) -> None:
     while True:
         try:
             line = line_queue.get_nowait()
         except queue.Empty:
             break
-        record_stdout_line(line, log_file, events, tracker)
+        record_stdout_line(
+            line, log_file, events, tracker,
+            live_progress_callback=live_progress_callback,
+        )
 
 
 def record_stdout_line(
@@ -266,6 +293,8 @@ def record_stdout_line(
     log_file: Any,
     events: list[dict[str, Any]],
     tracker: ProgressTracker,
+    *,
+    live_progress_callback: LiveProgressCallback | None = None,
 ) -> None:
     tracker.record_stdout_line()
     log_file.write(line)
@@ -274,6 +303,13 @@ def record_stdout_line(
     if isinstance(parsed, dict):
         events.append(parsed)
         tracker.record_event(parsed, time.monotonic())
+        if live_progress_callback is not None:
+            try:
+                live_progress_callback(parsed, tracker.as_dict())
+            except Exception:
+                # Live metadata is best-effort observability and must never abort
+                # or alter the worker execution result.
+                pass
 
 
 def watchdog_reason(tracker: ProgressTracker, config: Config) -> str | None:

@@ -9,9 +9,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePath
-from typing import Any
+from typing import Any, Callable
 
-from .codex import FIRST_MEANINGFUL_STALL_REASON, STARTUP_STALL_REASON, CodexResult, run_codex
+from .codex import FIRST_MEANINGFUL_STALL_REASON, STARTUP_STALL_REASON, CodexResult, first_recursive_value, is_meaningful_event, run_codex
 from .config import Config
 from .events import emit_task_event, result_summary_payload, transition_payload
 from .parent_attention import create_parent_attention
@@ -39,7 +39,7 @@ from .fs import ensure_dir
 from .lock import FileLock
 from .maintenance import build_codex_cli_maintenance_report, run_codex_cli_maintenance
 from .prompts import build_prompt
-from .queue import is_in_cooldown, recover_stale_running_tasks, save_task, select_next_task
+from .queue import is_in_cooldown, load_task, recover_stale_running_tasks, save_task, select_next_task
 from .review_next import build_review_next_apply_report_locked, has_actionable_auto_review_candidate
 from .shell import ShellResult, run_shell_task
 from .state import (
@@ -69,6 +69,7 @@ ACTIVE_RUN_FIELDS = (
     "active_run_started_at",
     "active_execution_target_snapshot",
 )
+LIVE_PROGRESS_UPDATE_INTERVAL_SECONDS = 5.0
 
 
 @dataclass
@@ -184,6 +185,7 @@ def run_next(config: Config, *, suppress_wake_hooks: bool = False) -> RunOutcome
             result = run_external_json_command_task(config, claimed.run_task, claimed.prompt, claimed.attempt)
             outcome = finalize_external_json_command_run(config, claimed, result)
         else:
+            claimed.run_task["_live_progress_callback"] = live_codex_progress_callback(config, claimed)
             result = run_codex(config, claimed.run_task, claimed.prompt, claimed.attempt)
             outcome = finalize_codex_run(config, claimed, result)
     except Exception as exc:
@@ -300,6 +302,11 @@ def claim_next_implementation_task_locked(
     task["active_runner_pid"] = os.getpid()
     task["active_run_attempt"] = task["attempts"]
     task["active_run_started_at"] = started_at
+    if execution_backend == "codex":
+        attempt_log_path = config.log_dir / str(task["id"]) / f"attempt-{task['attempts']}.jsonl"
+        log_paths = task.setdefault("log_paths", [])
+        if str(attempt_log_path) not in log_paths:
+            log_paths.append(str(attempt_log_path))
     if execution_config and execution_config.selected_target_snapshot:
         task["active_execution_target_snapshot"] = execution_config.selected_target_snapshot
     if execution_cwd:
@@ -427,6 +434,80 @@ def acquire_finalize_lock(config: Config) -> FileLock:
         if time.monotonic() >= deadline:
             raise RuntimeError("could not acquire queue lock to finalize task result")
         time.sleep(0.1)
+
+
+def live_codex_progress_callback(
+    config: Config,
+    claimed: ClaimedRun,
+) -> Callable[[dict[str, Any], dict[str, Any]], None]:
+    last_write_monotonic = 0.0
+    identity_written = False
+    meaningful_written = False
+    observed_session_id: str | None = None
+    observed_thread_id: str | None = None
+    meaningful_observed = False
+
+    def publish(event: dict[str, Any], progress: dict[str, Any]) -> None:
+        nonlocal identity_written, meaningful_written, last_write_monotonic
+        nonlocal observed_session_id, observed_thread_id, meaningful_observed
+        thread_id = first_recursive_value(event, ("thread_id", "threadId"))
+        session_id = first_recursive_value(
+            event,
+            ("session_id", "sessionId", "conversation_id"),
+        ) or thread_id
+        if thread_id:
+            observed_thread_id = str(thread_id)
+        if session_id:
+            observed_session_id = str(session_id)
+        meaningful = is_meaningful_event(event)
+        meaningful_observed = meaningful_observed or meaningful
+        first_identity = bool((observed_session_id or observed_thread_id) and not identity_written)
+        first_meaningful = bool(meaningful_observed and not meaningful_written)
+        now_monotonic = time.monotonic()
+        if not first_identity and not first_meaningful:
+            if not meaningful or now_monotonic - last_write_monotonic < LIVE_PROGRESS_UPDATE_INTERVAL_SECONDS:
+                return
+        if persist_live_codex_progress(
+            config,
+            claimed,
+            progress,
+            session_id=observed_session_id,
+            thread_id=observed_thread_id,
+        ):
+            identity_written = identity_written or bool(observed_session_id or observed_thread_id)
+            meaningful_written = meaningful_written or meaningful_observed
+            last_write_monotonic = now_monotonic
+
+    return publish
+
+
+def persist_live_codex_progress(
+    config: Config,
+    claimed: ClaimedRun,
+    progress: dict[str, Any],
+    *,
+    session_id: str | None,
+    thread_id: str | None,
+) -> bool:
+    deadline = time.monotonic() + 1.0
+    lock = FileLock(config.lock_file, config.stale_lock_seconds)
+    while not lock.acquire(task_id=str(claimed.task["id"])):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    try:
+        task = load_task(config, str(claimed.task["id"]))
+        if task.get("status") != "running" or task.get("active_run_id") != claimed.active_run_id:
+            return False
+        if session_id:
+            task["session_id"] = session_id
+        if thread_id:
+            task["thread_id"] = thread_id
+        task["last_progress"] = dict(progress)
+        save_task(config, task)
+        return True
+    finally:
+        lock.release()
 
 
 def finalize_runner_exception(config: Config, claimed: ClaimedRun, exc: Exception) -> None:
@@ -616,7 +697,9 @@ def apply_codex_result(
     execution_settings: ResolvedExecutionConfig | None = None,
 ) -> None:
     clear_active_run_metadata(task)
-    task.setdefault("log_paths", []).append(str(result.log_path))
+    log_paths = task.setdefault("log_paths", [])
+    if str(result.log_path) not in log_paths:
+        log_paths.append(str(result.log_path))
     record_last_run(config, task, result, execution_settings=execution_settings)
     if result.command_kind == "resume":
         task["resume_count"] = int(task.get("resume_count", 0)) + 1
@@ -630,6 +713,7 @@ def apply_codex_result(
     if result.watchdog_reason in {STARTUP_STALL_REASON, FIRST_MEANINGFUL_STALL_REASON}:
         mark_startup_stall(config, task, result, previous_runnable_status)
         return
+    task.pop("last_progress", None)
 
     final_response = result.final_response
     if not final_response:

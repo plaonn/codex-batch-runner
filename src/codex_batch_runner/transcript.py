@@ -16,10 +16,19 @@ SECRET_PATTERNS = (
 )
 
 
-def render_task_transcript(task: dict, raw: bool = False) -> str:
+def render_task_transcript(
+    task: dict,
+    raw: bool = False,
+    *,
+    task_log_dir: Path | None = None,
+) -> str:
     chunks: list[str] = render_task_summary(task)
-    for index, path_text in enumerate(task.get("log_paths") or [], start=1):
-        path = Path(path_text)
+    paths = [Path(str(path_text)) for path_text in task.get("log_paths") or []]
+    if task_log_dir and task_log_dir.exists():
+        for path in sorted(task_log_dir.glob("attempt-*.jsonl")):
+            if path not in paths:
+                paths.append(path)
+    for index, path in enumerate(paths, start=1):
         chunks.append(f"## attempt {index}: {path.name}")
         if not path.exists():
             chunks.append("(log file missing)")

@@ -4595,7 +4595,14 @@ def cmd_logs(config: Config, args: argparse.Namespace) -> int:
 
 def cmd_transcript(config: Config, args: argparse.Namespace) -> int:
     task = load_task(config, args.task_id)
-    print(render_task_transcript(task, raw=args.raw), end="")
+    print(
+        render_task_transcript(
+            task,
+            raw=args.raw,
+            task_log_dir=config.log_dir / args.task_id,
+        ),
+        end="",
+    )
     return 0
 
 
