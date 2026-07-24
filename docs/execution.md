@@ -303,6 +303,45 @@ Only implicit default `codex` tasks are eligible for worker target routing. An e
 
 Queue admission uses the planned worker target capacity pool for matching runnable tasks. This means a strict-review task routed to `external-review` is not blocked merely because the default `codex` pool is full, while running capacity still counts the pool stored on already claimed tasks.
 
+### Advisory worker certification and report-only canary
+
+`worker-certification-matrix-v1`은 explicit candidate snapshot과 candidate,
+target snapshot, task class, stable cohort에 exact-bind된 sanitized evidence만 받는
+pure advisory contract입니다. `Config`, queue, task, runner, external command,
+execution evidence history를 읽거나 수정하지 않습니다. 결과의
+`read_only=true`, `mutation_allowed=false`, `live_routing=false`는 certification이
+worker target의 trust state, backend, priority 또는 default routing을 승격하지
+않는다는 뜻입니다.
+
+Certification task class는 `readonly-objective`와
+`bounded-write-isolated`를 분리합니다. Boundary matrix는 malformed
+inventory/command, timeout, invalid/mismatched final JSON, nonzero failure,
+resume-unavailable, unsafe changed files, worker-created commit rejection,
+optional model/token attestation, auth/quota failure를 독립적으로 기록합니다.
+`synthetic` evidence는 adapter boundary만 검증하며 natural provider behavior나
+실제 실행 표본으로 승격되지 않습니다. Natural objective evidence가 20건 이상,
+objective pass ratio가 95% 이상이고 adverse signal이 없을 때만
+`eligible-readonly` 또는 `eligible-bounded-write`가 됩니다. 100건 이상과 98%
+이상은 `default-candidate` advisory를 만들 수 있지만 live/default routing
+activation authority를 부여하지 않습니다. Certification은 30일 뒤
+revalidation 대상입니다.
+
+Token usage attestation이 없으면 token-cost comparability만 false가 되며 execution
+quality certification을 막지 않습니다. Existing external execution contract가
+monetary cost를 attest하지 않으므로 monetary-cost comparability는 항상 false입니다.
+실패 뒤 fallback은 모든 관련 failure evidence의 mutation provenance가
+`no_mutation`일 때만 advisory-safe로 표시합니다.
+
+Simulation은 certification과 exact-bound candidate/evidence를 다시 검증하며 30일
+revalidation 기한이 지나면 항상 baseline을 보고합니다.
+`worker-canary-simulation-v1`은 policy revision, worker, target snapshot, task class,
+task ID 또는 stable cohort key를 SHA-256 bucket에 넣어 5% 초기 report-only lane을
+결정합니다. 같은 stable input은 certification 수집 시각이 바뀌어도 같은 bucket을
+만듭니다. 최대 simulation ratio는 10%이고 explicit sanitized adverse signal이
+하나라도 있으면 baseline과 `rollback_recommended`를 냅니다. 이 report에는 apply
+surface, selected target mutation,
+cooldown/wake, queue/config write가 없으며 실제 canary activation을 수행하지 않습니다.
+
 
 ## Model requirement routing optimization policy
 
