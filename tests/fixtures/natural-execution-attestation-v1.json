@@ -1,0 +1,75 @@
+{
+  "attestation_id": "sha256:f4fe4a300ddcd9aac31a17e5caac24e458557a21b57448f7350810424453ad3f",
+  "attestor_revision": "attestor-v1",
+  "boundary_event": null,
+  "binding": {
+    "attempt": 1,
+    "execution_cohort_id": "sha256:bb4094131348b26b84d077967d597e0f6cb965accc06127189454a163264258b",
+    "execution_evidence_id": "sha256:d683d82a602e4de7ea8c5acce708f48354c3b44f95b69773133566e8e071b271",
+    "mapping_revision": "public-mapping-v1",
+    "resolved_config_digest": "sha256:99416920d625b5d30a981b859ed019775e6c18d7482ff35a3abc4143849bd09b",
+    "target_id": "exact-target-v1",
+    "target_snapshot_id": "public-worker-snapshot-v1",
+    "task_class": "bounded-write-isolated",
+    "task_id": "public-natural-task",
+    "worker_family": "public-worker-family",
+    "worker_id": "public-worker-v1"
+  },
+  "contract": "cbr-natural-execution-attestation-v1",
+  "evidence": {
+    "class": "natural-objective-run",
+    "mutation_provenance": "unknown",
+    "outcome": "pass",
+    "scenario": "objective_outcome"
+  },
+  "execution": {
+    "captured_at": "2029-12-31T23:58:00+00:00",
+    "identity_attestation": "verified",
+    "integrity_status": "compliant"
+  },
+  "kind": "natural_execution_attestation",
+  "privacy": {
+    "argv_included": false,
+    "credentials_included": false,
+    "private_identity_included": false,
+    "raw_paths_included": false,
+    "raw_prompt_included": false,
+    "raw_transcript_included": false,
+    "session_or_thread_ids_included": false
+  },
+  "promotion_authority": false,
+  "provider_observation": {
+    "fallback_attested": false,
+    "model_confidence": "provider_observed",
+    "model_source": "codex_jsonl",
+    "model_status": "observed",
+    "model_value": "public-model-v1",
+    "natural_origin_attested": false,
+    "quality_attested": false,
+    "safety_attested": false,
+    "token_confidence": "provider_observed",
+    "token_source": "codex_jsonl",
+    "token_status": "observed"
+  },
+  "recorded_at": "2030-01-02T04:00:00+00:00",
+  "report_only": true,
+  "review": {
+    "acceptance_method": "reviewer_pass",
+    "accepted": true,
+    "captured_at": "2029-12-31T23:59:00+00:00",
+    "evidence_id": "review-sha256:12c0433435ed12914723ce4d",
+    "objective_status": "passed",
+    "policy_version": "review-v1",
+    "reviewer_provenance_class": "kind=codex identity=provider_observed",
+    "rubric_version": "rubric-v1",
+    "semantic_status": "pass"
+  },
+  "routing_mutation_allowed": false,
+  "schema_version": 1,
+  "source_digests": {
+    "boundary": null,
+    "execution": "sha256:db002f4d4f87bdedce8b1bce7a53dfa717c16e6975f3c270b8f5dc275ff99603",
+    "review": "sha256:3eaa34e1e8425f187f380e81d242e7c000ef4e3c995bc3590f5c2abc48c0a8b6"
+  },
+  "supersedes_attestation_id": null
+}

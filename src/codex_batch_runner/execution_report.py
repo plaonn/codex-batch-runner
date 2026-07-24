@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .config import Config
 from .execution_evidence_v2 import reporting_evidence_view
+from .natural_execution_attestation import natural_execution_attestation_view
 from .queue import list_tasks, task_labels, task_project_id, task_project_root, task_title
 from .review_outcome_evidence import review_outcome_view
 from .routing_report import number
@@ -78,9 +80,11 @@ def build_execution_report(
     tasks.sort(key=execution_sort_key, reverse=True)
     if limit > 0:
         tasks = tasks[:limit]
-    rows = [task_execution_row(config, task) for task in tasks]
+    generated_at = iso_now()
+    report_as_of = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    rows = [task_execution_row(config, task, as_of=report_as_of) for task in tasks]
     return {
-        "generated_at": iso_now(),
+        "generated_at": generated_at,
         "filters": {
             "project": project_id,
             "project_root": project_root,
@@ -137,7 +141,12 @@ def execution_sort_key(task: dict[str, Any]) -> tuple[str, str]:
     return (str(last_run.get("finished_at") or task.get("completed_at") or task.get("updated_at") or ""), str(task.get("id") or ""))
 
 
-def task_execution_row(config: Config, task: dict[str, Any]) -> dict[str, Any]:
+def task_execution_row(
+    config: Config,
+    task: dict[str, Any],
+    *,
+    as_of: datetime | None = None,
+) -> dict[str, Any]:
     last_run = task.get("last_run") if isinstance(task.get("last_run"), dict) else {}
     resolved_config = (
         last_run.get("resolved_execution_config")
@@ -213,6 +222,9 @@ def task_execution_row(config: Config, task: dict[str, Any]) -> dict[str, Any]:
             "privacy": dict(observed_evidence.get("privacy") or {}),
         },
         "review_outcome": review_outcome_view(task),
+        "natural_execution_attestation": natural_execution_attestation_view(
+            task, as_of=as_of or datetime.now(timezone.utc)
+        ),
         "result": {
             "status": sanitize(last_result_value(task, "status")),
             "reviewer_decision": sanitize(reviewer_decision(task)),
