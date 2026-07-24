@@ -342,6 +342,73 @@ task ID 또는 stable cohort key를 SHA-256 bucket에 넣어 5% 초기 report-on
 surface, selected target mutation,
 cooldown/wake, queue/config write가 없으며 실제 canary activation을 수행하지 않습니다.
 
+### Natural execution attestation
+
+`cbr-natural-execution-attestation-v1`은 이미 끝난 실제 실행의 canonical
+`execution-evidence-v3`와 최종 `review-outcome-evidence-v1`을 exact-bind하는
+append-only, report-only contract입니다. 새 provider call이나 canary를 실행하지
+않으며 queue, selected target, config, cooldown, wake, reservation, retry, routing
+order를 변경하지 않습니다.
+
+Builder는 `last_run.execution_evidence_id`가 가리키는 v3 record가 history에 정확히
+하나 있고, task attempt와 일치하며, execution integrity가 compliant이고, task가
+terminal 상태인지 확인합니다. Review record는 execution cohort에 exact-bind되어야
+하며 execution/review evidence ID를 task ID, attempt, capture time으로 다시 계산해
+cross-task reuse를 거부합니다. Review policy/rubric, acceptance method, objective
+verification, semantic outcome, reviewer provenance를 보존합니다. Legacy 또는
+mechanical-only closure, semantic pass가 없는 passing claim, missing/unbound
+review, nonterminal task, future timestamp, schema mismatch는 attestation으로
+승격하지 않습니다.
+
+Worker family, worker ID, target snapshot, task class는 mutable task metadata에서
+추론하지 않고 explicit public-safe mapping으로만 받습니다. Mapping의 exact
+target은 execution evidence target과 일치해야 합니다. Resolved config, execution
+source, review source는 stable SHA-256 digest로 bind합니다. Raw prompt, transcript,
+argv, credential, account/email, private path, session/thread ID는 record에 넣지
+않습니다.
+
+Evidence class는 서로 합치지 않습니다.
+
+- `natural-objective-run`: accepted objective closure의 pass/fail/unknown
+- `natural-boundary-event`: 실제 terminal boundary observation
+- `provider-observation`: provider model/token availability만 표현하는 enrichment
+- `synthetic-boundary`: synthetic adapter boundary evidence
+
+Provider model/token observation은 token comparability를 enrich할 수 있지만 quality,
+safety, natural origin, fallback을 단독으로 attest하지 않습니다. Read-only report는
+네 class를 별도 배열과 count로 반환합니다. Correction은 이전 attestation ID를
+`supersedes_attestation_id`로 가리키는 새 record를 append하며 기존 record를
+overwrite하지 않습니다. Missing predecessor, duplicate correction, future record,
+같은 task/attempt/execution/class/scenario의 conflicting effective record는 fail
+closed입니다.
+
+기존 execution report row는 `natural_execution_attestation`에 같은 read-only
+분리 report를 additive field로 표시합니다. History가 없으면 count가 0인 report를
+반환하며 task, queue, routing state를 쓰지 않습니다. Invalid/future/conflicting
+history는 unknown으로 완화하지 않고 report 생성도 fail closed합니다.
+
+Natural boundary는 arbitrary scenario label을 받지 않습니다.
+`cbr-natural-boundary-event-v1` builder가 terminal task의 canonical timeout,
+nonzero return 또는 optional model/token observation fact를 실제로 찾은 경우에만
+source digest를 생성하고, attestation 시점에 current closure에서 같은 event를
+다시 도출해 stale/replayed event를 거부합니다. 현재 canonical closure가 직접
+증명하지 못하는 auth/quota/malformed/resume 및 final-result-only changed-files/
+commit scenario는 natural evidence로 추론하지 않고 거부합니다. Existing review
+contract가 mutation-free state를 직접 attest하지 않으므로 natural objective와
+boundary의 mutation provenance는 보수적으로 `unknown`이며, final JSON의
+changed-files/commits만으로 `no_mutation`을 주장할 수 없습니다.
+
+`build_worker_certification_evidence`는 effective natural objective/boundary
+attestation만 기존 `worker-certification-matrix-v1` envelope로 projection합니다.
+Provider-only와 synthetic-only evidence는 natural sample이 되지 않습니다. 이
+projection은 기존 certification threshold를 우회하지 않으며 한두 개의 자연 실행
+record만으로는 `experimental-private`를 벗어나지 않습니다. 결과에는 live/default
+routing 또는 promotion authority가 없습니다. Worker cohort ID는 caller가 정하지
+않고 execution cohort, resolved config digest, target, worker family, mapping
+revision과 candidate binding에서 파생하며 mixed cohort는 거부합니다.
+Public-safe representative record는
+`tests/fixtures/natural-execution-attestation-v1.json`에 있습니다.
+
 
 ## Model requirement routing optimization policy
 
