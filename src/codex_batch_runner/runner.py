@@ -33,6 +33,13 @@ from .execution_evidence_v3 import (
     build_external_execution_evidence_v3,
     exact_v3_settings,
 )
+from .execution_mutation_provenance import (
+    ExecutionMutationProvenanceError,
+    attach_execution_mutation_provenance,
+    attach_execution_mutation_snapshot,
+    build_execution_mutation_provenance,
+    capture_execution_mutation_snapshot,
+)
 from .model_requirements import ResolvedExecutionConfig, command_options, resolve_execution_config
 from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
@@ -312,6 +319,11 @@ def claim_next_implementation_task_locked(
     if execution_cwd:
         task["execution_worktree_status"] = "running"
         task["execution_started_at"] = started_at
+        record_mutation_snapshot(
+            task,
+            execution_cwd,
+            phase="pre_worker",
+        )
     save_task(config, task)
     emit_task_event(
         config,
@@ -356,8 +368,20 @@ def finalize_codex_run(config: Config, claimed: ClaimedRun, result: CodexResult)
         if claimed.execution_cwd:
             task["execution_worktree_status"] = "retained"
             task["execution_retained_at"] = iso_now()
+            record_mutation_snapshot(
+                task,
+                claimed.execution_cwd,
+                phase="post_worker_pre_cbr_commit",
+                reported_changed_files=(
+                    result.final_response.get("changed_files")
+                    if isinstance(result.final_response, dict)
+                    else None
+                ),
+            )
             auto_commit_worktree_result(config, task, result, claimed.execution_cwd)
         apply_codex_result(config, task, result, git_status_cwd=claimed.execution_cwd, execution_settings=claimed.execution_settings)
+        finalize_mutation_provenance(task, claimed.execution_cwd)
+        save_task(config, task)
         if claimed.usage_stale_reset_at:
             finish_usage_stale_attempt(config, claimed.usage_stale_reset_at, str(task["id"]))
         claimed.task = task
@@ -375,7 +399,15 @@ def finalize_shell_run(config: Config, claimed: ClaimedRun, result: ShellResult)
         if claimed.execution_cwd:
             task["execution_worktree_status"] = "retained"
             task["execution_retained_at"] = iso_now()
+            record_mutation_snapshot(
+                task,
+                claimed.execution_cwd,
+                phase="post_worker_pre_cbr_commit",
+                reported_changed_files=[],
+            )
         apply_shell_result(config, task, result, git_status_cwd=claimed.execution_cwd)
+        finalize_mutation_provenance(task, claimed.execution_cwd)
+        save_task(config, task)
         claimed.task = task
         return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
     finally:
@@ -395,6 +427,16 @@ def finalize_external_json_command_run(
         if claimed.execution_cwd:
             task["execution_worktree_status"] = "retained"
             task["execution_retained_at"] = iso_now()
+            record_mutation_snapshot(
+                task,
+                claimed.execution_cwd,
+                phase="post_worker_pre_cbr_commit",
+                reported_changed_files=(
+                    result.final_response.get("changed_files")
+                    if isinstance(result.final_response, dict)
+                    else None
+                ),
+            )
             completion_guard_error = None
             if external_json_command_completed_success(task, result):
                 completion_guard_error = external_json_command_worker_commit_error(task, claimed.execution_cwd)
@@ -410,6 +452,8 @@ def finalize_external_json_command_run(
             completion_guard_error=completion_guard_error,
             execution_settings=claimed.execution_settings,
         )
+        finalize_mutation_provenance(task, claimed.execution_cwd)
+        save_task(config, task)
         claimed.task = task
         return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
     finally:
@@ -423,6 +467,47 @@ def load_claimed_task_for_finalize(config: Config, claimed: ClaimedRun) -> dict[
     if task.get("active_run_id") != claimed.active_run_id:
         return None
     return task
+
+
+def record_mutation_snapshot(
+    task: dict[str, Any],
+    execution_cwd: Path | None,
+    *,
+    phase: str,
+    reported_changed_files: object = None,
+) -> None:
+    """Capture additive evidence without changing execution success semantics."""
+    try:
+        attach_execution_mutation_snapshot(
+            task,
+            capture_execution_mutation_snapshot(
+                task,
+                execution_cwd,
+                phase=phase,
+                reported_changed_files=reported_changed_files,
+            ),
+        )
+    except (ExecutionMutationProvenanceError, OSError):
+        task["execution_mutation_provenance_status"] = "unknown"
+
+
+def finalize_mutation_provenance(
+    task: dict[str, Any], execution_cwd: Path | None
+) -> None:
+    if execution_cwd is None:
+        return
+    record_mutation_snapshot(task, execution_cwd, phase="terminal_closure")
+    try:
+        attach_execution_mutation_provenance(
+            task,
+            build_execution_mutation_provenance(
+                task,
+                producer_revision="runner-vmp-imp-1",
+            ),
+        )
+        task["execution_mutation_provenance_status"] = "recorded"
+    except ExecutionMutationProvenanceError:
+        task["execution_mutation_provenance_status"] = "unknown"
 
 
 def acquire_finalize_lock(config: Config) -> FileLock:

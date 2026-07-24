@@ -6,6 +6,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .execution_evidence_v3 import validate_execution_evidence_v3
+from .execution_mutation_provenance import (
+    latest_execution_mutation_provenance,
+    validate_execution_mutation_provenance,
+)
 from .review_outcome_evidence import validate_review_outcome_evidence
 from .worker_certification import (
     BOUNDARY_SCENARIOS,
@@ -64,6 +68,7 @@ def build_natural_execution_attestation(
     recorded_at: datetime,
     supersedes_attestation_id: str | None = None,
     boundary_event: object | None = None,
+    mutation_record: object | None = None,
 ) -> dict[str, Any]:
     """Bind one already-finished execution/review closure to a report-only record."""
     recorded = _aware_utc(recorded_at, "recorded_at")
@@ -72,6 +77,33 @@ def build_natural_execution_attestation(
     mapping_value = _mapping(mapping, execution)
     _validate_closure(task, execution, review, recorded)
     _validate_observation(evidence_class, scenario, outcome, mutation_provenance, review)
+    scoped_mutation = None
+    if mutation_record is not None:
+        scoped_mutation = validate_execution_mutation_provenance(mutation_record)
+        current_mutation = latest_execution_mutation_provenance(task)
+        if scoped_mutation != current_mutation:
+            raise NaturalExecutionAttestationError(
+                "scoped mutation record is not the current verified task record"
+            )
+        if (
+            scoped_mutation["binding"]["task_id"] != str(task.get("id"))
+            or scoped_mutation["binding"]["attempt"] != task.get("attempts")
+            or scoped_mutation["binding"]["execution_evidence_id"]
+            != execution["evidence_id"]
+        ):
+            raise NaturalExecutionAttestationError(
+                "scoped mutation record does not match execution closure"
+            )
+        if mutation_provenance != "unknown":
+            raise NaturalExecutionAttestationError(
+                "scoped mutation provenance cannot replace global unknown"
+            )
+        if _timestamp(
+            scoped_mutation["recorded_at"], "mutation_record.recorded_at"
+        ) > recorded:
+            raise NaturalExecutionAttestationError(
+                "future scoped mutation source is ineligible"
+            )
     if evidence_class == "natural-boundary-event":
         validated_boundary = validate_natural_boundary_event(boundary_event)
         boundary_time = _timestamp(
@@ -163,6 +195,18 @@ def build_natural_execution_attestation(
                 else None
             ),
         },
+        "mutation_binding": (
+            {
+                "provenance_id": scoped_mutation["provenance_id"],
+                "scope": scoped_mutation["scope"]["name"],
+                "scoped_provenance": scoped_mutation["provenance"],
+                "global_provenance": "unknown",
+                "source_digest": _stable_id(scoped_mutation),
+                "worker_certification_projection_allowed": False,
+            }
+            if scoped_mutation is not None
+            else None
+        ),
         "boundary_event": (
             validated_boundary
             if evidence_class == "natural-boundary-event"
@@ -364,6 +408,24 @@ def attach_natural_execution_attestation(
         raise NaturalExecutionAttestationError(
             "attestation sources do not match current destination closure"
         )
+    mutation_binding = validated.get("mutation_binding")
+    if mutation_binding is not None:
+        current_mutation = latest_execution_mutation_provenance(task)
+        if (
+            current_mutation is None
+            or mutation_binding["provenance_id"]
+            != current_mutation["provenance_id"]
+            or mutation_binding["source_digest"] != _stable_id(current_mutation)
+        ):
+            raise NaturalExecutionAttestationError(
+                "attestation scoped mutation source does not match task history"
+            )
+        if _timestamp(
+            current_mutation["recorded_at"], "mutation_record.recorded_at"
+        ) > _timestamp(validated["recorded_at"], "recorded_at"):
+            raise NaturalExecutionAttestationError(
+                "future scoped mutation source is ineligible"
+            )
     if validated["evidence"]["class"] == "natural-boundary-event":
         boundary = validated["boundary_event"]
         expected_boundary = build_natural_boundary_event(
@@ -533,6 +595,13 @@ def build_natural_execution_attestation_report(
             "promotion_authority": False,
         },
         "mutation_allowed": False,
+        "scoped_mutation": {
+            "verified_record_count": sum(
+                item.get("mutation_binding") is not None for item in effective
+            ),
+            "global_provenance": "unknown",
+            "worker_certification_projection_allowed": False,
+        },
     }
 
 
@@ -705,6 +774,7 @@ def validate_natural_execution_attestation(record: object) -> dict[str, Any]:
         "review",
         "provider_observation",
         "source_digests",
+        "mutation_binding",
         "boundary_event",
         "attestor_revision",
         "supersedes_attestation_id",
@@ -714,7 +784,8 @@ def validate_natural_execution_attestation(record: object) -> dict[str, Any]:
         "promotion_authority",
         "attestation_id",
     }
-    if set(record) != expected:
+    legacy_expected = expected - {"mutation_binding"}
+    if frozenset(record) not in {frozenset(expected), frozenset(legacy_expected)}:
         raise NaturalExecutionAttestationError("attestation fields are not canonical")
     if (
         record.get("schema_version") != SCHEMA_VERSION
@@ -892,6 +963,30 @@ def validate_natural_execution_attestation(record: object) -> dict[str, Any]:
         raise NaturalExecutionAttestationError(
             "non-boundary evidence cannot include a boundary event"
         )
+    mutation_binding = record.get("mutation_binding")
+    if mutation_binding is not None:
+        if not isinstance(mutation_binding, dict) or set(mutation_binding) != {
+            "provenance_id",
+            "scope",
+            "scoped_provenance",
+            "global_provenance",
+            "source_digest",
+            "worker_certification_projection_allowed",
+        }:
+            raise NaturalExecutionAttestationError("invalid scoped mutation binding")
+        if (
+            mutation_binding["scoped_provenance"] not in MUTATION_PROVENANCE
+            or mutation_binding["global_provenance"] != "unknown"
+            or mutation_binding["worker_certification_projection_allowed"] is not False
+            or not _is_digest(mutation_binding["provenance_id"])
+            or not _is_digest(mutation_binding["source_digest"])
+            or not isinstance(mutation_binding["scope"], str)
+            or not mutation_binding["scope"]
+            or evidence["mutation_provenance"] != "unknown"
+        ):
+            raise NaturalExecutionAttestationError(
+                "scoped mutation binding cannot claim global provenance"
+            )
     _safe_id(record.get("attestor_revision"), "attestor_revision")
     supersedes = record.get("supersedes_attestation_id")
     if supersedes is not None:

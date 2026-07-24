@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import Config
 from .execution_evidence_v2 import reporting_evidence_view
+from .execution_mutation_provenance import execution_mutation_provenance_view
 from .natural_execution_attestation import natural_execution_attestation_view
 from .queue import list_tasks, task_labels, task_project_id, task_project_root, task_title
 from .review_outcome_evidence import review_outcome_view
@@ -223,6 +224,9 @@ def task_execution_row(
         },
         "review_outcome": review_outcome_view(task),
         "natural_execution_attestation": natural_execution_attestation_view(
+            task, as_of=as_of or datetime.now(timezone.utc)
+        ),
+        "execution_mutation_provenance": execution_mutation_provenance_view(
             task, as_of=as_of or datetime.now(timezone.utc)
         ),
         "result": {
