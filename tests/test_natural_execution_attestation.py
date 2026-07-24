@@ -33,9 +33,6 @@ from codex_batch_runner.review_outcome_evidence import (
     attach_review_outcome_evidence,
     build_review_outcome_evidence,
 )
-from codex_batch_runner.worker_certification import certify_worker
-
-
 RECORDED_AT = datetime(2030, 1, 2, 4, 0, tzinfo=timezone.utc)
 CANDIDATE = {
     "worker_id": "public-worker-v1",
@@ -203,25 +200,27 @@ class NaturalExecutionAttestationTests(unittest.TestCase):
             row["natural_execution_attestation"]["eligibility"]["live_routing"]
         )
 
-    def test_projection_is_advisory_and_provider_observation_only_enriches_tokens(self) -> None:
+    def test_unknown_mutation_is_reported_but_policy_ineligible_for_worker_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             record = build(closed_task(Path(tmp)))
 
-        envelope = build_worker_certification_evidence(
-            [record],
-            candidate=CANDIDATE,
-            as_of=RECORDED_AT,
+        report = build_natural_execution_attestation_report(
+            [record], as_of=RECORDED_AT
         )
-        self.assertEqual(1, len(envelope["records"]))
-        self.assertEqual("natural", envelope["records"][0]["evidence_class"])
-        self.assertTrue(envelope["records"][0]["token_usage_attested"])
-
-        certification = certify_worker(
-            CANDIDATE, envelope, evaluated_at=RECORDED_AT
+        self.assertEqual(1, report["eligibility"]["natural_record_count"])
+        self.assertEqual(0, report["eligibility"]["natural_worker_evidence_count"])
+        self.assertEqual(
+            ["unknown_or_unverified_mutation_provenance"],
+            report["eligibility"]["natural_policy_ineligible_reasons"],
         )
-        self.assertEqual("experimental-private", certification["state"])
-        self.assertFalse(certification["live_routing"])
-        self.assertFalse(certification["mutation_allowed"])
+        with self.assertRaisesRegex(
+            NaturalExecutionAttestationError, "policy-eligible"
+        ):
+            build_worker_certification_evidence(
+                [record],
+                candidate=CANDIDATE,
+                as_of=RECORDED_AT,
+            )
 
     def test_report_keeps_natural_provider_and_synthetic_classes_separate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,7 +245,8 @@ class NaturalExecutionAttestationTests(unittest.TestCase):
         self.assertEqual(1, len(report["classes"]["natural-objective-run"]))
         self.assertEqual(1, len(report["classes"]["provider-observation"]))
         self.assertEqual(1, len(report["classes"]["synthetic-boundary"]))
-        self.assertEqual(1, report["eligibility"]["natural_worker_evidence_count"])
+        self.assertEqual(1, report["eligibility"]["natural_record_count"])
+        self.assertEqual(0, report["eligibility"]["natural_worker_evidence_count"])
         self.assertFalse(report["eligibility"]["live_routing"])
         self.assertFalse(report["eligibility"]["promotion_authority"])
 
@@ -330,7 +330,7 @@ class NaturalExecutionAttestationTests(unittest.TestCase):
                 [conflict], as_of=RECORDED_AT
             )
         with self.assertRaisesRegex(
-            NaturalExecutionAttestationError, "no eligible natural"
+            NaturalExecutionAttestationError, "policy-eligible natural"
         ):
             build_worker_certification_evidence(
                 [provider],
@@ -367,13 +367,22 @@ class NaturalExecutionAttestationTests(unittest.TestCase):
             )
 
         self.assertTrue(record["source_digests"]["boundary"].startswith("sha256:"))
-        envelope = build_worker_certification_evidence(
+        report = build_natural_execution_attestation_report(
             [record],
-            candidate=CANDIDATE,
             as_of=RECORDED_AT,
             verified_boundary_events=[boundary],
         )
-        self.assertEqual("timeout", envelope["records"][0]["scenario"])
+        self.assertEqual(1, report["eligibility"]["natural_record_count"])
+        self.assertEqual(0, report["eligibility"]["natural_worker_evidence_count"])
+        with self.assertRaisesRegex(
+            NaturalExecutionAttestationError, "policy-eligible"
+        ):
+            build_worker_certification_evidence(
+                [record],
+                candidate=CANDIDATE,
+                as_of=RECORDED_AT,
+                verified_boundary_events=[boundary],
+            )
 
     def test_natural_boundary_rejects_replay_tampering_and_future_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -617,7 +626,7 @@ class NaturalExecutionAttestationTests(unittest.TestCase):
             ):
                 build(absent)
 
-    def test_attach_and_worker_projection_preserve_exact_task_and_cohort_binding(self) -> None:
+    def test_attach_preserves_task_binding_and_unknown_blocks_worker_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             first_task = closed_task(root, task_id="first-task")
@@ -633,7 +642,7 @@ class NaturalExecutionAttestationTests(unittest.TestCase):
             ):
                 attach_natural_execution_attestation(second_task, first)
             with self.assertRaisesRegex(
-                NaturalExecutionAttestationError, "mixed natural execution cohorts"
+                NaturalExecutionAttestationError, "policy-eligible"
             ):
                 build_worker_certification_evidence(
                     [first, second],
@@ -641,7 +650,7 @@ class NaturalExecutionAttestationTests(unittest.TestCase):
                     as_of=RECORDED_AT,
                 )
 
-    def test_attach_rejects_stale_review_and_worker_cohort_binds_review_policy(self) -> None:
+    def test_attach_rejects_stale_review_and_unknown_blocks_policy_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             first_task = closed_task(root, task_id="stale-review-task")
@@ -686,7 +695,7 @@ class NaturalExecutionAttestationTests(unittest.TestCase):
             )
             second = build(second_task)
             with self.assertRaisesRegex(
-                NaturalExecutionAttestationError, "mixed natural execution cohorts"
+                NaturalExecutionAttestationError, "policy-eligible"
             ):
                 build_worker_certification_evidence(
                     [first, second],

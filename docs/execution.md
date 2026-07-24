@@ -396,7 +396,9 @@ source digest를 생성하고, attestation 시점에 current closure에서 같�
 commit scenario는 natural evidence로 추론하지 않고 거부합니다. Existing review
 contract가 mutation-free state를 직접 attest하지 않으므로 natural objective와
 boundary의 mutation provenance는 보수적으로 `unknown`이며, final JSON의
-changed-files/commits만으로 `no_mutation`을 주장할 수 없습니다.
+changed-files/commits만으로 `no_mutation`을 주장할 수 없습니다. Unknown mutation
+record는 natural report count에는 남지만 certification policy에는 ineligible이며
+worker evidence envelope로 projection되지 않습니다.
 
 `build_worker_certification_evidence`는 effective natural objective/boundary
 attestation만 기존 `worker-certification-matrix-v1` envelope로 projection합니다.
@@ -406,6 +408,9 @@ record만으로는 `experimental-private`를 벗어나지 않습니다. 결과�
 routing 또는 promotion authority가 없습니다. Worker cohort ID는 caller가 정하지
 않고 execution cohort, resolved config digest, target, worker family, mapping
 revision과 candidate binding에서 파생하며 mixed cohort는 거부합니다.
+Current v1 closure가 verified mutation provenance를 제공하지 않는 동안 이 adapter는
+natural evidence를 축적·분리 보고만 하고 certification eligibility를 열지
+않습니다.
 Public-safe representative record는
 `tests/fixtures/natural-execution-attestation-v1.json`에 있습니다.
 

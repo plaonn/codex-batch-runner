@@ -498,6 +498,16 @@ def build_natural_execution_attestation_report(
         name: [item for item in effective if item["evidence"]["class"] == name]
         for name in sorted(EVIDENCE_CLASSES)
     }
+    natural_records = (
+        classes["natural-objective-run"]
+        + classes["natural-boundary-event"]
+    )
+    worker_eligible_natural = [
+        item
+        for item in natural_records
+        if item["evidence"]["mutation_provenance"]
+        in {"no_mutation", "mutation_observed"}
+    ]
     return {
         "schema_version": 1,
         "contract": "cbr-natural-execution-attestation-report-v1",
@@ -507,9 +517,15 @@ def build_natural_execution_attestation_report(
         "superseded_record_count": len(superseded_ids),
         "classes": classes,
         "eligibility": {
-            "natural_worker_evidence_count": sum(
-                len(classes[name])
-                for name in ("natural-objective-run", "natural-boundary-event")
+            "natural_record_count": len(natural_records),
+            "natural_worker_evidence_count": len(worker_eligible_natural),
+            "natural_policy_ineligible_count": (
+                len(natural_records) - len(worker_eligible_natural)
+            ),
+            "natural_policy_ineligible_reasons": (
+                ["unknown_or_unverified_mutation_provenance"]
+                if len(worker_eligible_natural) != len(natural_records)
+                else []
             ),
             "provider_observation_count": len(classes["provider-observation"]),
             "synthetic_boundary_count": len(classes["synthetic-boundary"]),
@@ -572,9 +588,15 @@ def build_worker_certification_evidence(
         report["classes"]["natural-objective-run"]
         + report["classes"]["natural-boundary-event"]
     )
+    natural_records = [
+        item
+        for item in natural_records
+        if item["evidence"]["mutation_provenance"]
+        in {"no_mutation", "mutation_observed"}
+    ]
     if not natural_records:
         raise NaturalExecutionAttestationError(
-            "no eligible natural worker evidence"
+            "no policy-eligible natural worker evidence"
         )
     for item in natural_records:
         binding = item["binding"]
