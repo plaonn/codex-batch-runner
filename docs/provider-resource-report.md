@@ -23,6 +23,44 @@ Native Codex cached-rollout projection은 experimental입니다. Current `codex-
 
 Sanitized shape는 [synthetic snapshot example](../examples/provider-resource-snapshot-v1.example.json)을 참조합니다.
 
+## Inactive provider acquisition adapters
+
+두 provider-specific acquisition module은 public provider-resource snapshot 또는
+runtime routing에 아직 연결되지 않은 bounded input adapter입니다. 이 분리는 다음
+contract revision이 optional window duration, multiple resource IDs, acquisition
+health와 timestamp provenance를 정의하기 전까지 유지됩니다.
+
+`codex_app_server_capacity`의 `codex-app-server-capacity-v1` contract:
+
+- local `codex app-server --stdio`에 `initialize`, `initialized`,
+  `account/rateLimits/read`를 순서대로 보내는 one-shot read입니다.
+- timeout은 최대 10초, stdout은 최대 64 KiB이며 shell evaluation, model turn,
+  authentication refresh를 수행하지 않습니다.
+- `limitId`, `planType`, primary/secondary `usedPercent`,
+  `windowDurationMins`, `resetsAt`만 projection합니다.
+- `remaining_ratio`는 `usedPercent`의 complement이며 absolute remaining/total을
+  추론하지 않습니다.
+- response receipt time은 `adapter_response_received_at` provenance의 advisory
+  collection time일 뿐 provider-observed authority가 아닙니다.
+- method-not-found, malformed response, timeout, output overflow는 raw
+  stdout/stderr/argv 없이 sanitized reason으로 축약됩니다. Cached rollout fallback은
+  advisory로만 표시되며 새 app-server read를 observed로 승격하지 않습니다.
+
+`antigravity_statusline`의 `antigravity-statusline-cache-v1` contract:
+
+- official statusLine payload의 `version`, optional `plan_tier`, `quota` map만
+  allowlist projection합니다. Bucket마다 `remaining_fraction`, `reset_time`,
+  optional `reset_in_seconds`와 public-safe bucket ID만 보존합니다.
+- email, session/conversation ID, transcript path, cwd, workspace, model, raw
+  payload와 unknown field는 보존하지 않습니다.
+- callback receipt time은 `statusline_callback_received_at` provenance의 advisory
+  collection time입니다. `reset_in_seconds`를 window duration으로 해석하지 않습니다.
+- sanitized field-presence bitmap과 value-free format fingerprint로 shape drift를
+  표시하고, cache write는 atomic이며 read는 기본 64 KiB로 제한됩니다.
+- collector가 존재해도 live user statusLine configuration은 자동 변경하지
+  않습니다. Source가 별도로 구성되지 않은 현재 CLI report는 계속
+  `resource_capability_unavailable`을 유지합니다.
+
 ## Mapping contract
 
 `provider-resource-mapping-v1`은 exact `target_id`를 operator-verified opaque provider quota identity에 bind합니다. Exact target binding이 primary이며 `capacity_pool`은 local pool projection을 만들기 위한 field일 뿐입니다.
