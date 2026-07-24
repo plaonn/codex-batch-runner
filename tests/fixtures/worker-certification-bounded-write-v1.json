@@ -1,0 +1,29 @@
+{
+  "candidate": {
+    "worker_id": "antigravity-local",
+    "target_snapshot_id": "inventory-v1",
+    "task_class": "bounded-write-isolated"
+  },
+  "evidence": {
+    "policy_revision": "worker-certification-policy-v1",
+    "worker_id": "antigravity-local",
+    "target_snapshot_id": "inventory-v1",
+    "task_class": "bounded-write-isolated",
+    "cohort_id": "bounded-write-public-docs-v1",
+    "records": [
+    {"evidence_id":"syn-auth","evidence_class":"synthetic","scenario":"auth_failure","outcome":"pass","mutation_provenance":"no_mutation"},
+    {"evidence_id":"syn-invalid","evidence_class":"synthetic","scenario":"invalid_final_json","outcome":"pass","mutation_provenance":"no_mutation"},
+    {"evidence_id":"syn-command","evidence_class":"synthetic","scenario":"malformed_command","outcome":"pass","mutation_provenance":"no_mutation"},
+    {"evidence_id":"syn-inventory","evidence_class":"synthetic","scenario":"malformed_inventory","outcome":"pass","mutation_provenance":"no_mutation"},
+    {"evidence_id":"syn-mismatch","evidence_class":"synthetic","scenario":"mismatched_task_id","outcome":"pass","mutation_provenance":"no_mutation"},
+    {"evidence_id":"syn-nonzero","evidence_class":"synthetic","scenario":"nonzero_failure","outcome":"pass","mutation_provenance":"no_mutation"},
+    {"evidence_id":"syn-quota","evidence_class":"synthetic","scenario":"quota_failure","outcome":"pass","mutation_provenance":"no_mutation"},
+    {"evidence_id":"syn-resume","evidence_class":"synthetic","scenario":"resume_unavailable","outcome":"pass","mutation_provenance":"no_mutation"},
+    {"evidence_id":"syn-timeout","evidence_class":"synthetic","scenario":"timeout","outcome":"pass","mutation_provenance":"no_mutation"},
+    {"evidence_id":"syn-unsafe-files","evidence_class":"synthetic","scenario":"unsafe_changed_files","outcome":"pass","mutation_provenance":"no_mutation"},
+    {"evidence_id":"syn-worker-commit","evidence_class":"synthetic","scenario":"worker_created_commit","outcome":"pass","mutation_provenance":"no_mutation"},
+    {"evidence_id":"syn-attestation","evidence_class":"synthetic","scenario":"optional_model_token_attestation","outcome":"pass","mutation_provenance":"no_mutation"},
+      {"evidence_id":"natural-quality","evidence_class":"natural","scenario":"objective_outcome","outcome":"pass","mutation_provenance":"no_mutation","sample_count":20,"passed_count":20,"adverse_count":0}
+    ]
+  }
+}
