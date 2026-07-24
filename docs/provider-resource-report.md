@@ -155,6 +155,60 @@ routing policy를 읽기 결과로 수정하지 않습니다. D2-B activation, a
 substitution, provider identity exception, 운영 threshold 선택은 이 command의 범위가
 아닙니다.
 
+## Wave B capacity bundle and shadow evaluation
+
+`provider-resource-capacity-bundle-v1`은 기존
+`provider-resource-snapshot-v1`을 변경하거나 대체하지 않는 additive evidence
+contract입니다. Strict validator는 canonical snapshot 또는 inactive provider
+adapter projection을 content-addressed observation으로 받고, producer revision,
+advisory pool projection, conflict evidence를 다시 검증합니다. Bundle lineage는
+canonical contract가 unchanged임을 명시하며 bundle 자체는
+`read_only=true`, `mutation_allowed=false`,
+`scheduling_authoritative=false`입니다.
+
+Codex app-server와 Antigravity adapter projection은 provider가 보고한 ratio와 reset
+evidence만 보존합니다. 현재 adapter contract가 quota identity, observation scope,
+local capacity pool을 attest하지 않으므로 이 projection만으로는 capacity-aware
+shadow recommendation을 만들지 않습니다. Canonical bridge도 snapshot에 없는 model
+scope를 추론하지 않고 `unknown`으로 보존합니다. Shadow request가 실제
+`provider-resource-mapping-v2`를 함께 검증해 exact target, quota identity, pool,
+scope와 producer revision을 결합합니다. Unknown, stale, degraded, unavailable,
+missing, ambiguous 또는 conflicting evidence는 기존 baseline 선택으로 fail
+closed합니다.
+
+`capacity-shadow-evaluation-request-v1`은 requirement, target inventory, selector,
+mapping, capacity policy, bundle, worker certification/canary revision을 고정하고,
+기존 selector가 capability, safety, hard constraint와 quality floor를 통과시킨 exact
+target만 selector order로 받습니다. Baseline decision 전체, canonical digest,
+selected target와 order도 immutable input입니다. 각 target은 정확히 하나의
+canonical mapping binding과 observation/provider/resource/quota
+identity/pool/constraint에 bind되어야 합니다. Baseline envelope의 target와 order는
+digested baseline decision 내부 값과도 일치해야 합니다.
+
+`capacity-shadow-evaluation-report-v1`은 baseline object, digest와 order를 그대로
+보존하고 별도 `shadow_recommendation`만 생성합니다. Revision currentness나 binding
+하나라도 어긋나면 capacity-unaware baseline fallback을 냅니다. Versioned capacity
+policy 아래 동일 window duration과 remaining unit인 단일 constraint끼리만
+비교합니다. 서로 다른 provider, quota identity와 pool도 canonical mapping이 exact
+target binding을 입증하면 shadow 비교할 수 있지만, 그 identity나 pool을 합치거나
+remaining을 합산하지 않습니다. Ratio, percent, token, credit, request 단위를 서로
+변환하거나 비교하지 않습니다.
+
+Worker target은 Wave A-3 contract가 동일 candidate/evidence에서 다시 도출한 current
+certification과 report-only canary record에 exact-bind되어야 합니다. Expired,
+future-dated, ineligible 또는 mutation-free fallback이 입증되지 않은 record는
+거절됩니다. 현재 공개 contract에는 natural evidence origin을 외부 실행 ledger에서
+attest하는 authority가 없으므로, natural처럼 표시된 fixture를 포함한 모든 worker
+certification/canary는 재도출·chronology 검증 후에도 promotion evidence로 쓰지
+않고 baseline fallback을 만듭니다.
+
+Shadow report는 queue, config, cooldown, wake, reservation, routing mutation을 모두
+빈 값으로 유지하고 `automatic_substitution=false`, `live_routing=false`,
+`default_routing=false`, `provider_promotion=false`를 명시합니다. Provider
+acquisition, runtime scheduling authority, D2-B activation, default worker promotion,
+deployment/release와 실제 canary activation은 이 contract의 미구현·비권한
+경계입니다.
+
 ## CLI
 
 이미 projection된 file을 읽는 예시:
