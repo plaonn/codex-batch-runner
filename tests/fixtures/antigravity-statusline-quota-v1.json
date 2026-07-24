@@ -1,0 +1,11 @@
+{
+  "version": "statusline-v1",
+  "plan_tier": "pro",
+  "quota": {
+    "gemini-weekly": {
+      "remaining_fraction": 0.375,
+      "reset_time": "2030-01-02T05:00:00Z",
+      "reset_in_seconds": 3600
+    }
+  }
+}
