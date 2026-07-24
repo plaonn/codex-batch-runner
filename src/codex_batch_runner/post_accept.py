@@ -48,8 +48,9 @@ def already_accepted_applied_result(config: Config, task_id: str) -> dict[str, A
 
 def mark_task_accepted_locked(config: Config, task_id: str, reason: str | None, *, source: str) -> dict[str, Any]:
     task = load_task(config, task_id)
-    if task.get("status") != "completed":
-        raise ValueError(f"accepted review requires completed task status, found {task.get('status')}")
+    eligibility_error = acceptance_eligibility_error(task)
+    if eligibility_error:
+        raise ValueError(eligibility_error)
     task["review_status"] = "accepted"
     task["reviewed_at"] = iso_now()
     task["review_reason"] = reason
@@ -65,6 +66,12 @@ def mark_task_accepted_locked(config: Config, task_id: str, reason: str | None, 
         payload=transition_payload(task, review_status="accepted", reviewed_at=task.get("reviewed_at")),
     )
     return task
+
+
+def acceptance_eligibility_error(task: dict[str, Any]) -> str | None:
+    if task.get("status") != "completed":
+        return f"accepted review requires completed task status, found {task.get('status')}"
+    return None
 
 
 def integrate_accepted_worktree(

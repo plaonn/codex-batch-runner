@@ -12,6 +12,9 @@ license = { text = "MIT" }
 authors = [{ name = "plaonn" }]
 dependencies = []
 
+[project.optional-dependencies]
+completion = ["argcomplete>=3.6,<4"]
+
 [project.scripts]
 cbr = "codex_batch_runner.cli:main"
 

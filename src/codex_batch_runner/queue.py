@@ -300,6 +300,14 @@ def is_resolvable_task(task: dict) -> bool:
 
 def list_tasks(config: Config) -> list[dict]:
     ensure_dir(config.queue_dir)
+    return list_tasks_read_only(config)
+
+
+def list_tasks_read_only(config: Config) -> list[dict]:
+    if not config.queue_dir.exists():
+        return []
+    if not config.queue_dir.is_dir():
+        raise ValueError(f"queue path is not a directory: {config.queue_dir}")
     tasks = []
     for path in sorted(config.queue_dir.glob("*.json")):
         task = read_json(path)

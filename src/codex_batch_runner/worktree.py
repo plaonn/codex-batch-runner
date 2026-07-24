@@ -29,6 +29,12 @@ DISCARD_CLEANUP_RESOLUTIONS = {"duplicate", "manual", "superseded", "wont_fix"}
 
 
 def sanitize_branch_name(task_id: str) -> str:
+    branch = sanitized_branch_name_unchecked(task_id)
+    validate_branch_name(branch)
+    return branch
+
+
+def sanitized_branch_name_unchecked(task_id: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", task_id.strip())
     slug = re.sub(r"[-_.]{2,}", "-", slug).strip("-._")
     slug = slug.replace("@{", "-")
@@ -36,9 +42,7 @@ def sanitize_branch_name(task_id: str) -> str:
         slug = "task"
     if slug.endswith(".lock"):
         slug = slug[: -len(".lock")] or "task"
-    branch = f"cbr/{slug[:180]}"
-    validate_branch_name(branch)
-    return branch
+    return f"cbr/{slug[:180]}"
 
 
 def build_prepare_report(config: Config, task_id: str, *, apply: bool = False) -> dict[str, Any]:
@@ -761,6 +765,104 @@ def cleanup_eligibility_error(task: dict[str, Any]) -> str | None:
     eligibility = cleanup_eligibility(task)
     error = eligibility.get("error")
     return str(error) if error else None
+
+
+def worktree_operation_state_eligibility_error(
+    config: Config,
+    operation: str,
+    task: dict[str, Any],
+) -> str | None:
+    """Return the shared, mutation-free task-state gate for a worktree operation.
+
+    Commands still revalidate live Git/worktree state immediately before acting.
+    This selector intentionally excludes filesystem-dependent checks so interactive
+    completion stays bounded and cannot hang on a slow repository.
+    """
+
+    if operation == "prepare":
+        if config.worktree_mode != "task":
+            return "worktree_mode is disabled; set worktree_mode=task to prepare task worktrees"
+        if task.get("status") not in PREPARE_OK_STATUSES and task.get("execution_worktree_status") != "prepared":
+            return f"task status {task.get('status')} is not eligible for worktree prepare"
+        return None
+
+    if operation == "cleanup":
+        missing = [
+            name
+            for name, value in (
+                ("execution_branch", task.get("execution_branch")),
+                ("execution_worktree_path", task.get("execution_worktree_path")),
+                ("execution_worktree_status", task.get("execution_worktree_status")),
+                ("execution_repo_root", task.get("execution_repo_root")),
+            )
+            if not value
+        ]
+        if missing:
+            return "worktree cleanup requires retained worktree metadata; missing: " + ", ".join(missing)
+        return cleanup_eligibility_error(task)
+
+    if operation == "discard-stale-applied":
+        if task.get("execution_mode") != "git_worktree":
+            return "discard stale applied worktree requires execution_mode=git_worktree"
+        if task.get("execution_worktree_status") not in CLEANUP_OK_WORKTREE_STATUSES:
+            return "discard stale applied worktree requires retained cleanup-capable worktree metadata"
+        if task.get("status") != "completed" or task.get("review_status") != "accepted":
+            return "discard stale applied worktree requires completed + accepted task metadata"
+        if not has_applied_worktree_metadata(task):
+            return "discard stale applied worktree requires applied metadata"
+        return None
+
+    if operation == "branch-prune":
+        if task.get("execution_mode") != "git_worktree":
+            return "branch prune requires execution_mode=git_worktree"
+        branch = str(task.get("execution_branch") or "").strip()
+        repo_raw = task.get("execution_repo_root") or task.get("project_root") or task.get("cwd")
+        if not branch or not repo_raw or not task.get("execution_worktree_status"):
+            return "branch prune requires worktree branch metadata"
+        if task.get("execution_worktree_status") != "cleaned":
+            return "branch prune requires execution_worktree_status=cleaned"
+        if task.get("execution_cleanup_kind") != "applied" or task.get("execution_cleanup_result_applied") is not True:
+            return "branch prune is currently limited to applied worktree cleanup"
+        if task.get("execution_apply_status") != "applied":
+            return "branch prune requires execution_apply_status=applied"
+        if not (
+            (task.get("status") == "completed" and task.get("review_status") == "accepted")
+            or task.get("status") == "archived"
+        ):
+            return "branch prune requires an applied completed+accepted or archived task"
+        if not branch.startswith("cbr/") or is_protected_branch_name(branch, task):
+            return "branch prune only deletes local cbr/* task branches"
+        if branch != sanitized_branch_name_unchecked(str(task.get("id") or "")):
+            return "branch prune requires execution_branch to match the sanitized task id branch"
+        if not branch_prune_expected_head(task):
+            return "branch prune requires reliable expected head metadata"
+        return None
+
+    if operation == "apply":
+        if task.get("status") != "completed" or task.get("review_status") != "accepted":
+            return "worktree apply requires task status=completed and review_status=accepted"
+        if task.get("execution_mode") != "git_worktree":
+            return "worktree apply requires execution_mode=git_worktree"
+        if task.get("execution_apply_status") == "applied":
+            return "worktree apply requires execution_apply_status not already applied"
+        missing = [
+            name
+            for name, value in (
+                ("execution_branch", task.get("execution_branch")),
+                ("execution_base_head", task.get("execution_base_head")),
+                ("execution_repo_root", task.get("execution_repo_root")),
+                ("execution_worktree_path", task.get("execution_worktree_path")),
+                ("execution_worktree_status", task.get("execution_worktree_status")),
+            )
+            if not value
+        ]
+        if missing:
+            return "worktree apply requires retained worktree metadata; missing: " + ", ".join(missing)
+        if task.get("execution_worktree_status") not in APPLY_OK_WORKTREE_STATUSES:
+            return "worktree apply requires retained worktree metadata"
+        return None
+
+    return f"unknown worktree operation: {operation}"
 
 
 def cleanup_eligibility(task: dict[str, Any]) -> dict[str, Any]:

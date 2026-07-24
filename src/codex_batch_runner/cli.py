@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# PYTHON_ARGCOMPLETE_OK
+
 import argparse
 import json
 import os
@@ -18,6 +20,7 @@ from typing import Any
 from .apply_plan import apply_queue_mutation_plan, build_apply_plan_report, render_apply_plan_report
 from .capability_belief import CapabilityBeliefError, rebuild_capability_report
 from .config import Config
+from .completion import activate_completion, completion_shellcode
 from .cooldown import MANUAL_COOLDOWN_SAFETY_OFFSET_SECONDS, cooldown_status, format_duration, parse_manual_cooldown
 from .doctor import build_doctor_report, render_doctor_report
 from .direct_worktrees import build_direct_worktrees_report, render_direct_worktrees_report
@@ -248,7 +251,14 @@ COMPACT_TABLE_NARROW_STATUS_LABELS = {
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
+    activate_completion(parser)
     args = parser.parse_args(argv)
+    if args.command == "completion":
+        try:
+            return args.func(None, args)
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if args.command == "orchestration":
         if args.orchestration_command == "plan":
             if args.config:
@@ -272,6 +282,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cbr", description="Codex batch runner")
     parser.add_argument("--config", help="config JSON path")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    completion = sub.add_parser("completion", help="print Bash or Zsh registration shellcode")
+    completion.add_argument("shell", choices=("bash", "zsh"))
+    completion.set_defaults(func=cmd_completion)
 
     enqueue = sub.add_parser("enqueue", help="enqueue a task")
     enqueue.add_argument("--cwd", required=True, help="working directory for task execution")
@@ -1073,6 +1087,12 @@ def build_parser() -> argparse.ArgumentParser:
     worktree_apply.add_argument("--json", action="store_true", help="print JSON")
     worktree_apply.set_defaults(func=cmd_worktree_apply)
     return parser
+
+
+def cmd_completion(config: Config | None, args: argparse.Namespace) -> int:
+    del config
+    print(completion_shellcode(args.shell), end="")
+    return 0
 
 
 def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
