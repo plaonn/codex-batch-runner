@@ -1,0 +1,170 @@
+{
+  "bundle_id": "sha256:c4661fc733b5350ac5255c4bb24c5e91575eeaadb350c13cb69b97ffbea2c140",
+  "conflict_evidence": [],
+  "contract": "provider-resource-capacity-bundle-v1",
+  "lineage": {
+    "canonical_contract": "provider-resource-snapshot-v1",
+    "canonical_contract_unchanged": true,
+    "canonical_runtime_state": false,
+    "extension_role": "advisory_evidence_input"
+  },
+  "mutation_allowed": false,
+  "observations": [
+    {
+      "acquisition_health": "healthy",
+      "canonical_snapshot": null,
+      "freshness": {
+        "evaluated_at": "2030-01-02T04:00:00+00:00",
+        "max_age_seconds": 300.0,
+        "reason": "within_max_age",
+        "status": "fresh"
+      },
+      "model_scope_revision": null,
+      "observation_id": "sha256:31247e0c73693124595f0f925bc1b0508cf7daa82cdc8cbcd643a8b434b350c9",
+      "observation_scope": {
+        "kind": "provider_control_plane",
+        "scope_id": null,
+        "scope_id_status": "unknown"
+      },
+      "observed_at": "2030-01-02T04:00:00+00:00",
+      "producer": {
+        "id": "codex-app-server-capacity-adapter",
+        "revision": "codex-app-server-capacity-v1"
+      },
+      "provider_id": "codex",
+      "resources": [
+        {
+          "constraints": [
+            {
+              "availability": "available",
+              "constraint_id": "sha256:06510c39f9553940e0a55a000fb53baaf477d7604c9a8f2216225290e5711b8c",
+              "remaining": {
+                "provenance": "derived_complement_of_used_ratio",
+                "status": "observed",
+                "unit": "ratio",
+                "value": 0.75
+              },
+              "resets_at": {
+                "relative_seconds": null,
+                "status": "observed",
+                "value": "2030-01-02T05:00:00+00:00"
+              },
+              "source_field": "resources.windows.primary",
+              "window_duration_seconds": 18000.0,
+              "window_id": "primary"
+            },
+            {
+              "availability": "exhausted",
+              "constraint_id": "sha256:b566909674fee7bf78cc6939ca650116463e84b8673dc668ad3f3c412d6d932a",
+              "remaining": {
+                "provenance": "derived_complement_of_used_ratio",
+                "status": "observed",
+                "unit": "ratio",
+                "value": 0.0
+              },
+              "resets_at": {
+                "relative_seconds": null,
+                "status": "observed",
+                "value": "2030-01-09T04:00:00+00:00"
+              },
+              "source_field": "resources.windows.secondary",
+              "window_duration_seconds": 604800.0,
+              "window_id": "secondary"
+            }
+          ],
+          "model_scope": {
+            "model_ids": [],
+            "status": "unknown"
+          },
+          "quota_identity": {
+            "confidence": "unverified",
+            "id": null,
+            "opaque_id": "codex",
+            "source": "source_reported_opaque_id",
+            "status": "unknown"
+          },
+          "resource_id": "sha256:c475a22fcfbbf4860eeb3f667d24e4913714f3ef3d78e5bace7a23947c1062df"
+        }
+      ],
+      "source_contract": "codex-app-server-capacity-v1",
+      "source_revision": "codex-app-server-capacity-v1",
+      "timestamp_provenance": "adapter_response_received_at"
+    },
+    {
+      "acquisition_health": "healthy",
+      "canonical_snapshot": null,
+      "freshness": {
+        "evaluated_at": "2030-01-02T04:10:00+00:00",
+        "max_age_seconds": 300.0,
+        "reason": "exceeds_max_age",
+        "status": "stale"
+      },
+      "model_scope_revision": null,
+      "observation_id": "sha256:a2120457d82aa0913de0c4d6b48a8ccc927ccd8dbd332b0f004284110f9a27d6",
+      "observation_scope": {
+        "kind": "provider_control_plane",
+        "scope_id": null,
+        "scope_id_status": "unknown"
+      },
+      "observed_at": "2030-01-02T04:00:00+00:00",
+      "producer": {
+        "id": "antigravity-statusline-capacity-adapter",
+        "revision": "statusline-v1"
+      },
+      "provider_id": "antigravity",
+      "resources": [
+        {
+          "constraints": [
+            {
+              "availability": "available",
+              "constraint_id": "sha256:33f113f85dbb2b5c947441e778fd0fc1c7fdb9b66676874786ca600494053bf5",
+              "remaining": {
+                "provenance": "provider_reported",
+                "status": "observed",
+                "unit": "ratio",
+                "value": 0.375
+              },
+              "resets_at": {
+                "relative_seconds": 3600,
+                "status": "observed",
+                "value": "2030-01-02T05:00:00+00:00"
+              },
+              "source_field": "buckets.remaining_fraction",
+              "window_duration_seconds": null,
+              "window_id": "provider-quota"
+            }
+          ],
+          "model_scope": {
+            "model_ids": [],
+            "status": "unknown"
+          },
+          "quota_identity": {
+            "confidence": "unverified",
+            "id": null,
+            "opaque_id": "gemini-weekly",
+            "source": "source_reported_opaque_id",
+            "status": "unknown"
+          },
+          "resource_id": "sha256:be617c1d6d52b5fadb23fa7c8951f2920bf04c1b5bab3cfbe287a4d6c18c3d45"
+        }
+      ],
+      "source_contract": "antigravity-statusline-cache-v1",
+      "source_revision": "statusline-v1",
+      "timestamp_provenance": "statusline_callback_received_at"
+    }
+  ],
+  "pools": [],
+  "producer_revisions": [
+    {
+      "producer_id": "antigravity-statusline-capacity-adapter",
+      "revision": "statusline-v1"
+    },
+    {
+      "producer_id": "codex-app-server-capacity-adapter",
+      "revision": "codex-app-server-capacity-v1"
+    }
+  ],
+  "read_only": true,
+  "scheduling_authoritative": false,
+  "schema_version": 1
+}
