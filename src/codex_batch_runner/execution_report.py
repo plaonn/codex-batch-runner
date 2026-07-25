@@ -15,6 +15,9 @@ from .natural_execution_attestation import natural_execution_attestation_view
 from .queue import list_tasks, task_labels, task_project_id, task_project_root, task_title
 from .review_outcome_evidence import review_outcome_view
 from .routing_report import number
+from .scoped_readonly_certification import (
+    build_scoped_readonly_certification_report_bundle,
+)
 from .timeutil import iso_now, parse_time
 from .transcript import sanitize
 
@@ -77,6 +80,7 @@ def build_execution_report(
         include_preexecution=purpose in {"diagnostic", "audit"},
     )
     filtered_count = len(tasks)
+    scoped_certification_tasks = list(tasks)
     if purpose == "routing":
         tasks = [task for task in tasks if routing_comparable_task(task)]
     purpose_eligible_count = len(tasks)
@@ -86,6 +90,16 @@ def build_execution_report(
     generated_at = iso_now()
     report_as_of = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
     rows = [task_execution_row(config, task, as_of=report_as_of) for task in tasks]
+    summary = summarize_rows(rows)
+    summary["scoped_readonly_certification"] = (
+        build_scoped_readonly_certification_report_bundle(
+            config, scoped_certification_tasks, as_of=report_as_of
+        )
+        if purpose in {"diagnostic", "audit"}
+        else build_scoped_readonly_certification_report_bundle(
+            config, [], as_of=report_as_of
+        )
+    )
     return {
         "generated_at": generated_at,
         "filters": {
@@ -103,7 +117,7 @@ def build_execution_report(
         "purpose_excluded_count": filtered_count - purpose_eligible_count,
         "row_count": len(rows),
         "rows": rows,
-        "summary": summarize_rows(rows),
+        "summary": summary,
     }
 
 

@@ -86,6 +86,15 @@ Report 기본 `--purpose routing`은 cohort metadata상 `model_quality=true`인 
 evidence를 조회하지만 comparability를 승격하지 않음. 보존 상태와 routing 사용 가능성은
 서로 독립임.
 
+`--purpose diagnostic|audit`의 `summary.scoped_readonly_certification`은
+`scoped-readonly-certification-policy-v1` report bundle을 additive하게 표시합니다.
+현재 natural objective attestation, scoped mutation provenance, 그리고 runner-owned
+pre-execution delegation receipt가 exact-match한 `readonly-objective` task만 후보
+sample로 사용합니다. 이 summary는 routing comparability, worker selection, canary,
+promotion 또는 queue/config state를 바꾸지 않습니다. 자세한 경계는
+[Scoped readonly certification projection](scoped-readonly-certification.md)을
+참고합니다.
+
 Contract-bearing delegated task는
 [`cbr-execution-delegation-contract-v1`](execution-delegation.md)을 first atomic
 enqueue write에서 admit합니다. Runner는 exact worker/target resolution 뒤 canonical
