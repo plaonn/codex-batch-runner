@@ -228,6 +228,27 @@ routing mutation 배열은 비어 있습니다. 자세한 계약은
 [Capacity target-ordering activation simulation](capacity-target-ordering-simulation.md)을
 참조합니다.
 
+## Bounded gate-lifecycle activation simulation
+
+`capacity-gate-lifecycle-activation-simulation-v1`은 immutable
+`provider-resource-gate-state-v1`과 append-only typed decision evidence 위에서 gate
+create, dedup, later-reset supersession, wake revalidation, release, rollback을
+deterministically replay하는 별도 report-only handoff입니다.
+
+각 event는 해당 시점의 최신 global-gate observation을 먼저 적용합니다. 그 뒤에만
+source-attested identity/mapping/currentness, canonical resource/decision/wake key,
+one-active-gate invariant, selector eligibility와 resume binding, lifecycle
+counterfactual을 순서대로 평가합니다. Wake time은 release authority가 아니라
+revalidation boundary입니다.
+
+Threshold evidence는 defer만 preview할 수 있습니다. V1에는 trusted natural/external
+confirmed-exhaustion source가 없으므로 non-synthetic input은 거부합니다. Synthetic
+fixture는 hard-exclusion mechanics만 검증하며 `natural_evidence_authority=false`,
+`hard_exclusion_authority=false`를 유지합니다. 모든 runtime authority flag는 false이고
+실제 mutation 배열은 비어 있습니다. 자세한 계약은
+[Capacity gate-lifecycle activation simulation](capacity-gate-lifecycle-simulation.md)을
+참조합니다.
+
 ## CLI
 
 이미 projection된 file을 읽는 예시:
