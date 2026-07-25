@@ -21,6 +21,7 @@
 - [Scoped execution mutation provenance](docs/execution-mutation-provenance.md): report-only pre/post/terminal worktree evidence and explicit global non-claims.
 - [Trusted pre-execution delegation](docs/execution-delegation.md): immutable queue admission and runner-owned exact-target receipt barrier before worker invocation.
 - [Scoped readonly certification projection](docs/scoped-readonly-certification.md): receipt-bound 20/95%/zero-adverse advisory aggregation within the CBR worktree scope.
+- [Capacity target-ordering activation simulation](docs/capacity-target-ordering-simulation.md): deterministic report-only counterfactual ordering over the immutable baseline eligible set.
 - [Events and index contract](docs/events-and-index.md): event log, local SQLite read index, prune/retention.
 - [CLI reference](docs/cli-reference.md): command reference and human/JSON output semantics, including list renderer and routing-report details.
 - [Operator installation guide](docs/operator-installation.md): config discovery, macOS launchd setup, doctor, cooldown wake, cross-project usage.

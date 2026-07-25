@@ -209,6 +209,25 @@ acquisition, runtime scheduling authority, D2-B activation, default worker promo
 deployment/release와 실제 canary activation은 이 contract의 미구현·비권한
 경계입니다.
 
+## Bounded target-ordering activation simulation
+
+`capacity-target-ordering-activation-simulation-v1`은 immutable shadow request와
+deterministically reproduced shadow report를 exact-bind한 별도 report-only
+handoff입니다. Baseline hard constraints, exact-target eligibility, quality floor와
+resume pinning이 capacity보다 먼저 적용됩니다. Capacity는 baseline의 ordered
+eligible set에 target을 추가하지 않고, 그 집합 안에서만
+`keep_baseline | would_select_alternative | fail_closed` counterfactual을
+계산합니다.
+
+Baseline target와 order는 별도 field에 그대로 보존됩니다. Unknown, stale,
+missing, ambiguous, conflicting, revision drift, unit/window mismatch, untrusted
+mapping/identity 또는 malformed input은 alternative를 만들지 않습니다. 모든
+live/default/activation/promotion authority field는 false이고 queue, config,
+reservation, cooldown, wake, defer, hard-exclusion, retry, selection, dispatch,
+routing mutation 배열은 비어 있습니다. 자세한 계약은
+[Capacity target-ordering activation simulation](capacity-target-ordering-simulation.md)을
+참조합니다.
+
 ## CLI
 
 이미 projection된 file을 읽는 예시:

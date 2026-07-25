@@ -942,7 +942,7 @@ def _exact_keys(
 
 
 def _literal(key: str, value: object, expected: object) -> None:
-    if value != expected:
+    if type(value) is not type(expected) or value != expected:
         raise CapacityShadowValidationError(f"{key} must be {expected!r}")
 
 
