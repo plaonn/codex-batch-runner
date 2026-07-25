@@ -86,6 +86,14 @@ Report 기본 `--purpose routing`은 cohort metadata상 `model_quality=true`인 
 evidence를 조회하지만 comparability를 승격하지 않음. 보존 상태와 routing 사용 가능성은
 서로 독립임.
 
+Contract-bearing delegated task는
+[`cbr-execution-delegation-contract-v1`](execution-delegation.md)을 first atomic
+enqueue write에서 admit합니다. Runner는 exact worker/target resolution 뒤 canonical
+receipt를 먼저 durable save하고, 그 다음 pre-worker snapshot을 bind한 뒤 invocation
+guard를 통과해야만 worker를 호출합니다. 이 local control-plane evidence는 report-only이며
+external issuer authentication, global provenance, canary, promotion 또는 routing
+authority를 주장하지 않습니다.
+
 같은 command의 `summary.model_measurements`는 queue에 저장된 exact `execution-evidence-v3` run만 target, selected model, reasoning effort, selection cohort별로 descriptively 집계합니다. 집계는 integrity와 provider attestation, distinct execution cohort/version strata, review outcome evidence와 comparable sample 수, token component totals, completed/censored latency, timeout/failure evidence를 분리합니다. Review quality count는 review cohort의 bound `execution_cohort_id`가 현재 execution cohort와 exact match하고 execution/review comparability와 integrity가 모두 통과한 경우에만 증가합니다. `review.strata`는 task bucket, review policy/rubric, acceptance method, reviewer provenance/execution cohort, automatic/override lane, reasoning effort, identity attestation과 execution contract version boundary를 보존합니다. 서로 다른 모델에 공통 review stratum이 없으면 quality comparison은 부족한 상태로 남습니다. v2/legacy/non-exact run은 exact 집계에서 제외하고 `non_exact_run_count`로만 표시합니다. 여러 모델이 있더라도 posterior나 우열을 계산하지 않으며 `cross_model_quality_status`가 `no_exact_v3_evidence`, `insufficient_models`, `insufficient_comparable_quality`, `insufficient_common_review_stratum`, `descriptive_only` 중 하나로 추론 경계를 명시합니다. 이 command는 raw prompt, transcript/log body, full command argv, session/thread id, raw log path를 출력하지 않고 task JSON/event log/review status나 routing policy를 변경하지 않습니다.
 
 ### Evaluation evidence v2

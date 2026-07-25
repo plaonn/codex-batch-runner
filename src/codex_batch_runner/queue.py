@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import socket
 import subprocess
@@ -7,10 +8,17 @@ from collections import Counter
 from pathlib import Path
 
 from .config import Config
+from .execution_delegation import (
+    ExecutionDelegationError,
+    admit_execution_delegation_contract,
+    require_preexecution_delegation_receipt,
+    record_delegation_recovery,
+    validate_preexecution_delegation_receipt,
+)
 from .events import emit_task_event, transition_payload
 from .model_requirements import derive_model_requirement_vector, issue_native_requirement_v2, task_requirement_metadata
 from .fs import ensure_dir, read_json, write_json_atomic, write_json_atomic_create
-from .lock import lock_pid, pid_exists
+from .lock import lock_pid, pid_exists, read_lock_metadata
 from .timeutil import iso_now, parse_time, utc_now
 from .worker_routing import planned_worker_capacity_pool
 
@@ -55,6 +63,7 @@ CHAIN_METADATA_FIELDS = (
     "finding_fingerprints",
 )
 SCHEMA_VERSION = 1
+_DELEGATION_TRANSITION_TOKEN = object()
 TASK_TITLE_DISPLAY_LIMIT = 80
 ORCHESTRATION_IMMUTABLE_FIELDS = (
     "prompt",
@@ -94,7 +103,13 @@ def load_task(config: Config, task_id: str) -> dict:
     return task
 
 
-def save_task(config: Config, task: dict, *, touch_updated_at: bool = True) -> None:
+def save_task(
+    config: Config,
+    task: dict,
+    *,
+    touch_updated_at: bool = True,
+    _delegation_transition_token: object | None = None,
+) -> None:
     path = task_path(config, task["id"])
     existing = read_json(path)
     if isinstance(existing, dict):
@@ -109,6 +124,31 @@ def save_task(config: Config, task: dict, *, touch_updated_at: bool = True) -> N
                 raise ValueError(
                     f"{field} is immutable after enqueue; create a new task revision instead"
                 )
+        if existing.get("execution_delegation_contract") != task.get(
+            "execution_delegation_contract"
+        ):
+            raise ValueError(
+                "execution_delegation_contract is immutable after enqueue; "
+                "create a new task revision instead"
+            )
+        for field in (
+            "preexecution_delegation_receipt_history",
+            "preexecution_delegation_phase_history",
+        ):
+            existing_history = existing.get(field, [])
+            new_history = task.get(field, [])
+            if not isinstance(existing_history, list) or not isinstance(
+                new_history, list
+            ):
+                raise ValueError(f"{field} must be a list")
+            if new_history[: len(existing_history)] != existing_history:
+                raise ValueError(f"{field} is append-only")
+        _validate_delegation_transition(
+            existing,
+            task,
+            authorized=_delegation_transition_token
+            is _DELEGATION_TRANSITION_TOKEN,
+        )
         existing_reviewer_units = existing.get("automatic_reviewer_work_units", [])
         new_reviewer_units = task.get("automatic_reviewer_work_units", [])
         if not isinstance(existing_reviewer_units, list) or not isinstance(new_reviewer_units, list):
@@ -118,6 +158,87 @@ def save_task(config: Config, task: dict, *, touch_updated_at: bool = True) -> N
     if touch_updated_at:
         task["updated_at"] = iso_now()
     write_json_atomic(path, task)
+
+
+def save_delegation_transition_locked(config: Config, task: dict) -> None:
+    metadata = read_lock_metadata(config.lock_file)
+    if (
+        lock_pid(metadata.get("pid")) != os.getpid()
+        or metadata.get("hostname") != socket.gethostname()
+    ):
+        raise ValueError(
+            "runner-owned delegation transition requires the current "
+            "process to hold the canonical queue lock"
+        )
+    save_task(
+        config,
+        task,
+        _delegation_transition_token=_DELEGATION_TRANSITION_TOKEN,
+    )
+
+
+def _validate_delegation_transition(
+    existing: dict, task: dict, *, authorized: bool
+) -> None:
+    old_receipts = existing.get("preexecution_delegation_receipt_history", [])
+    new_receipts = task.get("preexecution_delegation_receipt_history", [])
+    old_phases = existing.get("preexecution_delegation_phase_history", [])
+    new_phases = task.get("preexecution_delegation_phase_history", [])
+    receipt_delta = len(new_receipts) - len(old_receipts)
+    phase_delta = len(new_phases) - len(old_phases)
+    if receipt_delta == 0 and phase_delta == 0:
+        return
+    if not authorized:
+        raise ValueError(
+            "delegation receipt transitions are runner-owned and cannot be "
+            "appended through save_task"
+        )
+    if receipt_delta == 1 and phase_delta == 1:
+        if (
+            existing.get("status") not in RUNNABLE_STATUSES
+            or task.get("status") != "running"
+            or not task.get("active_run_id")
+            or task.get("attempts") != int(existing.get("attempts") or 0) + 1
+            or task.get("run_count") != int(existing.get("run_count") or 0) + 1
+        ):
+            raise ValueError("invalid runner-owned delegation claim transition")
+        receipt = validate_preexecution_delegation_receipt(new_receipts[-1])
+        phase = new_phases[-1]
+        if (
+            receipt["binding"]["attempt"] != task["attempts"]
+            or receipt["claim"]["claim_id"] != task["active_run_id"]
+            or receipt["claim"]["lease_sequence"] != task["run_count"]
+            or not isinstance(phase, dict)
+            or phase.get("phase") != "preexecution_receipt_appended"
+            or phase.get("receipt_id") != receipt["receipt_id"]
+            or phase.get("attempt") != task["attempts"]
+        ):
+            raise ValueError("invalid runner-owned delegation receipt append")
+        return
+    if receipt_delta == 0 and phase_delta == 1:
+        phase = new_phases[-1]
+        if not isinstance(phase, dict):
+            raise ValueError("invalid runner-owned delegation phase append")
+        if phase.get("phase") == "pre_worker_snapshot_recorded":
+            if (
+                existing.get("status") != "running"
+                or task.get("status") != "running"
+                or task.get("active_run_id") != existing.get("active_run_id")
+            ):
+                raise ValueError(
+                    "invalid runner-owned pre-worker snapshot transition"
+                )
+            require_preexecution_delegation_receipt(task)
+            return
+        if phase.get("phase") == "attempt_recovered_before_pre_worker":
+            if (
+                existing.get("status") != "running"
+                or task.get("status") not in RUNNABLE_STATUSES
+                or task.get("active_run_id") is not None
+            ):
+                raise ValueError("invalid runner-owned delegation recovery")
+            return
+    raise ValueError("invalid runner-owned delegation history transition")
 
 
 def archive_task(config: Config, task_id: str) -> dict:
@@ -363,6 +484,7 @@ def create_task(
     orchestration_dispatch_id: str | None = None,
     orchestration_request_fingerprint: str | None = None,
     orchestration_execution_fingerprint: str | None = None,
+    execution_delegation_contract: dict | None = None,
 ) -> dict:
     ensure_dir(config.queue_dir)
     now = iso_now()
@@ -459,6 +581,11 @@ def create_task(
         "orchestration_dispatch_id": orchestration_dispatch_id,
         "orchestration_request_fingerprint": orchestration_request_fingerprint,
         "orchestration_execution_fingerprint": orchestration_execution_fingerprint,
+        "execution_delegation_contract": admit_execution_delegation_contract(
+            task_id, execution_delegation_contract
+        ),
+        "preexecution_delegation_receipt_history": [],
+        "preexecution_delegation_phase_history": [],
     }
     requirement_metadata = task_requirement_metadata(
         model_requirement_vector=model_requirement_vector,
@@ -956,6 +1083,25 @@ def recover_stale_running_tasks(config: Config) -> list[str]:
             continue
         recovery_reason = "same_host_dead_runner_pid" if dead_same_host_pid else "stale_started_at"
         previous_status = str(task.get("status") or "")
+        try:
+            record_delegation_recovery(task)
+        except ExecutionDelegationError as exc:
+            task["status"] = "failed"
+            task["last_error"] = f"delegation recovery failed: {exc}"
+            save_task(config, task)
+            emit_task_event(
+                config,
+                "task_failed",
+                task,
+                source="stale-running-recovery",
+                summary=task["last_error"],
+                payload=transition_payload(
+                    task,
+                    previous_status=previous_status,
+                    mutation="delegation_recovery_failed",
+                ),
+            )
+            continue
         task["status"] = "needs_resume" if task.get("next_prompt") else "runnable"
         task["last_error"] = f"recovered stale running task: {recovery_reason}"
         task["running_recovered_at"] = iso_now()
@@ -963,7 +1109,10 @@ def recover_stale_running_tasks(config: Config) -> list[str]:
         task["running_recovery_runner_hostname"] = runner_hostname if isinstance(runner_hostname, str) else None
         task["running_recovery_runner_pid"] = runner_pid
         clear_active_run_metadata(task)
-        save_task(config, task)
+        if task.get("execution_delegation_contract") is not None:
+            save_delegation_transition_locked(config, task)
+        else:
+            save_task(config, task)
         emit_task_event(
             config,
             "task_mutated",

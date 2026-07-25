@@ -33,6 +33,12 @@ from .execution_evidence_v3 import (
     build_external_execution_evidence_v3,
     exact_v3_settings,
 )
+from .execution_delegation import (
+    ExecutionDelegationError,
+    append_preexecution_delegation_receipt,
+    record_pre_worker_snapshot_phase,
+    require_preexecution_delegation_receipt,
+)
 from .execution_mutation_provenance import (
     ExecutionMutationProvenanceError,
     attach_execution_mutation_provenance,
@@ -46,7 +52,14 @@ from .fs import ensure_dir
 from .lock import FileLock
 from .maintenance import build_codex_cli_maintenance_report, run_codex_cli_maintenance
 from .prompts import build_prompt
-from .queue import is_in_cooldown, load_task, recover_stale_running_tasks, save_task, select_next_task
+from .queue import (
+    is_in_cooldown,
+    load_task,
+    recover_stale_running_tasks,
+    save_delegation_transition_locked,
+    save_task,
+    select_next_task,
+)
 from .review_next import build_review_next_apply_report_locked, has_actionable_auto_review_candidate
 from .shell import ShellResult, run_shell_task
 from .state import (
@@ -183,6 +196,7 @@ def run_next(config: Config, *, suppress_wake_hooks: bool = False) -> RunOutcome
 
     task = claimed.task
     try:
+        require_preexecution_delegation_receipt(task)
         if not suppress_wake_hooks and should_trigger_post_claim_wake(config, task):
             run_post_run_trigger(config)
         if claimed.execution_backend == "shell":
@@ -316,15 +330,81 @@ def claim_next_implementation_task_locked(
             log_paths.append(str(attempt_log_path))
     if execution_config and execution_config.selected_target_snapshot:
         task["active_execution_target_snapshot"] = execution_config.selected_target_snapshot
+    if task.get("execution_delegation_contract") is not None and execution_cwd is None:
+        mark_execution_config_failure(
+            config,
+            task,
+            "delegated execution requires an isolated task worktree",
+        )
+        mark_run(config, task["id"])
+        return (
+            None,
+            RunOutcome(
+                status=task["status"],
+                message=str(task.get("last_error") or "delegation receipt failed"),
+                task_id=task["id"],
+            ),
+            None,
+        )
+    delegation_receipt = None
+    try:
+        delegation_receipt = append_preexecution_delegation_receipt(
+            task,
+            execution_settings=execution_config,
+            active_run_id=active_run_id,
+        )
+    except ExecutionDelegationError as exc:
+        mark_execution_config_failure(config, task, str(exc))
+        mark_run(config, task["id"])
+        return (
+            None,
+            RunOutcome(
+                status=task["status"],
+                message=str(exc),
+                task_id=task["id"],
+            ),
+            None,
+        )
+    if delegation_receipt is not None:
+        save_delegation_transition_locked(config, task)
     if execution_cwd:
         task["execution_worktree_status"] = "running"
         task["execution_started_at"] = started_at
-        record_mutation_snapshot(
-            task,
-            execution_cwd,
-            phase="pre_worker",
-        )
-    save_task(config, task)
+        if delegation_receipt is None:
+            record_mutation_snapshot(
+                task,
+                execution_cwd,
+                phase="pre_worker",
+            )
+        else:
+            try:
+                snapshot = capture_execution_mutation_snapshot(
+                    task,
+                    execution_cwd,
+                    phase="pre_worker",
+                )
+                attach_execution_mutation_snapshot(task, snapshot)
+                record_pre_worker_snapshot_phase(
+                    task,
+                    receipt_id=delegation_receipt["receipt_id"],
+                    snapshot_id=snapshot["snapshot_id"],
+                )
+            except (ExecutionDelegationError, ExecutionMutationProvenanceError, OSError) as exc:
+                mark_execution_config_failure(config, task, str(exc))
+                mark_run(config, task["id"])
+                return (
+                    None,
+                    RunOutcome(
+                        status=task["status"],
+                        message=str(exc),
+                        task_id=task["id"],
+                    ),
+                    None,
+                )
+    if delegation_receipt is not None:
+        save_delegation_transition_locked(config, task)
+    else:
+        save_task(config, task)
     emit_task_event(
         config,
         "task_started",

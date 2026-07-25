@@ -21,6 +21,9 @@ from codex_batch_runner.cli import ListColor, main
 from codex_batch_runner.config import Config
 from codex_batch_runner.decision_cards import decision_card_next_action
 from codex_batch_runner.evidence import rate_limit_dir
+from codex_batch_runner.execution_delegation import (
+    build_execution_delegation_contract,
+)
 from codex_batch_runner.events import list_events
 from codex_batch_runner.fs import write_json_atomic
 from codex_batch_runner.queue import create_task, dependency_status, list_tasks, load_task, save_task, select_next_task
@@ -1340,6 +1343,48 @@ class CliTests(unittest.TestCase):
             self.assertEqual("test", task["created_by"])
             self.assertEqual("work", task["title"])
             self.assertIsNone(task["description"])
+
+    def test_enqueue_admits_canonical_delegation_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            contract = build_execution_delegation_contract(
+                task_id="delegated-cli",
+                task_revision="public-task-r1",
+                task_class="bounded-write-isolated",
+                issuer_source_kind="adopted-task-contract",
+                authority_revision="public-authority-r1",
+                policy_revision="public-policy-r1",
+                execution_revision="public-execution-r1",
+                review_revision="public-review-r1",
+                side_effect_boundary={
+                    "cbr_controlled_repository_write_allowed": True,
+                    "external_state_mutation_allowed": False,
+                    "credential_access_allowed": False,
+                    "deployment_or_publication_allowed": False,
+                    "destructive_action_allowed": False,
+                },
+            )
+
+            code, output = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "enqueue",
+                    "--cwd",
+                    tmp,
+                    "--id",
+                    "delegated-cli",
+                    "--prompt",
+                    "bounded objective",
+                    "--delegation-contract-json",
+                    json.dumps(contract),
+                ]
+            )
+
+            task = load_task(Config.load(str(config_path)), "delegated-cli")
+            self.assertEqual(0, code)
+            self.assertEqual("delegated-cli\n", output)
+            self.assertEqual(contract, task["execution_delegation_contract"])
 
     def test_enqueue_records_scheduling_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import Config
 from .execution_evidence_v2 import reporting_evidence_view
+from .execution_delegation import preexecution_delegation_view
 from .execution_mutation_provenance import execution_mutation_provenance_view
 from .natural_execution_attestation import natural_execution_attestation_view
 from .queue import list_tasks, task_labels, task_project_id, task_project_root, task_title
@@ -73,6 +74,7 @@ def build_execution_report(
         category=category,
         label=label,
         include_archived=effective_include_archived,
+        include_preexecution=purpose in {"diagnostic", "audit"},
     )
     filtered_count = len(tasks)
     if purpose == "routing":
@@ -122,8 +124,20 @@ def filter_processed_tasks(
     category: str | None,
     label: str | None,
     include_archived: bool,
+    include_preexecution: bool = False,
 ) -> list[dict[str, Any]]:
-    selected = [task for task in tasks if isinstance(task.get("last_run"), dict)]
+    selected = [
+        task
+        for task in tasks
+        if isinstance(task.get("last_run"), dict)
+        or (
+            include_preexecution
+            and isinstance(
+                task.get("preexecution_delegation_receipt_history"), list
+            )
+            and bool(task["preexecution_delegation_receipt_history"])
+        )
+    ]
     if not include_archived:
         selected = [task for task in selected if task.get("status") != "archived"]
     if project_id:
@@ -229,6 +243,7 @@ def task_execution_row(
         "execution_mutation_provenance": execution_mutation_provenance_view(
             task, as_of=as_of or datetime.now(timezone.utc)
         ),
+        "preexecution_delegation": preexecution_delegation_view(task),
         "result": {
             "status": sanitize(last_result_value(task, "status")),
             "reviewer_decision": sanitize(reviewer_decision(task)),

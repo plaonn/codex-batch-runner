@@ -19,6 +19,9 @@ from codex_batch_runner.config import Config
 import codex_batch_runner.runner as runner_module
 from codex_batch_runner.codex import CodexResult
 from codex_batch_runner.evidence import list_rate_limit_evidence
+from codex_batch_runner.execution_delegation import (
+    build_execution_delegation_contract,
+)
 from codex_batch_runner.events import list_events
 from codex_batch_runner.fs import write_json_atomic
 from codex_batch_runner.lock import FileLock
@@ -1579,6 +1582,254 @@ class RunnerTests(unittest.TestCase):
             self.assertIn(task["execution_commit"], task["last_result"]["commits"])
             self.assertEqual("not_pushed", task["last_result"]["push_status"]["status"])
             self.assertEqual("", git(repo, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip())
+
+    def test_delegation_receipt_is_durable_before_snapshot_and_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            init_repo(repo)
+            config = replace(
+                make_config(tmp, "success"),
+                worktree_mode="task",
+                worktree_root=root / "worktrees",
+            )
+            delegated = build_execution_delegation_contract(
+                task_id="delegated-barrier",
+                task_revision="public-task-r1",
+                task_class="bounded-write-isolated",
+                issuer_source_kind="adopted-task-contract",
+                authority_revision="public-authority-r1",
+                policy_revision="public-policy-r1",
+                execution_revision="public-execution-r1",
+                review_revision="public-review-r1",
+                side_effect_boundary={
+                    "cbr_controlled_repository_write_allowed": True,
+                    "external_state_mutation_allowed": False,
+                    "credential_access_allowed": False,
+                    "deployment_or_publication_allowed": False,
+                    "destructive_action_allowed": False,
+                },
+            )
+            create_task(
+                config,
+                "bounded delegated work",
+                str(repo),
+                task_id="delegated-barrier",
+                execution_delegation_contract=delegated,
+            )
+            resolved = ResolvedExecutionConfig(
+                requirement_vector={"schema_version": 1},
+                selection_rule="execution-target-selector-v1",
+                selection_reason="public-static-selection",
+                model="public-model-v1",
+                model_source="target-alias",
+                execution_target="exact-target-v1",
+                selected_target_snapshot={
+                    "target_id": "exact-target-v1",
+                    "target": {
+                        "target_id": "exact-target-v1",
+                        "worker_family": "public-worker-family",
+                        "worker_id": "public-worker-v1",
+                        "execution_surface": "codex",
+                        "execution_backend": "codex",
+                    },
+                    "inventory_schema_version": 1,
+                    "inventory_snapshot_id": "sha256:public-inventory",
+                    "constraint_registry_version": "public-constraints-v1",
+                    "selection_policy_version": "execution-target-selector-v1",
+                },
+            )
+            real_capture = runner_module.capture_execution_mutation_snapshot
+            barrier_observed: list[bool] = []
+
+            def capture_after_barrier(*args, **kwargs):
+                persisted = load_task(config, "delegated-barrier")
+                barrier_observed.append(
+                    len(
+                        persisted.get(
+                            "preexecution_delegation_receipt_history", []
+                        )
+                    )
+                    == 1
+                    and persisted.get(
+                        "preexecution_delegation_phase_history", []
+                    )[0]["phase"]
+                    == "preexecution_receipt_appended"
+                    and not persisted.get("execution_mutation_snapshot_history")
+                )
+                return real_capture(*args, **kwargs)
+
+            with (
+                patch.object(
+                    runner_module,
+                    "validate_execution_config",
+                    return_value=(resolved, None),
+                ),
+                patch.object(
+                    runner_module,
+                    "capture_execution_mutation_snapshot",
+                    side_effect=capture_after_barrier,
+                ),
+            ):
+                outcome = run_next(config)
+
+            task = load_task(config, "delegated-barrier")
+            self.assertEqual("completed", outcome.status)
+            self.assertTrue(barrier_observed[0])
+            self.assertEqual(
+                "pre_worker_snapshot_recorded",
+                task["preexecution_delegation_phase_history"][1]["phase"],
+            )
+
+    def test_delegation_snapshot_failure_blocks_worker_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            init_repo(repo)
+            config = replace(
+                make_config(tmp, "success"),
+                worktree_mode="task",
+                worktree_root=root / "worktrees",
+            )
+            delegated = build_execution_delegation_contract(
+                task_id="delegated-fail-closed",
+                task_revision="public-task-r1",
+                task_class="bounded-write-isolated",
+                issuer_source_kind="adopted-task-contract",
+                authority_revision="public-authority-r1",
+                policy_revision="public-policy-r1",
+                execution_revision="public-execution-r1",
+                review_revision="public-review-r1",
+                side_effect_boundary={
+                    "cbr_controlled_repository_write_allowed": True,
+                    "external_state_mutation_allowed": False,
+                    "credential_access_allowed": False,
+                    "deployment_or_publication_allowed": False,
+                    "destructive_action_allowed": False,
+                },
+            )
+            create_task(
+                config,
+                "bounded delegated work",
+                str(repo),
+                task_id="delegated-fail-closed",
+                execution_delegation_contract=delegated,
+            )
+            resolved = ResolvedExecutionConfig(
+                requirement_vector={"schema_version": 1},
+                execution_target="exact-target-v1",
+                selected_target_snapshot={
+                    "target_id": "exact-target-v1",
+                    "target": {
+                        "target_id": "exact-target-v1",
+                        "worker_family": "public-worker-family",
+                        "worker_id": "public-worker-v1",
+                        "execution_surface": "codex",
+                        "execution_backend": "codex",
+                    },
+                },
+            )
+
+            with (
+                patch.object(
+                    runner_module,
+                    "validate_execution_config",
+                    return_value=(resolved, None),
+                ),
+                patch.object(
+                    runner_module,
+                    "capture_execution_mutation_snapshot",
+                    side_effect=OSError("synthetic pre-worker capture failure"),
+                ),
+                patch.object(runner_module, "run_codex") as worker,
+            ):
+                outcome = run_next(config)
+
+            task = load_task(config, "delegated-fail-closed")
+            self.assertEqual("failed", outcome.status)
+            self.assertEqual(1, len(task["preexecution_delegation_receipt_history"]))
+            self.assertEqual(
+                ["preexecution_receipt_appended"],
+                [
+                    item["phase"]
+                    for item in task["preexecution_delegation_phase_history"]
+                ],
+            )
+            worker.assert_not_called()
+
+    def test_delegation_receipt_persistence_failure_blocks_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            init_repo(repo)
+            config = replace(
+                make_config(tmp, "success"),
+                worktree_mode="task",
+                worktree_root=root / "worktrees",
+            )
+            delegated = build_execution_delegation_contract(
+                task_id="delegated-save-failure",
+                task_revision="public-task-r1",
+                task_class="bounded-write-isolated",
+                issuer_source_kind="adopted-task-contract",
+                authority_revision="public-authority-r1",
+                policy_revision="public-policy-r1",
+                execution_revision="public-execution-r1",
+                review_revision="public-review-r1",
+                side_effect_boundary={
+                    "cbr_controlled_repository_write_allowed": True,
+                    "external_state_mutation_allowed": False,
+                    "credential_access_allowed": False,
+                    "deployment_or_publication_allowed": False,
+                    "destructive_action_allowed": False,
+                },
+            )
+            create_task(
+                config,
+                "bounded delegated work",
+                str(repo),
+                task_id="delegated-save-failure",
+                execution_delegation_contract=delegated,
+            )
+            resolved = ResolvedExecutionConfig(
+                requirement_vector={"schema_version": 1},
+                execution_target="exact-target-v1",
+                selected_target_snapshot={
+                    "target_id": "exact-target-v1",
+                    "target": {
+                        "target_id": "exact-target-v1",
+                        "worker_family": "public-worker-family",
+                        "worker_id": "public-worker-v1",
+                        "execution_surface": "codex",
+                        "execution_backend": "codex",
+                    },
+                },
+            )
+
+            with (
+                patch.object(
+                    runner_module,
+                    "validate_execution_config",
+                    return_value=(resolved, None),
+                ),
+                patch.object(
+                    runner_module,
+                    "save_delegation_transition_locked",
+                    side_effect=OSError("synthetic receipt persistence failure"),
+                ),
+                patch.object(runner_module, "run_codex") as worker,
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "receipt persistence failure"
+                ):
+                    run_next(config)
+
+            persisted = load_task(config, "delegated-save-failure")
+            self.assertEqual("runnable", persisted["status"])
+            self.assertEqual(
+                [], persisted["preexecution_delegation_receipt_history"]
+            )
+            worker.assert_not_called()
 
     def test_run_next_external_json_command_worktree_unsafe_changed_files_remains_dirty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

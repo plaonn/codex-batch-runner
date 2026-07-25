@@ -318,6 +318,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="concise list title, usually 4-8 words: action + object + short qualifier",
     )
     enqueue.add_argument("--description", help="optional human-readable task description")
+    enqueue.add_argument(
+        "--delegation-contract-json",
+        help=(
+            "canonical cbr-execution-delegation-contract-v1 JSON admitted "
+            "immutably before first claim"
+        ),
+    )
     enqueue.add_argument("--model-requirement-json", help="model requirement vector JSON object")
     enqueue.add_argument("--routing-override-json", help="single-task routing override JSON object")
     for dimension in REQUIREMENT_DIMENSIONS:
@@ -1140,6 +1147,7 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         external_timeout_seconds=args.external_timeout_seconds,
         capacity_pool=args.capacity_pool,
         task_priority=args.priority,
+        execution_delegation_contract=parse_delegation_contract_arg(args),
     )
     run_post_mutation_trigger(config)
     print(task["id"])
@@ -1165,6 +1173,21 @@ def parse_command_args(args: argparse.Namespace) -> list[str] | None:
             raise ValueError("--command requires at least one argv item")
         return command
     return None
+
+
+def parse_delegation_contract_arg(args: argparse.Namespace) -> dict | None:
+    raw = args.delegation_contract_json
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "--delegation-contract-json must be a JSON object"
+        ) from exc
+    if not isinstance(value, dict):
+        raise ValueError("--delegation-contract-json must be a JSON object")
+    return value
 
 
 def parse_model_requirement_args(args: argparse.Namespace) -> dict | None:
