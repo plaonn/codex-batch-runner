@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import select
 import shutil
 import shlex
@@ -35,11 +36,16 @@ from .decision_cards import (
 )
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write_event_nonfatal
 from .execution_evidence import ExecutionEvidenceError, load_execution_evidence_records
+from .execution_evidence_v2 import ExecutionEvidenceV2Error, reporting_evidence_view
+from .execution_evidence_v3 import ExecutionEvidenceV3Error
 from .execution_report import (
     DEFAULT_EXECUTION_REPORT_LIMIT,
     EXECUTION_REPORT_PURPOSES,
     build_execution_report,
+    command_option,
+    list_value,
     render_execution_report,
+    worker_family,
 )
 from .model_requirements import (
     REQUIREMENT_DIMENSIONS,
@@ -240,7 +246,7 @@ from .status_report import build_status_report as build_cbr_status_report
 from .status_report import render_status_report as render_cbr_status_report
 from .summary import render_task_summary
 from .timeutil import parse_time, utc_now
-from .transcript import render_task_transcript
+from .transcript import render_task_transcript, sanitize
 from .triggers import run_post_mutation_trigger
 from .wake import schedule_manual_cooldown_wake
 from .watching_report import build_watching_evidence_report, render_watching_evidence_report
@@ -257,6 +263,12 @@ from .worktree import (
 WATCH_RESTART_MESSAGE = "cbr source changed since this watch started; restart watch to use updated code"
 COMPACT_TABLE_BLOCK_LAYOUT_WIDTH = 80
 COMPACT_TABLE_COMFORT_WIDTH = 93
+VERBOSE_TABLE_BLOCK_LAYOUT_WIDTH = 160
+SAFE_PROVENANCE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,95}$")
+SAFE_PROVENANCE_REASON = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ +()-]{0,95}$")
+SENSITIVE_PROVENANCE_FRAGMENT = re.compile(
+    r"(?i)(credential|internal|password|private|secret|session|thread|token)"
+)
 COMPACT_TABLE_MIN_TITLE_WIDTH = 30
 COMPACT_TABLE_MIN_DETAIL_WIDTH = 24
 COMPACT_TABLE_FLOOR_TITLE_WIDTH = 12
@@ -1507,13 +1519,17 @@ def render_list_output(config: Config, args: argparse.Namespace, terminal_width:
         return "\n".join([*banners, output]) if banners else output
     header = ["ID", "TITLE", "STATUS", "PROJECT", "ATTEMPTS", "DEPS", "NOTE"]
     header.append("MODEL")
-    header.extend(["RAW_STATUS", "LAST_RESULT", "LAST_RUN", "LAST_ERROR"])
+    header.extend(["RAW_STATUS", "LAST_RESULT", "LAST_RUN", "LAST_ERROR", "PROVENANCE", "NEXT"])
     rows = []
     for task in tasks:
         row = list_table_row(task, by_id, config, include_capacity=not args.demo)
-        row.extend(verbose_table_cells(task))
+        row.extend(verbose_table_cells(task, config=config, by_id=by_id))
         rows.append(row)
-    output = render_table(header, rows)
+    output = (
+        render_verbose_block_list(header, rows, terminal_width)
+        if terminal_width is not None and terminal_width < VERBOSE_TABLE_BLOCK_LAYOUT_WIDTH
+        else render_table(header, rows)
+    )
     return "\n".join([*banners, output]) if banners else output
 
 
@@ -1774,6 +1790,17 @@ def render_table(header: list[str], rows: list[list[str]]) -> str:
 def render_table_row(row: list[str], widths: list[int]) -> str:
     padded = [cell.ljust(widths[index]) for index, cell in enumerate(row[:-1])]
     return "  ".join([*padded, row[-1]])
+
+
+def render_verbose_block_list(header: list[str], rows: list[list[str]], terminal_width: int) -> str:
+    if not rows:
+        return "(no tasks)"
+    blocks = []
+    for row in rows:
+        if blocks:
+            blocks.append("")
+        blocks.extend(render_block_rows(list(zip(header, row)), terminal_width))
+    return "\n".join(blocks)
 
 
 def render_dependency_graph(
@@ -3911,14 +3938,228 @@ def truncate_table_text(value: str, limit: int) -> str:
     return value[: max(0, limit - 3)].rstrip() + "..."
 
 
-def verbose_table_cells(task: dict) -> list[str]:
+def verbose_table_cells(
+    task: dict,
+    config: Config | None = None,
+    by_id: dict[str, dict] | None = None,
+) -> list[str]:
     return [
         model_requirement_note(task) or "-",
         scalar_cell(task.get("status")),
         last_result_cell(task.get("last_result"), task.get("git_status")),
         last_run_cell(task.get("last_run")),
         excerpt_cell(task.get("last_error")),
+        provenance_cell(task, config=config),
+        next_cell(task, by_id=by_id, config=config),
     ]
+
+
+def provenance_cell(task: dict, config: Config | None = None) -> str:
+    queue_surface = "cbr_batch"
+    selected_surface = "unknown"
+
+    last_run = task.get("last_run") if isinstance(task.get("last_run"), dict) else {}
+    resolved_config = (
+        last_run.get("resolved_execution_config")
+        if isinstance(last_run.get("resolved_execution_config"), dict)
+        else {}
+    )
+    resolved_worker_target = (
+        last_run.get("resolved_worker_target")
+        if isinstance(last_run.get("resolved_worker_target"), dict)
+        else {}
+    )
+    backend = sanitize(last_run.get("execution_backend"))
+    capacity_pool = sanitize(task.get("capacity_pool"))
+    command = list_value(last_run.get("command"))
+
+    worker_val = "unknown"
+    planned_val = "unknown"
+    if last_run:
+        worker_val = bounded_provenance_identifier(
+            resolved_worker_target.get("worker_family")
+            or worker_family(backend or "codex", capacity_pool or "codex", command)
+        )
+        planned_val = bounded_provenance_identifier(
+            resolved_config.get("model")
+            or command_option(command, "--model")
+        )
+
+    evidence_invalid = False
+    try:
+        observed_evidence = reporting_evidence_view(task) if task else {}
+    except (ExecutionEvidenceV2Error, ExecutionEvidenceV3Error):
+        observed_evidence = {}
+        evidence_invalid = True
+    actual_model_val = "unavailable"
+    reasoning_val = "unavailable"
+    if evidence_invalid:
+        actual_model_val = "unknown"
+        reasoning_val = "unknown"
+
+    if isinstance(observed_evidence, dict):
+        identity = (
+            observed_evidence.get("identity")
+            if isinstance(observed_evidence.get("identity"), dict)
+            else {}
+        )
+        provider_reported = (
+            identity.get("provider_reported_model")
+            if isinstance(identity.get("provider_reported_model"), dict)
+            else {}
+        )
+        actual_model_obj = (
+            observed_evidence.get("actual_model")
+            if isinstance(observed_evidence.get("actual_model"), dict)
+            else {}
+        )
+
+        cohort = (
+            observed_evidence.get("cohort")
+            if isinstance(observed_evidence.get("cohort"), dict)
+            else {}
+        )
+        comparability = (
+            cohort.get("comparability")
+            if isinstance(cohort.get("comparability"), dict)
+            else {}
+        )
+        exact_v3_identity = (
+            observed_evidence.get("schema_version") == 3
+            and comparability.get("model_quality") is True
+        )
+
+        if provider_reported.get("status") == "observed" and provider_reported.get("value"):
+            actual_model_val = bounded_provenance_identifier(
+                provider_reported.get("value"),
+                fallback="unknown",
+            )
+        elif (
+            actual_model_obj.get("status") == "observed"
+            and actual_model_obj.get("value")
+            and (observed_evidence.get("schema_version") != 3 or exact_v3_identity)
+        ):
+            actual_model_val = bounded_provenance_identifier(
+                actual_model_obj.get("value"),
+                fallback="unknown",
+            )
+
+        if exact_v3_identity:
+            reasoning_effort_val = identity.get("reasoning_effort")
+            if reasoning_effort_val in {"low", "medium", "high"}:
+                reasoning_val = str(reasoning_effort_val)
+
+    routing_evidence = (
+        observed_evidence.get("routing")
+        if isinstance(observed_evidence.get("routing"), dict)
+        else {}
+    )
+    rationale_code = execution_selection_reason_code(
+        resolved_config.get("selection_reason")
+        or resolved_worker_target.get("selection_reason")
+        or routing_evidence.get("selection_reason")
+    )
+    rationale_val = f"execution_target:{rationale_code}" if rationale_code else "unavailable"
+
+    parts = [
+        f"queue_surface={queue_surface}",
+        f"selected_surface={selected_surface}",
+        f"worker={worker_val}",
+        f"planned_model={planned_val}",
+        f"actual_model={actual_model_val}",
+        f"reasoning={reasoning_val}",
+        f"rationale={rationale_val}",
+    ]
+    return " ".join(parts)
+
+
+def next_cell(
+    task: dict,
+    by_id: dict[str, dict] | None = None,
+    config: Config | None = None,
+) -> str:
+    by_id = by_id or {}
+    projection = task_list_presentation(task, by_id, config)
+    task_id = bounded_task_identifier(task.get("id"))
+    if projection.blockers:
+        blocker_ids = [str(b.get("id")) for b in projection.blockers if b.get("id")]
+        safe_blocker_ids = [
+            bounded_task_identifier(blocker_id)
+            for blocker_id in blocker_ids
+        ]
+        safe_blocker_ids = [blocker_id for blocker_id in safe_blocker_ids if blocker_id != "unknown"]
+        if safe_blocker_ids:
+            if projection.kind != "fix":
+                return f"wait for blockers: {', '.join(safe_blocker_ids)}"
+            blocker_statuses = {
+                str(blocker.get("status") or "")
+                for blocker in projection.blockers
+            }
+            if blocker_statuses & {
+                "awaiting_review",
+                "needs_followup",
+                "review_failed",
+                "review_needs_fix",
+                "review_rejected",
+            }:
+                return "cbr review-next --dry-run"
+            blocker_id = safe_blocker_ids[0]
+            return f"cbr summary {blocker_id}; cbr resolve {blocker_id} --help"
+    missing_subtask_ids = [
+        subtask_id
+        for subtask_id in blocking_subtask_ids(task)
+        if subtask_id not in by_id
+    ]
+    if projection.kind == "fix" and missing_subtask_ids:
+        return f"unknown; cbr summary {task_id}"
+    if projection.kind in {"exec", "resume"}:
+        return f"cbr follow {task_id}; cbr summary {task_id}"
+    if projection.kind == "new":
+        return f"cbr summary {task_id}"
+    if projection.kind == "apply":
+        return f"cbr worktree apply {task_id} --dry-run"
+    if projection.kind in {"review", "followup", "fix"} and task.get("status") == "completed":
+        return "cbr review-next --dry-run"
+    if projection.kind in {"error", "fix"}:
+        return f"cbr summary {task_id}; cbr resolve {task_id} --help"
+    action_by_kind = {
+        "cooldown": "wait for cooldown",
+        "capacity": "wait for capacity",
+        "usage": "wait for usage recovery",
+        "review": f"cbr summary {task_id}",
+        "success": "none",
+        "archived": "none",
+        "resolved": "none",
+        "rejected": "none",
+    }
+    return action_by_kind.get(projection.kind, projection.detail or "unknown")
+
+
+def bounded_provenance_identifier(value: object, *, fallback: str = "unknown") -> str:
+    sanitized = sanitize(value)
+    if (
+        not sanitized
+        or SAFE_PROVENANCE_IDENTIFIER.fullmatch(sanitized) is None
+        or SENSITIVE_PROVENANCE_FRAGMENT.search(sanitized) is not None
+    ):
+        return fallback
+    return sanitized
+
+
+def bounded_task_identifier(value: object) -> str:
+    sanitized = sanitize(value)
+    return sanitized if SAFE_PROVENANCE_IDENTIFIER.fullmatch(sanitized) is not None else "unknown"
+
+
+def execution_selection_reason_code(value: object) -> str:
+    normalized = sanitize(value)
+    if (
+        not normalized
+        or SAFE_PROVENANCE_REASON.fullmatch(normalized) is None
+        or SENSITIVE_PROVENANCE_FRAGMENT.search(normalized) is not None
+    ):
+        return ""
+    return normalized
 
 
 def last_result_cell(last_result: object, git_status: object | None = None) -> str:

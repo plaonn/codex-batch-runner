@@ -6990,6 +6990,8 @@ class CliTests(unittest.TestCase):
                     "LAST_RESULT",
                     "LAST_RUN",
                     "LAST_ERROR",
+                    "PROVENANCE",
+                    "NEXT",
                 ],
                 lines[0].split(),
             )
@@ -7000,6 +7002,254 @@ class CliTests(unittest.TestCase):
             self.assertEqual("status=failed summary=first line second line", rows["verbose"]["LAST_RESULT"])
             self.assertEqual("command=exec returncode=1 duration=2.5s", rows["verbose"]["LAST_RUN"])
             self.assertEqual("error line one line two", rows["verbose"]["LAST_ERROR"])
+            self.assertIn("queue_surface=cbr_batch", rows["verbose"]["PROVENANCE"])
+            self.assertIn("selected_surface=unknown", rows["verbose"]["PROVENANCE"])
+            self.assertEqual(
+                "cbr summary verbose; cbr resolve verbose --help",
+                rows["verbose"]["NEXT"],
+            )
+
+    def test_list_verbose_provenance_actual_model_and_reasoning_from_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task_v3 = create_task(config, "v3 task", tmp, task_id="v3-task", project_id="project-a")
+            task_v3["status"] = "completed"
+            task_v3["last_run"] = {
+                "execution_backend": "codex",
+                "resolved_execution_config": {"model": "gpt-4o", "selection_reason": "automatic_static_non_learned"},
+                "resolved_worker_target": {"worker_family": "codex", "selection_reason": "automatic_static_non_learned"},
+            }
+            v3_evidence = {
+                "schema_version": 3,
+                "identity": {
+                    "selected_model": "gpt-4o-2024-08-06",
+                    "command_model": "gpt-4o-2024-08-06",
+                    "provider_reported_model": {"status": "observed", "value": "gpt-4o-2024-08-06", "source": "codex_jsonl", "confidence": "provider_observed", "availability_reason": None},
+                    "reasoning_effort": "high",
+                    "attestation": "verified",
+                },
+                "actual_model": {
+                    "status": "observed",
+                    "value": "gpt-4o-2024-08-06",
+                    "source": "command_enforced",
+                    "confidence": "verified",
+                    "availability_reason": None,
+                },
+                "routing": {"target_id": "codex-target", "selection_reason": "automatic_static_non_learned", "selection_cohort": "automatic"},
+                "cohort": {"definition_version": "execution-cohort-v3", "cohort_id": "cohort-1", "components": {}, "comparability": {"model_quality": True, "token_cost": True, "monetary_cost": False}, "exclusion_reasons": []}
+            }
+            save_task(config, task_v3)
+
+            task_no_ev = create_task(config, "no evidence task", tmp, task_id="no-ev-task", project_id="project-a")
+            task_no_ev["status"] = "completed"
+            task_no_ev["last_run"] = {
+                "execution_backend": "codex",
+                "resolved_execution_config": {"model": "gpt-4o-mini"},
+            }
+            save_task(config, task_no_ev)
+
+            with patch(
+                "codex_batch_runner.cli.reporting_evidence_view",
+                side_effect=lambda item: v3_evidence if item.get("id") == "v3-task" else {"schema_version": 1},
+            ):
+                code, output = run_cli(["--config", str(config_path), "list", "--verbose", "--all"])
+            self.assertEqual(0, code)
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+
+            v3_prov = rows["v3-task"]["PROVENANCE"]
+            self.assertIn("queue_surface=cbr_batch", v3_prov)
+            self.assertIn("selected_surface=unknown", v3_prov)
+            self.assertIn("worker=codex", v3_prov)
+            self.assertIn("planned_model=gpt-4o", v3_prov)
+            self.assertIn("actual_model=gpt-4o-2024-08-06", v3_prov)
+            self.assertIn("reasoning=high", v3_prov)
+            self.assertIn("rationale=execution_target:automatic_static_non_learned", v3_prov)
+
+            no_ev_prov = rows["no-ev-task"]["PROVENANCE"]
+            self.assertIn("actual_model=unavailable", no_ev_prov)
+            self.assertIn("reasoning=unavailable", no_ev_prov)
+
+    def test_list_verbose_next_presentation_for_unapplied_and_unreviewed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+
+            unreviewed = create_task(config, "unreviewed work", tmp, task_id="unreviewed-1")
+            unreviewed["status"] = "completed"
+            unreviewed["review_status"] = "unreviewed"
+            save_task(config, unreviewed)
+
+            unapplied = create_task(config, "unapplied work", tmp, task_id="unapplied-1")
+            unapplied["status"] = "completed"
+            unapplied["review_status"] = "accepted"
+            unapplied["execution_mode"] = "git_worktree"
+            unapplied["execution_apply_status"] = "not_applied"
+            save_task(config, unapplied)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--verbose", "--all"])
+            self.assertEqual(0, code)
+            rows = {row["ID"]: row for row in fixed_table_rows(output)}
+
+            self.assertEqual("cbr review-next --dry-run", rows["unreviewed-1"]["NEXT"])
+            self.assertEqual(
+                "cbr worktree apply unapplied-1 --dry-run",
+                rows["unapplied-1"]["NEXT"],
+            )
+
+    def test_list_verbose_failed_blocking_subtask_requires_resolution_not_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            parent = create_task(config, "parent", tmp, task_id="parent-task")
+            parent["blocking_subtask_ids"] = ["failed-child"]
+            save_task(config, parent)
+            child = create_task(config, "child", tmp, task_id="failed-child")
+            child["status"] = "failed"
+            child["subtask_for"] = "parent-task"
+            save_task(config, child)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--verbose", "--all"])
+            self.assertEqual(0, code)
+            row = {item["ID"]: item for item in fixed_table_rows(output)}["parent-task"]
+            self.assertEqual(
+                "cbr summary failed-child; cbr resolve failed-child --help",
+                row["NEXT"],
+            )
+
+    def test_list_verbose_missing_blocking_subtask_is_unknown_read_only_drilldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            parent = create_task(config, "parent", tmp, task_id="parent-task")
+            parent["blocking_subtask_ids"] = ["missing-child"]
+            save_task(config, parent)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--verbose", "--all"])
+            self.assertEqual(0, code)
+            row = {item["ID"]: item for item in fixed_table_rows(output)}["parent-task"]
+            self.assertEqual("unknown; cbr summary parent-task", row["NEXT"])
+
+    def test_list_verbose_malformed_evidence_is_unknown_without_echo_or_abort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "malformed evidence", tmp, task_id="malformed-evidence")
+            task["last_run"] = {"execution_backend": "codex"}
+            task["execution_evidence_history"] = [{"schema_version": 3, "private": "/private/secret"}]
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--verbose", "--all"])
+            self.assertEqual(0, code)
+            provenance = {item["ID"]: item for item in fixed_table_rows(output)}[
+                "malformed-evidence"
+            ]["PROVENANCE"]
+            self.assertIn("actual_model=unknown", provenance)
+            self.assertIn("reasoning=unknown", provenance)
+            self.assertNotIn("/private/secret", output)
+
+    def test_list_verbose_omits_unbounded_private_model_and_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "private provenance", tmp, task_id="private-provenance")
+            task["last_run"] = {
+                "execution_backend": "codex",
+                "resolved_execution_config": {
+                    "model": "private/ops/operator-secret/model",
+                    "selection_reason": "https://internal.example/secret-reason",
+                },
+            }
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--verbose", "--all"])
+            self.assertEqual(0, code)
+            provenance = {item["ID"]: item for item in fixed_table_rows(output)}[
+                "private-provenance"
+            ]["PROVENANCE"]
+            self.assertIn("planned_model=unknown", provenance)
+            self.assertIn("rationale=unavailable", provenance)
+            self.assertNotIn("private/ops", output)
+            self.assertNotIn("internal.example", output)
+
+    def test_list_verbose_reuses_bounded_execution_reason_without_new_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            fallback = create_task(config, "fallback reason", tmp, task_id="fallback-reason")
+            fallback["last_run"] = {
+                "execution_backend": "codex",
+                "resolved_execution_config": {"selection_reason": "fallback"},
+            }
+            save_task(config, fallback)
+            public_static = create_task(
+                config,
+                "public static reason",
+                tmp,
+                task_id="public-static-reason",
+            )
+            public_static["last_run"] = {
+                "execution_backend": "codex",
+                "resolved_execution_config": {"selection_reason": "public-static-selection"},
+            }
+            save_task(config, public_static)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--verbose", "--all"])
+            self.assertEqual(0, code)
+            rows = {item["ID"]: item for item in fixed_table_rows(output)}
+            self.assertIn(
+                "rationale=execution_target:fallback",
+                rows["fallback-reason"]["PROVENANCE"],
+            )
+            self.assertIn(
+                "rationale=execution_target:public-static-selection",
+                rows["public-static-reason"]["PROVENANCE"],
+            )
+
+    def test_list_verbose_narrow_layout_wraps_without_hiding_provenance_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "narrow provenance", tmp, task_id="narrow-provenance")
+            save_task(config, task)
+
+            with patch("codex_batch_runner.cli.compact_terminal_width", return_value=60):
+                code, output = run_cli(
+                    ["--config", str(config_path), "list", "--verbose", "--all"]
+                )
+
+            self.assertEqual(0, code)
+            self.assertIn("PROVENANCE:", output)
+            for label in (
+                "queue_surface=",
+                "selected_surface=",
+                "worker=",
+                "planned_model=",
+                "actual_model=",
+                "reasoning=",
+                "rationale=",
+            ):
+                self.assertIn(label, output)
+            self.assertTrue(all(len(line) <= 60 for line in output.splitlines()))
+
+    def test_list_verbose_does_not_promote_pre_run_worker_or_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = write_config(tmp)
+            config = Config.load(str(config_path))
+            task = create_task(config, "planned only", tmp, task_id="planned-only", project_id="project-a")
+            task["execution_backend"] = "external-json-command"
+            task["capacity_pool"] = "antigravity-gemini"
+            task["model"] = "gemini-intended"
+            save_task(config, task)
+
+            code, output = run_cli(["--config", str(config_path), "list", "--verbose", "--all"])
+            self.assertEqual(0, code)
+            row = {item["ID"]: item for item in fixed_table_rows(output)}["planned-only"]
+            provenance = row["PROVENANCE"]
+            self.assertIn("worker=unknown", provenance)
+            self.assertIn("planned_model=unknown", provenance)
+            self.assertIn("actual_model=unavailable", provenance)
+            self.assertIn("reasoning=unavailable", provenance)
 
     def test_list_verbose_includes_result_push_and_git_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
