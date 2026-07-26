@@ -7,6 +7,10 @@ create threads, or dispatch work. Global `--config` is a usage error for this
 command. Invalid input is printed to stdout with exit 2; valid `ready`,
 `needs_user_decision`, and `blocked` outcomes exit 0.
 
+The additive recommendation-versus-selection shadow contract is documented in
+[orchestration-selection-shadow.md](orchestration-selection-shadow.md). It
+does not change D1 eligibility, dispatch work, or emit warnings.
+
 ## Intake: `orchestration-intake-v1`
 
 The input is one UTF-8 JSON object no larger than 64 KiB. Its exact top-level

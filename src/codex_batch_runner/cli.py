@@ -141,6 +141,17 @@ from .orchestration import (
     orchestration_request_fingerprint,
     render_orchestration_plan,
 )
+from .orchestration_selection import (
+    CANONICAL_SURFACES,
+    POLICY_REVISION as ORCHESTRATION_SELECTION_POLICY_REVISION,
+    OrchestrationSelectionError,
+    SelectionReceiptConflict,
+    apply_selection_record,
+    build_selection_apply_preview,
+    build_selection_preview,
+    load_selection_override,
+    load_selection_preview,
+)
 from .orchestration_dispatch import (
     DispatchLockBusy,
     ExecutionEnvelopeError,
@@ -260,9 +271,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
     if args.command == "orchestration":
-        if args.orchestration_command == "plan":
-            if args.config:
-                print("error: --config is not supported by orchestration plan", file=sys.stderr)
+        if args.orchestration_command in {"plan", "selection-preview", "selection-record"}:
+            if args.config and args.orchestration_command in {"plan", "selection-preview"}:
+                print(f"error: --config is not supported by orchestration {args.orchestration_command}", file=sys.stderr)
                 return 2
             try:
                 return args.func(None, args)
@@ -491,6 +502,30 @@ def build_parser() -> argparse.ArgumentParser:
     orchestration_plan.add_argument("--manifest", required=True, metavar="PATH")
     orchestration_plan.add_argument("--json", action="store_true", help="print JSON")
     orchestration_plan.set_defaults(func=cmd_orchestration_plan)
+    orchestration_selection_preview = orchestration_sub.add_parser(
+        "selection-preview",
+        help="build deterministic report-only selection shadow evidence",
+    )
+    orchestration_selection_preview.add_argument("--manifest", required=True, metavar="PATH")
+    orchestration_selection_preview.add_argument("--source-contract-digest", required=True)
+    orchestration_selection_preview.add_argument("--policy-revision", default=ORCHESTRATION_SELECTION_POLICY_REVISION)
+    orchestration_selection_preview.add_argument("--selected-surface", choices=sorted(CANONICAL_SURFACES))
+    orchestration_selection_preview.add_argument("--override", metavar="PATH")
+    orchestration_selection_preview.add_argument("--evaluated-at", required=True)
+    orchestration_selection_preview.add_argument("--json", action="store_true", help="print JSON")
+    orchestration_selection_preview.set_defaults(func=cmd_orchestration_selection_preview)
+    orchestration_selection_record = orchestration_sub.add_parser(
+        "selection-record",
+        help="record one explicit immutable runtime-private selection receipt",
+    )
+    orchestration_selection_record.add_argument("--manifest", required=True, metavar="PATH")
+    orchestration_selection_record.add_argument("--preview", required=True, metavar="PATH")
+    selection_record_mode = orchestration_selection_record.add_mutually_exclusive_group(required=True)
+    selection_record_mode.add_argument("--dry-run", action="store_true")
+    selection_record_mode.add_argument("--apply", action="store_true")
+    orchestration_selection_record.add_argument("--confirm-decision-id")
+    orchestration_selection_record.add_argument("--json", action="store_true", help="print JSON")
+    orchestration_selection_record.set_defaults(func=cmd_orchestration_selection_record)
     orchestration_dispatch = orchestration_sub.add_parser(
         "dispatch-cbr",
         help="explicitly dispatch a ready cbr_batch plan exactly once",
@@ -4193,6 +4228,77 @@ def cmd_orchestration_plan(config: Config | None, args: argparse.Namespace) -> i
     else:
         print(render_orchestration_plan(report), end="")
     return exit_code
+
+
+def cmd_orchestration_selection_preview(config: Config | None, args: argparse.Namespace) -> int:
+    del config  # This command is deliberately config-free and report-only.
+    try:
+        manifest = load_manifest(args.manifest)
+        override = load_selection_override(args.override) if args.override else None
+        report = build_selection_preview(
+            manifest,
+            selected_surface=args.selected_surface,
+            source_contract_digest=args.source_contract_digest,
+            policy_revision=args.policy_revision,
+            evaluated_at=args.evaluated_at,
+            override=override,
+        )
+    except (OrchestrationManifestError, OrchestrationSelectionError):
+        print("error: orchestration selection preview invalid", file=sys.stderr)
+        return 2
+    _emit_orchestration_selection(report, args.json)
+    return 0
+
+
+def cmd_orchestration_selection_record(config: Config | None, args: argparse.Namespace) -> int:
+    del config  # Config loading occurs after preview and confirmation checks.
+    try:
+        preview = load_selection_preview(args.preview)
+        manifest = load_manifest(args.manifest)
+        decision_id = preview["decision"]["decision_id"]
+        if args.dry_run and args.confirm_decision_id is not None:
+            raise OrchestrationSelectionError("confirmation is not allowed for dry-run")
+        if args.apply and args.confirm_decision_id is None:
+            raise OrchestrationSelectionError("confirmation is required for apply")
+        if args.apply and args.confirm_decision_id != decision_id:
+            raise OrchestrationSelectionError("confirmation does not match")
+        loaded_config = Config.load(args.config)
+        if args.dry_run:
+            report = build_selection_apply_preview(loaded_config, preview, manifest)
+            _emit_orchestration_selection(report, args.json)
+            return 0 if report["status"] != "conflict" else 2
+        report = apply_selection_record(loaded_config, preview, manifest)
+    except (
+        OrchestrationManifestError,
+        OrchestrationSelectionError,
+        SelectionReceiptConflict,
+    ):
+        print("error: orchestration selection record failed closed", file=sys.stderr)
+        return 2
+    except Exception:
+        print("error: orchestration selection record failed", file=sys.stderr)
+        return 1
+    _emit_orchestration_selection(report, args.json)
+    return 0
+
+
+def _emit_orchestration_selection(report: dict[str, Any], as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    decision = report.get("decision") or {}
+    fields = [
+        ("contract", report.get("contract")),
+        ("decision_id", report.get("decision_id") or decision.get("decision_id")),
+        ("status", report.get("status") or decision.get("decision_status")),
+        ("recommended_surface", decision.get("recommended_surface")),
+        ("selected_surface", decision.get("selected_surface")),
+        ("would_warn", decision.get("would_warn")),
+        ("mutation", report.get("mutation")),
+    ]
+    for key, value in fields:
+        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        print(f"{key}: {rendered}")
 
 
 def cmd_orchestration_dispatch_cbr(config: Config, args: argparse.Namespace) -> int:
