@@ -151,6 +151,11 @@ from .orchestration_selection import (
     build_selection_preview,
     load_selection_override,
     load_selection_preview,
+    load_selection_receipt,
+)
+from .orchestration_selection_funnel import (
+    SelectionFunnelError,
+    build_selection_funnel,
 )
 from .orchestration_dispatch import (
     DispatchLockBusy,
@@ -271,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
     if args.command == "orchestration":
-        if args.orchestration_command in {"plan", "selection-preview", "selection-record"}:
+        if args.orchestration_command in {"plan", "selection-preview", "selection-record", "selection-funnel"}:
             if args.config and args.orchestration_command in {"plan", "selection-preview"}:
                 print(f"error: --config is not supported by orchestration {args.orchestration_command}", file=sys.stderr)
                 return 2
@@ -526,6 +531,15 @@ def build_parser() -> argparse.ArgumentParser:
     orchestration_selection_record.add_argument("--confirm-decision-id")
     orchestration_selection_record.add_argument("--json", action="store_true", help="print JSON")
     orchestration_selection_record.set_defaults(func=cmd_orchestration_selection_record)
+    orchestration_selection_funnel = orchestration_sub.add_parser(
+        "selection-funnel",
+        help="project trusted durable selection and CBR lifecycle evidence read-only",
+    )
+    orchestration_selection_funnel.add_argument("--manifest", required=True, metavar="PATH")
+    orchestration_selection_funnel.add_argument("--execution-envelope", required=True, metavar="PRIVATE_PATH")
+    orchestration_selection_funnel.add_argument("--selection-receipt", required=True, metavar="PRIVATE_PATH")
+    orchestration_selection_funnel.add_argument("--json", action="store_true", help="print JSON")
+    orchestration_selection_funnel.set_defaults(func=cmd_orchestration_selection_funnel)
     orchestration_dispatch = orchestration_sub.add_parser(
         "dispatch-cbr",
         help="explicitly dispatch a ready cbr_batch plan exactly once",
@@ -4299,6 +4313,42 @@ def _emit_orchestration_selection(report: dict[str, Any], as_json: bool) -> None
     for key, value in fields:
         rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
         print(f"{key}: {rendered}")
+
+
+def cmd_orchestration_selection_funnel(config: Config | None, args: argparse.Namespace) -> int:
+    del config  # Validate private inputs before loading read-only runtime config.
+    try:
+        manifest = load_manifest(args.manifest)
+        envelope = load_execution_envelope(args.execution_envelope)
+        receipt = load_selection_receipt(args.selection_receipt)
+        loaded_config = Config.load(args.config)
+        report = build_selection_funnel(loaded_config, manifest, envelope, receipt)
+    except (
+        OrchestrationManifestError,
+        ExecutionEnvelopeError,
+        OrchestrationSelectionError,
+        SelectionFunnelError,
+    ):
+        print("error: orchestration selection funnel failed closed", file=sys.stderr)
+        return 2
+    except Exception:
+        print("error: orchestration selection funnel failed", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"contract: {report['contract']}")
+        print(f"report_digest: {report['report_digest']}")
+        for row in report["surface_rows"]:
+            stages = " ".join(
+                f"{stage}={row['stages'][stage]['status']}"
+                for stage in report["stage_order"]
+            )
+            print(f"{row['surface']}: {stages}")
+        print("parent_collected: not_claimed")
+        print("root_complete: not_claimed")
+        print("mutation: allowed=false applied=false")
+    return 0
 
 
 def cmd_orchestration_dispatch_cbr(config: Config, args: argparse.Namespace) -> int:

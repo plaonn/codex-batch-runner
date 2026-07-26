@@ -11,6 +11,10 @@ The additive recommendation-versus-selection shadow contract is documented in
 [orchestration-selection-shadow.md](orchestration-selection-shadow.md). It
 does not change D1 eligibility, dispatch work, or emit warnings.
 
+The read-only durable lifecycle projection is documented in
+[orchestration-selection-funnel.md](orchestration-selection-funnel.md). It
+does not invent non-CBR adapters or equate parent attention with collection.
+
 ## Intake: `orchestration-intake-v1`
 
 The input is one UTF-8 JSON object no larger than 64 KiB. Its exact top-level

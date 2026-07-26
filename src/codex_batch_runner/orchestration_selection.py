@@ -397,6 +397,29 @@ def load_selection_preview(path: str | Path) -> dict[str, Any]:
     return validate_selection_preview(value)
 
 
+def load_selection_receipt(path: str | Path) -> dict[str, Any]:
+    value = _load_private_json(Path(path), missing=None)
+    if value is None:
+        raise OrchestrationSelectionError("selection receipt is missing")
+    return validate_selection_receipt(value)
+
+
+def validate_source_bound_selection_receipt(
+    value: object,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    receipt = validate_selection_receipt(value)
+    preview = {
+        "schema_version": 1,
+        "contract": PREVIEW_CONTRACT,
+        "decision": receipt["decision"],
+        "mutation": False,
+        "preview_digest": receipt["preview_digest"],
+    }
+    _validate_source_bound_preview(preview, manifest)
+    return receipt
+
+
 def load_selection_override(path: str | Path) -> dict[str, Any]:
     try:
         raw = Path(path).read_bytes()

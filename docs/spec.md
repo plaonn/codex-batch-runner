@@ -18,6 +18,7 @@
 - [CLI reference](cli-reference.md): command surface and human/JSON output semantics.
 - [Closed-loop orchestration](orchestration.md): D1 deterministic read-only surface recommendation, additive selection shadow evidence, D2 explicit idempotent CBR admission, D3-0 generic reconciliation shadow, D3-1 CBR-owned local ingress, and D3-2 explicit one-event guarded consumption through the existing D2 writer.
 - [Orchestration selection shadow evidence](orchestration-selection-shadow.md): exact D1-bound report-only comparison, stable reason codes, advisory `would_warn`, and explicit immutable private receipt recording.
+- [Orchestration selection funnel](orchestration-selection-funnel.md): trusted receipt/task/outbox projection from durable eligibility through parent-attention recording, without collection or root-completion claims.
 - [Operator installation guide](operator-installation.md): fail-closed CLI/environment/XDG config discovery, guarded managed launchd lifecycle, doctor, manual cooldown wake, cross-project enqueue/check flow.
 - [Beta operations guide](beta-operations.md): practical beta operating model, inbox triage, review workflow, JSON output use, smoke checklist.
 
