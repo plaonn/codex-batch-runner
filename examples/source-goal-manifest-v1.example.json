@@ -1,0 +1,14 @@
+{
+  "automation_boundary": {"allowed_mutations": ["read_only"], "attention_gates": ["manual-collection"], "prohibited_mutations": ["dispatch", "source_write", "delivery", "acknowledgement", "completion"]},
+  "contract": "source-goal-manifest-v1",
+  "decision_authority": {"goal": "source_owner", "node_default": "codex_coordinator"},
+  "goal_id": "goal-public-1",
+  "manifest_digest": "sha256:11c0783183e0ad72eda27cce0abf255406bf187a6e3c5643ebbf11e643e0641f",
+  "nodes": [{"authority": "codex_coordinator", "dependencies": [], "dependency_mode": "wait-for-acceptance", "executable_contract_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "node_id": "node-a", "required_outcome": "Verified package", "terminal_contribution": "required", "verification_references": ["tests-v1"]}],
+  "revision": 1,
+  "root_outcome": {"acceptance_references": ["acceptance-v1"], "summary": "Public-safe outcome"},
+  "schema_version": 1,
+  "source": {"adapter_revision": "adapter-v1", "owner_kind": "source_project", "source_ref": "public-goal-ref"},
+  "supersedes": null,
+  "terminal_condition": {"required_nodes": ["node-a"], "root_acceptance_references": ["acceptance-v1"]}
+}

@@ -157,6 +157,12 @@ from .orchestration_selection_funnel import (
     SelectionFunnelError,
     build_selection_funnel,
 )
+from .goal_reconciliation import (
+    GoalReconciliationError,
+    build_goal_reconciliation_report,
+    load_goal_evidence,
+    load_goal_manifest,
+)
 from .orchestration_dispatch import (
     DispatchLockBusy,
     ExecutionEnvelopeError,
@@ -276,8 +282,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
     if args.command == "orchestration":
-        if args.orchestration_command in {"plan", "selection-preview", "selection-record", "selection-funnel"}:
-            if args.config and args.orchestration_command in {"plan", "selection-preview"}:
+        if args.orchestration_command in {"plan", "selection-preview", "selection-record", "selection-funnel", "goal-reconcile"}:
+            if args.config and args.orchestration_command in {"plan", "selection-preview", "goal-reconcile"}:
                 print(f"error: --config is not supported by orchestration {args.orchestration_command}", file=sys.stderr)
                 return 2
             try:
@@ -540,6 +546,14 @@ def build_parser() -> argparse.ArgumentParser:
     orchestration_selection_funnel.add_argument("--selection-receipt", required=True, metavar="PRIVATE_PATH")
     orchestration_selection_funnel.add_argument("--json", action="store_true", help="print JSON")
     orchestration_selection_funnel.set_defaults(func=cmd_orchestration_selection_funnel)
+    orchestration_goal_reconcile = orchestration_sub.add_parser(
+        "goal-reconcile",
+        help="project one source-owned goal manifest read-only",
+    )
+    orchestration_goal_reconcile.add_argument("--goal-manifest", required=True, metavar="PATH")
+    orchestration_goal_reconcile.add_argument("--evidence", metavar="PATH")
+    orchestration_goal_reconcile.add_argument("--json", action="store_true", help="print JSON")
+    orchestration_goal_reconcile.set_defaults(func=cmd_orchestration_goal_reconcile)
     orchestration_dispatch = orchestration_sub.add_parser(
         "dispatch-cbr",
         help="explicitly dispatch a ready cbr_batch plan exactly once",
@@ -4347,6 +4361,32 @@ def cmd_orchestration_selection_funnel(config: Config | None, args: argparse.Nam
             print(f"{row['surface']}: {stages}")
         print("parent_collected: not_claimed")
         print("root_complete: not_claimed")
+        print("mutation: allowed=false applied=false")
+    return 0
+
+
+def cmd_orchestration_goal_reconcile(config: Config | None, args: argparse.Namespace) -> int:
+    """Read only manifest/evidence projection; intentionally never loads config."""
+    del config
+    try:
+        manifest = load_goal_manifest(args.goal_manifest)
+        evidence = load_goal_evidence(args.evidence) if args.evidence else None
+        report = build_goal_reconciliation_report(manifest, evidence)
+    except GoalReconciliationError:
+        print("error: goal reconciliation failed closed", file=sys.stderr)
+        return 2
+    except Exception:
+        print("error: goal reconciliation failed", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"contract: {report['contract']}")
+        print(f"report_digest: {report['report_digest']}")
+        for node in report["nodes"]:
+            axes = " ".join(f"{axis}={node['axes'][axis]['status']}" for axis in node["axes"])
+            print(f"{node['node_id']}: {axes}")
+        print("terminal_candidate: advisory=false")
         print("mutation: allowed=false applied=false")
     return 0
 

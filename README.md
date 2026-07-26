@@ -26,6 +26,7 @@
 - [Capacity gate-lifecycle activation simulation](docs/capacity-gate-lifecycle-simulation.md): deterministic report-only replay of typed gate creation, deduplication, supersession, wake revalidation, release, rollback, and synthetic hard-exclusion mechanics.
 - [Orchestration selection shadow evidence](docs/orchestration-selection-shadow.md): deterministic D1-bound recommendation/selection comparison with immutable private recording and no dispatch or warning authority.
 - [Orchestration selection funnel](docs/orchestration-selection-funnel.md): read-only durable selection-to-CBR lifecycle projection with explicit unknown/non-applicable semantics.
+- [Source-goal reconciliation](docs/goal-reconciliation.md): strict source-owned goal manifest and deterministic read-only CBR evidence projection without source or completion authority.
 - [Events and index contract](docs/events-and-index.md): event log, local SQLite read index, prune/retention.
 - [CLI reference](docs/cli-reference.md): command reference and human/JSON output semantics, including list renderer and routing-report details.
 - [Operator installation guide](docs/operator-installation.md): config discovery, macOS launchd setup, doctor, cooldown wake, cross-project usage.
