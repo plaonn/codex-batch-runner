@@ -1,0 +1,79 @@
+{
+  "authority_claims": {
+    "acknowledgement": false,
+    "apply": false,
+    "delivery": false,
+    "dispatch": false,
+    "parent_collection": false,
+    "review": false,
+    "root_completion": false,
+    "source_disposition": false
+  },
+  "contract": "goal-reconciliation-report-v1",
+  "goal_id": "goal-public-1",
+  "manifest_digest": "sha256:11c0783183e0ad72eda27cce0abf255406bf187a6e3c5643ebbf11e643e0641f",
+  "mutation": {
+    "allowed": false,
+    "applied": false
+  },
+  "nodes": [
+    {
+      "axes": {
+        "admission": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "apply": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "attention_acknowledged": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "attention_delivered": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "attention_recorded": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "contract_binding": {
+          "reason_code": "exact_manifest_binding",
+          "status": "observed"
+        },
+        "execution": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "parent_collection": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "review": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "selection": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "source_disposition": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        }
+      },
+      "dependencies": [],
+      "node_id": "node-a",
+      "recommendations": [
+        "blocked_conflict"
+      ],
+      "required": true
+    }
+  ],
+  "report_digest": "sha256:330116428683fe9628b6a3403d9a2bc393a8856cb008056cdcab23c4dd81f860",
+  "revision": 1,
+  "schema_version": 1,
+  "terminal_candidate": false
+}

@@ -1,0 +1,197 @@
+{
+  "attention": {
+    "node_ids": [
+      "node-a"
+    ],
+    "reason_codes": [
+      "no_trusted_cbr_evidence"
+    ],
+    "status": "unknown"
+  },
+  "authority_claims": {
+    "acknowledgement": false,
+    "apply": false,
+    "delivery": false,
+    "dispatch": false,
+    "goal_completion": false,
+    "parent_collection": false,
+    "review": false,
+    "root_completion": false,
+    "routing": false,
+    "selection": false,
+    "source_disposition": false
+  },
+  "binding": {
+    "current": {
+      "manifest_digest": "sha256:11c0783183e0ad72eda27cce0abf255406bf187a6e3c5643ebbf11e643e0641f",
+      "report_digest": "sha256:330116428683fe9628b6a3403d9a2bc393a8856cb008056cdcab23c4dd81f860",
+      "revision": 1
+    },
+    "desired": {
+      "manifest_digest": "sha256:11c0783183e0ad72eda27cce0abf255406bf187a6e3c5643ebbf11e643e0641f",
+      "revision": 1
+    },
+    "reason_code": "exact_goal_revision_binding",
+    "status": "observed"
+  },
+  "contract": "goal-explain-view-v1",
+  "goal": {
+    "goal_decision_authority": "source_owner",
+    "goal_id": "goal-public-1",
+    "owner_kind": "source_project",
+    "root_outcome": {
+      "acceptance_references": [
+        "acceptance-v1"
+      ],
+      "summary": "Public-safe outcome"
+    },
+    "source_adapter_revision": "adapter-v1",
+    "source_ref": "public-goal-ref"
+  },
+  "input_digests": {
+    "manifest_digest": "sha256:11c0783183e0ad72eda27cce0abf255406bf187a6e3c5643ebbf11e643e0641f",
+    "report_digest": "sha256:330116428683fe9628b6a3403d9a2bc393a8856cb008056cdcab23c4dd81f860"
+  },
+  "mutation": {
+    "allowed": false,
+    "applied": false
+  },
+  "next_decision": {
+    "claim": "advisory",
+    "kind": "await_trusted_evidence",
+    "node_ids": [
+      "node-a"
+    ],
+    "owner": "codex_coordinator",
+    "reason_codes": [
+      "no_trusted_cbr_evidence"
+    ]
+  },
+  "nodes": [
+    {
+      "authority": "codex_coordinator",
+      "axes": {
+        "admission": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "apply": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "attention_acknowledged": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "attention_delivered": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "attention_recorded": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "contract_binding": {
+          "reason_code": "exact_manifest_binding",
+          "status": "observed"
+        },
+        "execution": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "parent_collection": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "review": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "selection": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        },
+        "source_disposition": {
+          "reason_code": "no_trusted_cbr_evidence",
+          "status": "unknown"
+        }
+      },
+      "dependencies": [],
+      "dependency_mode": "wait-for-acceptance",
+      "issues": [
+        {
+          "axis": "selection",
+          "kind": "unknown",
+          "reason_code": "no_trusted_cbr_evidence"
+        },
+        {
+          "axis": "admission",
+          "kind": "unknown",
+          "reason_code": "no_trusted_cbr_evidence"
+        },
+        {
+          "axis": "execution",
+          "kind": "unknown",
+          "reason_code": "no_trusted_cbr_evidence"
+        },
+        {
+          "axis": "review",
+          "kind": "unknown",
+          "reason_code": "no_trusted_cbr_evidence"
+        },
+        {
+          "axis": "apply",
+          "kind": "unknown",
+          "reason_code": "no_trusted_cbr_evidence"
+        },
+        {
+          "axis": "attention_recorded",
+          "kind": "unknown",
+          "reason_code": "no_trusted_cbr_evidence"
+        },
+        {
+          "axis": "attention_delivered",
+          "kind": "unknown",
+          "reason_code": "no_trusted_cbr_evidence"
+        },
+        {
+          "axis": "attention_acknowledged",
+          "kind": "unknown",
+          "reason_code": "no_trusted_cbr_evidence"
+        },
+        {
+          "axis": "parent_collection",
+          "kind": "unknown",
+          "reason_code": "no_trusted_cbr_evidence"
+        },
+        {
+          "axis": "source_disposition",
+          "kind": "unknown",
+          "reason_code": "no_trusted_cbr_evidence"
+        }
+      ],
+      "node_id": "node-a",
+      "recommendations": [
+        "blocked_conflict"
+      ],
+      "required": true,
+      "required_outcome": "Verified package"
+    }
+  ],
+  "schema_version": 1,
+  "terminal": {
+    "operator_status": "not_candidate",
+    "reason_codes": [
+      "reconciliation_report_not_terminal_candidate"
+    ],
+    "report_candidate": false,
+    "required_node_ids": [
+      "node-a"
+    ],
+    "root_acceptance_references": [
+      "acceptance-v1"
+    ],
+    "source_completion_required": true
+  },
+  "view_digest": "sha256:68a57bed5670223e8a6c18fd20f5bb27d3a051a09c60720d0482106cc55acbfa"
+}

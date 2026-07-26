@@ -158,10 +158,15 @@ from .orchestration_selection_funnel import (
     build_selection_funnel,
 )
 from .goal_reconciliation import (
+    GoalExplainError,
     GoalReconciliationError,
+    build_goal_explain_view,
     build_goal_reconciliation_report,
+    error_goal_explain_view,
     load_goal_evidence,
     load_goal_manifest,
+    load_goal_reconciliation_report,
+    render_goal_explain_view,
 )
 from .orchestration_dispatch import (
     DispatchLockBusy,
@@ -282,8 +287,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
     if args.command == "orchestration":
-        if args.orchestration_command in {"plan", "selection-preview", "selection-record", "selection-funnel", "goal-reconcile"}:
-            if args.config and args.orchestration_command in {"plan", "selection-preview", "goal-reconcile"}:
+        if args.orchestration_command in {"plan", "selection-preview", "selection-record", "selection-funnel", "goal-reconcile", "goal-explain"}:
+            if args.config and args.orchestration_command in {"plan", "selection-preview", "goal-reconcile", "goal-explain"}:
                 print(f"error: --config is not supported by orchestration {args.orchestration_command}", file=sys.stderr)
                 return 2
             try:
@@ -554,6 +559,14 @@ def build_parser() -> argparse.ArgumentParser:
     orchestration_goal_reconcile.add_argument("--evidence", metavar="PATH")
     orchestration_goal_reconcile.add_argument("--json", action="store_true", help="print JSON")
     orchestration_goal_reconcile.set_defaults(func=cmd_orchestration_goal_reconcile)
+    orchestration_goal_explain = orchestration_sub.add_parser(
+        "goal-explain",
+        help="build read-only goal explain view over manifest and reconciliation report",
+    )
+    orchestration_goal_explain.add_argument("--goal-manifest", required=True, metavar="PATH")
+    orchestration_goal_explain.add_argument("--reconciliation-report", required=True, metavar="PATH")
+    orchestration_goal_explain.add_argument("--json", action="store_true", help="print JSON")
+    orchestration_goal_explain.set_defaults(func=cmd_orchestration_goal_explain)
     orchestration_dispatch = orchestration_sub.add_parser(
         "dispatch-cbr",
         help="explicitly dispatch a ready cbr_batch plan exactly once",
@@ -4388,6 +4401,40 @@ def cmd_orchestration_goal_reconcile(config: Config | None, args: argparse.Names
             print(f"{node['node_id']}: {axes}")
         print("terminal_candidate: advisory=false")
         print("mutation: allowed=false applied=false")
+    return 0
+
+
+def cmd_orchestration_goal_explain(config: Config | None, args: argparse.Namespace) -> int:
+    """Read only manifest/report explain projection; intentionally never loads config."""
+    del config
+    try:
+        manifest = load_goal_manifest(args.goal_manifest)
+        report = load_goal_reconciliation_report(args.reconciliation_report)
+        view = build_goal_explain_view(manifest, report)
+    except (GoalExplainError, GoalReconciliationError):
+        if args.json:
+            err = error_goal_explain_view(
+                reason_codes=["goal_explain_invalid"],
+                validation_errors=["failed_closed"],
+            )
+            print(json.dumps(err, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+        else:
+            print("error: goal explain failed closed", file=sys.stderr)
+        return 2
+    except Exception:
+        if args.json:
+            err = error_goal_explain_view(
+                reason_codes=["goal_explain_internal_error"],
+                validation_errors=["unexpected_failure"],
+            )
+            print(json.dumps(err, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+        else:
+            print("error: goal explain failed closed", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(view, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    else:
+        print(render_goal_explain_view(view))
     return 0
 
 
