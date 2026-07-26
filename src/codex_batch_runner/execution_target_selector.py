@@ -222,6 +222,21 @@ def select_execution_target(config: Any, task: dict[str, Any], requirement: dict
         if not override.get("allow_fallback"):
             raise TargetSelectionError("explicit_fallback_exhausted", "preferred target is unavailable and fallback is disabled")
         return SelectedExecutionTarget(ranked[0][0], ranked[0][1], "operator_preference_fallback")
+    from .capacity_target_ordering_canary import (
+        selected_capacity_target_ordering_canary_target,
+    )
+
+    canary_target = selected_capacity_target_ordering_canary_target(
+        task=task,
+        requirement=requirement,
+        assessment=assessment,
+    )
+    if canary_target is not None:
+        return SelectedExecutionTarget(
+            canary_target,
+            by_id[canary_target],
+            "bounded_capacity_target_ordering_canary",
+        )
     return SelectedExecutionTarget(ranked[0][0], ranked[0][1], "automatic_static_non_learned")
 
 

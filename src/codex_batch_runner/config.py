@@ -92,6 +92,9 @@ class Config:
     worker_selection_rules: list[dict[str, Any]] = field(default_factory=list)
     execution_target_inventory: dict[str, Any] = field(default_factory=dict)
     constraint_registry: dict[str, Any] = field(default_factory=dict)
+    capacity_target_ordering_canary_policy: dict[str, Any] = field(
+        default_factory=dict
+    )
     config_path: Path | None = None
     config_source: str = "internal"
 
@@ -137,6 +140,15 @@ class Config:
         constraint_registry = constraint_registry_value(data.get("constraint_registry"))
         if execution_target_inventory and not constraint_registry:
             raise ValueError("constraint_registry is required with execution_target_inventory")
+        from .capacity_target_ordering_canary import (
+            capacity_target_ordering_canary_policy_value,
+        )
+
+        capacity_target_ordering_canary_policy = (
+            capacity_target_ordering_canary_policy_value(
+                data.get("capacity_target_ordering_canary_policy")
+            )
+        )
         usage_admission_enabled = bool_value(
             "usage_admission_enabled",
             data.get("usage_admission_enabled", False),
@@ -313,6 +325,9 @@ class Config:
             worker_selection_rules=worker_selection_rules,
             execution_target_inventory=execution_target_inventory,
             constraint_registry=constraint_registry,
+            capacity_target_ordering_canary_policy=(
+                capacity_target_ordering_canary_policy
+            ),
             config_path=resolved_config_path,
             config_source=selection.source if selection else "internal",
         )

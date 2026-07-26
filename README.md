@@ -22,6 +22,7 @@
 - [Trusted pre-execution delegation](docs/execution-delegation.md): immutable queue admission and runner-owned exact-target receipt barrier before worker invocation.
 - [Scoped readonly certification projection](docs/scoped-readonly-certification.md): receipt-bound 20/95%/zero-adverse advisory aggregation within the CBR worktree scope.
 - [Capacity target-ordering activation simulation](docs/capacity-target-ordering-simulation.md): deterministic report-only counterfactual ordering over the immutable baseline eligible set.
+- [Bounded capacity target-ordering canary mechanism](docs/capacity-target-ordering-canary.md): default-disabled exact-scope claim-time ordering with deterministic assignment, append-only evidence, and fail-closed rollback.
 - [Capacity gate-lifecycle activation simulation](docs/capacity-gate-lifecycle-simulation.md): deterministic report-only replay of typed gate creation, deduplication, supersession, wake revalidation, release, rollback, and synthetic hard-exclusion mechanics.
 - [Events and index contract](docs/events-and-index.md): event log, local SQLite read index, prune/retention.
 - [CLI reference](docs/cli-reference.md): command reference and human/JSON output semantics, including list renderer and routing-report details.

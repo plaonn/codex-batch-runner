@@ -4,6 +4,7 @@ import os
 import re
 import socket
 import subprocess
+import uuid
 from collections import Counter
 from pathlib import Path
 
@@ -131,9 +132,17 @@ def save_task(
                 "execution_delegation_contract is immutable after enqueue; "
                 "create a new task revision instead"
             )
+        if existing.get("capacity_target_ordering_assignment_id") != task.get(
+            "capacity_target_ordering_assignment_id"
+        ):
+            raise ValueError(
+                "capacity_target_ordering_assignment_id is immutable after enqueue"
+            )
         for field in (
             "preexecution_delegation_receipt_history",
             "preexecution_delegation_phase_history",
+            "capacity_target_ordering_canary_decision_history",
+            "capacity_target_ordering_canary_outcome_history",
         ):
             existing_history = existing.get(field, [])
             new_history = task.get(field, [])
@@ -573,6 +582,7 @@ def create_task(
         "cooldown_until": None,
         "last_error": None,
         "created_at": now,
+        "capacity_target_ordering_assignment_id": uuid.uuid4().hex,
         "updated_at": now,
         "started_at": None,
         "completed_at": None,
@@ -586,6 +596,8 @@ def create_task(
         ),
         "preexecution_delegation_receipt_history": [],
         "preexecution_delegation_phase_history": [],
+        "capacity_target_ordering_canary_decision_history": [],
+        "capacity_target_ordering_canary_outcome_history": [],
     }
     requirement_metadata = task_requirement_metadata(
         model_requirement_vector=model_requirement_vector,
@@ -1068,6 +1080,10 @@ def effective_project_priority(
 
 
 def recover_stale_running_tasks(config: Config) -> list[str]:
+    from .capacity_target_ordering_canary import (
+        record_capacity_target_ordering_canary_outcome,
+    )
+
     recovered: list[str] = []
     for task in list_tasks(config):
         if task.get("status") != "running":
@@ -1088,6 +1104,9 @@ def recover_stale_running_tasks(config: Config) -> list[str]:
         except ExecutionDelegationError as exc:
             task["status"] = "failed"
             task["last_error"] = f"delegation recovery failed: {exc}"
+            record_capacity_target_ordering_canary_outcome(
+                task, recorded_at=iso_now()
+            )
             save_task(config, task)
             emit_task_event(
                 config,
@@ -1108,6 +1127,9 @@ def recover_stale_running_tasks(config: Config) -> list[str]:
         task["running_recovery_reason"] = recovery_reason
         task["running_recovery_runner_hostname"] = runner_hostname if isinstance(runner_hostname, str) else None
         task["running_recovery_runner_pid"] = runner_pid
+        record_capacity_target_ordering_canary_outcome(
+            task, recorded_at=task["running_recovered_at"]
+        )
         clear_active_run_metadata(task)
         if task.get("execution_delegation_contract") is not None:
             save_delegation_transition_locked(config, task)

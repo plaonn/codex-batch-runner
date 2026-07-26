@@ -38,6 +38,7 @@ Config는 선택적으로 아래 field를 가질 수 있습니다.
 - `model_selection_rules`: requirement dimension match 조건과 direct Codex 실행 설정 또는 `execution_target` alias mapping
 - `worker_targets`: requirement rule이 task를 Codex CLI가 아닌 다른 execution backend로 보낼 때 사용할 backend, capacity pool, command, timeout, worker metadata alias mapping
 - `worker_selection_rules`: requirement dimension match 조건과 `worker_target` alias mapping
+- `capacity_target_ordering_canary_policy`: default-disabled exact-scope canary policy. 초기 enabled assignment는 정확히 5%이고 hard ceiling은 10%로 고정되며, kill switch와 allowed scope가 claim-time baseline reordering을 fail-closed로 제한합니다. 상세 계약은 [bounded capacity target-ordering canary mechanism](capacity-target-ordering-canary.md)에 정의됩니다.
 
 Task는 complete v2 `model_requirement_vector`를 `--model-requirement-json`으로 받을 수 있으며 issuer-owned `revision_id`가 필수입니다. 일반 task가 이를 생략한 compatibility path는 deterministic, non-comparable `legacy-derived` projection을 유지합니다. Automatic reviewer와 자동 생성 fix/subtask issuer는 현재 work unit metadata에서 별도 native v2 revision을 발행합니다. 기존 저장 task와 명시적 v1 dimension 입력도 읽기 호환을 위해 `legacy-derived`로 유지합니다. Enqueue 뒤 requirement와 override는 수정할 수 없고 정정은 새 task revision으로 발급합니다.
 

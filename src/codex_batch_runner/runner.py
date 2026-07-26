@@ -13,6 +13,11 @@ from typing import Any, Callable
 
 from .codex import FIRST_MEANINGFUL_STALL_REASON, STARTUP_STALL_REASON, CodexResult, first_recursive_value, is_meaningful_event, run_codex
 from .config import Config
+from .capacity_target_ordering_canary import (
+    CapacityTargetOrderingCanaryError,
+    apply_capacity_target_ordering_canary,
+    record_capacity_target_ordering_canary_outcome,
+)
 from .events import emit_task_event, result_summary_payload, transition_payload
 from .parent_attention import create_parent_attention
 from .external_json_command import (
@@ -46,7 +51,13 @@ from .execution_mutation_provenance import (
     build_execution_mutation_provenance,
     capture_execution_mutation_snapshot,
 )
-from .model_requirements import ResolvedExecutionConfig, command_options, resolve_execution_config
+from .model_requirements import (
+    ResolvedExecutionConfig,
+    command_options,
+    resolve_execution_config,
+    resolve_model_requirement_vector,
+)
+from .execution_target_selector import assess_execution_target_candidates
 from .evidence import capture_rate_limit_evidence
 from .fs import ensure_dir
 from .lock import FileLock
@@ -77,7 +88,11 @@ from .timeutil import add_seconds, iso_now, parse_time
 from .triggers import run_post_run_trigger
 from .usage_admission import check_usage_admission
 from .wake import schedule_manual_cooldown_wake
-from .worker_routing import apply_worker_target, resolve_worker_target
+from .worker_routing import (
+    apply_worker_target,
+    resolve_worker_target,
+    worker_target_applicable,
+)
 from .worktree import prepare_task_worktree_for_run_locked
 
 
@@ -243,6 +258,20 @@ def claim_next_implementation_task_locked(
         mark_run(config, None)
         return None, RunOutcome(status="empty", message="no runnable task"), None
 
+    execution_cwd: Path | None = None
+    if (
+        config.worktree_mode == "task"
+        and task.get("capacity_target_ordering_canary_request") is not None
+        and worker_target_applicable(task)
+    ):
+        worktree_result = prepare_task_worktree_for_run_locked(config, task)
+        task = worktree_result["task"]
+        if worktree_result["report"].get("errors"):
+            mark_worktree_prepare_failure(config, task, worktree_result["report"])
+            mark_run(config, task["id"])
+            return None, RunOutcome(status=task["status"], message="worktree preparation failed", task_id=task["id"]), None
+        execution_cwd = worktree_result["worktree_path"]
+
     routing_error = apply_configured_worker_target(config, task)
     if routing_error:
         mark_execution_config_failure(config, task, routing_error)
@@ -274,8 +303,7 @@ def claim_next_implementation_task_locked(
 
     started_at = iso_now()
     resume_requested = execution_backend in {"codex", "external-json-command"} and task.get("status") == "needs_resume"
-    execution_cwd: Path | None = None
-    if config.worktree_mode == "task":
+    if config.worktree_mode == "task" and execution_cwd is None:
         worktree_result = prepare_task_worktree_for_run_locked(config, task)
         task = worktree_result["task"]
         if worktree_result["report"].get("errors"):
@@ -306,6 +334,13 @@ def claim_next_implementation_task_locked(
             mark_execution_config_failure(config, task, config_error)
             mark_run(config, task["id"])
             return None, RunOutcome(status=task["status"], message=config_error, task_id=task["id"]), None
+        binding_error = capacity_canary_dispatch_binding_error(
+            task, execution_config
+        )
+        if binding_error:
+            mark_execution_config_failure(config, task, binding_error)
+            mark_run(config, task["id"])
+            return None, RunOutcome(status=task["status"], message=binding_error, task_id=task["id"]), None
 
     active_run_id = uuid.uuid4().hex
     task["status"] = "running"
@@ -461,6 +496,9 @@ def finalize_codex_run(config: Config, claimed: ClaimedRun, result: CodexResult)
             auto_commit_worktree_result(config, task, result, claimed.execution_cwd)
         apply_codex_result(config, task, result, git_status_cwd=claimed.execution_cwd, execution_settings=claimed.execution_settings)
         finalize_mutation_provenance(task, claimed.execution_cwd)
+        record_capacity_target_ordering_canary_outcome(
+            task, recorded_at=iso_now()
+        )
         save_task(config, task)
         if claimed.usage_stale_reset_at:
             finish_usage_stale_attempt(config, claimed.usage_stale_reset_at, str(task["id"]))
@@ -487,6 +525,9 @@ def finalize_shell_run(config: Config, claimed: ClaimedRun, result: ShellResult)
             )
         apply_shell_result(config, task, result, git_status_cwd=claimed.execution_cwd)
         finalize_mutation_provenance(task, claimed.execution_cwd)
+        record_capacity_target_ordering_canary_outcome(
+            task, recorded_at=iso_now()
+        )
         save_task(config, task)
         claimed.task = task
         return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
@@ -533,6 +574,9 @@ def finalize_external_json_command_run(
             execution_settings=claimed.execution_settings,
         )
         finalize_mutation_provenance(task, claimed.execution_cwd)
+        record_capacity_target_ordering_canary_outcome(
+            task, recorded_at=iso_now()
+        )
         save_task(config, task)
         claimed.task = task
         return RunOutcome(status=task["status"], message="task processed", task_id=task["id"])
@@ -690,6 +734,9 @@ def finalize_runner_exception(config: Config, claimed: ClaimedRun, exc: Exceptio
         if claimed.execution_cwd:
             task["execution_worktree_status"] = "retained"
             task["execution_retained_at"] = iso_now()
+        record_capacity_target_ordering_canary_outcome(
+            task, recorded_at=iso_now()
+        )
         save_task(config, task)
         emit_task_event(
             config,
@@ -742,11 +789,53 @@ def validate_execution_config(config: Config, task: dict[str, Any]) -> tuple[Res
 
 def apply_configured_worker_target(config: Config, task: dict[str, Any]) -> str | None:
     try:
+        if (
+            task.get("capacity_target_ordering_canary_request") is not None
+            and worker_target_applicable(task)
+        ):
+            requirement = resolve_model_requirement_vector(config, task)
+            assessment = assess_execution_target_candidates(config, requirement)
+            apply_capacity_target_ordering_canary(
+                policy=config.capacity_target_ordering_canary_policy,
+                task=task,
+                requirement=requirement,
+                assessment=assessment,
+                dispatch_evaluated_at=iso_now(),
+            )
         resolved = resolve_worker_target(config, task)
         if resolved:
             apply_worker_target(task, resolved)
-    except ValueError as exc:
+    except (ValueError, CapacityTargetOrderingCanaryError) as exc:
         return str(exc)
+    return None
+
+
+def capacity_canary_dispatch_binding_error(
+    task: dict[str, Any],
+    execution_config: ResolvedExecutionConfig | None,
+) -> str | None:
+    history = task.get("capacity_target_ordering_canary_decision_history")
+    if not isinstance(history, list) or not history:
+        return None
+    attempt = int(task.get("attempts") or 0) + 1
+    matching = [
+        item
+        for item in history
+        if isinstance(item, dict)
+        and isinstance(item.get("binding"), dict)
+        and item["binding"].get("attempt") == attempt
+    ]
+    if not matching:
+        return None
+    if len(matching) != 1:
+        return "canary dispatch binding has divergent claim decisions"
+    decision = matching[0]
+    if decision.get("decision") != "apply_canary":
+        return None
+    actual = execution_config.execution_target if execution_config else None
+    expected = (decision.get("dispatch") or {}).get("target_id")
+    if actual != expected:
+        return "canary decision does not exact-bind resolved dispatch target"
     return None
 
 
@@ -790,6 +879,7 @@ def mark_backend_failure(config: Config, task: dict, error_message: str) -> None
     task["status"] = "failed"
     task["last_error"] = error_message
     task["failure_count"] = int(task.get("failure_count", 0)) + 1
+    record_capacity_target_ordering_canary_outcome(task, recorded_at=iso_now())
     save_task(config, task)
     emit_task_event(
         config,
@@ -805,6 +895,7 @@ def mark_execution_config_failure(config: Config, task: dict[str, Any], error_me
     task["status"] = "failed"
     task["last_error"] = f"invalid execution config: {error_message}"
     task["failure_count"] = int(task.get("failure_count", 0)) + 1
+    record_capacity_target_ordering_canary_outcome(task, recorded_at=iso_now())
     save_task(config, task)
     emit_task_event(
         config,
