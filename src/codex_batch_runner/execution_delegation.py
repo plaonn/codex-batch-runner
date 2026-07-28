@@ -207,36 +207,12 @@ def append_preexecution_delegation_receipt(
     attempt = _positive_int(task.get("attempts"), "task.attempts")
     lease_sequence = _positive_int(task.get("run_count"), "task.run_count")
     _safe_id(active_run_id, "active_run_id")
+    identity = resolved_execution_identity(task, execution_settings)
     snapshot = _target_snapshot(task, execution_settings)
     target = snapshot.get("target")
     if not isinstance(target, dict):
         raise ExecutionDelegationError("resolved target snapshot is missing target")
-    target_id = _safe_id(snapshot.get("target_id"), "target_snapshot.target_id")
-    nested_target_id = _safe_id(target.get("target_id"), "target.target_id")
-    if nested_target_id != target_id:
-        raise ExecutionDelegationError(
-            "resolved target identifiers are divergent"
-        )
-    if (
-        execution_settings is None
-        or execution_settings.execution_target != target_id
-    ):
-        raise ExecutionDelegationError(
-            "resolved execution target does not match target snapshot"
-        )
-    if task.get("worker_target") not in (None, target_id):
-        raise ExecutionDelegationError(
-            "resolved worker target does not match target snapshot"
-        )
-    snapshot_backend = target.get("execution_backend") or target.get(
-        "execution_surface"
-    )
-    task_backend = str(task.get("execution_backend") or "codex")
-    expected_backend = "codex" if snapshot_backend == "codex" else snapshot_backend
-    if expected_backend not in (None, task_backend):
-        raise ExecutionDelegationError(
-            "resolved backend does not match execution target snapshot"
-        )
+    target_id = identity["target_id"]
     worker_family = _safe_id(
         target.get("worker_family")
         or task.get("worker_family")
@@ -247,16 +223,13 @@ def append_preexecution_delegation_receipt(
         target.get("worker_id") or task.get("worker_target") or target_id,
         "target.worker_id",
     )
-    command = _resolved_command(task)
     target_record = {
         "worker_family": worker_family,
         "worker_identity_digest": _stable_id({"worker_id": worker_id}),
         "target_id": target_id,
-        "target_snapshot_digest": _stable_id(snapshot),
-        "resolved_config_digest": _stable_id(
-            _resolved_config(task, execution_settings)
-        ),
-        "command_contract_digest": _stable_id(command),
+        "target_snapshot_digest": identity["resolved_target_digest"],
+        "resolved_config_digest": identity["resolved_config_digest"],
+        "command_contract_digest": identity["command_contract_digest"],
     }
     history = task.setdefault("preexecution_delegation_receipt_history", [])
     if not isinstance(history, list):
@@ -352,6 +325,53 @@ def append_preexecution_delegation_receipt(
         phase="preexecution_receipt_appended",
     )
     return validated
+
+
+def resolved_execution_identity(
+    task: dict[str, Any],
+    execution_settings: ResolvedExecutionConfig | None,
+) -> dict[str, Any]:
+    """Return the receipt-owned launch identity without appending queue state."""
+
+    snapshot = _target_snapshot(task, execution_settings)
+    target = snapshot.get("target")
+    if not isinstance(target, dict):
+        raise ExecutionDelegationError("resolved target snapshot is missing target")
+    target_id = _safe_id(snapshot.get("target_id"), "target_snapshot.target_id")
+    nested_target_id = _safe_id(target.get("target_id"), "target.target_id")
+    if nested_target_id != target_id:
+        raise ExecutionDelegationError(
+            "resolved target identifiers are divergent"
+        )
+    if (
+        execution_settings is None
+        or execution_settings.execution_target != target_id
+    ):
+        raise ExecutionDelegationError(
+            "resolved execution target does not match target snapshot"
+        )
+    if task.get("worker_target") not in (None, target_id):
+        raise ExecutionDelegationError(
+            "resolved worker target does not match target snapshot"
+        )
+    snapshot_backend = target.get("execution_backend") or target.get(
+        "execution_surface"
+    )
+    task_backend = str(task.get("execution_backend") or "codex")
+    expected_backend = "codex" if snapshot_backend == "codex" else snapshot_backend
+    if expected_backend not in (None, task_backend):
+        raise ExecutionDelegationError(
+            "resolved backend does not match execution target snapshot"
+        )
+    return {
+        "target_id": target_id,
+        "backend": task_backend,
+        "resolved_target_digest": _stable_id(snapshot),
+        "resolved_config_digest": _stable_id(
+            _resolved_config(task, execution_settings)
+        ),
+        "command_contract_digest": _stable_id(_resolved_command(task)),
+    }
 
 
 def record_delegation_recovery(task: dict[str, Any]) -> None:

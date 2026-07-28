@@ -1,0 +1,44 @@
+{
+  "availability": {
+    "fail_closed": false,
+    "reason_codes": [],
+    "status": "available"
+  },
+  "binding": {
+    "target_id": "public-external-target",
+    "task_id": "public-plan-task",
+    "task_revision": "public-task-r1"
+  },
+  "contract": "gateway-neutral-execution-plan-v1",
+  "execution": {
+    "backend": "external-json-command",
+    "output_contract_revision": "cbr-external-json-final-v1",
+    "timeout_seconds": 321
+  },
+  "mutation": {
+    "allowed": false,
+    "applied": false
+  },
+  "plan_digest": "sha256:6c90453b650e0f882028fc3e5c6b6a9fabd450367cd194a63424e77a1c6e1ca8",
+  "policy": {
+    "config_mutation": {
+      "name": "no_persistent_mutation_v1"
+    },
+    "environment": {
+      "allowlisted_key_names": [
+        "LANG",
+        "PATH"
+      ],
+      "name": "legacy_inherit_current"
+    },
+    "process": {
+      "name": "legacy_direct_child_timeout_v1"
+    }
+  },
+  "provenance": {
+    "command_contract_digest": "sha256:cf81d33ad3c2780a2635fe34727a33f43430b52ba7321aa3b3b5bf5b74288a72",
+    "resolved_config_digest": "sha256:8066cbcef0ea5ccaf7e0dae346f918242c11d7eed191098b05b0c9cf04a77a4c",
+    "resolved_target_digest": "sha256:655afcf32fe469c43fe1723b71682c58bc3615fe7b6dd6dd04c82f3bd5f2e4f1"
+  },
+  "schema_version": 1
+}

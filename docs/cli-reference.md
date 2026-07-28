@@ -77,6 +77,7 @@ cbr run-next
 cbr run-loop --json
 cbr show TASK_ID
 cbr summary TASK_ID
+cbr execution-plan TASK_ID
 cbr routing-report --project project-id --json
 cbr execution-report --project project-id --json
 cbr routing-policy-candidates --project project-id --json
@@ -126,6 +127,19 @@ cbr prune --notifier-cursor-state path/to/notify-state.json
 ```
 
 `cbr enqueue --backend external-json-command` requires `--command-json` or final-position `--command`. The command must be an argv list; cbr does not evaluate shell strings. The runner appends the wrapped cbr prompt as the command's final argv argument and expects stdout to contain one final JSON object with `task_id`, `status`, `summary`, `changed_files`, and `verification`.
+
+`cbr execution-plan TASK_ID`는 canonical task와 current config에서
+`gateway-neutral-execution-plan-v1`을 계산해 canonical JSON만 stdout에 출력하는
+read-only projection입니다. Exact execution target과 delegation task revision에
+bind된 target/config/command digest, backend, timeout, output contract, sanitized
+environment/config-mutation/process policy와 availability reason code만 포함합니다.
+Legacy task나 missing/unknown policy metadata는 execution behavior를 추측하지 않고
+`availability.status=unavailable`로 표시합니다. 이 command는 raw argv, prompt,
+environment value, credential reference/value, cwd/private/log path,
+session/thread/account identity, provider response를 출력하지 않으며 worker subprocess,
+provider/API/credential access, queue/config/event/state write를 수행하지 않습니다.
+세부 계약은 [Gateway-neutral execution plan](gateway-neutral-execution-plan.md)을
+참고하십시오.
 
 `cbr enqueue --delegation-contract-json OBJECT` accepts one complete canonical
 `cbr-execution-delegation-contract-v1` JSON object in the first atomic task

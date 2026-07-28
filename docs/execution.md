@@ -284,6 +284,13 @@ External attempt log는 command, cwd, started/finished time, duration, timeout, 
 
 `external_json_command_timeout_seconds` config 기본값은 `900`입니다. `--external-timeout` 또는 task `external_timeout_seconds`가 있으면 해당 task에만 override합니다.
 
+외부 worker를 실행하지 않고 effective target/config/command identity와 sanitized
+policy metadata만 점검하려면 `cbr execution-plan TASK_ID`를 사용합니다. 이
+`gateway-neutral-execution-plan-v1` projection은 runner launch contract를
+대체하거나 enforcement를 추가하지 않으며, legacy task와 unsupported policy를
+명시적으로 unavailable로 유지합니다. 자세한 schema, reason code, privacy boundary는
+[Gateway-neutral execution plan](gateway-neutral-execution-plan.md)을 참고하십시오.
+
 ## Worker target routing
 
 `model_selection_rules`는 Codex CLI model/profile/config option만 선택합니다. External worker, shell worker, Antigravity wrapper처럼 execution backend와 pool 자체를 바꾸려면 `worker_targets`와 `worker_selection_rules`를 사용합니다.

@@ -174,6 +174,10 @@ from .goal_reconciliation import (
     load_goal_reconciliation_report,
     render_goal_explain_view,
 )
+from .gateway_neutral_execution_plan import (
+    build_gateway_neutral_execution_plan,
+    render_gateway_neutral_execution_plan,
+)
 from .orchestration_dispatch import (
     DispatchLockBusy,
     ExecutionEnvelopeError,
@@ -430,6 +434,13 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("task_id")
     show.add_argument("--json", action="store_true", help="print raw JSON")
     show.set_defaults(func=cmd_show)
+
+    execution_plan = sub.add_parser(
+        "execution-plan",
+        help="show a sanitized read-only execution plan without launching a worker",
+    )
+    execution_plan.add_argument("task_id")
+    execution_plan.set_defaults(func=cmd_execution_plan)
 
     summary = sub.add_parser("summary", help="show a compact task summary")
     summary.add_argument("task_id")
@@ -4348,6 +4359,13 @@ def cmd_show(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     print(json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_execution_plan(config: Config, args: argparse.Namespace) -> int:
+    task = load_task(config, args.task_id)
+    plan = build_gateway_neutral_execution_plan(config, task)
+    print(render_gateway_neutral_execution_plan(plan))
     return 0
 
 
