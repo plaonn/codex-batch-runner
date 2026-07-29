@@ -179,6 +179,8 @@ def terminate_process_group(
     deadline = monotonic() + grace_seconds
     if term in {"sent", "not_needed"}:
         while monotonic() < deadline:
+            if poll_direct_child(process):
+                direct_child_reaped = True
             observation = observe_process_group(process_group_id, killpg=killpg)
             if observation == "observed_absent":
                 break
@@ -200,15 +202,18 @@ def terminate_process_group(
         except OSError:
             kill = "failed"
 
-    try:
-        process.wait(timeout=max(1.0, float(grace_seconds)))
-        direct_child_reaped = True
-    except subprocess.TimeoutExpired:
-        direct_child_reaped = False
+    if not direct_child_reaped:
+        try:
+            process.wait(timeout=max(1.0, float(grace_seconds)))
+            direct_child_reaped = True
+        except subprocess.TimeoutExpired:
+            direct_child_reaped = False
 
     if kill in {"sent", "not_needed"} and observation != "observed_absent":
         final_deadline = monotonic() + grace_seconds
         while monotonic() < final_deadline:
+            if poll_direct_child(process):
+                direct_child_reaped = True
             observation = observe_process_group(process_group_id, killpg=killpg)
             if observation == "observed_absent":
                 break
@@ -237,6 +242,11 @@ def terminate_process_group(
             "outcome": outcome,
         }
     )
+
+
+def poll_direct_child(process: subprocess.Popen[Any]) -> bool:
+    poll = getattr(process, "poll", None)
+    return bool(callable(poll) and poll() is not None)
 
 
 def observe_process_group(

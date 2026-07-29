@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import selectors
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,13 +97,11 @@ def run_external_json_command_task(
                 cwd=task.get("cwd") or None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 start_new_session=True,
             )
+            drain = start_process_pipe_drain(process)
             try:
-                stdout, stderr = process.communicate(timeout=timeout_seconds)
+                process.wait(timeout=timeout_seconds)
                 returncode = process.returncode
                 process_lifecycle = normal_exit_lifecycle()
             except subprocess.TimeoutExpired:
@@ -111,24 +112,18 @@ def run_external_json_command_task(
                     trigger="external_wall_timeout",
                     grace_seconds=lifecycle_policy.termination_grace_seconds,
                 )
-                try:
-                    stdout, stderr = process.communicate(
-                        timeout=max(
-                            1,
-                            lifecycle_policy.termination_grace_seconds,
-                        )
-                    )
-                except subprocess.TimeoutExpired as drain_error:
-                    stdout = output_text(drain_error.stdout)
-                    stderr = output_text(drain_error.stderr)
-                    if process.stdout:
-                        process.stdout.close()
-                    if process.stderr:
-                        process.stderr.close()
                 error = (
                     f"external-json-command timed out after {timeout_seconds}s"
                 )
                 returncode = None
+            finally:
+                stdout_bytes_value, stderr_bytes_value = finish_process_pipe_drain(
+                    process,
+                    drain,
+                    join_timeout_seconds=1,
+                )
+                stdout = stdout_bytes_value.decode("utf-8", errors="replace")
+                stderr = stderr_bytes_value.decode("utf-8", errors="replace")
     except subprocess.TimeoutExpired as exc:
         timed_out = True
         stdout = output_text(exc.stdout)
@@ -172,6 +167,100 @@ def run_external_json_command_task(
         error=error,
         process_lifecycle=process_lifecycle,
     )
+
+
+@dataclass
+class ProcessPipeDrain:
+    stdout_chunks: list[bytes]
+    stderr_chunks: list[bytes]
+    errors: list[Exception]
+    stop: threading.Event
+    thread: threading.Thread
+
+
+def start_process_pipe_drain(
+    process: subprocess.Popen[bytes],
+) -> ProcessPipeDrain:
+    if process.stdout is None or process.stderr is None:
+        raise ValueError("process lifecycle requires captured stdout and stderr")
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    errors: list[Exception] = []
+    stop = threading.Event()
+
+    def drain_pipes() -> None:
+        selector = selectors.DefaultSelector()
+        streams = (
+            (process.stdout, stdout_chunks),
+            (process.stderr, stderr_chunks),
+        )
+        try:
+            for stream, chunks in streams:
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, chunks)
+            while selector.get_map() and not stop.is_set():
+                for key, _events in selector.select(timeout=0.05):
+                    _drain_ready_stream(selector, key.fileobj, key.data)
+            for key in list(selector.get_map().values()):
+                _drain_ready_stream(selector, key.fileobj, key.data)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            selector.close()
+
+    thread = threading.Thread(target=drain_pipes, daemon=True)
+    thread.start()
+    return ProcessPipeDrain(
+        stdout_chunks=stdout_chunks,
+        stderr_chunks=stderr_chunks,
+        errors=errors,
+        stop=stop,
+        thread=thread,
+    )
+
+
+def finish_process_pipe_drain(
+    process: subprocess.Popen[bytes],
+    drain: ProcessPipeDrain,
+    *,
+    join_timeout_seconds: int,
+) -> tuple[bytes, bytes]:
+    drain.stop.set()
+    drain.thread.join(timeout=max(1, join_timeout_seconds))
+    if drain.thread.is_alive():
+        raise RuntimeError("process lifecycle pipe drain did not stop")
+    if drain.errors:
+        raise RuntimeError("process lifecycle pipe drain failed") from drain.errors[0]
+    if process.stdout is not None:
+        process.stdout.close()
+    if process.stderr is not None:
+        process.stderr.close()
+    return b"".join(drain.stdout_chunks), b"".join(drain.stderr_chunks)
+
+
+def _drain_ready_stream(
+    selector: selectors.BaseSelector,
+    stream: Any,
+    chunks: list[bytes],
+) -> None:
+    while True:
+        try:
+            chunk = os.read(stream.fileno(), 65536)
+        except BlockingIOError:
+            return
+        except OSError:
+            try:
+                selector.unregister(stream)
+            except (KeyError, ValueError):
+                pass
+            return
+        if not chunk:
+            try:
+                selector.unregister(stream)
+            except (KeyError, ValueError):
+                pass
+            return
+        chunks.append(chunk)
 
 
 def external_command(task: dict[str, Any], *, settings: Any = None) -> list[str]:

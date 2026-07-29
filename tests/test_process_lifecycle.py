@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_batch_runner.config import Config
+from codex_batch_runner.codex import finalize_codex_process_lifecycle
 from codex_batch_runner.external_json_command import (
     run_external_json_command_task,
 )
@@ -34,6 +35,22 @@ class FakeProcess:
         if self.timeout:
             raise subprocess.TimeoutExpired(["fake"], timeout)
         return 0
+
+
+class UnreapedProcess:
+    returncode = None
+
+    def __init__(self) -> None:
+        self.poll_calls = 0
+        self.wait_calls = 0
+
+    def poll(self) -> None:
+        self.poll_calls += 1
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.wait_calls += 1
+        raise subprocess.TimeoutExpired(["fake"], timeout)
 
 
 class ProcessLifecycleTests(unittest.TestCase):
@@ -177,6 +194,33 @@ class ProcessLifecycleTests(unittest.TestCase):
             row = task_execution_row(config, task)
             self.assertNotIn("process_lifecycle", row["execution"])
 
+    def test_native_unreaped_failure_returns_canonical_evidence_without_rewait(
+        self,
+    ) -> None:
+        process = UnreapedProcess()
+
+        def killpg(_group: int, _sent_signal: int) -> None:
+            raise PermissionError("synthetic signal failure")
+
+        lifecycle = terminate_process_group(
+            process,  # type: ignore[arg-type]
+            process_group_id=105,
+            trigger="startup_stall",
+            grace_seconds=1,
+            killpg=killpg,
+        )
+
+        returncode, reconciled = finalize_codex_process_lifecycle(
+            process,  # type: ignore[arg-type]
+            lifecycle,
+        )
+
+        self.assertEqual(1, returncode)
+        self.assertEqual(1, process.poll_calls)
+        self.assertEqual(1, process.wait_calls)
+        self.assertFalse(reconciled["direct_child_reaped"])
+        self.assertEqual("termination_failed", reconciled["outcome"])
+
     @unittest.skipUnless(os.name == "posix", "POSIX process groups required")
     def test_external_timeout_preserves_legacy_failure_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -223,6 +267,59 @@ class ProcessLifecycleTests(unittest.TestCase):
             )
 
     @unittest.skipUnless(os.name == "posix", "POSIX process groups required")
+    def test_external_term_handler_output_is_drained_during_grace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ready = Path(tmp) / "external-ready.txt"
+            output_size = 1024 * 1024
+            handler_script = (
+                "import signal,sys,time; "
+                "signal.signal(signal.SIGTERM, lambda *_: "
+                "(sys.stdout.buffer.write(b'x' * int(sys.argv[2])), "
+                "sys.stdout.buffer.flush(), sys.exit(0))); "
+                "open(sys.argv[1], 'w').write('ready'); "
+                "time.sleep(30)"
+            )
+            config = Config.load(root=Path(tmp))
+            task = {
+                "id": "external-drain",
+                "cwd": tmp,
+                "external_command": [
+                    sys.executable,
+                    "-c",
+                    handler_script,
+                    str(ready),
+                    str(output_size),
+                ],
+                "external_timeout_seconds": 1,
+            }
+            with patch(
+                "codex_batch_runner.external_json_command."
+                "resolve_process_lifecycle_policy",
+                return_value=ProcessLifecyclePolicy(
+                    name="posix_process_group_v1",
+                    termination_grace_seconds=2,
+                ),
+            ):
+                result = run_external_json_command_task(
+                    config,
+                    task,
+                    "synthetic prompt",
+                    1,
+                )
+
+            self.assertTrue(ready.exists())
+            self.assertTrue(result.timed_out)
+            self.assertIsNone(result.returncode)
+            self.assertEqual(output_size, result.stdout_bytes)
+            self.assertIsNotNone(result.process_lifecycle)
+            assert result.process_lifecycle is not None
+            self.assertEqual("not_needed", result.process_lifecycle["kill"])
+            self.assertEqual(
+                "terminated_during_grace",
+                result.process_lifecycle["outcome"],
+            )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process groups required")
     def test_wrapper_need_not_forward_signal_to_same_group_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "worker-term.txt"
@@ -263,6 +360,115 @@ class ProcessLifecycleTests(unittest.TestCase):
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=2)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process groups required")
+    def test_term_handling_direct_child_is_reaped_before_group_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ready = Path(tmp) / "ready.txt"
+            child = (
+                "import signal,sys,time; "
+                "open(sys.argv[1], 'w').write('ready'); "
+                "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); "
+                "time.sleep(30)"
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-c", child, str(ready)],
+                start_new_session=True,
+            )
+            try:
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and not ready.exists():
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists())
+
+                evidence = terminate_process_group(
+                    process,
+                    process_group_id=process.pid,
+                    trigger="startup_stall",
+                    grace_seconds=1,
+                )
+
+                self.assertEqual("sent", evidence["term"])
+                self.assertEqual("not_needed", evidence["kill"])
+                self.assertTrue(evidence["direct_child_reaped"])
+                self.assertEqual(
+                    "observed_absent",
+                    evidence["group_observation"],
+                )
+                self.assertEqual(
+                    "terminated_during_grace",
+                    evidence["outcome"],
+                )
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=2)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process groups required")
+    def test_reaped_leader_does_not_hide_same_group_descendant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            child_ready = Path(tmp) / "child-ready.txt"
+            child_pid_path = Path(tmp) / "child.pid"
+            child = (
+                "import os,signal,sys,time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "open(sys.argv[1], 'w').write(str(os.getpid())); "
+                "open(sys.argv[2], 'w').write('ready'); "
+                "time.sleep(30)"
+            )
+            parent = (
+                "import signal,subprocess,sys,time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}, "
+                "sys.argv[1], sys.argv[2]]); "
+                "deadline=time.monotonic()+2; "
+                "\nwhile time.monotonic() < deadline and "
+                "not __import__('os').path.exists(sys.argv[2]): time.sleep(.02); "
+                "\nsignal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); "
+                "time.sleep(30)"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    parent,
+                    str(child_pid_path),
+                    str(child_ready),
+                ],
+                start_new_session=True,
+            )
+            child_pid: int | None = None
+            try:
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and not child_ready.exists():
+                    time.sleep(0.02)
+                self.assertTrue(child_ready.exists())
+                child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+
+                evidence = terminate_process_group(
+                    process,
+                    process_group_id=process.pid,
+                    trigger="external_wall_timeout",
+                    grace_seconds=1,
+                )
+
+                self.assertTrue(evidence["direct_child_reaped"])
+                self.assertEqual("sent", evidence["kill"])
+                self.assertIn(
+                    evidence["outcome"],
+                    {
+                        "killed_after_grace",
+                        "direct_child_reaped_group_unverified",
+                    },
+                )
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=2)
+                if child_pid is not None:
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     @unittest.skipUnless(os.name == "posix", "POSIX process groups required")
     def test_new_session_descendant_is_outside_same_group_guarantee(self) -> None:

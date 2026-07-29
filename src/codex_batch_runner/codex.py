@@ -19,6 +19,7 @@ from .process_lifecycle import (
     normal_exit_lifecycle,
     resolve_process_lifecycle_policy,
     terminate_process_group,
+    validate_process_lifecycle,
 )
 from .timeutil import iso_now
 
@@ -215,8 +216,9 @@ def run_codex(
     if lifecycle_policy is None:
         returncode = process.wait()
     else:
-        returncode = process.wait(
-            timeout=max(1, lifecycle_policy.termination_grace_seconds)
+        returncode, process_lifecycle = finalize_codex_process_lifecycle(
+            process,
+            process_lifecycle,
         )
     stderr_thread.join(timeout=5)
     if process.stderr:
@@ -242,6 +244,33 @@ def run_codex(
         progress=tracker.as_dict(),
         watchdog_reason=tracker.watchdog_reason,
         process_lifecycle=process_lifecycle,
+    )
+
+
+def finalize_codex_process_lifecycle(
+    process: subprocess.Popen[str],
+    lifecycle: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    reconciled = validate_process_lifecycle(lifecycle)
+    returncode = process.poll()
+    if returncode is not None and not reconciled["direct_child_reaped"]:
+        reconciled["direct_child_reaped"] = True
+        if reconciled["term"] == "failed" or reconciled["kill"] == "failed":
+            reconciled["outcome"] = "termination_failed"
+        elif reconciled["group_observation"] in {
+            "probe_failed",
+            "unverified",
+            "still_present",
+        }:
+            reconciled["outcome"] = "direct_child_reaped_group_unverified"
+        elif reconciled["kill"] == "sent":
+            reconciled["outcome"] = "killed_after_grace"
+        else:
+            reconciled["outcome"] = "terminated_during_grace"
+        reconciled = validate_process_lifecycle(reconciled)
+    return (
+        returncode if isinstance(returncode, int) else 1,
+        reconciled,
     )
 
 
