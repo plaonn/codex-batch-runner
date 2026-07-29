@@ -21,6 +21,8 @@ from codex_batch_runner.external_json_command import (
     run_external_json_command_task,
 )
 from codex_batch_runner.execution_report import task_execution_row
+from codex_batch_runner.queue import create_task, load_task
+from codex_batch_runner.runner import apply_codex_result
 from codex_batch_runner.process_lifecycle import (
     ProcessLifecycleError,
     ProcessLifecyclePolicy,
@@ -254,7 +256,7 @@ class ProcessLifecycleTests(unittest.TestCase):
             lifecycle,
         )
 
-        self.assertEqual(1, returncode)
+        self.assertIsNone(returncode)
         self.assertEqual(2, process.poll_calls)
         self.assertEqual(1, process.wait_calls)
         self.assertFalse(reconciled["direct_child_reaped"])
@@ -338,6 +340,12 @@ class ProcessLifecycleTests(unittest.TestCase):
                 codex_total_runtime_timeout_seconds=0,
             )
             process = PersistentProcess()
+            task = create_task(
+                config,
+                "synthetic work",
+                tmp,
+                task_id="native-persistent-failure",
+            )
             failure = {
                 "schema_version": 1,
                 "policy": "posix_process_group_v1",
@@ -371,7 +379,7 @@ class ProcessLifecycleTests(unittest.TestCase):
                 ):
                     result = run_codex(
                         config,
-                        {"id": "native-persistent-failure", "cwd": tmp},
+                        task,
                         "synthetic prompt",
                         1,
                     )
@@ -381,7 +389,7 @@ class ProcessLifecycleTests(unittest.TestCase):
             elapsed = time.monotonic() - started
 
             self.assertLess(elapsed, 5)
-            self.assertEqual(1, result.returncode)
+            self.assertIsNone(result.returncode)
             self.assertEqual(1, process.kill_calls)
             self.assertFalse(process.stdout.close_called)
             self.assertFalse(process.stderr.close_called)
@@ -393,6 +401,22 @@ class ProcessLifecycleTests(unittest.TestCase):
             self.assertEqual(
                 "termination_failed",
                 result.process_lifecycle["outcome"],
+            )
+            result.watchdog_reason = "total_runtime_timeout"
+            result.process_lifecycle["trigger"] = "total_runtime_timeout"
+            apply_codex_result(config, task, result)
+            persisted = load_task(config, task["id"])
+            self.assertIsNone(persisted["last_run"]["returncode"])
+            self.assertEqual("runnable", persisted["status"])
+            self.assertEqual(
+                "POSIX process lifecycle termination failed",
+                persisted["last_error"],
+            )
+            row = task_execution_row(config, persisted)
+            self.assertIsNone(row["execution"]["returncode"])
+            self.assertEqual(
+                "termination_failed",
+                row["execution"]["process_lifecycle"]["outcome"],
             )
 
     @unittest.skipUnless(os.name == "posix", "POSIX process groups required")

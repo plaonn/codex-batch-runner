@@ -34,7 +34,7 @@ LiveProgressCallback = Callable[[dict[str, Any], dict[str, Any]], None]
 
 @dataclass
 class CodexResult:
-    returncode: int
+    returncode: int | None
     log_path: Path
     command_kind: str
     resume_id_used: str | None
@@ -253,7 +253,7 @@ def run_codex(
 def finalize_codex_process_lifecycle(
     process: subprocess.Popen[str],
     lifecycle: dict[str, Any],
-) -> tuple[int, dict[str, Any]]:
+) -> tuple[int | None, dict[str, Any]]:
     reconciled = validate_process_lifecycle(lifecycle)
     returncode = process.poll()
     if returncode is None and not reconciled["direct_child_reaped"]:
@@ -278,10 +278,7 @@ def finalize_codex_process_lifecycle(
         else:
             reconciled["outcome"] = "terminated_during_grace"
         reconciled = validate_process_lifecycle(reconciled)
-    return (
-        returncode if isinstance(returncode, int) else 1,
-        reconciled,
-    )
+    return returncode if isinstance(returncode, int) else None, reconciled
 
 
 def read_stdout_with_watchdog(

@@ -990,6 +990,18 @@ def apply_codex_result(
         mark_startup_stall(config, task, result, previous_runnable_status)
         return
     task.pop("last_progress", None)
+    if (
+        result.returncode is None
+        and isinstance(result.process_lifecycle, dict)
+        and result.process_lifecycle.get("outcome") == "termination_failed"
+    ):
+        mark_non_rate_failure(
+            config,
+            task,
+            result,
+            "POSIX process lifecycle termination failed",
+        )
+        return
 
     final_response = result.final_response
     if not final_response:
