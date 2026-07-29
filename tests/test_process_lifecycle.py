@@ -5,13 +5,18 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 from codex_batch_runner.config import Config
-from codex_batch_runner.codex import finalize_codex_process_lifecycle
+from codex_batch_runner.codex import (
+    finalize_codex_process_lifecycle,
+    run_codex,
+)
 from codex_batch_runner.external_json_command import (
     run_external_json_command_task,
 )
@@ -51,6 +56,40 @@ class UnreapedProcess:
     def wait(self, timeout: float | None = None) -> int:
         self.wait_calls += 1
         raise subprocess.TimeoutExpired(["fake"], timeout)
+
+
+class BlockingStream:
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.close_called = False
+
+    def __iter__(self) -> BlockingStream:
+        return self
+
+    def __next__(self) -> str:
+        self.release.wait(timeout=30)
+        raise StopIteration
+
+    def close(self) -> None:
+        self.close_called = True
+        raise AssertionError("live reader stream must not be closed")
+
+
+class PersistentProcess:
+    pid = 106
+    returncode = None
+
+    def __init__(self) -> None:
+        self.stdout = BlockingStream()
+        self.stderr = BlockingStream()
+        self.kill_calls = 0
+
+    def poll(self) -> None:
+        return None
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        raise OSError("synthetic direct kill failure")
 
 
 class ProcessLifecycleTests(unittest.TestCase):
@@ -216,10 +255,145 @@ class ProcessLifecycleTests(unittest.TestCase):
         )
 
         self.assertEqual(1, returncode)
-        self.assertEqual(1, process.poll_calls)
+        self.assertEqual(2, process.poll_calls)
         self.assertEqual(1, process.wait_calls)
         self.assertFalse(reconciled["direct_child_reaped"])
         self.assertEqual("termination_failed", reconciled["outcome"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process groups required")
+    def test_native_group_signal_failure_uses_bounded_direct_child_fallback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                Config.load(root=Path(tmp)),
+                codex_command=[
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(30)",
+                ],
+                codex_startup_stall_seconds=1,
+                codex_first_meaningful_timeout_seconds=0,
+                codex_mid_run_idle_seconds=0,
+                codex_total_runtime_timeout_seconds=0,
+            )
+            failure = {
+                "schema_version": 1,
+                "policy": "posix_process_group_v1",
+                "scope": "same_process_group",
+                "trigger": "startup_stall",
+                "term": "failed",
+                "kill": "failed",
+                "direct_child_reaped": False,
+                "group_observation": "unverified",
+                "outcome": "termination_failed",
+            }
+            started = time.monotonic()
+            with (
+                patch(
+                    "codex_batch_runner.codex."
+                    "resolve_process_lifecycle_policy",
+                    return_value=ProcessLifecyclePolicy(
+                        name="posix_process_group_v1",
+                        termination_grace_seconds=1,
+                    ),
+                ),
+                patch(
+                    "codex_batch_runner.codex.terminate_process_group",
+                    return_value=failure,
+                ),
+            ):
+                result = run_codex(
+                    config,
+                    {"id": "native-bounded-failure", "cwd": tmp},
+                    "synthetic prompt",
+                    1,
+                )
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 5)
+            self.assertIsNotNone(result.process_lifecycle)
+            assert result.process_lifecycle is not None
+            self.assertTrue(
+                result.process_lifecycle["direct_child_reaped"]
+            )
+            self.assertEqual(
+                "termination_failed",
+                result.process_lifecycle["outcome"],
+            )
+            self.assertEqual("failed", result.process_lifecycle["term"])
+            self.assertEqual("failed", result.process_lifecycle["kill"])
+            self.assertNotEqual(1, result.returncode)
+
+    def test_native_direct_kill_failure_does_not_close_live_reader_streams(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = replace(
+                Config.load(root=Path(tmp)),
+                codex_command=["synthetic-codex"],
+                codex_startup_stall_seconds=1,
+                codex_first_meaningful_timeout_seconds=0,
+                codex_mid_run_idle_seconds=0,
+                codex_total_runtime_timeout_seconds=0,
+            )
+            process = PersistentProcess()
+            failure = {
+                "schema_version": 1,
+                "policy": "posix_process_group_v1",
+                "scope": "same_process_group",
+                "trigger": "startup_stall",
+                "term": "failed",
+                "kill": "failed",
+                "direct_child_reaped": False,
+                "group_observation": "unverified",
+                "outcome": "termination_failed",
+            }
+            started = time.monotonic()
+            try:
+                with (
+                    patch(
+                        "codex_batch_runner.codex."
+                        "resolve_process_lifecycle_policy",
+                        return_value=ProcessLifecyclePolicy(
+                            name="posix_process_group_v1",
+                            termination_grace_seconds=1,
+                        ),
+                    ),
+                    patch(
+                        "codex_batch_runner.codex.terminate_process_group",
+                        return_value=failure,
+                    ),
+                    patch(
+                        "codex_batch_runner.codex.subprocess.Popen",
+                        return_value=process,
+                    ),
+                ):
+                    result = run_codex(
+                        config,
+                        {"id": "native-persistent-failure", "cwd": tmp},
+                        "synthetic prompt",
+                        1,
+                    )
+            finally:
+                process.stdout.release.set()
+                process.stderr.release.set()
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 5)
+            self.assertEqual(1, result.returncode)
+            self.assertEqual(1, process.kill_calls)
+            self.assertFalse(process.stdout.close_called)
+            self.assertFalse(process.stderr.close_called)
+            self.assertIsNotNone(result.process_lifecycle)
+            assert result.process_lifecycle is not None
+            self.assertFalse(
+                result.process_lifecycle["direct_child_reaped"]
+            )
+            self.assertEqual(
+                "termination_failed",
+                result.process_lifecycle["outcome"],
+            )
 
     @unittest.skipUnless(os.name == "posix", "POSIX process groups required")
     def test_external_timeout_preserves_legacy_failure_shape(self) -> None:

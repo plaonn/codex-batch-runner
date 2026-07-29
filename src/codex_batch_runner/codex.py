@@ -202,8 +202,8 @@ def run_codex(
 
     tracker = ProgressTracker(start_monotonic=time.monotonic())
     assert process.stdout is not None
-    with process.stdout, log_path.open("w", encoding="utf-8") as log_file:
-        process_lifecycle = read_stdout_with_watchdog(
+    with log_path.open("w", encoding="utf-8") as log_file:
+        process_lifecycle, stdout_thread = read_stdout_with_watchdog(
             process,
             log_file,
             events,
@@ -220,8 +220,11 @@ def run_codex(
             process,
             process_lifecycle,
         )
-    stderr_thread.join(timeout=5)
-    if process.stderr:
+    stdout_thread.join(timeout=1)
+    if not stdout_thread.is_alive() and process.stdout:
+        process.stdout.close()
+    stderr_thread.join(timeout=1 if lifecycle_policy is not None else 5)
+    if not stderr_thread.is_alive() and process.stderr:
         process.stderr.close()
     stderr = "".join(stderr_chunks)
     final_response = extract_final_response(events)
@@ -253,6 +256,13 @@ def finalize_codex_process_lifecycle(
 ) -> tuple[int, dict[str, Any]]:
     reconciled = validate_process_lifecycle(lifecycle)
     returncode = process.poll()
+    if returncode is None and not reconciled["direct_child_reaped"]:
+        try:
+            process.kill()
+            process.wait(timeout=1)
+            returncode = process.returncode
+        except (AttributeError, OSError, subprocess.TimeoutExpired):
+            returncode = process.poll()
     if returncode is not None and not reconciled["direct_child_reaped"]:
         reconciled["direct_child_reaped"] = True
         if reconciled["term"] == "failed" or reconciled["kill"] == "failed":
@@ -283,7 +293,7 @@ def read_stdout_with_watchdog(
     *,
     live_progress_callback: LiveProgressCallback | None = None,
     lifecycle_policy: ProcessLifecyclePolicy | None = None,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, threading.Thread]:
     assert process.stdout is not None
     line_queue: queue.Queue[str] = queue.Queue()
 
@@ -327,7 +337,7 @@ def read_stdout_with_watchdog(
         line_queue, log_file, events, tracker,
         live_progress_callback=live_progress_callback,
     )
-    return process_lifecycle
+    return process_lifecycle, stdout_thread
 
 
 def drain_stdout_queue(
