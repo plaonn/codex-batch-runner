@@ -1,0 +1,71 @@
+{
+  "filters": {
+    "project_id_applied": false,
+    "task_id_applied": true
+  },
+  "items": [
+    {
+      "branch_only_review": {
+        "compatible": false,
+        "reason_codes": [
+          "non_worktree_task"
+        ]
+      },
+      "execution_mode": "main_worktree",
+      "hibernation": {
+        "compatible": false,
+        "reason_codes": [
+          "non_worktree_task"
+        ]
+      },
+      "pool_lease": {
+        "compatible": null,
+        "reason_codes": [
+          "pool_not_applicable"
+        ]
+      },
+      "reattach": {
+        "compatible": false,
+        "reason_codes": [
+          "reattach_not_applicable"
+        ]
+      },
+      "reconciliation": {
+        "reason_codes": [
+          "non_worktree_task"
+        ],
+        "status": "not_applicable"
+      },
+      "repository_ref": null,
+      "resume": {
+        "compatible": null,
+        "reason_codes": [
+          "resume_not_applicable"
+        ]
+      },
+      "task_id": "plain",
+      "worktree_status": null
+    }
+  ],
+  "mode": "report-only",
+  "mutation": {
+    "performed": false,
+    "supported": false,
+    "task_state_changes_supported": false,
+    "worktree_changes_supported": false
+  },
+  "report_digest": "sha256:14a63a1fcac3715cf03bdc8c2dabc4ca56156f8d3aa0997b508d8120c9b5b563",
+  "schema_version": "worktree-hibernation-plan-v1",
+  "summary": {
+    "branch_only_review_candidates": 0,
+    "git_worktree_task_count": 0,
+    "hibernation_candidates": 0,
+    "pool_lease_inconsistent": 0,
+    "reattach_candidates": 0,
+    "reconciliation_by_status": {
+      "not_applicable": 1
+    },
+    "resume_compatible": 0,
+    "task_count": 1
+  }
+}

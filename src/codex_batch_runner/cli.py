@@ -267,6 +267,10 @@ from .worktree import (
     render_worktree_report,
     task_worktree_metadata,
 )
+from .worktree_hibernation import (
+    build_worktree_hibernation_plan,
+    render_worktree_hibernation_plan,
+)
 
 WATCH_RESTART_MESSAGE = "cbr source changed since this watch started; restart watch to use updated code"
 COMPACT_TABLE_BLOCK_LAYOUT_WIDTH = 80
@@ -1164,7 +1168,10 @@ def build_parser() -> argparse.ArgumentParser:
     apply_plan.add_argument("--json", action="store_true", help="print JSON")
     apply_plan.set_defaults(func=cmd_apply_plan)
 
-    worktree = sub.add_parser("worktree", help="prepare or cleanup task git worktrees")
+    worktree = sub.add_parser(
+        "worktree",
+        help="inspect, prepare, apply, or cleanup task git worktrees",
+    )
     worktree_sub = worktree.add_subparsers(dest="worktree_command", required=True)
     worktree_prepare = worktree_sub.add_parser("prepare", help="prepare a task git worktree without running Codex")
     worktree_prepare.add_argument("task_id")
@@ -1215,6 +1222,23 @@ def build_parser() -> argparse.ArgumentParser:
     apply_mode.add_argument("--apply", action="store_true", help="fast-forward merge the accepted task branch under the queue lock")
     worktree_apply.add_argument("--json", action="store_true", help="print JSON")
     worktree_apply.set_defaults(func=cmd_worktree_apply)
+
+    worktree_hibernation_plan = worktree_sub.add_parser(
+        "hibernation-plan",
+        help="report branch-only review and worktree hibernation compatibility",
+    )
+    worktree_hibernation_plan.add_argument(
+        "task_id",
+        nargs="?",
+        help="optional exact task id; omitted reports all queue tasks",
+    )
+    worktree_hibernation_plan.add_argument(
+        "--project",
+        dest="project_id",
+        help="filter by project id",
+    )
+    worktree_hibernation_plan.add_argument("--json", action="store_true", help="print JSON")
+    worktree_hibernation_plan.set_defaults(func=cmd_worktree_hibernation_plan)
     return parser
 
 
@@ -6055,6 +6079,19 @@ def cmd_worktree_apply(config: Config, args: argparse.Namespace) -> int:
     else:
         print(render_worktree_report(report), end="")
     return 1 if report.get("errors") else 0
+
+
+def cmd_worktree_hibernation_plan(config: Config, args: argparse.Namespace) -> int:
+    report = build_worktree_hibernation_plan(
+        config,
+        task_id=args.task_id,
+        project_id=args.project_id,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_worktree_hibernation_plan(report), end="")
+    return 0
 
 
 def render_prune_report(report: dict) -> str:
