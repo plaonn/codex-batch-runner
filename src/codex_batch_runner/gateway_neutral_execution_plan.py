@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 from typing import Any
 
@@ -23,6 +24,9 @@ from .worker_routing import (
 CONTRACT = "gateway-neutral-execution-plan-v1"
 SCHEMA_VERSION = 1
 POLICY_REVISION = "gateway-neutral-execution-policy-v1"
+V2_CONTRACT = "gateway-neutral-execution-plan-v2"
+V2_SCHEMA_VERSION = 2
+V2_POLICY_REVISION = "gateway-neutral-execution-policy-v2"
 POLICY_FIELD = "gateway_neutral_execution_policy"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$")
 ENVIRONMENT_KEY = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -32,6 +36,7 @@ SENSITIVE_ENVIRONMENT_KEY = re.compile(
 SUPPORTED_ENVIRONMENT_POLICIES = {"legacy_inherit_current"}
 SUPPORTED_CONFIG_MUTATION_POLICIES = {"no_persistent_mutation_v1"}
 SUPPORTED_PROCESS_POLICIES = {"legacy_direct_child_timeout_v1"}
+V2_PROCESS_POLICY = "posix_process_group_v1"
 FORBIDDEN_OUTPUT_KEYS = {
     "account",
     "argv",
@@ -57,6 +62,8 @@ class GatewayNeutralExecutionPlanError(ValueError):
 def build_gateway_neutral_execution_plan(
     config: Config,
     task: dict[str, Any],
+    *,
+    platform_name: str | None = None,
 ) -> dict[str, Any]:
     projected_task = copy.deepcopy(task)
     reasons: list[str] = []
@@ -113,7 +120,14 @@ def build_gateway_neutral_execution_plan(
         resolved_backend,
         reasons,
     )
-    policy = _policy_projection(target.get(POLICY_FIELD), reasons)
+    raw_policy = target.get(POLICY_FIELD)
+    is_v2 = isinstance(raw_policy, dict) and raw_policy.get("revision") == V2_POLICY_REVISION
+    policy = _policy_projection(raw_policy, reasons)
+    if is_v2:
+        if backend not in {"codex", "external-json-command"}:
+            reasons.append("process_backend_unsupported")
+        if (platform_name or os.name) != "posix":
+            reasons.append("process_platform_unsupported")
     target_id = (
         str(identity["target_id"])
         if identity is not None
@@ -125,8 +139,8 @@ def build_gateway_neutral_execution_plan(
     )
     availability_reasons = sorted(set(reasons))
     plan = {
-        "schema_version": SCHEMA_VERSION,
-        "contract": CONTRACT,
+        "schema_version": V2_SCHEMA_VERSION if is_v2 else SCHEMA_VERSION,
+        "contract": V2_CONTRACT if is_v2 else CONTRACT,
         "binding": {
             "task_id": task_id,
             "task_revision": task_revision,
@@ -183,7 +197,12 @@ def validate_gateway_neutral_execution_plan(value: object) -> dict[str, Any]:
         raise GatewayNeutralExecutionPlanError(
             "execution plan fields are not canonical"
         )
-    if value["schema_version"] != SCHEMA_VERSION or value["contract"] != CONTRACT:
+    version = value["schema_version"]
+    contract = value["contract"]
+    if (version, contract) not in {
+        (SCHEMA_VERSION, CONTRACT),
+        (V2_SCHEMA_VERSION, V2_CONTRACT),
+    }:
         raise GatewayNeutralExecutionPlanError("invalid execution plan contract")
     binding = value["binding"]
     if not isinstance(binding, dict) or set(binding) != {
@@ -258,12 +277,17 @@ def validate_gateway_neutral_execution_plan(value: object) -> dict[str, Any]:
         "process",
     }:
         raise GatewayNeutralExecutionPlanError("invalid execution policy")
-    _validate_policy_output(policy)
+    _validate_policy_output(policy, plan_version=version)
+    supported_process_policies = (
+        {V2_PROCESS_POLICY}
+        if version == V2_SCHEMA_VERSION
+        else SUPPORTED_PROCESS_POLICIES
+    )
     if status == "available" and (
         policy["environment"]["name"] not in SUPPORTED_ENVIRONMENT_POLICIES
         or policy["config_mutation"]["name"]
         not in SUPPORTED_CONFIG_MUTATION_POLICIES
-        or policy["process"]["name"] not in SUPPORTED_PROCESS_POLICIES
+        or policy["process"]["name"] not in supported_process_policies
     ):
         raise GatewayNeutralExecutionPlanError(
             "available plan uses unsupported execution policy"
@@ -355,7 +379,8 @@ def _policy_projection(
     }:
         reasons.append("policy_metadata_invalid")
         return unavailable
-    if value.get("revision") != POLICY_REVISION:
+    revision = value.get("revision")
+    if revision not in {POLICY_REVISION, V2_POLICY_REVISION}:
         reasons.append("policy_revision_unknown")
         return unavailable
     environment = value.get("environment")
@@ -406,7 +431,12 @@ def _policy_projection(
         return unavailable
     if config_mutation_name not in SUPPORTED_CONFIG_MUTATION_POLICIES:
         reasons.append("config_mutation_policy_unknown")
-    if not isinstance(process, dict) or set(process) != {"name"}:
+    expected_process_fields = (
+        {"name", "termination_grace_seconds"}
+        if revision == V2_POLICY_REVISION
+        else {"name"}
+    )
+    if not isinstance(process, dict) or set(process) != expected_process_fields:
         reasons.append("process_policy_invalid")
         return unavailable
     try:
@@ -417,8 +447,20 @@ def _policy_projection(
     except GatewayNeutralExecutionPlanError:
         reasons.append("process_policy_invalid")
         return unavailable
-    if process_name not in SUPPORTED_PROCESS_POLICIES:
+    supported_process_policies = (
+        {V2_PROCESS_POLICY}
+        if revision == V2_POLICY_REVISION
+        else SUPPORTED_PROCESS_POLICIES
+    )
+    if process_name not in supported_process_policies:
         reasons.append("process_policy_unknown")
+    process_projection: dict[str, Any] = {"name": process_name}
+    if revision == V2_POLICY_REVISION:
+        grace = process.get("termination_grace_seconds")
+        if isinstance(grace, bool) or not isinstance(grace, int) or grace < 1:
+            reasons.append("process_grace_invalid")
+            return unavailable
+        process_projection["termination_grace_seconds"] = grace
     try:
         output_revision = _safe_id(
             value.get("output_contract_revision"),
@@ -433,12 +475,16 @@ def _policy_projection(
             "allowlisted_key_names": list(keys),
         },
         "config_mutation": {"name": config_mutation_name},
-        "process": {"name": process_name},
+        "process": process_projection,
         "output_contract_revision": output_revision,
     }
 
 
-def _validate_policy_output(policy: dict[str, Any]) -> None:
+def _validate_policy_output(
+    policy: dict[str, Any],
+    *,
+    plan_version: int,
+) -> None:
     environment = policy["environment"]
     if not isinstance(environment, dict) or set(environment) != {
         "name",
@@ -458,11 +504,25 @@ def _validate_policy_output(policy: dict[str, Any]) -> None:
         )
     ):
         raise GatewayNeutralExecutionPlanError("invalid environment key names")
-    for name in ("config_mutation", "process"):
-        item = policy[name]
-        if not isinstance(item, dict) or set(item) != {"name"}:
-            raise GatewayNeutralExecutionPlanError(f"invalid {name} policy")
-        _safe_id(item["name"], f"policy.{name}.name")
+    config_mutation = policy["config_mutation"]
+    if not isinstance(config_mutation, dict) or set(config_mutation) != {"name"}:
+        raise GatewayNeutralExecutionPlanError("invalid config_mutation policy")
+    _safe_id(config_mutation["name"], "policy.config_mutation.name")
+    process = policy["process"]
+    process_fields = (
+        {"name", "termination_grace_seconds"}
+        if plan_version == V2_SCHEMA_VERSION
+        and isinstance(process, dict)
+        and process.get("name") != "legacy_unavailable"
+        else {"name"}
+    )
+    if not isinstance(process, dict) or set(process) != process_fields:
+        raise GatewayNeutralExecutionPlanError("invalid process policy")
+    _safe_id(process["name"], "policy.process.name")
+    if "termination_grace_seconds" in process:
+        grace = process["termination_grace_seconds"]
+        if isinstance(grace, bool) or not isinstance(grace, int) or grace < 1:
+            raise GatewayNeutralExecutionPlanError("invalid process grace")
 
 
 def _safe_id(value: object, name: str) -> str:

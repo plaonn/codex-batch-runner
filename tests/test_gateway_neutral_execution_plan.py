@@ -75,6 +75,16 @@ def policy(*, keys: list[str] | None = None) -> dict:
     }
 
 
+def policy_v2(*, grace_seconds: object = 5) -> dict:
+    value = policy()
+    value["revision"] = "gateway-neutral-execution-policy-v2"
+    value["process"] = {
+        "name": "posix_process_group_v1",
+        "termination_grace_seconds": grace_seconds,
+    }
+    return value
+
+
 def delegation(task_id: str) -> dict:
     return build_execution_delegation_contract(
         task_id=task_id,
@@ -313,6 +323,81 @@ class GatewayNeutralExecutionPlanTests(unittest.TestCase):
             self.assertEqual(
                 {"name": "posix_process_group_v1"},
                 plan["policy"]["process"],
+            )
+
+    def test_v2_binds_positive_target_grace_into_plan_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_config = Config.load(
+                str(write_config(root, target_policy=policy_v2(grace_seconds=3)))
+            )
+            first = build_gateway_neutral_execution_plan(
+                first_config,
+                create_external_task(first_config),
+                platform_name="posix",
+            )
+            second_config = Config.load(
+                str(write_config(root, target_policy=policy_v2(grace_seconds=7)))
+            )
+            second = build_gateway_neutral_execution_plan(
+                second_config,
+                create_external_task(second_config, task_id="public-plan-task-2"),
+                platform_name="posix",
+            )
+
+            self.assertEqual(2, first["schema_version"])
+            self.assertEqual("gateway-neutral-execution-plan-v2", first["contract"])
+            self.assertEqual("available", first["availability"]["status"])
+            self.assertEqual(
+                {
+                    "name": "posix_process_group_v1",
+                    "termination_grace_seconds": 3,
+                },
+                first["policy"]["process"],
+            )
+            self.assertNotEqual(first["plan_digest"], second["plan_digest"])
+            self.assertNotEqual(
+                first["provenance"]["resolved_target_digest"],
+                second["provenance"]["resolved_target_digest"],
+            )
+
+    def test_v2_invalid_grace_and_non_posix_platform_fail_closed(self) -> None:
+        for grace in (0, -1, True, "5", None):
+            with self.subTest(grace=grace), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                config = Config.load(
+                    str(
+                        write_config(
+                            root,
+                            target_policy=policy_v2(grace_seconds=grace),
+                        )
+                    )
+                )
+                plan = build_gateway_neutral_execution_plan(
+                    config,
+                    create_external_task(config),
+                    platform_name="posix",
+                )
+                self.assertEqual("unavailable", plan["availability"]["status"])
+                self.assertIn(
+                    "process_grace_invalid",
+                    plan["availability"]["reason_codes"],
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(
+                str(write_config(root, target_policy=policy_v2()))
+            )
+            plan = build_gateway_neutral_execution_plan(
+                config,
+                create_external_task(config),
+                platform_name="nt",
+            )
+            self.assertEqual("unavailable", plan["availability"]["status"])
+            self.assertIn(
+                "process_platform_unsupported",
+                plan["availability"]["reason_codes"],
             )
 
     def test_unknown_backend_returns_canonical_unavailable_plan(self) -> None:

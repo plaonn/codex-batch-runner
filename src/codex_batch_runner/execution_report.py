@@ -13,6 +13,10 @@ from .execution_delegation import preexecution_delegation_view
 from .execution_mutation_provenance import execution_mutation_provenance_view
 from .natural_execution_attestation import natural_execution_attestation_view
 from .queue import list_tasks, task_labels, task_project_id, task_project_root, task_title
+from .process_lifecycle import (
+    ProcessLifecycleError,
+    validate_process_lifecycle,
+)
 from .review_outcome_evidence import review_outcome_view
 from .routing_report import number
 from .scoped_readonly_certification import (
@@ -194,6 +198,14 @@ def task_execution_row(
     queue_wait = duration_between(task.get("created_at"), last_run.get("started_at") or task.get("started_at"))
     changed_files = changed_files_count(task.get("last_result"))
     verification = verification_count(task.get("last_result"))
+    process_lifecycle = None
+    if last_run.get("process_lifecycle") is not None:
+        try:
+            process_lifecycle = validate_process_lifecycle(
+                last_run["process_lifecycle"]
+            )
+        except ProcessLifecycleError:
+            process_lifecycle = None
     return {
         "task_id": sanitize(task.get("id")),
         "title": sanitize(task_title(task)),
@@ -216,6 +228,11 @@ def task_execution_row(
             ),
             "returncode": int_value(last_run.get("returncode")),
             "timed_out": bool(last_run.get("timed_out")),
+            **(
+                {"process_lifecycle": process_lifecycle}
+                if process_lifecycle is not None
+                else {}
+            ),
         },
         "model": {
             "identity_kind": "planned_execution",

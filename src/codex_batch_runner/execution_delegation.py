@@ -13,9 +13,12 @@ from .timeutil import iso_now
 
 DELEGATION_CONTRACT = "cbr-execution-delegation-contract-v1"
 RECEIPT_CONTRACT = "cbr-preexecution-delegation-receipt-v1"
+RECEIPT_CONTRACT_V2 = "cbr-preexecution-delegation-receipt-v2"
 SCHEMA_VERSION = 1
+RECEIPT_SCHEMA_VERSION_V2 = 2
 CONTROL_PLANE = "local-cbr-queue-claim"
 PRODUCER_REVISION = "cbr-runner-preexecution-delegation-v1"
+PRODUCER_REVISION_V2 = "cbr-runner-preexecution-delegation-v2"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$")
 SIDE_EFFECT_FIELDS = {
     "cbr_controlled_repository_write_allowed",
@@ -194,6 +197,7 @@ def append_preexecution_delegation_receipt(
     *,
     execution_settings: ResolvedExecutionConfig | None,
     active_run_id: str,
+    execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     raw_contract = task.get("execution_delegation_contract")
     if raw_contract is None:
@@ -231,6 +235,41 @@ def append_preexecution_delegation_receipt(
         "resolved_config_digest": identity["resolved_config_digest"],
         "command_contract_digest": identity["command_contract_digest"],
     }
+    receipt_schema_version = SCHEMA_VERSION
+    receipt_contract = RECEIPT_CONTRACT
+    producer_revision = PRODUCER_REVISION
+    if execution_plan is not None:
+        if (
+            execution_plan.get("schema_version") != 2
+            or execution_plan.get("contract") != "gateway-neutral-execution-plan-v2"
+        ):
+            raise ExecutionDelegationError("invalid lifecycle execution plan binding")
+        plan_digest = _digest(
+            execution_plan.get("plan_digest"),
+            "execution_plan.plan_digest",
+        )
+        provenance = execution_plan.get("provenance")
+        binding_record = execution_plan.get("binding")
+        if (
+            not isinstance(provenance, dict)
+            or provenance.get("resolved_target_digest")
+            != identity["resolved_target_digest"]
+            or provenance.get("resolved_config_digest")
+            != identity["resolved_config_digest"]
+            or provenance.get("command_contract_digest")
+            != identity["command_contract_digest"]
+            or not isinstance(binding_record, dict)
+            or binding_record.get("task_id") != binding["task_id"]
+            or binding_record.get("task_revision") != binding["task_revision"]
+            or binding_record.get("target_id") != target_id
+        ):
+            raise ExecutionDelegationError(
+                "lifecycle execution plan does not exact-bind resolved target"
+            )
+        target_record["gateway_neutral_execution_plan_digest"] = plan_digest
+        receipt_schema_version = RECEIPT_SCHEMA_VERSION_V2
+        receipt_contract = RECEIPT_CONTRACT_V2
+        producer_revision = PRODUCER_REVISION_V2
     history = task.setdefault("preexecution_delegation_receipt_history", [])
     if not isinstance(history, list):
         raise ExecutionDelegationError("delegation receipt history must be a list")
@@ -279,8 +318,8 @@ def append_preexecution_delegation_receipt(
             raise ExecutionDelegationError("delegation receipt attempt chain is broken")
         predecessor = previous["receipt_id"]
     receipt = {
-        "schema_version": SCHEMA_VERSION,
-        "contract": RECEIPT_CONTRACT,
+        "schema_version": receipt_schema_version,
+        "contract": receipt_contract,
         "kind": "preexecution_delegation_receipt",
         "recorded_at": iso_now(),
         "binding": {
@@ -301,7 +340,7 @@ def append_preexecution_delegation_receipt(
         },
         "producer": {
             "kind": "cbr_runner",
-            "revision": PRODUCER_REVISION,
+            "revision": producer_revision,
         },
         "scope": {
             "control_plane": CONTROL_PLANE,
@@ -465,9 +504,14 @@ def validate_preexecution_delegation_receipt(value: object) -> dict[str, Any]:
     }
     if not isinstance(value, dict) or set(value) != expected:
         raise ExecutionDelegationError("delegation receipt fields are not canonical")
+    receipt_version = value["schema_version"]
+    receipt_contract = value["contract"]
     if (
-        value["schema_version"] != SCHEMA_VERSION
-        or value["contract"] != RECEIPT_CONTRACT
+        (receipt_version, receipt_contract)
+        not in {
+            (SCHEMA_VERSION, RECEIPT_CONTRACT),
+            (RECEIPT_SCHEMA_VERSION_V2, RECEIPT_CONTRACT_V2),
+        }
         or value["kind"] != "preexecution_delegation_receipt"
         or value["report_only"] is not True
         or value["actual_canary"] is not False
@@ -494,14 +538,17 @@ def validate_preexecution_delegation_receipt(value: object) -> dict[str, Any]:
         "binding.delegation_contract_digest",
     )
     target = value["target"]
-    if not isinstance(target, dict) or set(target) != {
+    target_fields = {
         "worker_family",
         "worker_identity_digest",
         "target_id",
         "target_snapshot_digest",
         "resolved_config_digest",
         "command_contract_digest",
-    }:
+    }
+    if receipt_version == RECEIPT_SCHEMA_VERSION_V2:
+        target_fields.add("gateway_neutral_execution_plan_digest")
+    if not isinstance(target, dict) or set(target) != target_fields:
         raise ExecutionDelegationError("invalid receipt target")
     for key in ("worker_family", "target_id"):
         _safe_id(target.get(key), f"target.{key}")
@@ -510,6 +557,11 @@ def validate_preexecution_delegation_receipt(value: object) -> dict[str, Any]:
         "target_snapshot_digest",
         "resolved_config_digest",
         "command_contract_digest",
+        *(
+            ("gateway_neutral_execution_plan_digest",)
+            if receipt_version == RECEIPT_SCHEMA_VERSION_V2
+            else ()
+        ),
     ):
         _digest(target.get(key), f"target.{key}")
     revisions = value["revisions"]
@@ -537,9 +589,14 @@ def validate_preexecution_delegation_receipt(value: object) -> dict[str, Any]:
         raise ExecutionDelegationError("invalid receipt sequence")
     _positive_int(sequence.get("position"), "sequence.position")
     _digest(sequence.get("predecessor"), "sequence.predecessor")
+    producer_revision = (
+        PRODUCER_REVISION_V2
+        if receipt_version == RECEIPT_SCHEMA_VERSION_V2
+        else PRODUCER_REVISION
+    )
     if value["producer"] != {
         "kind": "cbr_runner",
-        "revision": PRODUCER_REVISION,
+        "revision": producer_revision,
     }:
         raise ExecutionDelegationError("invalid receipt producer")
     if value["scope"] != {
@@ -595,8 +652,8 @@ def preexecution_delegation_view(task: dict[str, Any]) -> dict[str, Any]:
     ):
         return _unknown_view("current_target_snapshot_mismatch")
     return {
-        "schema_version": SCHEMA_VERSION,
-        "contract": RECEIPT_CONTRACT,
+        "schema_version": receipt["schema_version"],
+        "contract": receipt["contract"],
         "status": "verified-local-preexecution-binding",
         "task_class": contract["binding"]["task_class"],
         "task_revision": contract["binding"]["task_revision"],

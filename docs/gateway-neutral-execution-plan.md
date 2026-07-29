@@ -1,6 +1,7 @@
 # Gateway-neutral execution plan
 
-`gateway-neutral-execution-plan-v1`은 canonical queue task와 current CBR config에서
+`gateway-neutral-execution-plan-v1`과 opt-in
+`gateway-neutral-execution-plan-v2`는 canonical queue task와 current CBR config에서
 effective execution identity를 계산하는 deterministic read-only projection입니다.
 Worker launch 전에 사람이 확인할 수 있는 sanitized contract일 뿐 새 launcher,
 execution result, routing decision, policy enforcement 또는 canonical runtime truth가
@@ -47,13 +48,39 @@ contract를 사용합니다.
 }
 ```
 
-Package 1에서 supported name은 현재 behavior를 설명하는
+V1에서 supported name은 현재 behavior를 설명하는
 `legacy_inherit_current`, `no_persistent_mutation_v1`,
 `legacy_direct_child_timeout_v1`뿐입니다. Environment 목록은 key name metadata일
-뿐 값을 읽거나 child environment를 구성하지 않습니다. `allowlist_v1`,
-`posix_process_group_v1` 같은 public-safe opt-in metadata는 이름과 environment key
+뿐 값을 읽거나 child environment를 구성하지 않습니다. V1에서 `allowlist_v1`,
+`posix_process_group_v1` 같은 다른 public-safe metadata는 이름과 environment key
 name을 그대로 projection하되 `availability.status=unavailable`로 fail closed됩니다.
-실제 enforcement에는 별도 Package 2 authority가 필요합니다.
+
+V2는 exact target의 다음 strict process metadata만 지원합니다.
+
+```json
+{
+  "revision": "gateway-neutral-execution-policy-v2",
+  "environment": {
+    "name": "legacy_inherit_current",
+    "allowlisted_key_names": []
+  },
+  "config_mutation": {
+    "name": "no_persistent_mutation_v1"
+  },
+  "process": {
+    "name": "posix_process_group_v1",
+    "termination_grace_seconds": 5
+  },
+  "output_contract_revision": "cbr-external-json-final-v1"
+}
+```
+
+Grace는 positive integer이며 resolved target digest와 plan digest에 포함됩니다. V2는
+POSIX의 exact-target native Codex와 `external-json-command` backend에서만 available
+합니다. Shell, non-POSIX, unknown field/name, non-positive grace는 launch 전에 fail
+closed됩니다. V2 plan digest는 같은 attempt의
+`cbr-preexecution-delegation-receipt-v2`에 exact binding되며 target/config/command
+digest도 모두 일치해야 합니다.
 
 Metadata가 없는 기존 task/target은 자동 migration하지 않습니다. Delegation
 revision이 없는 task는 `legacy_task_revision_unavailable`, policy metadata가 없는
@@ -76,7 +103,8 @@ Projection은 invalid 또는 unsupported input을 실행 가능하다고 추측�
   `policy_revision_unknown`, `environment_policy_invalid`,
   `environment_policy_unknown`, `environment_allowlist_invalid`,
   `config_mutation_policy_invalid`, `config_mutation_policy_unknown`,
-  `process_policy_invalid`, `process_policy_unknown`,
+  `process_policy_invalid`, `process_policy_unknown`, `process_grace_invalid`,
+  `process_backend_unsupported`, `process_platform_unsupported`,
   `output_contract_revision_invalid`
 
 Reason codes는 sorted unique list이며 하나라도 있으면

@@ -15,6 +15,11 @@ from .execution_evidence_v3 import (
     validate_external_attestation_v3,
 )
 from .fs import ensure_dir
+from .process_lifecycle import (
+    normal_exit_lifecycle,
+    resolve_process_lifecycle_policy,
+    terminate_process_group,
+)
 from .timeutil import iso_now
 
 
@@ -36,6 +41,7 @@ class ExternalJsonCommandResult:
     stderr_bytes: int
     final_response: dict[str, Any] | None
     error: str | None = None
+    process_lifecycle: dict[str, Any] | None = None
 
 
 def run_external_json_command_task(
@@ -61,21 +67,68 @@ def run_external_json_command_task(
     returncode: int | None = None
     timed_out = False
     error: str | None = None
+    process_lifecycle: dict[str, Any] | None = None
+    lifecycle_policy = resolve_process_lifecycle_policy(
+        task,
+        backend="external-json-command",
+    )
     try:
-        completed = subprocess.run(
-            command,
-            cwd=task.get("cwd") or None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            check=False,
-        )
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-        returncode = completed.returncode
+        if lifecycle_policy is None:
+            completed = subprocess.run(
+                command,
+                cwd=task.get("cwd") or None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+            )
+            stdout = completed.stdout or ""
+            stderr = completed.stderr or ""
+            returncode = completed.returncode
+        else:
+            process = subprocess.Popen(
+                command,
+                cwd=task.get("cwd") or None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_seconds)
+                returncode = process.returncode
+                process_lifecycle = normal_exit_lifecycle()
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                process_lifecycle = terminate_process_group(
+                    process,
+                    process_group_id=process.pid,
+                    trigger="external_wall_timeout",
+                    grace_seconds=lifecycle_policy.termination_grace_seconds,
+                )
+                try:
+                    stdout, stderr = process.communicate(
+                        timeout=max(
+                            1,
+                            lifecycle_policy.termination_grace_seconds,
+                        )
+                    )
+                except subprocess.TimeoutExpired as drain_error:
+                    stdout = output_text(drain_error.stdout)
+                    stderr = output_text(drain_error.stderr)
+                    if process.stdout:
+                        process.stdout.close()
+                    if process.stderr:
+                        process.stderr.close()
+                error = (
+                    f"external-json-command timed out after {timeout_seconds}s"
+                )
+                returncode = None
     except subprocess.TimeoutExpired as exc:
         timed_out = True
         stdout = output_text(exc.stdout)
@@ -117,6 +170,7 @@ def run_external_json_command_task(
         stderr_bytes=len(stderr.encode("utf-8")),
         final_response=final_response,
         error=error,
+        process_lifecycle=process_lifecycle,
     )
 
 

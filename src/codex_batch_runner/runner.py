@@ -51,6 +51,10 @@ from .execution_mutation_provenance import (
     build_execution_mutation_provenance,
     capture_execution_mutation_snapshot,
 )
+from .gateway_neutral_execution_plan import (
+    GatewayNeutralExecutionPlanError,
+    build_gateway_neutral_execution_plan,
+)
 from .model_requirements import (
     ResolvedExecutionConfig,
     command_options,
@@ -63,6 +67,8 @@ from .fs import ensure_dir
 from .lock import FileLock
 from .maintenance import build_codex_cli_maintenance_report, run_codex_cli_maintenance
 from .prompts import build_prompt
+from .process_lifecycle import lifecycle_policy_requested
+from .process_lifecycle import validate_process_lifecycle
 from .queue import (
     is_in_cooldown,
     load_task,
@@ -382,13 +388,27 @@ def claim_next_implementation_task_locked(
             None,
         )
     delegation_receipt = None
+    execution_plan = None
     try:
+        if lifecycle_policy_requested(execution_config):
+            execution_plan = build_gateway_neutral_execution_plan(config, task)
+            if execution_plan["availability"]["status"] != "available":
+                reasons = ", ".join(
+                    execution_plan["availability"]["reason_codes"]
+                )
+                raise ExecutionDelegationError(
+                    f"lifecycle execution plan unavailable: {reasons}"
+                )
+            task["active_gateway_neutral_execution_plan"] = execution_plan
+        else:
+            task.pop("active_gateway_neutral_execution_plan", None)
         delegation_receipt = append_preexecution_delegation_receipt(
             task,
             execution_settings=execution_config,
             active_run_id=active_run_id,
+            execution_plan=execution_plan,
         )
-    except ExecutionDelegationError as exc:
+    except (ExecutionDelegationError, GatewayNeutralExecutionPlanError) as exc:
         mark_execution_config_failure(config, task, str(exc))
         mark_run(config, task["id"])
         return (
@@ -1442,6 +1462,10 @@ def record_external_json_command_last_run(
         task["last_run"]["resolved_execution_config"] = resolved_execution_config_metadata(
             execution_settings
         )
+    if result.process_lifecycle is not None:
+        task["last_run"]["process_lifecycle"] = validate_process_lifecycle(
+            result.process_lifecycle
+        )
     attestation = result.final_response.get("execution_evidence") if isinstance(result.final_response, dict) else None
     if execution_settings and exact_v3_settings(execution_settings):
         attach_execution_evidence_v3(
@@ -1718,6 +1742,10 @@ def record_last_run(
         )
     if result.watchdog_reason:
         task["last_run"]["watchdog_reason"] = result.watchdog_reason
+    if result.process_lifecycle is not None:
+        task["last_run"]["process_lifecycle"] = validate_process_lifecycle(
+            result.process_lifecycle
+        )
     if execution_settings and exact_v3_settings(execution_settings):
         attach_execution_evidence_v3(
             task, build_codex_execution_evidence_v3(task, result, execution_settings, config)

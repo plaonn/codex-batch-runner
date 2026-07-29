@@ -274,6 +274,15 @@ Enqueue CLI는 `--backend external-json-command`와 함께 `--command-json '["pa
 
 Runner는 external-json-command task에도 기존 queue ordering, dependency readiness, cooldown skip, runner lock, stale running recovery, worktree cwd adapter, attempts/run count, log path, status transition event, post-run wake trigger를 적용합니다. `worktree_mode=task`이면 command cwd는 prepared task worktree입니다. Timeout은 Codex JSONL progress watchdog이 아니라 wall-clock subprocess timeout입니다.
 
+Exact target이 available `gateway-neutral-execution-plan-v2`와 같은 attempt의
+pre-execution receipt에 bind된 경우에만 POSIX `posix_process_group_v1` lifecycle을
+사용합니다. 이 opt-in path는 child를 새 session/process group에서 시작하고 wall-clock
+timeout에 group SIGTERM, target-bound grace, 필요한 경우 group SIGKILL을 요청한 뒤
+direct child를 bounded wait로 reap합니다. 기존 external timeout 결과의
+`timed_out=true`, `returncode=null`, failed disposition과 final-response validation은
+그대로 유지됩니다. Legacy target은 계속 `subprocess.run(timeout=...)`을 사용하며
+shell backend는 이 lifecycle을 사용하지 않습니다.
+
 `worktree_mode=task`에서 external worker는 task worktree 파일을 수정하고 final JSON `changed_files`에 안전한 상대 경로를 보고해야 합니다. External worker는 직접 commit하거나 push하지 않습니다. Valid `completed` final JSON이면 cbr가 보고된 safe `changed_files`만 stage하여 task branch에 local auto-commit을 만들고, 그 commit을 review/apply unit으로 기록합니다. cbr-created commit은 `last_result.commits`에 추가되고 `last_result.push_status.status=not_pushed`로 저장됩니다. If an external-json-command worker creates local commits before cbr auto-commit, cbr v1 rejects the completed result with a sanitized `last_error` and retains the task worktree/branch for recovery or review. The runner execution path does not fetch, push, delete the worker commit, or rewrite history for this guard.
 
 External command stdout은 하나의 JSON object여야 합니다. Required final JSON shape는 Codex final response와 같습니다: `task_id`, `status`, `summary`, `changed_files`, `verification`, optional `next_prompt`, optional `commits`, optional `push_status`. 허용 status는 `completed`, `needs_resume`, `blocked_user`, `failed`입니다. `completed`는 `review_status=unreviewed`를 기록합니다. `needs_resume`은 `next_prompt`를 저장하고 다음 실행에서 provider-native conversation id 없이 resume-unavailable continuation prompt를 사용합니다.
@@ -695,6 +704,20 @@ Conservative default config:
 - `codex_startup_stall_cooldown_seconds`: `60`
 
 Startup/no-progress stall이 감지되면 runner는 Codex child process에 `SIGTERM`을 보내고 grace period 안에 종료되지 않을 때만 `SIGKILL`을 보냅니다. 이 class는 기본적으로 permanent failure가 아닙니다. session/thread id가 있으면 task는 `needs_resume`으로 남고, id가 없으면 짧은 cooldown이 있는 `runnable`로 되돌아갑니다. `last_error`는 `codex startup stalled before meaningful JSONL events` 또는 `codex startup stalled before any JSONL output`처럼 stderr-only noise보다 명확한 메시지를 사용합니다.
+
+Available v2 process plan에 exact-bind된 native Codex target은 기존 watchdog trigger,
+resume 및 cooldown 의미를 유지하되 direct-child signal 대신 같은 process group에
+signal을 보냅니다. 이때 grace는 `codex_watchdog_grace_seconds`가 아니라 exact target의
+`termination_grace_seconds`입니다.
+
+Opt-in run은 `last_run.process_lifecycle`에 enum-only sanitized evidence를 추가합니다.
+Field는 policy/scope, 기존 watchdog 또는 `external_wall_timeout` trigger, TERM/KILL
+request state, direct-child reap 여부, bounded group observation과 outcome입니다. PID,
+PGID, argv, output 또는 path는 포함하지 않습니다. Execution report는 같은 object를
+additively projection합니다. `observed_absent`는 signal 시점의 같은 process group에
+대한 observation일 뿐, escaped process나 arbitrary descendant가 없다는 증명이
+아닙니다. CBR은 grandchildren reap, `setsid` escape 방지, provider cancellation 또는
+전체 descendant cleanup을 보장하지 않습니다.
 
 Runner는 stall task에 `last_progress`, `startup_stalled_at`, `startup_stall_count`를 기록하고, sanitized append-only `task_startup_stalled` event를 남깁니다. Event payload는 raw prompt, raw transcript, session/thread id, credentials, token-like values를 포함하지 않습니다. `cbr summary`는 `last_progress`와 stall marker를 표시하고, `cbr list`는 현재 재시도 대상의 startup stall retry evidence와 완료된 task의 startup stall history를 `NOTE`에서 구분해 표시할 수 있습니다. `cbr doctor`는 최근 startup stall evidence와 오래 running 상태로 남은 no-progress 후보를 operator diagnosis용으로 노출합니다.
 

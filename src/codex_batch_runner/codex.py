@@ -14,6 +14,12 @@ from .execution_evidence_v3 import enforce_codex_command_identity
 from .fs import ensure_dir
 from .limits import matched_rate_limit_markers
 from .model_requirements import command_options, insert_command_options, resolve_execution_config
+from .process_lifecycle import (
+    ProcessLifecyclePolicy,
+    normal_exit_lifecycle,
+    resolve_process_lifecycle_policy,
+    terminate_process_group,
+)
 from .timeutil import iso_now
 
 
@@ -40,6 +46,7 @@ class CodexResult:
     rate_limit_markers: list[str]
     progress: dict[str, Any] | None = None
     watchdog_reason: str | None = None
+    process_lifecycle: dict[str, Any] | None = None
 
 
 @dataclass
@@ -141,6 +148,7 @@ def run_codex(
     resume_id_used = (task.get("session_id") or task.get("thread_id")) if use_resume else None
     command_kind = "resume" if use_resume else "exec"
     settings = execution_settings or task.get("_resolved_execution_settings") or resolve_execution_config(config, task)
+    lifecycle_policy = resolve_process_lifecycle_policy(task, backend="codex")
     base = format_command(config.codex_resume_command if use_resume else config.codex_command, task, prompt)
     command = [*insert_command_options(base[:-1], command_options(settings)), base[-1]]
     enforce_codex_command_identity(task, settings, command, config)
@@ -151,6 +159,9 @@ def run_codex(
         live_progress_callback = None
 
     try:
+        popen_kwargs: dict[str, Any] = {}
+        if lifecycle_policy is not None:
+            popen_kwargs["start_new_session"] = True
         process = subprocess.Popen(
             command,
             cwd=task.get("cwd") or None,
@@ -159,6 +170,7 @@ def run_codex(
             text=True,
             encoding="utf-8",
             errors="replace",
+            **popen_kwargs,
         )
     except OSError as exc:
         log_path.write_text("", encoding="utf-8")
@@ -176,6 +188,7 @@ def run_codex(
             rate_limit_markers=[],
             progress=None,
             watchdog_reason=None,
+            process_lifecycle=None,
         )
 
     def read_stderr() -> None:
@@ -189,16 +202,22 @@ def run_codex(
     tracker = ProgressTracker(start_monotonic=time.monotonic())
     assert process.stdout is not None
     with process.stdout, log_path.open("w", encoding="utf-8") as log_file:
-        read_stdout_with_watchdog(
+        process_lifecycle = read_stdout_with_watchdog(
             process,
             log_file,
             events,
             tracker,
             config,
             live_progress_callback=live_progress_callback,
+            lifecycle_policy=lifecycle_policy,
         )
 
-    returncode = process.wait()
+    if lifecycle_policy is None:
+        returncode = process.wait()
+    else:
+        returncode = process.wait(
+            timeout=max(1, lifecycle_policy.termination_grace_seconds)
+        )
     stderr_thread.join(timeout=5)
     if process.stderr:
         process.stderr.close()
@@ -222,6 +241,7 @@ def run_codex(
         rate_limit_markers=rate_limit_markers,
         progress=tracker.as_dict(),
         watchdog_reason=tracker.watchdog_reason,
+        process_lifecycle=process_lifecycle,
     )
 
 
@@ -233,7 +253,8 @@ def read_stdout_with_watchdog(
     config: Config,
     *,
     live_progress_callback: LiveProgressCallback | None = None,
-) -> None:
+    lifecycle_policy: ProcessLifecyclePolicy | None = None,
+) -> dict[str, Any] | None:
     assert process.stdout is not None
     line_queue: queue.Queue[str] = queue.Queue()
 
@@ -260,13 +281,24 @@ def read_stdout_with_watchdog(
             )
         reason = watchdog_reason(tracker, config)
         if reason:
-            terminate_for_watchdog(process, tracker, reason, config.codex_watchdog_grace_seconds)
+            process_lifecycle = terminate_for_watchdog(
+                process,
+                tracker,
+                reason,
+                config.codex_watchdog_grace_seconds,
+                lifecycle_policy=lifecycle_policy,
+            )
             break
+    else:
+        process_lifecycle = (
+            normal_exit_lifecycle() if lifecycle_policy is not None else None
+        )
     stdout_thread.join(timeout=1)
     drain_stdout_queue(
         line_queue, log_file, events, tracker,
         live_progress_callback=live_progress_callback,
     )
+    return process_lifecycle
 
 
 def drain_stdout_queue(
@@ -340,9 +372,22 @@ def terminate_for_watchdog(
     tracker: ProgressTracker,
     reason: str,
     grace_seconds: int,
-) -> None:
+    *,
+    lifecycle_policy: ProcessLifecyclePolicy | None = None,
+) -> dict[str, Any] | None:
     tracker.watchdog_reason = reason
     tracker.terminated_by_watchdog = True
+    if lifecycle_policy is not None:
+        lifecycle = terminate_process_group(
+            process,
+            process_group_id=process.pid,
+            trigger=reason,
+            grace_seconds=lifecycle_policy.termination_grace_seconds,
+        )
+        tracker.termination_signal = (
+            "SIGKILL" if lifecycle["kill"] == "sent" else "SIGTERM"
+        )
+        return lifecycle
     process.terminate()
     tracker.termination_signal = "SIGTERM"
     try:
@@ -351,6 +396,7 @@ def terminate_for_watchdog(
         process.kill()
         tracker.termination_signal = "SIGKILL"
         process.wait()
+    return None
 
 
 def should_use_resume(task: dict) -> bool:

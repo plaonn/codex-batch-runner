@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import socket
 import subprocess
 import tempfile
@@ -19,6 +21,14 @@ from codex_batch_runner.execution_delegation import (
     require_preexecution_delegation_receipt,
     validate_execution_delegation_contract,
     validate_preexecution_delegation_receipt,
+    resolved_execution_identity,
+)
+from codex_batch_runner.gateway_neutral_execution_plan import (
+    validate_gateway_neutral_execution_plan,
+)
+from codex_batch_runner.process_lifecycle import (
+    ProcessLifecycleError,
+    resolve_process_lifecycle_policy,
 )
 from codex_batch_runner.execution_mutation_provenance import (
     attach_execution_mutation_snapshot,
@@ -115,6 +125,51 @@ def running_task(root: Path, *, attempt: int = 1, claim_id: str = "claim-r1") ->
     }
 
 
+def lifecycle_plan(task: dict, resolved: ResolvedExecutionConfig) -> dict:
+    identity = resolved_execution_identity(task, resolved)
+    plan = {
+        "schema_version": 2,
+        "contract": "gateway-neutral-execution-plan-v2",
+        "binding": {
+            "task_id": task["id"],
+            "task_revision": contract()["binding"]["task_revision"],
+            "target_id": identity["target_id"],
+        },
+        "provenance": {
+            "resolved_target_digest": identity["resolved_target_digest"],
+            "resolved_config_digest": identity["resolved_config_digest"],
+            "command_contract_digest": identity["command_contract_digest"],
+        },
+        "execution": {
+            "backend": "codex",
+            "timeout_seconds": 120,
+            "output_contract_revision": "cbr-codex-jsonl-v1",
+        },
+        "policy": {
+            "environment": {
+                "name": "legacy_inherit_current",
+                "allowlisted_key_names": [],
+            },
+            "config_mutation": {"name": "no_persistent_mutation_v1"},
+            "process": {
+                "name": "posix_process_group_v1",
+                "termination_grace_seconds": 3,
+            },
+        },
+        "availability": {
+            "status": "available",
+            "fail_closed": False,
+            "reason_codes": [],
+        },
+        "mutation": {"allowed": False, "applied": False},
+    }
+    encoded = json.dumps(
+        plan, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    plan["plan_digest"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    return validate_gateway_neutral_execution_plan(plan)
+
+
 def bind_pre_worker(task: dict, root: Path, receipt: dict) -> None:
     snapshot = capture_execution_mutation_snapshot(task, root, phase="pre_worker")
     attach_execution_mutation_snapshot(task, snapshot)
@@ -207,6 +262,70 @@ class ExecutionDelegationTests(unittest.TestCase):
             )
             self.assertFalse(view["scope"]["external_issuer_authenticated"])
             self.assertEqual("unknown", view["scope"]["global_provenance"])
+
+    def test_v2_receipt_exact_binds_plan_digest_and_runtime_rejects_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository(root)
+            task = running_task(root)
+            resolved = settings()
+            assert resolved.selected_target_snapshot is not None
+            resolved.selected_target_snapshot["target"][
+                "gateway_neutral_execution_policy"
+            ] = {
+                "revision": "gateway-neutral-execution-policy-v2",
+                "environment": {
+                    "name": "legacy_inherit_current",
+                    "allowlisted_key_names": [],
+                },
+                "config_mutation": {"name": "no_persistent_mutation_v1"},
+                "process": {
+                    "name": "posix_process_group_v1",
+                    "termination_grace_seconds": 3,
+                },
+                "output_contract_revision": "cbr-codex-jsonl-v1",
+            }
+            plan = lifecycle_plan(task, resolved)
+            receipt = append_preexecution_delegation_receipt(
+                task,
+                execution_settings=resolved,
+                active_run_id="claim-r1",
+                execution_plan=plan,
+            )
+            assert receipt is not None
+            self.assertEqual(2, receipt["schema_version"])
+            self.assertEqual(
+                plan["plan_digest"],
+                receipt["target"]["gateway_neutral_execution_plan_digest"],
+            )
+            bind_pre_worker(task, root, receipt)
+            task["active_execution_target_snapshot"] = (
+                resolved.selected_target_snapshot
+            )
+            task["active_gateway_neutral_execution_plan"] = plan
+            task["_resolved_execution_settings"] = resolved
+
+            policy = resolve_process_lifecycle_policy(
+                task,
+                backend="codex",
+                platform_name="posix",
+            )
+            assert policy is not None
+            self.assertEqual(3, policy.termination_grace_seconds)
+
+            task["active_gateway_neutral_execution_plan"] = copy.deepcopy(plan)
+            task["active_gateway_neutral_execution_plan"]["plan_digest"] = (
+                "sha256:" + "0" * 64
+            )
+            with self.assertRaisesRegex(
+                (ProcessLifecycleError, ValueError),
+                "plan_digest",
+            ):
+                resolve_process_lifecycle_policy(
+                    task,
+                    backend="codex",
+                    platform_name="posix",
+                )
 
     def test_target_backend_tamper_and_receipt_substitution_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
