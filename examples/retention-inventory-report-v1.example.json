@@ -1,0 +1,37 @@
+{
+  "cursor_safety": {
+    "block_all_event_pruning": false,
+    "configured_cursor_count": 0,
+    "reason_codes": []
+  },
+  "event_files": [],
+  "items": [],
+  "mode": "report-only",
+  "mutation": {
+    "canonical_task_deletion_supported": false,
+    "performed": false,
+    "supported": false
+  },
+  "observed_at": "2026-07-30T00:00:00+00:00",
+  "proposal_parameters": {
+    "age_days": 60,
+    "age_is_policy": false,
+    "project_filter_applied": false
+  },
+  "report_digest": "sha256:b45792bb374ea4087846bcfc2e7a483e39764bd22f532e1cabf5a7138fc8d901",
+  "schema_version": "retention-inventory-report-v1",
+  "summary": {
+    "artifact_count": 0,
+    "canonical_task_json_protected_count": 0,
+    "event_candidate_count": 0,
+    "event_file_count": 0,
+    "lifecycle_class_counts": {
+      "Cold-candidate": 0,
+      "Hot": 0,
+      "Warm": 0
+    },
+    "raw_log_candidate_task_count": 0,
+    "task_count": 0,
+    "tombstone_candidate_count": 0
+  }
+}

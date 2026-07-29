@@ -87,6 +87,10 @@ from .maintenance import (
     run_codex_cli_maintenance,
 )
 from .prune import DEFAULT_PRUNE_AGE_DAYS, build_prune_report
+from .retention import (
+    build_retention_inventory_report,
+    render_retention_inventory_report,
+)
 from .post_accept import accept_task_and_integrate
 from .presentation import (
     TaskListPresentation,
@@ -1132,6 +1136,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prune.add_argument("--json", action="store_true", help="print JSON")
     prune.set_defaults(func=cmd_prune)
+
+    retention_inventory = sub.add_parser(
+        "retention-inventory",
+        help="show a sanitized report-only retention and tombstone preview",
+    )
+    retention_inventory.add_argument(
+        "--proposal-age-days",
+        type=int,
+        help="evaluate an explicit age proposal; omitted means no age eligibility",
+    )
+    retention_inventory.add_argument("--project", dest="project_id", help="filter by project id")
+    retention_inventory.add_argument(
+        "--notifier-cursor-state",
+        action="append",
+        default=[],
+        help="local notifier cursor state JSON path; repeatable",
+    )
+    retention_inventory.add_argument("--json", action="store_true", help="print JSON")
+    retention_inventory.set_defaults(func=cmd_retention_inventory)
 
     apply_plan = sub.add_parser("apply-plan", help="validate or apply a queue mutation plan")
     apply_plan.add_argument("plan_path", help="queue plan JSON path")
@@ -5953,6 +5976,21 @@ def cmd_prune(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_prune_report(report), end="")
+    return 0
+
+
+def cmd_retention_inventory(config: Config, args: argparse.Namespace) -> int:
+    cursor_paths = [Path(path) for path in args.notifier_cursor_state]
+    report = build_retention_inventory_report(
+        config,
+        proposal_age_days=args.proposal_age_days,
+        project_id=args.project_id,
+        notifier_cursor_state_paths=cursor_paths or None,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_retention_inventory_report(report), end="")
     return 0
 
 

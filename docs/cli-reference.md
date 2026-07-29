@@ -118,6 +118,8 @@ cbr prune
 cbr prune --older-than-days 60 --json
 cbr prune --apply
 cbr prune --notifier-cursor-state path/to/notify-state.json
+cbr retention-inventory
+cbr retention-inventory --proposal-age-days 60 --json
 ```
 
 공통 option:
@@ -265,6 +267,13 @@ runner는 Codex task를 claim할 때 해당 attempt log path를 먼저 task meta
 `cbr events`는 append-only event log에서 최근 event를 조회함. 기본 출력은 human-readable table이고, `--json`은 event object 배열을 출력함. `--task-id`로 특정 task event만 필터링할 수 있고 `--limit`으로 최대 출력 개수를 제한함.
 
 `cbr prune --notifier-cursor-state PATH`는 local notifier cursor state를 read-only로 확인한 뒤 old event JSONL deletion safety에 반영합니다. Cursor v1의 canonical identity는 `current_event_file` + `current_byte_offset`이며, `last_processed_event_id`와 timestamp field는 optional checkpoint metadata입니다. Cursor state가 missing, malformed, unreadable이거나 configured `event_dir` 밖의 event file을 가리키면 event pruning은 skipped warning으로 block됩니다. Cursor가 현재 event file을 fully processed 하지 않았으면 해당 file은 삭제되지 않습니다. Core runner에는 external notifier adapter, Telegram token/chat id, ack/snooze/mute schema가 없고, adapter state/config는 public repository 밖의 local/private opt-in surface로 둡니다.
+
+`cbr retention-inventory`는 canonical task, referenced log, event file을 읽어
+`retention-inventory-report-v1` sanitized projection을 출력합니다. 기본 호출은
+age eligibility를 부여하지 않습니다. `--proposal-age-days 60` 같은 값은
+report-only proposal input이며 TTL 채택이나 apply authority가 아닙니다. 이 명령에는
+apply mode가 없고 canonical task JSON을 항상 protected로 표시합니다. 상세 계약은
+[Report-only retention inventory](retention-inventory.md)를 참고하십시오.
 
 `cbr dashboard`는 local read-only operator overview HTTP server를 실행합니다. 기본 bind는 `127.0.0.1:8765`이며 `--host`, `--port`로 변경할 수 있습니다. Browser를 자동으로 열지 않고, 인증/token 설정을 추가하지 않으며, queue/task/review/event/state를 변경하는 route를 제공하지 않습니다.
 
