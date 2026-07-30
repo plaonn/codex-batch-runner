@@ -251,7 +251,32 @@ def changed_file_summary(task: dict, repo: dict[str, Any] | None) -> dict[str, A
     if not repo or not repo.get("_root_path"):
         summary["warnings"].append("git repository unavailable")
         return summary
-    name_status = run_git(Path(repo["_root_path"]), ["status", "--porcelain=v1", "--untracked-files=all"])
+    if task.get("execution_worktree_status") == "hibernated":
+        base = str(task.get("execution_base_head") or "")
+        checkpoint = str(task.get("execution_hibernation_branch_head") or "")
+        branch = str(task.get("execution_branch") or "")
+        branch_rev = run_git(
+            Path(repo["_root_path"]), ["rev-parse", "--verify", f"{branch}^{{commit}}"]
+        )
+        checkpoint_rev = run_git(
+            Path(repo["_root_path"]),
+            ["rev-parse", "--verify", f"{checkpoint}^{{commit}}"],
+        )
+        if (
+            branch_rev.returncode != 0
+            or checkpoint_rev.returncode != 0
+            or branch_rev.stdout.strip() != checkpoint_rev.stdout.strip()
+        ):
+            summary["warnings"].append(
+                "hibernated checkpoint does not match the current task branch head"
+            )
+            return summary
+        name_status = run_git(
+            Path(repo["_root_path"]),
+            ["diff", "--name-status", f"{base}..{checkpoint}"],
+        )
+    else:
+        name_status = run_git(Path(repo["_root_path"]), ["status", "--porcelain=v1", "--untracked-files=all"])
     if name_status.returncode == 0:
         summary["git_name_status"] = sanitize_value([line for line in name_status.stdout.splitlines() if line.strip()])
     else:
@@ -265,7 +290,12 @@ def inspect_repositories(task: dict) -> dict[str, dict[str, Any] | None]:
     return {
         "task": task_repo,
         "main": main_repo,
-        "task_worktree": task_repo if task.get("execution_mode") == "git_worktree" else None,
+        "task_worktree": (
+            task_repo
+            if task.get("execution_mode") == "git_worktree"
+            and task.get("execution_worktree_status") != "hibernated"
+            else None
+        ),
     }
 
 
@@ -276,6 +306,8 @@ def task_execution_cwd(task: dict) -> str | None:
 
 
 def task_execution_scope(task: dict) -> str:
+    if task.get("execution_worktree_status") == "hibernated":
+        return "branch_only_repository"
     return "task_worktree" if task.get("execution_mode") == "git_worktree" else "main_worktree"
 
 
@@ -447,6 +479,31 @@ def infer_worktree_branch_review_unit(task: dict, repo_root: Path) -> dict[str, 
 
     base_commit = base_rev.stdout.strip()
     branch_head = branch_rev.stdout.strip()
+    if task.get("execution_worktree_status") == "hibernated":
+        checkpoint = str(task.get("execution_hibernation_branch_head") or "").strip()
+        checkpoint_rev = (
+            run_git(repo_root, ["rev-parse", "--verify", f"{checkpoint}^{{commit}}"])
+            if checkpoint
+            else None
+        )
+        if (
+            checkpoint_rev is None
+            or checkpoint_rev.returncode != 0
+            or checkpoint_rev.stdout.strip() != branch_head
+        ):
+            return {
+                "inferred_commits": [],
+                "status": "checkpoint_mismatch",
+                "source": "hibernated_worktree_branch",
+                "ancestry": {
+                    "status": "checkpoint_mismatch",
+                    "ok": False,
+                    "detail": "hibernated checkpoint does not match the current task branch head",
+                },
+                "warnings": [
+                    "hibernated checkpoint does not match the current task branch head"
+                ],
+            }
     range_ref = f"{base_commit}..{branch_head}"
     rev_list = run_git(repo_root, ["rev-list", "--reverse", range_ref])
     if rev_list.returncode != 0:
@@ -458,7 +515,11 @@ def infer_worktree_branch_review_unit(task: dict, repo_root: Path) -> dict[str, 
     info: dict[str, Any] = {
         "inferred_commits": sanitize_value(commits),
         "status": "inferred",
-        "source": "worktree_branch",
+        "source": (
+            "hibernated_worktree_branch"
+            if task.get("execution_worktree_status") == "hibernated"
+            else "worktree_branch"
+        ),
         "ancestry": worktree_branch_ancestry(repo_root, base_commit, branch_head),
         "warnings": [],
     }
@@ -548,6 +609,9 @@ def build_git_diff(task: dict, repo: dict[str, Any] | None) -> dict[str, Any]:
         return result
     repo_root = Path(repo["_root_path"])
     commit_info = commit_information(task, repo)
+    if commit_info.get("status") == "checkpoint_mismatch":
+        result["warnings"].extend(commit_info.get("warnings") or [])
+        return result
     commits = commit_info.get("inferred_commits") or []
     commit_range = commit_info.get("commit_range") if isinstance(commit_info.get("commit_range"), dict) else None
     if commit_range:

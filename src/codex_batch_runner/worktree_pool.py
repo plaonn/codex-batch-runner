@@ -120,11 +120,15 @@ def acquire_pool_slot(
     branch: str,
     task_id: str,
     policy: WorktreePoolPolicy,
+    *,
+    existing_branch: bool = False,
+    prune_expired: bool = True,
 ) -> dict[str, Any]:
     if config.worktree_root is None:
         raise ValueError("worktree_root is not configured")
     state = _load_state(config)
-    _prune_expired_slots(config, repo_root, policy, state)
+    if prune_expired:
+        _prune_expired_slots(config, repo_root, policy, state)
     slots = state.setdefault("slots", [])
     repo_key = str(repo_root.resolve())
     candidates = [
@@ -170,9 +174,23 @@ def acquire_pool_slot(
         slots.append(slot)
         created = True
     try:
-        _prepare_slot(config, repo_root, slot_path, base_head, branch, policy)
+        _prepare_slot(
+            config,
+            repo_root,
+            slot_path,
+            base_head,
+            branch,
+            policy,
+            existing_branch=existing_branch,
+        )
     except Exception:
-        recovered = _recover_failed_acquire(repo_root, slot_path, branch, policy)
+        recovered = _recover_failed_acquire(
+            repo_root,
+            slot_path,
+            branch,
+            policy,
+            preserve_branch=existing_branch,
+        )
         slot.update(
             {
                 "status": "idle" if recovered else "recovery_required",
@@ -275,6 +293,8 @@ def pool_acquire_preview(
     config: Config,
     repo_root: Path,
     policy: WorktreePoolPolicy,
+    *,
+    consider_expired_prunable: bool = True,
 ) -> dict[str, Any]:
     state = _load_state(config)
     all_repo_slots = [
@@ -291,7 +311,7 @@ def pool_acquire_preview(
             slot.get("policy_fingerprint") != policy.fingerprint
             or (released is not None and released < cutoff)
         )
-        if not prunable:
+        if not prunable or not consider_expired_prunable:
             repo_slots.append(slot)
     matching_idle = [
         slot
@@ -356,11 +376,16 @@ def _prepare_slot(
     base_head: str,
     branch: str,
     policy: WorktreePoolPolicy,
+    *,
+    existing_branch: bool,
 ) -> None:
     _git(slot_path, "switch", "--detach", base_head)
     _git(slot_path, "reset", "--hard", base_head)
     _clean_untracked(slot_path, policy.retain)
-    _git(slot_path, "switch", "-c", branch, base_head)
+    if existing_branch:
+        _git(slot_path, "switch", branch)
+    else:
+        _git(slot_path, "switch", "-c", branch, base_head)
     for relative in policy.copy:
         source = repo_root / relative.as_posix()
         destination = slot_path / relative.as_posix()
@@ -406,25 +431,29 @@ def _recover_failed_acquire(
     slot_path: Path,
     branch: str,
     policy: WorktreePoolPolicy,
+    *,
+    preserve_branch: bool,
 ) -> bool:
     try:
         baseline = _git(repo_root, "rev-parse", "HEAD")
         _git(slot_path, "switch", "--detach", baseline)
         _git(slot_path, "reset", "--hard", baseline)
         _clean_untracked(slot_path, policy.retain)
-        subprocess.run(
-            ["git", "-C", str(repo_root), "branch", "-d", branch],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        if not preserve_branch:
+            subprocess.run(
+                ["git", "-C", str(repo_root), "branch", "-d", branch],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
         branch_exists = subprocess.run(
             ["git", "-C", str(repo_root), "show-ref", "--verify", f"refs/heads/{branch}"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
         ).returncode == 0
-        return not branch_exists and not _git(slot_path, "branch", "--show-current")
+        branch_state_ok = branch_exists if preserve_branch else not branch_exists
+        return branch_state_ok and not _git(slot_path, "branch", "--show-current")
     except Exception:
         return False
 

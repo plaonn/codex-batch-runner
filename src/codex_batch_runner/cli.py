@@ -263,7 +263,9 @@ from .worktree import (
     build_branch_prune_report,
     build_cleanup_report,
     build_discard_stale_applied_report,
+    build_hibernate_report,
     build_prepare_report,
+    build_reattach_report,
     render_worktree_report,
     task_worktree_metadata,
 )
@@ -1188,6 +1190,28 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_mode.add_argument("--apply", action="store_true", help="remove the worktree and store task metadata under the queue lock")
     worktree_cleanup.add_argument("--json", action="store_true", help="print JSON")
     worktree_cleanup.set_defaults(func=cmd_worktree_cleanup)
+
+    worktree_hibernate = worktree_sub.add_parser(
+        "hibernate",
+        help="release an eligible completed task worktree while retaining its branch",
+    )
+    worktree_hibernate.add_argument("task_id")
+    hibernate_mode = worktree_hibernate.add_mutually_exclusive_group(required=True)
+    hibernate_mode.add_argument("--dry-run", action="store_true")
+    hibernate_mode.add_argument("--apply", action="store_true")
+    worktree_hibernate.add_argument("--json", action="store_true", help="print JSON")
+    worktree_hibernate.set_defaults(func=cmd_worktree_hibernate)
+
+    worktree_reattach = worktree_sub.add_parser(
+        "reattach",
+        help="reattach an intentionally hibernated completed task branch",
+    )
+    worktree_reattach.add_argument("task_id")
+    reattach_mode = worktree_reattach.add_mutually_exclusive_group(required=True)
+    reattach_mode.add_argument("--dry-run", action="store_true")
+    reattach_mode.add_argument("--apply", action="store_true")
+    worktree_reattach.add_argument("--json", action="store_true", help="print JSON")
+    worktree_reattach.set_defaults(func=cmd_worktree_reattach)
 
     worktree_discard_stale = worktree_sub.add_parser(
         "discard-stale-applied",
@@ -6041,6 +6065,24 @@ def cmd_worktree_prepare(config: Config, args: argparse.Namespace) -> int:
 
 def cmd_worktree_cleanup(config: Config, args: argparse.Namespace) -> int:
     report = build_cleanup_report(config, args.task_id, apply=args.apply)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_worktree_report(report), end="")
+    return 1 if report.get("errors") else 0
+
+
+def cmd_worktree_hibernate(config: Config, args: argparse.Namespace) -> int:
+    report = build_hibernate_report(config, args.task_id, apply=args.apply)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_worktree_report(report), end="")
+    return 1 if report.get("errors") else 0
+
+
+def cmd_worktree_reattach(config: Config, args: argparse.Namespace) -> int:
+    report = build_reattach_report(config, args.task_id, apply=args.apply)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:

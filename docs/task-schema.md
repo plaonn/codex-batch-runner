@@ -157,6 +157,22 @@ task의 `execution_worktree_status=cleaned`와 `execution_worktree_lease_status=
 Task가 archived/running/retained인지와 idle slot 존재 여부를 같은 lifecycle로 판정하지
 않음.
 
+명시적 worktree hibernation은 완료 task에 다음 metadata를 기록할 수 있음.
+
+- `execution_worktree_status=hibernated`
+- `execution_hibernation_contract=worktree-hibernation-v1`
+- `execution_hibernation_kind=disposable|pooled`
+- `execution_hibernation_base_head`, `execution_hibernation_branch_head`
+- `execution_hibernated_at`
+
+`hibernated`는 command가 exact branch/base/checkpoint와 기존 attachment를 확인한 뒤
+기록하는 intentional state임. Missing `execution_worktree_path`만으로 추론하거나
+backfill하지 않음. Reattach 성공 시 새 `execution_worktree_path`,
+`execution_worktree_status=retained`, `execution_reattached_at`을 기록하고, pooled task는
+새 slot id와 `execution_worktree_lease_status=leased`를 기록함. Git/pool mutation 중
+부분 실패는 `execution_worktree_status=recovery_required`로 남기며 task status,
+review status, result disposition, worker lifecycle을 변경하지 않음.
+
 
 ## Review status
 

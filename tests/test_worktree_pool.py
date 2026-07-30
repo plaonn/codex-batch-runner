@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_batch_runner.cli import main
 from codex_batch_runner.config import Config
@@ -90,6 +91,89 @@ cwd = "."
 
 
 class WorktreePoolTests(unittest.TestCase):
+    def test_hibernate_releases_and_reattach_reacquires_exact_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo, POLICY)
+            (repo / ".env").write_text("VALUE=1\n", encoding="utf-8")
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            create_task(config, "hibernate", str(repo), task_id="pool-hibernate")
+            self.assertEqual(
+                0,
+                run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "worktree",
+                        "prepare",
+                        "pool-hibernate",
+                        "--apply",
+                        "--json",
+                    ]
+                )[0],
+            )
+            task = load_task(config, "pool-hibernate")
+            slot = Path(task["execution_worktree_path"])
+            (slot / "file.txt").write_text("base\nchange\n", encoding="utf-8")
+            git(slot, "commit", "-am", "change")
+            head = git(slot, "rev-parse", "HEAD")
+            task["status"] = "completed"
+            task["review_status"] = "unreviewed"
+            task["execution_branch_head"] = head
+            task["execution_mutation_provenance_history"] = [{"fixture": True}]
+            save_task(config, task)
+
+            safe_provenance = {
+                "status": "mutation_observed",
+                "unsafe_or_unreported": False,
+            }
+            with patch(
+                "codex_batch_runner.worktree_hibernation._provenance",
+                return_value=safe_provenance,
+            ):
+                hibernate_code, hibernate = run_cli(
+                    [
+                        "--config",
+                        str(config_path),
+                        "worktree",
+                        "hibernate",
+                        "pool-hibernate",
+                        "--apply",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(0, hibernate_code)
+            self.assertTrue(hibernate["applied"])
+            self.assertTrue(slot.is_dir())
+            self.assertEqual("", git(slot, "branch", "--show-current"))
+            hibernated = load_task(config, "pool-hibernate")
+            self.assertEqual("hibernated", hibernated["execution_worktree_status"])
+            self.assertEqual("released", hibernated["execution_worktree_lease_status"])
+            self.assertNotIn("execution_worktree_path", hibernated)
+
+            reattach_code, reattach = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "worktree",
+                    "reattach",
+                    "pool-hibernate",
+                    "--apply",
+                    "--json",
+                ]
+            )
+            self.assertEqual(0, reattach_code)
+            self.assertTrue(reattach["applied"])
+            reattached = load_task(config, "pool-hibernate")
+            self.assertEqual("retained", reattached["execution_worktree_status"])
+            self.assertEqual("leased", reattached["execution_worktree_lease_status"])
+            self.assertEqual(slot, Path(reattached["execution_worktree_path"]))
+            self.assertEqual("cbr/pool-hibernate", git(slot, "branch", "--show-current"))
+            self.assertEqual(head, git(slot, "rev-parse", "HEAD"))
+
     def test_untracked_policy_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

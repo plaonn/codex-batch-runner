@@ -16,6 +16,7 @@ from .execution_mutation_provenance import (
 )
 from .queue import list_tasks_read_only
 from .worktree import (
+    WORKTREE_HIBERNATION_CONTRACT,
     WORKTREE_RETAINED_STATUSES,
     git_optional,
     is_ancestor,
@@ -25,7 +26,7 @@ from .worktree import (
     rev_list,
     worktree_registry,
 )
-from .worktree_pool import validate_pool_lease
+from .worktree_pool import load_worktree_pool_policy, validate_pool_lease
 
 
 CONTRACT = "worktree-hibernation-plan-v1"
@@ -38,6 +39,7 @@ REASON_CODES = {
     "execution_base_head_missing",
     "execution_branch_missing",
     "hibernation_candidate",
+    "hibernated_intent_current",
     "intentional_hibernation_not_supported_v1",
     "missing_mutation_provenance",
     "missing_worktree_path",
@@ -50,6 +52,7 @@ REASON_CODES = {
     "pool_metadata_incomplete",
     "pool_not_applicable",
     "reattach_not_applicable",
+    "reattach_candidate",
     "repository_unavailable",
     "registry_path_mismatch",
     "registry_unavailable",
@@ -75,6 +78,7 @@ RECONCILIATION_STATUSES = {
     "registry_path_mismatch",
     "registry_unavailable",
     "terminal_cleanup_current",
+    "hibernated_current",
 }
 
 
@@ -260,7 +264,7 @@ def _task_projection(
         and path_entry
         and path_entry.get("branch") == f"refs/heads/{branch}"
     )
-    dirty = attached and git_optional(path, "status", "--porcelain") not in ("", None)
+    dirty = attached and _worktree_is_dirty(task, repo_root, path)
     reconciliation = _reconciliation(
         worktree_status=worktree_status,
         registry_available=registry is not None,
@@ -273,6 +277,20 @@ def _task_projection(
         dirty=dirty,
         checkpoint=checkpoint,
     )
+    intentional_hibernation = (
+        worktree_status == "hibernated"
+        and task.get("execution_hibernation_contract")
+        == WORKTREE_HIBERNATION_CONTRACT
+    )
+    if (
+        intentional_hibernation
+        and not path_exists
+        and branch_entry is None
+        and branch_state.get("head") == checkpoint
+    ):
+        reconciliation = _projection(
+            "hibernated_current", ["hibernated_intent_current"]
+        )
     branch_review = _branch_review(
         repo_root, branch, base_head, checkpoint, branch_state
     )
@@ -294,10 +312,28 @@ def _task_projection(
         provenance=provenance,
         pool_lease=pool_lease,
     )
-    reattach = _compatibility(
-        False,
-        ["intentional_hibernation_not_supported_v1"],
-    )
+    if (
+        intentional_hibernation
+        and task.get("status") == "completed"
+        and reconciliation["status"] == "hibernated_current"
+        and branch_review["compatible"] is True
+        and task.get("execution_hibernation_base_head") == base_head
+        and task.get("execution_hibernation_branch_head") == checkpoint
+    ):
+        reattach = _compatibility(True, ["reattach_candidate"])
+    elif intentional_hibernation:
+        reattach = _compatibility(
+            False,
+            [
+                *reconciliation["reason_codes"],
+                *branch_review["reason_codes"],
+            ],
+        )
+    else:
+        reattach = _compatibility(
+            False,
+            ["intentional_hibernation_not_supported_v1"],
+        )
     if task.get("status") == "needs_resume":
         if attached and worktree_status in WORKTREE_RETAINED_STATUSES:
             resume = _compatibility(True, ["retained_cwd_available"])
@@ -461,6 +497,54 @@ def _provenance(task: dict[str, Any]) -> dict[str, Any]:
             and attribution.get("unsafe_or_unreported_paths")
         ),
     }
+
+
+def _worktree_is_dirty(
+    task: dict[str, Any],
+    repo_root: Path | None,
+    path: Path | None,
+) -> bool:
+    if path is None:
+        return False
+    porcelain = git_optional(path, "status", "--porcelain")
+    ignored = git_optional(
+        path,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+    )
+    if porcelain is None or ignored is None:
+        return True
+    entries = porcelain.splitlines()
+    entries.extend(f"?? {relative}" for relative in ignored.splitlines() if relative)
+    if not entries:
+        return False
+    if not task.get("execution_worktree_pool") or repo_root is None:
+        return True
+    try:
+        policy = load_worktree_pool_policy(repo_root)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return True
+    if (
+        policy is None
+        or policy.fingerprint
+        != str(task.get("execution_worktree_policy_fingerprint") or "")
+    ):
+        return True
+    allowed = tuple(
+        value.as_posix().rstrip("/") for value in (*policy.copy, *policy.retain)
+    )
+    for line in entries:
+        if not line.startswith("?? "):
+            return True
+        relative = line[3:].strip().rstrip("/")
+        if not any(
+            relative == prefix or relative.startswith(f"{prefix}/")
+            for prefix in allowed
+        ):
+            return True
+    return False
 
 
 def _pool_lease(

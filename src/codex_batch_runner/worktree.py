@@ -26,6 +26,7 @@ WORKTREE_RETAINED_STATUSES = {"prepared", "running", "retained", "cleanup_candid
 APPLY_OK_WORKTREE_STATUSES = {"prepared", "retained", "cleanup_candidate"}
 CLEANUP_OK_WORKTREE_STATUSES = {"prepared", "retained", "cleanup_candidate"}
 DISCARD_CLEANUP_RESOLUTIONS = {"duplicate", "manual", "superseded", "wont_fix"}
+WORKTREE_HIBERNATION_CONTRACT = "worktree-hibernation-v1"
 
 
 def sanitize_branch_name(task_id: str) -> str:
@@ -55,6 +56,26 @@ def build_cleanup_report(config: Config, task_id: str, *, apply: bool = False) -
     if apply:
         return _with_lock(config, task_id, lambda: _build_cleanup_report_locked(config, task_id, apply=True))
     return _build_cleanup_report_locked(config, task_id, apply=False)
+
+
+def build_hibernate_report(config: Config, task_id: str, *, apply: bool = False) -> dict[str, Any]:
+    if apply:
+        return _with_lock(
+            config,
+            task_id,
+            lambda: _build_hibernate_report_locked(config, task_id, apply=True),
+        )
+    return _build_hibernate_report_locked(config, task_id, apply=False)
+
+
+def build_reattach_report(config: Config, task_id: str, *, apply: bool = False) -> dict[str, Any]:
+    if apply:
+        return _with_lock(
+            config,
+            task_id,
+            lambda: _build_reattach_report_locked(config, task_id, apply=True),
+        )
+    return _build_reattach_report_locked(config, task_id, apply=False)
 
 
 def build_discard_stale_applied_report(
@@ -438,6 +459,316 @@ def _build_cleanup_report_locked(config: Config, task_id: str, *, apply: bool) -
             execution_cleanup_reason=task.get("execution_cleanup_reason"),
             execution_cleanup_branch_retained=task.get("execution_cleanup_branch_retained"),
             execution_cleanup_result_applied=task.get("execution_cleanup_result_applied"),
+        ),
+    )
+    return report
+
+
+def _build_hibernate_report_locked(
+    config: Config,
+    task_id: str,
+    *,
+    apply: bool,
+) -> dict[str, Any]:
+    from .worktree_hibernation import build_worktree_hibernation_plan
+
+    task = load_task(config, task_id)
+    report = base_report("hibernate", task, apply)
+    try:
+        item = build_worktree_hibernation_plan(config, task_id=task_id)["items"][0]
+    except (FileNotFoundError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        report["errors"].append(str(exc))
+        return report
+    report["gates"] = [
+        {
+            "name": "hibernation_compatibility",
+            "ok": item["hibernation"]["compatible"] is True,
+            "detail": ",".join(item["hibernation"]["reason_codes"]),
+        }
+    ]
+    if item["hibernation"]["compatible"] is not True:
+        report["errors"].append(
+            "task is not eligible for hibernation: "
+            + ", ".join(item["hibernation"]["reason_codes"])
+        )
+        return report
+    if task.get("execution_apply_status") == "applied":
+        report["errors"].append("applied task worktrees are owned by terminal cleanup")
+        return report
+
+    branch = str(task.get("execution_branch") or "")
+    checkpoint = str(
+        task.get("execution_branch_head") or task.get("execution_commit") or ""
+    )
+    repo_root = Path(str(task.get("execution_repo_root") or "")).expanduser().resolve()
+    worktree_path = guarded_existing_worktree_path(
+        config, Path(str(task.get("execution_worktree_path") or ""))
+    )
+    pooled = bool(task.get("execution_worktree_pool"))
+    report.update(
+        {
+            "branch": branch,
+            "base_head": task.get("execution_base_head"),
+            "expected_head": checkpoint,
+            "planned_action": "release_pool_lease" if pooled else "remove_worktree",
+            "classification": {
+                "status": "eligible",
+                "reason": "completed clean checkpointed worktree is hibernation-compatible",
+            },
+        }
+    )
+    if not apply:
+        return report
+
+    now = iso_now()
+    task["execution_worktree_status"] = "recovery_required"
+    task["execution_hibernation_contract"] = WORKTREE_HIBERNATION_CONTRACT
+    task["execution_hibernation_kind"] = "pooled" if pooled else "disposable"
+    task["execution_hibernation_base_head"] = task.get("execution_base_head")
+    task["execution_hibernation_branch_head"] = checkpoint
+    task["execution_hibernation_previous_path"] = str(worktree_path)
+    task["execution_hibernation_started_at"] = now
+    try:
+        save_task(config, task)
+    except OSError as exc:
+        report["errors"].append(str(exc))
+        report["classification"] = {
+            "status": "blocked",
+            "reason": "recovery guard metadata could not be stored; worktree was not released",
+        }
+        return report
+    try:
+        pool_release: dict[str, Any] | None = None
+        if pooled:
+            pool_release = release_pool_slot(
+                config, repo_root, worktree_path, branch, task_id
+            )
+        else:
+            git(repo_root, "worktree", "remove", str(worktree_path))
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        report["errors"].append(str(exc))
+        report["classification"] = {
+            "status": "recovery_required",
+            "reason": "hibernation mutation did not complete",
+        }
+        return report
+
+    task["execution_worktree_status"] = "hibernated"
+    task["execution_hibernated_at"] = iso_now()
+    task.pop("execution_worktree_path", None)
+    if pool_release is not None:
+        task["execution_worktree_lease_status"] = "released"
+        task["execution_worktree_pool_released_at"] = iso_now()
+        report["pool"] = {
+            "enabled": True,
+            "slot_id": pool_release["slot_id"],
+            "status": "idle",
+        }
+    try:
+        save_task(config, task)
+    except OSError as exc:
+        report["errors"].append(str(exc))
+        report["classification"] = {
+            "status": "recovery_required",
+            "reason": "worktree was released but final hibernation metadata was not stored",
+        }
+        return report
+    report["applied"] = True
+    report["classification"] = {
+        "status": "hibernated",
+        "reason": "worktree attachment released; branch and checkpoint retained",
+    }
+    write_event_nonfatal(
+        config,
+        "task_worktree_hibernated",
+        task=task,
+        source="worktree hibernate",
+        summary=f"hibernated worktree for task {task_id}",
+        payload=transition_payload(
+            task,
+            execution_mode="git_worktree",
+            execution_branch=branch,
+            execution_worktree_status="hibernated",
+            execution_branch_head=checkpoint,
+            execution_hibernation_contract=WORKTREE_HIBERNATION_CONTRACT,
+        ),
+    )
+    return report
+
+
+def _build_reattach_report_locked(
+    config: Config,
+    task_id: str,
+    *,
+    apply: bool,
+) -> dict[str, Any]:
+    task = load_task(config, task_id)
+    report = base_report("reattach", task, apply)
+    required = (
+        "execution_branch",
+        "execution_base_head",
+        "execution_hibernation_branch_head",
+        "execution_hibernation_base_head",
+    )
+    missing = [name for name in required if not task.get(name)]
+    intentional = (
+        task.get("execution_mode") == "git_worktree"
+        and task.get("execution_worktree_status") == "hibernated"
+        and task.get("execution_hibernation_contract")
+        == WORKTREE_HIBERNATION_CONTRACT
+    )
+    report["gates"] = [
+        {
+            "name": "intentional_hibernation",
+            "ok": intentional,
+            "detail": "exact hibernation contract and lifecycle state",
+        }
+    ]
+    if not intentional:
+        report["errors"].append(
+            "reattach requires an intentional hibernated state; missing paths are not inferred"
+        )
+        return report
+    if task.get("status") != "completed":
+        report["errors"].append("reattach is limited to completed hibernated tasks")
+        return report
+    if missing:
+        report["errors"].append(
+            "reattach requires complete hibernation metadata; missing: " + ", ".join(missing)
+        )
+        return report
+
+    branch = str(task["execution_branch"])
+    base_head = str(task["execution_base_head"])
+    checkpoint = str(task["execution_hibernation_branch_head"])
+    repo_root = Path(
+        str(task.get("execution_repo_root") or task.get("project_root") or task.get("cwd"))
+    ).expanduser().resolve()
+    try:
+        validate_branch_name(branch)
+        if str(task["execution_hibernation_base_head"]) != base_head:
+            raise ValueError("hibernated base metadata does not match execution_base_head")
+        branch_head = git(repo_root, "rev-parse", "--verify", f"{branch}^{{commit}}")
+        if branch_head != checkpoint:
+            raise ValueError("task branch head does not match the hibernated checkpoint")
+        registry = worktree_registry(repo_root)
+        if registry_entry_for_branch(registry, branch):
+            raise ValueError("task branch is already checked out in another worktree")
+        pooled = bool(task.get("execution_worktree_pool"))
+        policy = load_worktree_pool_policy(repo_root) if pooled else None
+        if pooled:
+            if policy is None:
+                raise ValueError("pooled reattach requires the tracked .cbr.toml")
+            if policy.fingerprint != task.get("execution_worktree_policy_fingerprint"):
+                raise ValueError("pool preparation policy changed while task was hibernated")
+            preview = pool_acquire_preview(
+                config,
+                repo_root,
+                policy,
+                consider_expired_prunable=False,
+            )
+            if not preview["eligible"]:
+                raise ValueError(str(preview["reason"]))
+            report["pool"] = {
+                "enabled": True,
+                "policy_fingerprint": policy.fingerprint,
+                "acquire_preview": preview,
+            }
+        else:
+            worktree_path = guarded_worktree_path(config, branch)
+            if worktree_path.exists():
+                raise ValueError("reattach target path already exists")
+        report.update(
+            {
+                "branch": branch,
+                "base_head": base_head,
+                "expected_head": checkpoint,
+                "planned_action": "acquire_pool_slot" if pooled else "add_existing_branch",
+                "classification": {
+                    "status": "eligible",
+                    "reason": "intentional hibernation metadata and checkpoint are current",
+                },
+            }
+        )
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        report["errors"].append(str(exc))
+        return report
+    if not apply:
+        return report
+
+    task["execution_worktree_status"] = "recovery_required"
+    task["execution_reattach_started_at"] = iso_now()
+    try:
+        save_task(config, task)
+    except OSError as exc:
+        report["errors"].append(str(exc))
+        report["classification"] = {
+            "status": "blocked",
+            "reason": "recovery guard metadata could not be stored; branch was not reattached",
+        }
+        return report
+    try:
+        pool_slot: dict[str, Any] | None = None
+        if pooled:
+            pool_slot = acquire_pool_slot(
+                config,
+                repo_root,
+                base_head,
+                branch,
+                task_id,
+                policy,
+                existing_branch=True,
+                prune_expired=False,
+            )
+            worktree_path = pool_slot["path"]
+        else:
+            git(repo_root, "worktree", "add", str(worktree_path), branch)
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        report["errors"].append(str(exc))
+        report["classification"] = {
+            "status": "recovery_required",
+            "reason": "reattach mutation did not complete",
+        }
+        return report
+
+    task["execution_worktree_path"] = str(worktree_path)
+    task["execution_worktree_status"] = "retained"
+    task["execution_reattached_at"] = iso_now()
+    if pool_slot is not None:
+        task["execution_worktree_pool_slot_id"] = pool_slot["slot_id"]
+        task["execution_worktree_lease_status"] = "leased"
+        report["pool"] = {
+            "enabled": True,
+            "slot_id": pool_slot["slot_id"],
+            "status": "leased",
+        }
+    try:
+        save_task(config, task)
+    except OSError as exc:
+        report["errors"].append(str(exc))
+        report["classification"] = {
+            "status": "recovery_required",
+            "reason": "branch was reattached but final task metadata was not stored",
+        }
+        return report
+    report["applied"] = True
+    report["classification"] = {
+        "status": "retained",
+        "reason": "hibernated branch reattached without launching a worker",
+    }
+    write_event_nonfatal(
+        config,
+        "task_worktree_reattached",
+        task=task,
+        source="worktree reattach",
+        summary=f"reattached worktree for task {task_id}",
+        payload=transition_payload(
+            task,
+            execution_mode="git_worktree",
+            execution_branch=branch,
+            execution_worktree_status="retained",
+            execution_branch_head=checkpoint,
+            execution_hibernation_contract=WORKTREE_HIBERNATION_CONTRACT,
         ),
     )
     return report
@@ -1823,6 +2154,12 @@ def task_worktree_metadata(task: dict[str, Any]) -> dict[str, Any]:
         ("execution_worktree_policy_fingerprint", "pool_policy_fingerprint"),
         ("execution_worktree_lease_status", "pool_lease_status"),
         ("execution_worktree_pool_released_at", "pool_released_at"),
+        ("execution_hibernation_contract", "hibernation_contract"),
+        ("execution_hibernation_kind", "hibernation_kind"),
+        ("execution_hibernation_base_head", "hibernation_base_head"),
+        ("execution_hibernation_branch_head", "hibernation_branch_head"),
+        ("execution_hibernated_at", "hibernated_at"),
+        ("execution_reattached_at", "reattached_at"),
     ):
         value = task.get(source)
         if value not in (None, ""):
@@ -1849,8 +2186,9 @@ def task_worktree_report(task: dict[str, Any]) -> dict[str, Any]:
         "execution_base_ref": "base_ref",
         "execution_base_head": "base_head",
         "execution_worktree_status": "worktree_status",
-        "execution_worktree_path": "worktree_path",
     }
+    if task.get("execution_worktree_status") != "hibernated":
+        required["execution_worktree_path"] = "worktree_path"
     for source, public_name in required.items():
         if not task.get(source):
             report["missing_metadata"].append(public_name)
