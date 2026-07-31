@@ -20,6 +20,7 @@ from .worktree import (
     worktree_registry,
 )
 from .worktree_hibernation import _provenance, _worktree_is_dirty
+from .worktree_pool import pool_slot_observation
 
 
 CONTRACT = "worktree-reconciliation-plan-v1"
@@ -48,6 +49,8 @@ REASON_CODES = {
     "missing_execution_base",
     "missing_path_is_not_lifecycle_evidence",
     "non_worktree_task",
+    "active_pool_lease",
+    "pool_evidence_ambiguous",
     "registry_evidence_unavailable",
     "registry_mismatch",
     "result_review_apply_state_ambiguous",
@@ -110,8 +113,9 @@ RECONCILIATION_STATUSES = {
 CLEANUP_ELIGIBILITY = {"applied", "discard", "no_change", "blocked"}
 PROVENANCE_STATUSES = {"complete", "ambiguous_or_missing"}
 CONTAINMENT_STATUSES = {"current", "not_current", "unavailable"}
+POOL_CONSISTENCY = {"not_pooled", "leased", "released", "ambiguous"}
 HEX_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
-OPAQUE_REF = re.compile(r"(?:repo|branch|path):[0-9a-f]{16}")
+OPAQUE_REF = re.compile(r"(?:repo|branch|path|pool|task):[0-9a-f]{16}")
 COMMIT = re.compile(r"[0-9a-f]{40,64}")
 
 
@@ -137,7 +141,7 @@ def build_worktree_reconciliation_plan(
 
     registry_cache: dict[Path, list[dict[str, str]] | None] = {}
     items = [
-        _task_plan(task, registry_cache)
+        _task_plan(config, task, registry_cache)
         for task in sorted(tasks, key=lambda value: str(value.get("id") or ""))
     ]
     report: dict[str, Any] = {
@@ -234,10 +238,11 @@ def render_worktree_reconciliation_plan(report: dict[str, Any]) -> str:
 
 
 def _task_plan(
+    config: Config,
     task: dict[str, Any],
     registry_cache: dict[Path, list[dict[str, str]] | None],
 ) -> dict[str, Any]:
-    snapshot = _source_snapshot(task, registry_cache)
+    snapshot = _source_snapshot(config, task, registry_cache)
     derived = _derive(snapshot)
     action, reasons, delta = _classify(snapshot, derived)
     return {
@@ -253,6 +258,7 @@ def _task_plan(
 
 
 def _source_snapshot(
+    config: Config,
     task: dict[str, Any],
     registry_cache: dict[Path, list[dict[str, str]] | None],
 ) -> dict[str, Any]:
@@ -286,10 +292,10 @@ def _source_snapshot(
     observed_checkpoint_head = _resolve_commit(repo_root, checkpoint_head)
     observed_branch_head = _commit(branch_state.get("head"))
     ancestry = (
-        is_ancestor(repo_root, observed_base_head, observed_branch_head)
+        is_ancestor(repo_root, observed_base_head, observed_checkpoint_head)
         if repo_root is not None
         and observed_base_head is not None
-        and observed_branch_head is not None
+        and observed_checkpoint_head is not None
         else None
     )
     attached = bool(
@@ -314,6 +320,14 @@ def _source_snapshot(
         else None
     )
     provenance = _provenance_evidence(task)
+    pool_slot_id = task.get("execution_worktree_pool_slot_id")
+    pool_observation = (
+        pool_slot_observation(config, repo_root, pool_slot_id)
+        if task.get("execution_worktree_pool") is True
+        and repo_root is not None
+        and pool_slot_id not in (None, "")
+        else {"state_status": "not_applicable", "slot_status": "missing"}
+    )
     cleanup_values = {
         key: task.get(key)
         for key in (
@@ -339,6 +353,7 @@ def _source_snapshot(
             "resolution": _resolution(task.get("resolution")),
             "resolution_digest": _optional_value_digest(task.get("resolution")),
             "followup_present": bool(task.get("chain_status")),
+            "followup_status": _followup_status(task.get("chain_status")),
             "followup_digest": _optional_value_digest(task.get("chain_status")),
         },
         "git_observations": {
@@ -349,7 +364,7 @@ def _source_snapshot(
             "checkpoint_head": checkpoint_head,
             "observed_checkpoint_head": observed_checkpoint_head,
             "observed_branch_head": observed_branch_head,
-            "base_is_ancestor_of_observed_branch": ancestry,
+            "base_is_ancestor_of_checkpoint": ancestry,
             "registry_available": registry is not None,
             "path_exists": path_exists,
             "path_registry_ref": _entry_path_ref(path_entry),
@@ -364,6 +379,22 @@ def _source_snapshot(
             "apply_target_ref": _opaque_ref("branch", apply_target or None),
             "observed_apply_target_head": observed_apply_target_head,
             "applied_head_is_ancestor_of_target": containment,
+            "apply_via_task_ref": _opaque_ref(
+                "task", task.get("execution_apply_via_task_id")
+            ),
+            "conflict_fix_status": _enum(
+                task.get("execution_conflict_fix_status"),
+                {"queued", "applied", "unknown"},
+            ),
+            "conflict_fix_task_ref": _opaque_ref(
+                "task", task.get("execution_conflict_fix_task_id")
+            ),
+            "last_conflict_fix_task_ref": _opaque_ref(
+                "task", task.get("last_conflict_fix_task_id")
+            ),
+            "conflict_fix_queued_at_digest": _optional_value_digest(
+                task.get("execution_conflict_fix_queued_at")
+            ),
         },
         "cleanup_evidence": {
             "kind": _enum(task.get("execution_cleanup_kind"), CLEANUP_KINDS),
@@ -394,6 +425,85 @@ def _source_snapshot(
                 task.get("execution_hibernated_at")
             ),
         },
+        "branch_prune_evidence": {
+            "status": _enum(
+                task.get("execution_branch_prune_status"), {"pruned", "unknown"}
+            ),
+            "reason": _enum(
+                task.get("execution_branch_prune_reason"),
+                {"execution_apply_status=applied", "unknown"},
+            ),
+            "pruned_head": _commit(task.get("execution_branch_pruned_head")),
+            "pruned_at_digest": _optional_value_digest(
+                task.get("execution_branch_pruned_at")
+            ),
+            "receipt_digest": _value_digest(
+                {
+                    key: task.get(key)
+                    for key in (
+                        "execution_branch_prune_status",
+                        "execution_branch_prune_reason",
+                        "execution_branch_pruned_head",
+                        "execution_branch_pruned_at",
+                    )
+                }
+            ),
+        },
+        "pool_evidence": {
+            "enabled": task.get("execution_worktree_pool") is True,
+            "enabled_field_present": "execution_worktree_pool" in task,
+            "task_ref": _opaque_ref("task", task.get("id")),
+            "slot_ref": _opaque_ref(
+                "pool", task.get("execution_worktree_pool_slot_id")
+            ),
+            "policy_fingerprint_digest": _optional_value_digest(
+                task.get("execution_worktree_policy_fingerprint")
+            ),
+            "lease_status": _enum(
+                task.get("execution_worktree_lease_status"),
+                {"leased", "released", "unknown"},
+            ),
+            "released_at_digest": _optional_value_digest(
+                task.get("execution_worktree_pool_released_at")
+            ),
+            "evidence_digest": _value_digest(
+                {
+                    key: task.get(key)
+                    for key in (
+                        "execution_worktree_pool",
+                        "execution_worktree_pool_slot_id",
+                        "execution_worktree_policy_fingerprint",
+                        "execution_worktree_lease_status",
+                        "execution_worktree_pool_released_at",
+                    )
+                }
+            ),
+            "observed_state_status": _enum(
+                pool_observation.get("state_status"),
+                {"current", "absent", "invalid", "not_applicable", "unknown"},
+            ),
+            "observed_slot_status": _enum(
+                pool_observation.get("slot_status"),
+                {
+                    "idle",
+                    "leased",
+                    "recovery_required",
+                    "missing",
+                    "ambiguous",
+                    "unknown",
+                },
+            ),
+            "observed_task_ref": _opaque_ref("task", pool_observation.get("task_id")),
+            "observed_branch_ref": _opaque_ref(
+                "branch", pool_observation.get("branch")
+            ),
+            "observed_policy_fingerprint_digest": _optional_value_digest(
+                pool_observation.get("policy_fingerprint")
+            ),
+            "observed_last_released_at_digest": _optional_value_digest(
+                pool_observation.get("last_released_at")
+            ),
+        },
         "provenance_evidence": provenance,
     }
 
@@ -404,6 +514,7 @@ def _derive(snapshot: dict[str, Any]) -> dict[str, Any]:
         "cleanup_eligibility": _cleanup_eligibility(snapshot),
         "provenance_status": _provenance_status(snapshot),
         "apply_containment": _containment_status(snapshot),
+        "pool_consistency": _pool_consistency(snapshot),
     }
 
 
@@ -497,12 +608,65 @@ def _containment_status(snapshot: dict[str, Any]) -> str:
     )
 
 
+def _pool_consistency(snapshot: dict[str, Any]) -> str:
+    evidence = snapshot["pool_evidence"]
+    has_pool_metadata = any(
+        (
+            evidence["slot_ref"] is not None,
+            evidence["policy_fingerprint_digest"] is not None,
+            evidence["lease_status"] != "unknown",
+            evidence["released_at_digest"] is not None,
+            evidence["observed_state_status"] != "not_applicable",
+            evidence["observed_slot_status"] != "missing",
+            evidence["observed_task_ref"] is not None,
+            evidence["observed_branch_ref"] is not None,
+            evidence["observed_policy_fingerprint_digest"] is not None,
+            evidence["observed_last_released_at_digest"] is not None,
+        )
+    )
+    if not evidence["enabled"]:
+        return "ambiguous" if has_pool_metadata else "not_pooled"
+    if (
+        evidence["task_ref"] is None
+        or evidence["slot_ref"] is None
+        or evidence["policy_fingerprint_digest"] is None
+        or evidence["observed_state_status"] != "current"
+    ):
+        return "ambiguous"
+    if (
+        evidence["lease_status"] == "leased"
+        and evidence["released_at_digest"] is None
+        and evidence["observed_slot_status"] == "leased"
+        and evidence["observed_task_ref"] == evidence["task_ref"]
+        and evidence["observed_branch_ref"]
+        == snapshot["git_observations"]["branch_ref"]
+        and evidence["observed_policy_fingerprint_digest"]
+        == evidence["policy_fingerprint_digest"]
+    ):
+        return "leased"
+    if (
+        evidence["lease_status"] == "released"
+        and evidence["released_at_digest"] is not None
+        and evidence["observed_slot_status"] == "idle"
+        and evidence["observed_task_ref"] is None
+        and evidence["observed_branch_ref"] is None
+        and evidence["observed_policy_fingerprint_digest"]
+        == evidence["policy_fingerprint_digest"]
+        and evidence["observed_last_released_at_digest"] is not None
+    ):
+        return "released"
+    return "ambiguous"
+
+
 def _classify(
     snapshot: dict[str, Any],
     derived: dict[str, Any],
 ) -> tuple[str, list[str], list[dict[str, str]]]:
     state = snapshot["canonical_state"]
     reconciliation = derived["reconciliation_status"]
+    pool = derived["pool_consistency"]
+    if pool == "ambiguous":
+        return "manual_review", ["pool_evidence_ambiguous"], []
     if state["execution_mode"] != "git_worktree":
         return "no_action", ["non_worktree_task"], []
     if reconciliation == "registry_unavailable":
@@ -531,6 +695,8 @@ def _classify(
     if reconciliation == "dirty_or_uncheckpointed":
         return "manual_review", ["dirty_or_uncheckpointed"], []
     if reconciliation == "attached_current":
+        if pool == "released":
+            return "manual_review", ["pool_evidence_ambiguous"], []
         if state["task_status"] in {"runnable", "running", "needs_resume"}:
             return "manual_review", ["active_or_resumable_task"], []
         return "no_action", ["attached_state_current"], []
@@ -538,6 +704,8 @@ def _classify(
         return "manual_review", ["active_or_resumable_task"], []
     if derived["provenance_status"] != "complete":
         return "manual_review", ["ambiguous_or_missing_provenance"], []
+    if pool == "leased":
+        return "manual_review", ["active_pool_lease"], []
     if _exact_cleanup_status_candidate(snapshot, derived):
         return (
             "exact_repair_candidate",
@@ -567,6 +735,7 @@ def _classify(
 
 def _base_binding_reasons(snapshot: dict[str, Any]) -> list[str]:
     git = snapshot["git_observations"]
+    branch_pruned = _branch_prune_evidence_valid(snapshot)
     reasons: list[str] = []
     if git["base_head"] is None:
         reasons.append("missing_execution_base")
@@ -574,17 +743,17 @@ def _base_binding_reasons(snapshot: dict[str, Any]) -> list[str]:
         reasons.append("base_head_not_current")
     if git["checkpoint_head"] is None or git["observed_checkpoint_head"] is None:
         reasons.append("missing_checkpoint")
-    elif (
-        git["observed_checkpoint_head"] != git["checkpoint_head"]
-        or git["observed_branch_head"] != git["checkpoint_head"]
-    ):
+    elif git["observed_checkpoint_head"] != git["checkpoint_head"]:
         reasons.append("checkpoint_head_mismatch")
-    if git["observed_branch_head"] is None:
-        reasons.append("missing_branch")
+    if not branch_pruned:
+        if git["observed_branch_head"] is None:
+            reasons.append("missing_branch")
+        elif git["observed_branch_head"] != git["checkpoint_head"]:
+            reasons.append("checkpoint_head_mismatch")
     if (
         git["observed_base_head"] is not None
         and git["observed_branch_head"] is not None
-        and git["base_is_ancestor_of_observed_branch"] is not True
+        and git["base_is_ancestor_of_checkpoint"] is not True
     ):
         reasons.append("base_not_ancestor_of_checkpoint")
     return sorted(set(reasons))
@@ -603,9 +772,11 @@ def _exact_cleanup_status_candidate(
         and state["task_status"] == "completed"
         and state["review_status"] == "accepted"
         and state["apply_status"] == "applied"
+        and derived["pool_consistency"] in {"not_pooled", "released"}
         and state["worktree_status"] in {"retained", "recovery_required"}
         and state["resolution"] == "none"
         and not state["followup_present"]
+        and snapshot["apply_evidence"]["apply_via_task_ref"] is None
         and _terminal_cleanup_evidence_valid(snapshot)
     )
 
@@ -617,12 +788,19 @@ def _terminal_cleanup_evidence_valid(snapshot: dict[str, Any]) -> bool:
     if (
         evidence["cleaned_at_digest"] is None
         or evidence["receipt_digest"] is None
-        or evidence["branch_retained"] is not True
         or git["path_exists"]
         or git["path_registry_ref"] is not None
         or git["branch_registry_ref"] is not None
-        or git["observed_branch_head"] != git["checkpoint_head"]
+        or not _terminal_pool_evidence_valid(snapshot)
     ):
+        return False
+    if evidence["branch_retained"] is True:
+        if git["observed_branch_head"] != git["checkpoint_head"]:
+            return False
+    elif evidence["branch_retained"] is False:
+        if not _branch_prune_evidence_valid(snapshot):
+            return False
+    else:
         return False
     eligibility = _cleanup_eligibility(snapshot)
     if evidence["kind"] == "applied":
@@ -631,7 +809,10 @@ def _terminal_cleanup_evidence_valid(snapshot: dict[str, Any]) -> bool:
             and state["apply_status"] == "applied"
             and evidence["reason"] == "execution_apply_status=applied"
             and evidence["result_applied"] is True
-            and snapshot["apply_evidence"]["applied_head"] == git["checkpoint_head"]
+            and (
+                snapshot["apply_evidence"]["applied_head"] == git["checkpoint_head"]
+                or _conflict_fix_apply_evidence_valid(snapshot)
+            )
             and _containment_status(snapshot) == "current"
         )
     if evidence["kind"] == "no_change":
@@ -665,13 +846,65 @@ def _hibernation_evidence_valid(snapshot: dict[str, Any]) -> bool:
         and evidence["base_head"] == git["base_head"]
         and evidence["branch_head"] == git["checkpoint_head"]
         and evidence["hibernated_at_digest"] is not None
+        and (
+            (
+                evidence["kind"] == "pooled"
+                and snapshot["pool_evidence"]["enabled"]
+                and _pool_consistency(snapshot) == "released"
+            )
+            or (
+                evidence["kind"] == "disposable"
+                and _pool_consistency(snapshot) == "not_pooled"
+            )
+        )
         and not git["path_exists"]
         and git["path_registry_ref"] is None
         and git["branch_registry_ref"] is None
         and git["observed_branch_head"] == git["checkpoint_head"]
         and git["observed_checkpoint_head"] == git["checkpoint_head"]
         and git["observed_base_head"] == git["base_head"]
-        and git["base_is_ancestor_of_observed_branch"] is True
+        and git["base_is_ancestor_of_checkpoint"] is True
+    )
+
+
+def _terminal_pool_evidence_valid(snapshot: dict[str, Any]) -> bool:
+    consistency = _pool_consistency(snapshot)
+    return consistency in {"not_pooled", "released"}
+
+
+def _branch_prune_evidence_valid(snapshot: dict[str, Any]) -> bool:
+    git = snapshot["git_observations"]
+    apply = snapshot["apply_evidence"]
+    evidence = snapshot["branch_prune_evidence"]
+    return bool(
+        evidence["status"] == "pruned"
+        and evidence["reason"] == "execution_apply_status=applied"
+        and evidence["pruned_at_digest"] is not None
+        and evidence["receipt_digest"] is not None
+        and evidence["pruned_head"] is not None
+        and evidence["pruned_head"] == apply["applied_head"]
+        and git["observed_branch_head"] is None
+        and git["branch_registry_ref"] is None
+    )
+
+
+def _conflict_fix_apply_evidence_valid(snapshot: dict[str, Any]) -> bool:
+    state = snapshot["canonical_state"]
+    evidence = snapshot["apply_evidence"]
+    via = evidence["apply_via_task_ref"]
+    return bool(
+        via is not None
+        and evidence["conflict_fix_status"] == "applied"
+        and via
+        in {
+            evidence["conflict_fix_task_ref"],
+            evidence["last_conflict_fix_task_ref"],
+        }
+        and evidence["conflict_fix_queued_at_digest"] is not None
+        and state["followup_status"] == "accepted"
+        and state["followup_digest"] is not None
+        and evidence["applied_head"] is not None
+        and _containment_status(snapshot) == "current"
     )
 
 
@@ -771,6 +1004,13 @@ def _resolution(value: object) -> str:
     return token if token in RESOLUTIONS - {"none", "other"} else "other"
 
 
+def _followup_status(value: object) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return "none"
+    return "accepted" if token == "accepted" else "other"
+
+
 def _strict_bool(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
 
@@ -825,6 +1065,12 @@ def _validate_item(item: object) -> None:
     ):
         raise WorktreeReconciliationPlanValidationError("task id is invalid")
     _validate_snapshot(item["source_snapshot"])
+    if item["source_snapshot"]["pool_evidence"]["task_ref"] != _opaque_ref(
+        "task", item["task_id"]
+    ):
+        raise WorktreeReconciliationPlanValidationError(
+            "pool task ref does not match item"
+        )
     expected_derived = _derive(item["source_snapshot"])
     if item["derived"] != expected_derived:
         raise WorktreeReconciliationPlanValidationError(
@@ -860,6 +1106,8 @@ def _validate_snapshot(snapshot: object) -> None:
         "apply_evidence",
         "cleanup_evidence",
         "hibernation_evidence",
+        "branch_prune_evidence",
+        "pool_evidence",
         "provenance_evidence",
     }:
         raise WorktreeReconciliationPlanValidationError(
@@ -870,6 +1118,8 @@ def _validate_snapshot(snapshot: object) -> None:
     _validate_apply_evidence(snapshot["apply_evidence"])
     _validate_cleanup_evidence(snapshot["cleanup_evidence"])
     _validate_hibernation_evidence(snapshot["hibernation_evidence"])
+    _validate_branch_prune_evidence(snapshot["branch_prune_evidence"])
+    _validate_pool_evidence(snapshot["pool_evidence"])
     _validate_provenance_evidence(snapshot["provenance_evidence"])
 
 
@@ -883,6 +1133,7 @@ def _validate_canonical_state(value: object) -> None:
         "resolution",
         "resolution_digest",
         "followup_present",
+        "followup_status",
         "followup_digest",
     }:
         raise WorktreeReconciliationPlanValidationError("canonical state is invalid")
@@ -894,6 +1145,7 @@ def _validate_canonical_state(value: object) -> None:
         or value["worktree_status"] not in WORKTREE_STATUSES
         or value["resolution"] not in RESOLUTIONS
         or not isinstance(value["followup_present"], bool)
+        or value["followup_status"] not in {"none", "accepted", "other"}
     ):
         raise WorktreeReconciliationPlanValidationError(
             "canonical state enum is invalid"
@@ -908,6 +1160,10 @@ def _validate_canonical_state(value: object) -> None:
         raise WorktreeReconciliationPlanValidationError(
             "followup presence is inconsistent"
         )
+    if (value["followup_status"] == "none") is not (value["followup_present"] is False):
+        raise WorktreeReconciliationPlanValidationError(
+            "followup status is inconsistent"
+        )
 
 
 def _validate_git_observations(value: object) -> None:
@@ -919,7 +1175,7 @@ def _validate_git_observations(value: object) -> None:
         "checkpoint_head",
         "observed_checkpoint_head",
         "observed_branch_head",
-        "base_is_ancestor_of_observed_branch",
+        "base_is_ancestor_of_checkpoint",
         "registry_available",
         "path_exists",
         "path_registry_ref",
@@ -950,7 +1206,7 @@ def _validate_git_observations(value: object) -> None:
         raise WorktreeReconciliationPlanValidationError(
             "git observation booleans are invalid"
         )
-    for key in ("base_is_ancestor_of_observed_branch", "worktree_dirty"):
+    for key in ("base_is_ancestor_of_checkpoint", "worktree_dirty"):
         if value[key] not in (True, False, None):
             raise WorktreeReconciliationPlanValidationError(f"{key} is invalid")
     if value["repository_ref"] is None and value["registry_available"]:
@@ -995,11 +1251,9 @@ def _validate_git_observations(value: object) -> None:
         )
     ancestry_inputs = (
         value["observed_base_head"] is not None
-        and value["observed_branch_head"] is not None
+        and value["observed_checkpoint_head"] is not None
     )
-    if (
-        value["base_is_ancestor_of_observed_branch"] is not None
-    ) is not ancestry_inputs:
+    if (value["base_is_ancestor_of_checkpoint"] is not None) is not ancestry_inputs:
         raise WorktreeReconciliationPlanValidationError(
             "base ancestry observation is inconsistent"
         )
@@ -1021,6 +1275,11 @@ def _validate_apply_evidence(value: object) -> None:
         "apply_target_ref",
         "observed_apply_target_head",
         "applied_head_is_ancestor_of_target",
+        "apply_via_task_ref",
+        "conflict_fix_status",
+        "conflict_fix_task_ref",
+        "last_conflict_fix_task_ref",
+        "conflict_fix_queued_at_digest",
     }:
         raise WorktreeReconciliationPlanValidationError("apply evidence is invalid")
     for key in ("applied_head", "observed_apply_target_head"):
@@ -1030,7 +1289,21 @@ def _validate_apply_evidence(value: object) -> None:
         value["apply_target_ref"]
     ):
         raise WorktreeReconciliationPlanValidationError("apply target ref is invalid")
+    for key in (
+        "apply_via_task_ref",
+        "conflict_fix_task_ref",
+        "last_conflict_fix_task_ref",
+    ):
+        if value[key] is not None and not OPAQUE_REF.fullmatch(value[key]):
+            raise WorktreeReconciliationPlanValidationError(f"{key} is invalid")
+    if value["conflict_fix_status"] not in {"queued", "applied", "unknown"}:
+        raise WorktreeReconciliationPlanValidationError(
+            "conflict fix status is invalid"
+        )
     _validate_optional_digest(value["applied_at_digest"], "applied at digest")
+    _validate_optional_digest(
+        value["conflict_fix_queued_at_digest"], "conflict fix queued at digest"
+    )
     if value["applied_head_is_ancestor_of_target"] not in (True, False, None):
         raise WorktreeReconciliationPlanValidationError(
             "apply containment observation is invalid"
@@ -1097,6 +1370,119 @@ def _validate_hibernation_evidence(value: object) -> None:
         if value[key] is not None and not COMMIT.fullmatch(value[key]):
             raise WorktreeReconciliationPlanValidationError(f"{key} is invalid")
     _validate_optional_digest(value["hibernated_at_digest"], "hibernated at digest")
+
+
+def _validate_branch_prune_evidence(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "status",
+        "reason",
+        "pruned_head",
+        "pruned_at_digest",
+        "receipt_digest",
+    }:
+        raise WorktreeReconciliationPlanValidationError(
+            "branch prune evidence is invalid"
+        )
+    if value["status"] not in {"pruned", "unknown"} or value["reason"] not in {
+        "execution_apply_status=applied",
+        "unknown",
+    }:
+        raise WorktreeReconciliationPlanValidationError(
+            "branch prune evidence enum is invalid"
+        )
+    if value["pruned_head"] is not None and not COMMIT.fullmatch(value["pruned_head"]):
+        raise WorktreeReconciliationPlanValidationError("branch pruned head is invalid")
+    _validate_optional_digest(value["pruned_at_digest"], "branch pruned at digest")
+    if not isinstance(value["receipt_digest"], str) or not HEX_DIGEST.fullmatch(
+        value["receipt_digest"]
+    ):
+        raise WorktreeReconciliationPlanValidationError(
+            "branch prune receipt digest is invalid"
+        )
+
+
+def _validate_pool_evidence(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "enabled",
+        "enabled_field_present",
+        "task_ref",
+        "slot_ref",
+        "policy_fingerprint_digest",
+        "lease_status",
+        "released_at_digest",
+        "evidence_digest",
+        "observed_state_status",
+        "observed_slot_status",
+        "observed_task_ref",
+        "observed_branch_ref",
+        "observed_policy_fingerprint_digest",
+        "observed_last_released_at_digest",
+    }:
+        raise WorktreeReconciliationPlanValidationError("pool evidence is invalid")
+    if not isinstance(value["enabled"], bool) or not isinstance(
+        value["enabled_field_present"], bool
+    ):
+        raise WorktreeReconciliationPlanValidationError(
+            "pool enabled evidence is invalid"
+        )
+    if value["enabled"] and not value["enabled_field_present"]:
+        raise WorktreeReconciliationPlanValidationError(
+            "enabled pool requires canonical field presence"
+        )
+    ref_kinds = {
+        "task_ref": "task:",
+        "slot_ref": "pool:",
+        "observed_task_ref": "task:",
+        "observed_branch_ref": "branch:",
+    }
+    for key, prefix in ref_kinds.items():
+        if value[key] is not None and (
+            not OPAQUE_REF.fullmatch(value[key]) or not value[key].startswith(prefix)
+        ):
+            raise WorktreeReconciliationPlanValidationError(
+                f"pool {key.replace('_', ' ')} is invalid"
+            )
+    if value["lease_status"] not in {"leased", "released", "unknown"}:
+        raise WorktreeReconciliationPlanValidationError("pool lease status is invalid")
+    if value["observed_state_status"] not in {
+        "current",
+        "absent",
+        "invalid",
+        "not_applicable",
+        "unknown",
+    }:
+        raise WorktreeReconciliationPlanValidationError(
+            "observed pool state status is invalid"
+        )
+    if value["observed_slot_status"] not in {
+        "idle",
+        "leased",
+        "recovery_required",
+        "missing",
+        "ambiguous",
+        "unknown",
+    }:
+        raise WorktreeReconciliationPlanValidationError(
+            "observed pool slot status is invalid"
+        )
+    _validate_optional_digest(
+        value["policy_fingerprint_digest"], "pool policy fingerprint digest"
+    )
+    _validate_optional_digest(value["released_at_digest"], "pool released at digest")
+    _validate_optional_digest(
+        value["observed_policy_fingerprint_digest"],
+        "observed pool policy fingerprint digest",
+    )
+    _validate_optional_digest(
+        value["observed_last_released_at_digest"],
+        "observed pool last released at digest",
+    )
+    if not isinstance(value["evidence_digest"], str) or not HEX_DIGEST.fullmatch(
+        value["evidence_digest"]
+    ):
+        raise WorktreeReconciliationPlanValidationError(
+            "pool evidence digest is invalid"
+        )
 
 
 def _validate_provenance_evidence(value: object) -> None:

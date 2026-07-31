@@ -176,7 +176,12 @@ review status, result disposition, worker lifecycle을 변경하지 않음.
 `worktree reconciliation-plan`은 legacy/current metadata를 read-only로 분류함.
 Source snapshot은 task status, review/apply/worktree enum, resolved base/checkpoint/branch
 commit과 ancestry, opaque repository/branch/registry refs, resolution/follow-up/timestamp
-digests, cleanup/hibernation receipt, mutation provenance를 digest로 묶음.
+digests, cleanup/hibernation/branch-prune receipt, conflict-fix apply linkage,
+pool slot/policy/lease evidence, mutation provenance를 digest로 묶음. Pooled row는
+released lease receipt를 추가로 요구하며 non-pool row의 injected pool metadata와
+active/ambiguous lease는 repair candidate가 아님. Existing cleanup 뒤 branch-prune
+또는 conflict-fix apply-via owner receipt가 exact한 terminal `cleaned` state는
+`no_action`으로 유지함.
 `exact_repair_candidate`가 표시되더라도 future repair 권한은 생기지 않으며, 현재
 command는 enum-level before/after delta만 출력함. Future repair는 queue lock 아래에서
 approved digest와 live source facts를 다시 대조해야 함. Missing path alone은

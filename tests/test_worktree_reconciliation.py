@@ -47,6 +47,7 @@ def write_config(root: Path) -> Path:
                 "event_dir": str(root / "runtime" / "events"),
                 "lock_file": str(root / "runtime" / "runner.lock"),
                 "state_file": str(root / "runtime" / "state.json"),
+                "worktree_root": str(root),
             }
         ),
         encoding="utf-8",
@@ -106,6 +107,37 @@ def save_task(config: Config, task: dict[str, object]) -> None:
     )
 
 
+def save_pool_state(
+    root: Path,
+    repo: Path,
+    *,
+    status: str,
+    task_id: str | None,
+    branch: str | None,
+    last_released_at: str | None = None,
+) -> None:
+    (root / ".pool-state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "slots": [
+                    {
+                        "slot_id": "slot-01",
+                        "repo_root": str(repo.resolve()),
+                        "path": str(root / "pool-slot"),
+                        "policy_fingerprint": "policy-v1",
+                        "status": status,
+                        "task_id": task_id,
+                        "branch": branch,
+                        "last_released_at": last_released_at,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def make_exact_candidate(
     config: Config,
     repo: Path,
@@ -139,6 +171,13 @@ def redigest(report: dict[str, object]) -> None:
     report["report_digest"] = _digest(
         {key: value for key, value in report.items() if key != "report_digest"}
     )
+
+
+def run_cli(args: list[str]) -> tuple[int, dict[str, object]]:
+    output = io.StringIO()
+    with redirect_stdout(output):
+        code = main(args)
+    return code, json.loads(output.getvalue())
 
 
 class WorktreeReconciliationPlanTests(unittest.TestCase):
@@ -416,7 +455,7 @@ class WorktreeReconciliationPlanTests(unittest.TestCase):
             self.assertIn("base_not_ancestor_of_checkpoint", item["reason_codes"])
             self.assertFalse(
                 item["source_snapshot"]["git_observations"][
-                    "base_is_ancestor_of_observed_branch"
+                    "base_is_ancestor_of_checkpoint"
                 ]
             )
 
@@ -461,6 +500,277 @@ class WorktreeReconciliationPlanTests(unittest.TestCase):
                 "terminal_cleanup_current",
                 item["derived"]["reconciliation_status"],
             )
+
+    def test_released_pool_cleanup_can_be_exact_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task = make_exact_candidate(config, repo, base, task_id="pooled-released")
+            task.update(
+                {
+                    "execution_worktree_pool": True,
+                    "execution_worktree_pool_slot_id": "slot-01",
+                    "execution_worktree_policy_fingerprint": "policy-v1",
+                    "execution_worktree_lease_status": "released",
+                    "execution_worktree_pool_released_at": "2030-01-01T00:02:00Z",
+                }
+            )
+            save_task(config, task)
+            save_pool_state(
+                root,
+                repo,
+                status="idle",
+                task_id=None,
+                branch=None,
+                last_released_at="2030-01-01T00:02:00Z",
+            )
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                report = build_worktree_reconciliation_plan(config)
+            item = report["items"][0]
+            self.assertEqual("exact_repair_candidate", item["action_class"])
+            self.assertEqual("released", item["derived"]["pool_consistency"])
+            rendered = json.dumps(item)
+            self.assertNotIn("slot-01", rendered)
+            self.assertNotIn("policy-v1", rendered)
+
+    def test_leased_or_ambiguous_pool_blocks_exact_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task = make_exact_candidate(config, repo, base, task_id="pooled-conflict")
+            task.update(
+                {
+                    "execution_worktree_pool": True,
+                    "execution_worktree_pool_slot_id": "slot-01",
+                    "execution_worktree_policy_fingerprint": "policy-v1",
+                    "execution_worktree_lease_status": "leased",
+                }
+            )
+            save_task(config, task)
+            save_pool_state(
+                root,
+                repo,
+                status="leased",
+                task_id="pooled-conflict",
+                branch=str(task["execution_branch"]),
+            )
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                leased = build_worktree_reconciliation_plan(config)["items"][0]
+            self.assertEqual("manual_review", leased["action_class"])
+            self.assertIn("active_pool_lease", leased["reason_codes"])
+
+            save_pool_state(
+                root,
+                repo,
+                status="leased",
+                task_id="different-owner",
+                branch=str(task["execution_branch"]),
+            )
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                conflicting = build_worktree_reconciliation_plan(config)["items"][0]
+            self.assertEqual("manual_review", conflicting["action_class"])
+            self.assertIn("pool_evidence_ambiguous", conflicting["reason_codes"])
+
+            task.pop("execution_worktree_pool_slot_id")
+            save_task(config, task)
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                ambiguous = build_worktree_reconciliation_plan(config)["items"][0]
+            self.assertEqual("manual_review", ambiguous["action_class"])
+            self.assertIn("pool_evidence_ambiguous", ambiguous["reason_codes"])
+
+    def test_non_pool_row_rejects_injected_pool_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task = make_exact_candidate(config, repo, base, task_id="pool-injection")
+            task["execution_worktree_lease_status"] = "released"
+            task["execution_worktree_pool_released_at"] = "2030-01-01T00:02:00Z"
+            save_task(config, task)
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                item = build_worktree_reconciliation_plan(config)["items"][0]
+            self.assertEqual("manual_review", item["action_class"])
+            self.assertEqual("ambiguous", item["derived"]["pool_consistency"])
+
+    def test_pool_evidence_changes_source_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task = make_exact_candidate(config, repo, base, task_id="pool-digest")
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                baseline = build_worktree_reconciliation_plan(config)["items"][0][
+                    "source_snapshot_digest"
+                ]
+                for field, value in (
+                    ("execution_worktree_pool", True),
+                    ("execution_worktree_pool_slot_id", "slot-01"),
+                    ("execution_worktree_policy_fingerprint", "policy-v1"),
+                    ("execution_worktree_lease_status", "released"),
+                    (
+                        "execution_worktree_pool_released_at",
+                        "2030-01-01T00:02:00Z",
+                    ),
+                ):
+                    changed = copy.deepcopy(task)
+                    changed[field] = value
+                    save_task(config, changed)
+                    digest = build_worktree_reconciliation_plan(config)["items"][0][
+                        "source_snapshot_digest"
+                    ]
+                    self.assertNotEqual(baseline, digest, field)
+
+    def test_real_cleanup_then_branch_prune_is_terminal_no_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = write_config(root)
+            config = Config.load(str(config_path))
+            repo, base = create_repo(root)
+            task, _ = create_task(config, repo, base, task_id="owner-pruned")
+            head = str(task["execution_branch_head"])
+            git(repo, "merge", "--ff-only", str(task["execution_branch"]))
+            task.update(
+                {
+                    "review_status": "accepted",
+                    "execution_apply_status": "applied",
+                    "execution_applied_head": head,
+                    "execution_applied_at": "2030-01-01T00:00:00Z",
+                    "execution_apply_target": "main",
+                }
+            )
+            save_task(config, task)
+            cleanup_code, _ = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "worktree",
+                    "cleanup",
+                    "owner-pruned",
+                    "--apply",
+                    "--json",
+                ]
+            )
+            prune_code, _ = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "worktree",
+                    "branch-prune",
+                    "owner-pruned",
+                    "--apply",
+                    "--json",
+                ]
+            )
+            self.assertEqual(0, cleanup_code)
+            self.assertEqual(0, prune_code)
+            report = build_worktree_reconciliation_plan(config)
+            item = report["items"][0]
+            self.assertEqual("no_action", item["action_class"])
+            self.assertEqual(
+                "terminal_cleanup_current",
+                item["derived"]["reconciliation_status"],
+            )
+            self.assertFalse(
+                item["source_snapshot"]["cleanup_evidence"]["branch_retained"]
+            )
+            self.assertEqual(
+                "pruned",
+                item["source_snapshot"]["branch_prune_evidence"]["status"],
+            )
+
+    def test_conflict_fix_shaped_cleanup_is_terminal_no_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task = make_exact_candidate(config, repo, base, task_id="conflict-parent")
+            (repo / "conflict-fix.txt").write_text("ported\n", encoding="utf-8")
+            git(repo, "add", "conflict-fix.txt")
+            git(repo, "commit", "-m", "apply conflict fix")
+            applied_head = git(repo, "rev-parse", "HEAD")
+            task.update(
+                {
+                    "execution_worktree_status": "cleaned",
+                    "execution_applied_head": applied_head,
+                    "execution_apply_via_task_id": "conflict-fix-child",
+                    "execution_conflict_fix_status": "applied",
+                    "execution_conflict_fix_task_id": "conflict-fix-child",
+                    "execution_conflict_fix_queued_at": "2030-01-01T00:00:30Z",
+                    "chain_status": "accepted",
+                }
+            )
+            save_task(config, task)
+            report = build_worktree_reconciliation_plan(config)
+            item = report["items"][0]
+            self.assertNotEqual(
+                task["execution_branch_head"], task["execution_applied_head"]
+            )
+            self.assertEqual("no_action", item["action_class"])
+            self.assertEqual(
+                "terminal_cleanup_current",
+                item["derived"]["reconciliation_status"],
+            )
+
+    def test_malformed_conflict_fix_or_prune_receipt_is_not_no_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task = make_exact_candidate(
+                config, repo, base, task_id="malformed-owner-receipt"
+            )
+            (repo / "malformed-fix.txt").write_text("ported\n", encoding="utf-8")
+            git(repo, "add", "malformed-fix.txt")
+            git(repo, "commit", "-m", "malformed conflict fix")
+            task.update(
+                {
+                    "execution_worktree_status": "cleaned",
+                    "execution_applied_head": git(repo, "rev-parse", "HEAD"),
+                    "execution_apply_via_task_id": "child-a",
+                    "execution_conflict_fix_status": "applied",
+                    "execution_conflict_fix_task_id": "child-b",
+                    "execution_conflict_fix_queued_at": "2030-01-01T00:00:30Z",
+                    "chain_status": "accepted",
+                }
+            )
+            save_task(config, task)
+            conflict_item = build_worktree_reconciliation_plan(config)["items"][0]
+            self.assertEqual("manual_review", conflict_item["action_class"])
+
+            task["execution_apply_via_task_id"] = None
+            task["execution_conflict_fix_status"] = None
+            task["execution_conflict_fix_task_id"] = None
+            task["execution_conflict_fix_queued_at"] = None
+            task["chain_status"] = None
+            task["execution_cleanup_branch_retained"] = False
+            task["execution_branch_prune_status"] = "pruned"
+            task["execution_branch_prune_reason"] = "execution_apply_status=applied"
+            task["execution_branch_pruned_at"] = "2030-01-01T00:03:00Z"
+            task["execution_branch_pruned_head"] = "c" * 40
+            git(repo, "branch", "-D", str(task["execution_branch"]))
+            save_task(config, task)
+            prune_item = build_worktree_reconciliation_plan(config)["items"][0]
+            self.assertEqual("manual_review", prune_item["action_class"])
 
     def test_cleaned_enum_without_terminal_receipt_is_not_no_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

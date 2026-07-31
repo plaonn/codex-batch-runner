@@ -289,6 +289,40 @@ def pool_state_summary(config: Config) -> dict[str, Any]:
     }
 
 
+def pool_slot_observation(
+    config: Config,
+    repo_root: Path,
+    slot_id: object,
+) -> dict[str, Any]:
+    """Return exact read-only pool-slot facts without validating or mutating a lease."""
+    path = _state_path(config)
+    if not path.exists():
+        return {"state_status": "absent", "slot_status": "missing"}
+    try:
+        state = _load_state(config)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {"state_status": "invalid", "slot_status": "missing"}
+    matches = [
+        slot
+        for slot in state.get("slots", [])
+        if str(slot.get("repo_root") or "") == str(repo_root.resolve())
+        and str(slot.get("slot_id") or "") == str(slot_id or "")
+    ]
+    if not matches:
+        return {"state_status": "current", "slot_status": "missing"}
+    if len(matches) != 1:
+        return {"state_status": "current", "slot_status": "ambiguous"}
+    slot = matches[0]
+    return {
+        "state_status": "current",
+        "slot_status": str(slot.get("status") or "unknown"),
+        "task_id": slot.get("task_id"),
+        "branch": slot.get("branch"),
+        "policy_fingerprint": slot.get("policy_fingerprint"),
+        "last_released_at": slot.get("last_released_at"),
+    }
+
+
 def pool_acquire_preview(
     config: Config,
     repo_root: Path,

@@ -13,6 +13,7 @@ from unittest.mock import patch
 from codex_batch_runner.cli import main
 from codex_batch_runner.config import Config
 from codex_batch_runner.queue import create_task, load_task, save_task
+from codex_batch_runner.worktree_pool import pool_slot_observation
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -91,6 +92,46 @@ cwd = "."
 
 
 class WorktreePoolTests(unittest.TestCase):
+    def test_pool_slot_observation_is_exact_and_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            init_repo(repo)
+            config = Config.load(str(write_config(root)))
+            state_path = root / "worktrees" / ".pool-state.json"
+            state_path.parent.mkdir(parents=True)
+            state = {
+                "schema_version": 1,
+                "slots": [
+                    {
+                        "slot_id": "slot-01",
+                        "repo_root": str(repo.resolve()),
+                        "path": str(root / "worktrees" / "slot-01"),
+                        "policy_fingerprint": "policy-v1",
+                        "status": "leased",
+                        "task_id": "task-a",
+                        "branch": "cbr/task-a",
+                        "last_released_at": None,
+                    }
+                ],
+            }
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            before = state_path.read_bytes()
+
+            observation = pool_slot_observation(config, repo, "slot-01")
+
+            self.assertEqual("current", observation["state_status"])
+            self.assertEqual("leased", observation["slot_status"])
+            self.assertEqual("task-a", observation["task_id"])
+            self.assertEqual("cbr/task-a", observation["branch"])
+            self.assertEqual("policy-v1", observation["policy_fingerprint"])
+            self.assertEqual(before, state_path.read_bytes())
+            self.assertEqual(
+                {"state_status": "current", "slot_status": "missing"},
+                pool_slot_observation(config, repo, "slot-02"),
+            )
+
     def test_hibernate_releases_and_reattach_reacquires_exact_branch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -14,6 +14,7 @@
       "derived": {
         "apply_containment": "unavailable",
         "cleanup_eligibility": "blocked",
+        "pool_consistency": "not_pooled",
         "provenance_status": "ambiguous_or_missing",
         "reconciliation_status": "not_applicable"
       },
@@ -28,13 +29,26 @@
           "applied_head": null,
           "applied_head_is_ancestor_of_target": null,
           "apply_target_ref": null,
+          "apply_via_task_ref": null,
+          "conflict_fix_queued_at_digest": null,
+          "conflict_fix_status": "unknown",
+          "conflict_fix_task_ref": null,
+          "last_conflict_fix_task_ref": null,
           "observed_apply_target_head": null
+        },
+        "branch_prune_evidence": {
+          "pruned_at_digest": null,
+          "pruned_head": null,
+          "reason": "unknown",
+          "receipt_digest": "sha256:aee5c2ad0fa1eba4b3661064de8b2da5c41e73c453b5d3eaf3c2cdfa640df151",
+          "status": "unknown"
         },
         "canonical_state": {
           "apply_status": "unknown",
           "execution_mode": "unknown",
           "followup_digest": null,
           "followup_present": false,
+          "followup_status": "none",
           "resolution": "none",
           "resolution_digest": null,
           "review_status": "unknown",
@@ -51,7 +65,7 @@
         },
         "git_observations": {
           "base_head": null,
-          "base_is_ancestor_of_observed_branch": null,
+          "base_is_ancestor_of_checkpoint": null,
           "branch_ref": null,
           "branch_registry_ref": null,
           "checkpoint_head": null,
@@ -71,6 +85,22 @@
           "hibernated_at_digest": null,
           "kind": "unknown"
         },
+        "pool_evidence": {
+          "enabled": false,
+          "enabled_field_present": false,
+          "evidence_digest": "sha256:61c3bd09331e842cba142af34048f545fdfd1fac34f54895dbc6f3b578704095",
+          "lease_status": "unknown",
+          "observed_branch_ref": null,
+          "observed_last_released_at_digest": null,
+          "observed_policy_fingerprint_digest": null,
+          "observed_slot_status": "missing",
+          "observed_state_status": "not_applicable",
+          "observed_task_ref": null,
+          "policy_fingerprint_digest": null,
+          "released_at_digest": null,
+          "slot_ref": null,
+          "task_ref": "task:a116c9ed46d62077"
+        },
         "provenance_evidence": {
           "history_count": 0,
           "history_digest": null,
@@ -79,12 +109,12 @@
           "view_status": "unknown"
         }
       },
-      "source_snapshot_digest": "sha256:0f6b537cd63e5f6323cef6fb4292dc40ba579c4e7e80425a0b6ca5305952ff33",
+      "source_snapshot_digest": "sha256:fedae8894df7263b2594e852189cf32de27b0f650b0d5d678b21526d20215d20",
       "task_id": "plain"
     }
   ],
   "mode": "report-only",
-  "report_digest": "sha256:f547bb242787d160ec9cd997032a3bd9d26528ecb689ee0ff0ead9e801fcae84",
+  "report_digest": "sha256:b15ac631da2d53bcdb26c73e69d8d545b4994bdbf831b66f9dde6170b47ec148",
   "schema_version": "worktree-reconciliation-plan-v1",
   "summary": {
     "action_by_class": {
