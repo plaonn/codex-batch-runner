@@ -173,6 +173,14 @@ backfill하지 않음. Reattach 성공 시 새 `execution_worktree_path`,
 부분 실패는 `execution_worktree_status=recovery_required`로 남기며 task status,
 review status, result disposition, worker lifecycle을 변경하지 않음.
 
+`worktree reconciliation-plan`은 legacy/current metadata를 read-only로 분류함.
+Source snapshot은 task status, review/apply/worktree enum, exact commit binding, opaque
+repository/branch/registry refs, cleanup receipt, mutation provenance를 digest로 묶음.
+`exact_repair_candidate`가 표시되더라도 future repair 권한은 생기지 않으며, 현재
+command는 enum-level before/after delta만 출력함. Missing path alone은
+`hibernated`, `cleaned`, accepted/applied/rejected/resolved/archived 또는 deletion
+eligibility 증거가 아님.
+
 
 ## Review status
 

@@ -1,0 +1,77 @@
+{
+  "authority": {
+    "mutation_performed": false,
+    "repair_authority_granted": false,
+    "repair_supported": false
+  },
+  "filters": {
+    "project_id_applied": false,
+    "task_id_applied": true
+  },
+  "items": [
+    {
+      "action_class": "no_action",
+      "grandfathered_row": false,
+      "metadata_delta": [],
+      "reason_codes": [
+        "non_worktree_task"
+      ],
+      "source_snapshot": {
+        "canonical_state": {
+          "apply_status": "unknown",
+          "execution_mode": "unknown",
+          "followup_present": false,
+          "resolution_present": false,
+          "review_status": "unknown",
+          "task_status": "completed",
+          "worktree_status": "unknown"
+        },
+        "classification": {
+          "branch_only_review_compatible": false,
+          "cleanup_eligibility": "blocked",
+          "hibernation_compatible": false,
+          "reattach_compatible": false,
+          "reconciliation_status": "not_applicable",
+          "resume_compatible": null
+        },
+        "cleanup_receipt": {
+          "applied_head": null,
+          "apply_target_contains_applied_head": null,
+          "apply_target_ref": null,
+          "branch_retained": null,
+          "cleaned_at_present": false,
+          "kind": "unknown",
+          "reason": "unknown",
+          "result_applied": null
+        },
+        "git_binding": {
+          "base_head": null,
+          "branch_ref": null,
+          "branch_registry_ref": null,
+          "checkpoint_head": null,
+          "observed_branch_head": null,
+          "path_exists": false,
+          "path_registry_ref": null,
+          "registry_state": "repository_unavailable",
+          "repository_ref": null
+        },
+        "provenance": {
+          "status": "ambiguous_or_missing",
+          "unsafe_or_unreported": false
+        }
+      },
+      "source_snapshot_digest": "sha256:bc10d232fa9101c5d299daf26f03950b1ba21dbefccd31342dcf2bb738a9f7dc",
+      "task_id": "plain"
+    }
+  ],
+  "mode": "report-only",
+  "report_digest": "sha256:a70c2f6aea8b65c53dc7bc193e712cc2bb32ca23d3fb76d8efffb84d2537c910",
+  "schema_version": "worktree-reconciliation-plan-v1",
+  "summary": {
+    "action_by_class": {
+      "no_action": 1
+    },
+    "grandfathered_row_count": 0,
+    "task_count": 1
+  }
+}

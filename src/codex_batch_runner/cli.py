@@ -273,6 +273,10 @@ from .worktree_hibernation import (
     build_worktree_hibernation_plan,
     render_worktree_hibernation_plan,
 )
+from .worktree_reconciliation import (
+    build_worktree_reconciliation_plan,
+    render_worktree_reconciliation_plan,
+)
 
 WATCH_RESTART_MESSAGE = "cbr source changed since this watch started; restart watch to use updated code"
 COMPACT_TABLE_BLOCK_LAYOUT_WIDTH = 80
@@ -1263,6 +1267,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     worktree_hibernation_plan.add_argument("--json", action="store_true", help="print JSON")
     worktree_hibernation_plan.set_defaults(func=cmd_worktree_hibernation_plan)
+    worktree_reconciliation_plan = worktree_sub.add_parser(
+        "reconciliation-plan",
+        help="report sanitized legacy worktree reconciliation actions",
+    )
+    worktree_reconciliation_plan.add_argument(
+        "task_id",
+        nargs="?",
+        help="optional exact task id; omitted reports all queue tasks",
+    )
+    worktree_reconciliation_plan.add_argument(
+        "--project",
+        dest="project_id",
+        help="filter by project id",
+    )
+    worktree_reconciliation_plan.add_argument(
+        "--json", action="store_true", help="print JSON"
+    )
+    worktree_reconciliation_plan.set_defaults(
+        func=cmd_worktree_reconciliation_plan
+    )
     return parser
 
 
@@ -6133,6 +6157,21 @@ def cmd_worktree_hibernation_plan(config: Config, args: argparse.Namespace) -> i
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_worktree_hibernation_plan(report), end="")
+    return 0
+
+
+def cmd_worktree_reconciliation_plan(
+    config: Config, args: argparse.Namespace
+) -> int:
+    report = build_worktree_reconciliation_plan(
+        config,
+        task_id=args.task_id,
+        project_id=args.project_id,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_worktree_reconciliation_plan(report), end="")
     return 0
 
 
