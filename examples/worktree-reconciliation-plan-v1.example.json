@@ -11,61 +11,80 @@
   "items": [
     {
       "action_class": "no_action",
+      "derived": {
+        "apply_containment": "unavailable",
+        "cleanup_eligibility": "blocked",
+        "provenance_status": "ambiguous_or_missing",
+        "reconciliation_status": "not_applicable"
+      },
       "grandfathered_row": false,
       "metadata_delta": [],
       "reason_codes": [
         "non_worktree_task"
       ],
       "source_snapshot": {
+        "apply_evidence": {
+          "applied_at_digest": null,
+          "applied_head": null,
+          "applied_head_is_ancestor_of_target": null,
+          "apply_target_ref": null,
+          "observed_apply_target_head": null
+        },
         "canonical_state": {
           "apply_status": "unknown",
           "execution_mode": "unknown",
+          "followup_digest": null,
           "followup_present": false,
-          "resolution_present": false,
+          "resolution": "none",
+          "resolution_digest": null,
           "review_status": "unknown",
           "task_status": "completed",
           "worktree_status": "unknown"
         },
-        "classification": {
-          "branch_only_review_compatible": false,
-          "cleanup_eligibility": "blocked",
-          "hibernation_compatible": false,
-          "reattach_compatible": false,
-          "reconciliation_status": "not_applicable",
-          "resume_compatible": null
-        },
-        "cleanup_receipt": {
-          "applied_head": null,
-          "apply_target_contains_applied_head": null,
-          "apply_target_ref": null,
+        "cleanup_evidence": {
           "branch_retained": null,
-          "cleaned_at_present": false,
+          "cleaned_at_digest": null,
           "kind": "unknown",
           "reason": "unknown",
+          "receipt_digest": "sha256:000e9f6790294fc1abb733cb46f7b009fdc829a84c72a67359e8fe35382e5ad3",
           "result_applied": null
         },
-        "git_binding": {
+        "git_observations": {
           "base_head": null,
+          "base_is_ancestor_of_observed_branch": null,
           "branch_ref": null,
           "branch_registry_ref": null,
           "checkpoint_head": null,
+          "observed_base_head": null,
           "observed_branch_head": null,
+          "observed_checkpoint_head": null,
           "path_exists": false,
           "path_registry_ref": null,
-          "registry_state": "repository_unavailable",
-          "repository_ref": null
+          "registry_available": false,
+          "repository_ref": null,
+          "worktree_dirty": null
         },
-        "provenance": {
-          "status": "ambiguous_or_missing",
-          "unsafe_or_unreported": false
+        "hibernation_evidence": {
+          "base_head": null,
+          "branch_head": null,
+          "contract": "unknown",
+          "hibernated_at_digest": null,
+          "kind": "unknown"
+        },
+        "provenance_evidence": {
+          "history_count": 0,
+          "history_digest": null,
+          "parse_valid": false,
+          "unsafe_or_unreported": false,
+          "view_status": "unknown"
         }
       },
-      "source_snapshot_digest": "sha256:bc10d232fa9101c5d299daf26f03950b1ba21dbefccd31342dcf2bb738a9f7dc",
+      "source_snapshot_digest": "sha256:0f6b537cd63e5f6323cef6fb4292dc40ba579c4e7e80425a0b6ca5305952ff33",
       "task_id": "plain"
     }
   ],
   "mode": "report-only",
-  "report_digest": "sha256:a70c2f6aea8b65c53dc7bc193e712cc2bb32ca23d3fb76d8efffb84d2537c910",
+  "report_digest": "sha256:f547bb242787d160ec9cd997032a3bd9d26528ecb689ee0ff0ead9e801fcae84",
   "schema_version": "worktree-reconciliation-plan-v1",
   "summary": {
     "action_by_class": {

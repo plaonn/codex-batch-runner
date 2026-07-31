@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -16,11 +17,13 @@ from .worktree import (
     local_branch_state,
     registry_entry_for_branch,
     registry_entry_for_path,
+    worktree_registry,
 )
-from .worktree_hibernation import _provenance, _task_projection
+from .worktree_hibernation import _provenance, _worktree_is_dirty
 
 
 CONTRACT = "worktree-reconciliation-plan-v1"
+HIBERNATION_CONTRACT = "worktree-hibernation-v1"
 ACTION_CLASSES = {
     "no_action",
     "manual_review",
@@ -30,10 +33,16 @@ ACTION_CLASSES = {
 REASON_CODES = {
     "active_or_resumable_task",
     "ambiguous_or_missing_provenance",
+    "apply_containment_unproven",
     "attached_state_current",
+    "base_head_not_current",
+    "base_not_ancestor_of_checkpoint",
+    "checkpoint_head_mismatch",
     "dirty_or_uncheckpointed",
     "exact_terminal_cleanup_receipt",
     "intentional_hibernation_current",
+    "invalid_terminal_cleanup_evidence",
+    "malformed_hibernation_evidence",
     "missing_branch",
     "missing_checkpoint",
     "missing_execution_base",
@@ -73,15 +82,24 @@ WORKTREE_STATUSES = {
     "recovery_required",
     "unknown",
 }
-REGISTRY_STATES = {
-    "available",
-    "repository_unavailable",
-    "registry_unavailable",
+RESOLUTIONS = {"none", "duplicate", "manual", "superseded", "wont_fix", "other"}
+CLEANUP_KINDS = {"applied", "discard", "no_change", "unknown"}
+CLEANUP_REASONS = {
+    "execution_apply_status=applied",
+    "review_status=rejected",
+    "resolution=duplicate",
+    "resolution=manual",
+    "resolution=superseded",
+    "resolution=wont_fix",
+    "already_contained",
+    "unknown",
 }
 RECONCILIATION_STATUSES = {
     "attached_current",
+    "cleanup_evidence_invalid",
     "dirty_or_uncheckpointed",
     "hibernated_current",
+    "hibernation_evidence_invalid",
     "missing_path_branch_missing",
     "missing_path_branch_present",
     "not_applicable",
@@ -89,6 +107,9 @@ RECONCILIATION_STATUSES = {
     "registry_unavailable",
     "terminal_cleanup_current",
 }
+CLEANUP_ELIGIBILITY = {"applied", "discard", "no_change", "blocked"}
+PROVENANCE_STATUSES = {"complete", "ambiguous_or_missing"}
+CONTAINMENT_STATUSES = {"current", "not_current", "unavailable"}
 HEX_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 OPAQUE_REF = re.compile(r"(?:repo|branch|path):[0-9a-f]{16}")
 COMMIT = re.compile(r"[0-9a-f]{40,64}")
@@ -116,7 +137,7 @@ def build_worktree_reconciliation_plan(
 
     registry_cache: dict[Path, list[dict[str, str]] | None] = {}
     items = [
-        _task_plan(config, task, registry_cache)
+        _task_plan(task, registry_cache)
         for task in sorted(tasks, key=lambda value: str(value.get("id") or ""))
     ]
     report: dict[str, Any] = {
@@ -206,26 +227,26 @@ def render_worktree_reconciliation_plan(report: dict[str, Any]) -> str:
         lines.append(
             "  "
             f"task={item['task_id']} action={item['action_class']} "
-            f"reconciliation={item['source_snapshot']['classification']['reconciliation_status']} "
+            f"reconciliation={item['derived']['reconciliation_status']} "
             f"source_digest={item['source_snapshot_digest']}"
         )
     return "\n".join(lines) + "\n"
 
 
 def _task_plan(
-    config: Config,
     task: dict[str, Any],
     registry_cache: dict[Path, list[dict[str, str]] | None],
 ) -> dict[str, Any]:
-    projection = _task_projection(config, task, registry_cache)
-    snapshot = _source_snapshot(task, projection, registry_cache)
-    action, reasons, delta = _classify(task, projection, snapshot)
+    snapshot = _source_snapshot(task, registry_cache)
+    derived = _derive(snapshot)
+    action, reasons, delta = _classify(snapshot, derived)
     return {
         "task_id": str(task.get("id") or ""),
         "action_class": action,
         "reason_codes": sorted(set(reasons)),
-        "grandfathered_row": _grandfathered(projection),
+        "grandfathered_row": _grandfathered(derived),
         "metadata_delta": delta,
+        "derived": derived,
         "source_snapshot": snapshot,
         "source_snapshot_digest": _digest(snapshot),
     }
@@ -233,23 +254,16 @@ def _task_plan(
 
 def _source_snapshot(
     task: dict[str, Any],
-    projection: dict[str, Any],
     registry_cache: dict[Path, list[dict[str, str]] | None],
 ) -> dict[str, Any]:
     repo_root = _repo_root(task)
     branch = str(task.get("execution_branch") or "").strip()
     path = _path(task.get("execution_worktree_path"))
-    registry = registry_cache.get(repo_root) if repo_root is not None else None
-    if repo_root is None:
-        registry_state = "repository_unavailable"
-    elif registry is None:
-        registry_state = "registry_unavailable"
-    else:
-        registry_state = "available"
+    registry = _registry(repo_root, registry_cache)
     path_exists = bool(path is not None and path.exists())
     path_entry = (
         registry_entry_for_path(registry, path)
-        if registry is not None and path is not None and path_exists
+        if registry is not None and path is not None
         else None
     )
     branch_entry = (
@@ -262,10 +276,59 @@ def _source_snapshot(
         if repo_root is not None and branch
         else {"exists": False, "head": None}
     )
+    base_head = _commit(task.get("execution_base_head"))
+    checkpoint_head = _commit(
+        task.get("execution_branch_head")
+        or task.get("execution_commit")
+        or task.get("execution_hibernation_branch_head")
+    )
+    observed_base_head = _resolve_commit(repo_root, base_head)
+    observed_checkpoint_head = _resolve_commit(repo_root, checkpoint_head)
+    observed_branch_head = _commit(branch_state.get("head"))
+    ancestry = (
+        is_ancestor(repo_root, observed_base_head, observed_branch_head)
+        if repo_root is not None
+        and observed_base_head is not None
+        and observed_branch_head is not None
+        else None
+    )
+    attached = bool(
+        path_exists
+        and path_entry
+        and branch_entry
+        and _entry_path_ref(path_entry) == _entry_path_ref(branch_entry)
+    )
+    dirty = (
+        _worktree_is_dirty(task, repo_root, path)
+        if attached and path is not None
+        else None
+    )
+    applied_head = _commit(task.get("execution_applied_head"))
+    apply_target = str(task.get("execution_apply_target") or "").strip()
+    observed_apply_target_head = _resolve_ref(repo_root, apply_target)
+    containment = (
+        is_ancestor(repo_root, applied_head, observed_apply_target_head)
+        if repo_root is not None
+        and applied_head is not None
+        and observed_apply_target_head is not None
+        else None
+    )
+    provenance = _provenance_evidence(task)
+    cleanup_values = {
+        key: task.get(key)
+        for key in (
+            "execution_cleanup_kind",
+            "execution_cleanup_reason",
+            "execution_cleanup_branch_retained",
+            "execution_cleanup_result_applied",
+            "execution_cleaned_at",
+        )
+    }
     return {
         "canonical_state": {
             "execution_mode": _enum(
-                task.get("execution_mode"), {"git_worktree", "main_worktree", "unknown"}
+                task.get("execution_mode"),
+                {"git_worktree", "main_worktree", "unknown"},
             ),
             "task_status": _enum(task.get("status"), TASK_STATUSES),
             "review_status": _enum(task.get("review_status"), REVIEW_STATUSES),
@@ -273,127 +336,209 @@ def _source_snapshot(
             "worktree_status": _enum(
                 task.get("execution_worktree_status"), WORKTREE_STATUSES
             ),
-            "resolution_present": bool(task.get("resolution")),
+            "resolution": _resolution(task.get("resolution")),
+            "resolution_digest": _optional_value_digest(task.get("resolution")),
             "followup_present": bool(task.get("chain_status")),
+            "followup_digest": _optional_value_digest(task.get("chain_status")),
         },
-        "git_binding": {
+        "git_observations": {
             "repository_ref": _opaque_ref("repo", repo_root),
             "branch_ref": _opaque_ref("branch", branch or None),
-            "base_head": _commit(task.get("execution_base_head")),
-            "checkpoint_head": _commit(
-                task.get("execution_branch_head")
-                or task.get("execution_commit")
-                or task.get("execution_hibernation_branch_head")
-            ),
-            "observed_branch_head": _commit(branch_state.get("head")),
-            "registry_state": registry_state,
+            "base_head": base_head,
+            "observed_base_head": observed_base_head,
+            "checkpoint_head": checkpoint_head,
+            "observed_checkpoint_head": observed_checkpoint_head,
+            "observed_branch_head": observed_branch_head,
+            "base_is_ancestor_of_observed_branch": ancestry,
+            "registry_available": registry is not None,
             "path_exists": path_exists,
             "path_registry_ref": _entry_path_ref(path_entry),
             "branch_registry_ref": _entry_path_ref(branch_entry),
+            "worktree_dirty": dirty,
         },
-        "classification": {
-            "reconciliation_status": projection["reconciliation"]["status"],
-            "branch_only_review_compatible": projection["branch_only_review"][
-                "compatible"
-            ],
-            "hibernation_compatible": projection["hibernation"]["compatible"],
-            "reattach_compatible": projection["reattach"]["compatible"],
-            "resume_compatible": projection["resume"]["compatible"],
-            "cleanup_eligibility": _cleanup_eligibility(task),
+        "apply_evidence": {
+            "applied_head": applied_head,
+            "applied_at_digest": _optional_value_digest(
+                task.get("execution_applied_at")
+            ),
+            "apply_target_ref": _opaque_ref("branch", apply_target or None),
+            "observed_apply_target_head": observed_apply_target_head,
+            "applied_head_is_ancestor_of_target": containment,
         },
-        "cleanup_receipt": {
-            "kind": _enum(
-                task.get("execution_cleanup_kind"),
-                {"applied", "discard", "no_change", "unknown"},
-            ),
-            "reason": _enum(
-                task.get("execution_cleanup_reason"),
-                {
-                    "execution_apply_status=applied",
-                    "review_status=rejected",
-                    "resolution=duplicate",
-                    "resolution=manual",
-                    "resolution=superseded",
-                    "resolution=wont_fix",
-                    "already_contained",
-                    "unknown",
-                },
-            ),
+        "cleanup_evidence": {
+            "kind": _enum(task.get("execution_cleanup_kind"), CLEANUP_KINDS),
+            "reason": _enum(task.get("execution_cleanup_reason"), CLEANUP_REASONS),
             "branch_retained": _strict_bool(
                 task.get("execution_cleanup_branch_retained")
             ),
             "result_applied": _strict_bool(
                 task.get("execution_cleanup_result_applied")
             ),
-            "cleaned_at_present": bool(task.get("execution_cleaned_at")),
-            "applied_head": _commit(task.get("execution_applied_head")),
-            "apply_target_ref": _opaque_ref(
-                "branch", str(task.get("execution_apply_target") or "").strip() or None
+            "cleaned_at_digest": _optional_value_digest(
+                task.get("execution_cleaned_at")
             ),
-            "apply_target_contains_applied_head": _applied_target_contains_head(
-                task, repo_root
+            "receipt_digest": _value_digest(cleanup_values),
+        },
+        "hibernation_evidence": {
+            "contract": _enum(
+                task.get("execution_hibernation_contract"),
+                {HIBERNATION_CONTRACT, "unknown"},
+            ),
+            "kind": _enum(
+                task.get("execution_hibernation_kind"),
+                {"disposable", "pooled", "unknown"},
+            ),
+            "base_head": _commit(task.get("execution_hibernation_base_head")),
+            "branch_head": _commit(task.get("execution_hibernation_branch_head")),
+            "hibernated_at_digest": _optional_value_digest(
+                task.get("execution_hibernated_at")
             ),
         },
-        "provenance": _safe_provenance(task),
+        "provenance_evidence": provenance,
     }
 
 
-def _classify(
-    task: dict[str, Any],
-    projection: dict[str, Any],
-    snapshot: dict[str, Any],
-) -> tuple[str, list[str], list[dict[str, str]]]:
-    del task, projection
-    return _classify_snapshot(snapshot)
+def _derive(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "reconciliation_status": _reconciliation_status(snapshot),
+        "cleanup_eligibility": _cleanup_eligibility(snapshot),
+        "provenance_status": _provenance_status(snapshot),
+        "apply_containment": _containment_status(snapshot),
+    }
 
 
-def _classify_snapshot(
-    snapshot: dict[str, Any],
-) -> tuple[str, list[str], list[dict[str, str]]]:
-    classification = snapshot["classification"]
-    reconciliation = classification["reconciliation_status"]
+def _reconciliation_status(snapshot: dict[str, Any]) -> str:
     state = snapshot["canonical_state"]
-    binding = snapshot["git_binding"]
-    provenance = snapshot["provenance"]
+    git = snapshot["git_observations"]
+    if state["execution_mode"] != "git_worktree":
+        return "not_applicable"
+    if not git["registry_available"]:
+        return "registry_unavailable"
+    if state["worktree_status"] == "hibernated":
+        return (
+            "hibernated_current"
+            if _hibernation_evidence_valid(snapshot)
+            else "hibernation_evidence_invalid"
+        )
+    if state["worktree_status"] == "cleaned":
+        return (
+            "terminal_cleanup_current"
+            if _terminal_cleanup_evidence_valid(snapshot)
+            else "cleanup_evidence_invalid"
+        )
+    path_ref = git["path_registry_ref"]
+    branch_ref = git["branch_registry_ref"]
+    attached = bool(
+        git["path_exists"]
+        and path_ref is not None
+        and branch_ref is not None
+        and path_ref == branch_ref
+    )
+    if attached:
+        if (
+            git["worktree_dirty"] is True
+            or git["checkpoint_head"] is None
+            or git["observed_checkpoint_head"] != git["checkpoint_head"]
+            or git["observed_branch_head"] != git["checkpoint_head"]
+        ):
+            return "dirty_or_uncheckpointed"
+        return "attached_current"
+    if git["path_exists"] or path_ref is not None or branch_ref is not None:
+        return "registry_path_mismatch"
+    if git["observed_branch_head"] is None:
+        return "missing_path_branch_missing"
+    return "missing_path_branch_present"
 
+
+def _cleanup_eligibility(snapshot: dict[str, Any]) -> str:
+    state = snapshot["canonical_state"]
+    apply_evidence = snapshot["apply_evidence"]
+    task_view = {
+        "execution_mode": state["execution_mode"],
+        "status": state["task_status"],
+        "review_status": state["review_status"],
+        "resolution": None if state["resolution"] == "none" else state["resolution"],
+        "execution_apply_status": state["apply_status"],
+        "execution_applied_at": (
+            "present" if apply_evidence["applied_at_digest"] is not None else None
+        ),
+        "execution_applied_head": apply_evidence["applied_head"],
+    }
+    eligibility = cleanup_eligibility(task_view)
+    kind = eligibility.get("cleanup_kind")
+    return kind if kind in {"applied", "discard", "no_change"} else "blocked"
+
+
+def _provenance_status(snapshot: dict[str, Any]) -> str:
+    evidence = snapshot["provenance_evidence"]
+    if (
+        evidence["history_count"] > 0
+        and evidence["history_digest"] is not None
+        and evidence["parse_valid"]
+        and evidence["view_status"] in {"mutation_observed", "no_mutation_observed"}
+        and not evidence["unsafe_or_unreported"]
+    ):
+        return "complete"
+    return "ambiguous_or_missing"
+
+
+def _containment_status(snapshot: dict[str, Any]) -> str:
+    evidence = snapshot["apply_evidence"]
+    if (
+        evidence["applied_head"] is None
+        or evidence["applied_at_digest"] is None
+        or evidence["apply_target_ref"] is None
+        or evidence["observed_apply_target_head"] is None
+        or evidence["applied_head_is_ancestor_of_target"] is None
+    ):
+        return "unavailable"
+    return (
+        "current" if evidence["applied_head_is_ancestor_of_target"] else "not_current"
+    )
+
+
+def _classify(
+    snapshot: dict[str, Any],
+    derived: dict[str, Any],
+) -> tuple[str, list[str], list[dict[str, str]]]:
+    state = snapshot["canonical_state"]
+    reconciliation = derived["reconciliation_status"]
     if state["execution_mode"] != "git_worktree":
         return "no_action", ["non_worktree_task"], []
-    if reconciliation == "terminal_cleanup_current":
-        return "no_action", ["terminal_cleanup_current"], []
-    if reconciliation == "hibernated_current":
-        return "no_action", ["intentional_hibernation_current"], []
-    if reconciliation == "attached_current":
-        if state["task_status"] in {"runnable", "running", "needs_resume"}:
-            return "manual_review", ["active_or_resumable_task"], []
-        return "no_action", ["attached_state_current"], []
-    if reconciliation == "dirty_or_uncheckpointed":
-        return "manual_review", ["dirty_or_uncheckpointed"], []
+    if reconciliation == "registry_unavailable":
+        return (
+            "unrecoverable_without_owner_decision",
+            ["registry_evidence_unavailable"],
+            [],
+        )
     if reconciliation == "registry_path_mismatch":
         return (
             "unrecoverable_without_owner_decision",
             ["registry_mismatch"],
             [],
         )
-    if binding["registry_state"] != "available":
-        return (
-            "unrecoverable_without_owner_decision",
-            ["registry_evidence_unavailable"],
-            [],
-        )
-    missing = []
-    if binding["base_head"] is None:
-        missing.append("missing_execution_base")
-    if binding["checkpoint_head"] is None:
-        missing.append("missing_checkpoint")
-    if binding["observed_branch_head"] is None:
-        missing.append("missing_branch")
-    if missing:
-        return "unrecoverable_without_owner_decision", missing, []
+    if reconciliation == "hibernation_evidence_invalid":
+        return "manual_review", ["malformed_hibernation_evidence"], []
+    if reconciliation == "cleanup_evidence_invalid":
+        return "manual_review", ["invalid_terminal_cleanup_evidence"], []
+    base_reasons = _base_binding_reasons(snapshot)
+    if base_reasons:
+        return "unrecoverable_without_owner_decision", base_reasons, []
+    if reconciliation == "terminal_cleanup_current":
+        return "no_action", ["terminal_cleanup_current"], []
+    if reconciliation == "hibernated_current":
+        return "no_action", ["intentional_hibernation_current"], []
+    if reconciliation == "dirty_or_uncheckpointed":
+        return "manual_review", ["dirty_or_uncheckpointed"], []
+    if reconciliation == "attached_current":
+        if state["task_status"] in {"runnable", "running", "needs_resume"}:
+            return "manual_review", ["active_or_resumable_task"], []
+        return "no_action", ["attached_state_current"], []
     if state["task_status"] in {"runnable", "running", "needs_resume"}:
         return "manual_review", ["active_or_resumable_task"], []
-    if provenance["status"] != "complete":
+    if derived["provenance_status"] != "complete":
         return "manual_review", ["ambiguous_or_missing_provenance"], []
-    if _exact_cleanup_status_candidate(snapshot, reconciliation):
+    if _exact_cleanup_status_candidate(snapshot, derived):
         return (
             "exact_repair_candidate",
             [
@@ -408,83 +553,160 @@ def _classify_snapshot(
                 }
             ],
         )
+    if derived["cleanup_eligibility"] == "applied" and (
+        derived["apply_containment"] != "current"
+    ):
+        return "manual_review", ["apply_containment_unproven"], []
     if reconciliation in {
         "missing_path_branch_present",
         "missing_path_branch_missing",
     }:
         return "manual_review", ["missing_path_is_not_lifecycle_evidence"], []
-    return (
-        "manual_review",
-        ["result_review_apply_state_ambiguous"],
-        [],
-    )
+    return "manual_review", ["result_review_apply_state_ambiguous"], []
+
+
+def _base_binding_reasons(snapshot: dict[str, Any]) -> list[str]:
+    git = snapshot["git_observations"]
+    reasons: list[str] = []
+    if git["base_head"] is None:
+        reasons.append("missing_execution_base")
+    elif git["observed_base_head"] != git["base_head"]:
+        reasons.append("base_head_not_current")
+    if git["checkpoint_head"] is None or git["observed_checkpoint_head"] is None:
+        reasons.append("missing_checkpoint")
+    elif (
+        git["observed_checkpoint_head"] != git["checkpoint_head"]
+        or git["observed_branch_head"] != git["checkpoint_head"]
+    ):
+        reasons.append("checkpoint_head_mismatch")
+    if git["observed_branch_head"] is None:
+        reasons.append("missing_branch")
+    if (
+        git["observed_base_head"] is not None
+        and git["observed_branch_head"] is not None
+        and git["base_is_ancestor_of_observed_branch"] is not True
+    ):
+        reasons.append("base_not_ancestor_of_checkpoint")
+    return sorted(set(reasons))
 
 
 def _exact_cleanup_status_candidate(
     snapshot: dict[str, Any],
-    reconciliation: str,
+    derived: dict[str, Any],
 ) -> bool:
     state = snapshot["canonical_state"]
-    binding = snapshot["git_binding"]
-    receipt = snapshot["cleanup_receipt"]
     return bool(
-        reconciliation == "missing_path_branch_present"
-        and snapshot["classification"]["cleanup_eligibility"] == "applied"
-        and state["task_status"] in {"completed", "archived"}
+        derived["reconciliation_status"] == "missing_path_branch_present"
+        and derived["cleanup_eligibility"] == "applied"
+        and derived["provenance_status"] == "complete"
+        and derived["apply_containment"] == "current"
+        and state["task_status"] == "completed"
         and state["review_status"] == "accepted"
         and state["apply_status"] == "applied"
         and state["worktree_status"] in {"retained", "recovery_required"}
-        and receipt
-        == {
-            "kind": "applied",
-            "reason": "execution_apply_status=applied",
-            "branch_retained": True,
-            "result_applied": True,
-            "cleaned_at_present": True,
-            "applied_head": receipt["applied_head"],
-            "apply_target_ref": receipt["apply_target_ref"],
-            "apply_target_contains_applied_head": True,
-        }
-        and receipt["applied_head"] is not None
-        and receipt["apply_target_ref"] is not None
-        and binding["checkpoint_head"] == binding["observed_branch_head"]
-        and state["resolution_present"] is False
-        and state["followup_present"] is False
+        and state["resolution"] == "none"
+        and not state["followup_present"]
+        and _terminal_cleanup_evidence_valid(snapshot)
     )
 
 
-def _safe_provenance(task: dict[str, Any]) -> dict[str, Any]:
+def _terminal_cleanup_evidence_valid(snapshot: dict[str, Any]) -> bool:
+    state = snapshot["canonical_state"]
+    evidence = snapshot["cleanup_evidence"]
+    git = snapshot["git_observations"]
+    if (
+        evidence["cleaned_at_digest"] is None
+        or evidence["receipt_digest"] is None
+        or evidence["branch_retained"] is not True
+        or git["path_exists"]
+        or git["path_registry_ref"] is not None
+        or git["branch_registry_ref"] is not None
+        or git["observed_branch_head"] != git["checkpoint_head"]
+    ):
+        return False
+    eligibility = _cleanup_eligibility(snapshot)
+    if evidence["kind"] == "applied":
+        return bool(
+            eligibility == "applied"
+            and state["apply_status"] == "applied"
+            and evidence["reason"] == "execution_apply_status=applied"
+            and evidence["result_applied"] is True
+            and snapshot["apply_evidence"]["applied_head"] == git["checkpoint_head"]
+            and _containment_status(snapshot) == "current"
+        )
+    if evidence["kind"] == "no_change":
+        return bool(
+            eligibility == "no_change"
+            and evidence["reason"] == "already_contained"
+            and evidence["result_applied"] is False
+        )
+    if evidence["kind"] == "discard":
+        expected_reason = (
+            "review_status=rejected"
+            if state["review_status"] == "rejected"
+            else f"resolution={state['resolution']}"
+        )
+        return bool(
+            eligibility == "discard"
+            and evidence["reason"] == expected_reason
+            and evidence["result_applied"] is False
+        )
+    return False
+
+
+def _hibernation_evidence_valid(snapshot: dict[str, Any]) -> bool:
+    state = snapshot["canonical_state"]
+    git = snapshot["git_observations"]
+    evidence = snapshot["hibernation_evidence"]
+    return bool(
+        state["task_status"] == "completed"
+        and evidence["contract"] == HIBERNATION_CONTRACT
+        and evidence["kind"] in {"disposable", "pooled"}
+        and evidence["base_head"] == git["base_head"]
+        and evidence["branch_head"] == git["checkpoint_head"]
+        and evidence["hibernated_at_digest"] is not None
+        and not git["path_exists"]
+        and git["path_registry_ref"] is None
+        and git["branch_registry_ref"] is None
+        and git["observed_branch_head"] == git["checkpoint_head"]
+        and git["observed_checkpoint_head"] == git["checkpoint_head"]
+        and git["observed_base_head"] == git["base_head"]
+        and git["base_is_ancestor_of_observed_branch"] is True
+    )
+
+
+def _provenance_evidence(task: dict[str, Any]) -> dict[str, Any]:
+    history = task.get("execution_mutation_provenance_history")
+    count = len(history) if isinstance(history, list) else 0
+    digest = _value_digest(history) if count else None
     value = _provenance(task)
-    status = value.get("status")
-    complete = (
-        status in {"mutation_observed", "no_mutation_observed"}
-        and value.get("unsafe_or_unreported") is False
-    )
+    raw_status = str(value.get("status") or "")
+    parse_valid = count > 0 and raw_status not in {"", "missing", "invalid"}
     return {
-        "status": "complete" if complete else "ambiguous_or_missing",
+        "history_count": count,
+        "history_digest": digest,
+        "parse_valid": parse_valid,
+        "view_status": (
+            raw_status
+            if raw_status in {"mutation_observed", "no_mutation_observed"}
+            else "unknown"
+        ),
         "unsafe_or_unreported": bool(value.get("unsafe_or_unreported")),
     }
 
 
-def _cleanup_eligibility(task: dict[str, Any]) -> str:
-    value = cleanup_eligibility(task)
-    kind = value.get("cleanup_kind")
-    return kind if kind in {"applied", "discard", "no_change"} else "blocked"
-
-
-def _applied_target_contains_head(
-    task: dict[str, Any], repo_root: Path | None
-) -> bool | None:
-    target = str(task.get("execution_apply_target") or "").strip()
-    head = _commit(task.get("execution_applied_head"))
-    if repo_root is None or not target or head is None:
+def _registry(
+    repo_root: Path | None,
+    cache: dict[Path, list[dict[str, str]] | None],
+) -> list[dict[str, str]] | None:
+    if repo_root is None:
         return None
-    target_head = git_optional(
-        repo_root, "rev-parse", "--verify", f"{target}^{{commit}}"
-    )
-    if not target_head:
-        return None
-    return is_ancestor(repo_root, head, target_head)
+    if repo_root not in cache:
+        try:
+            cache[repo_root] = worktree_registry(repo_root)
+        except (OSError, subprocess.SubprocessError):
+            cache[repo_root] = None
+    return cache[repo_root]
 
 
 def _repo_root(task: dict[str, Any]) -> Path | None:
@@ -502,6 +724,22 @@ def _path(value: object) -> Path | None:
         return Path(str(value)).expanduser().resolve()
     except OSError:
         return None
+
+
+def _resolve_commit(repo_root: Path | None, commit: str | None) -> str | None:
+    if repo_root is None or commit is None:
+        return None
+    return _commit(
+        git_optional(repo_root, "rev-parse", "--verify", f"{commit}^{{commit}}")
+    )
+
+
+def _resolve_ref(repo_root: Path | None, ref: str) -> str | None:
+    if repo_root is None or not ref:
+        return None
+    return _commit(
+        git_optional(repo_root, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    )
 
 
 def _entry_path_ref(entry: dict[str, str] | None) -> str | None:
@@ -526,12 +764,29 @@ def _enum(value: object, allowed: set[str]) -> str:
     return token if token in allowed else "unknown"
 
 
+def _resolution(value: object) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return "none"
+    return token if token in RESOLUTIONS - {"none", "other"} else "other"
+
+
 def _strict_bool(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def _grandfathered(projection: dict[str, Any]) -> bool:
-    return projection["reconciliation"]["status"] in {
+def _optional_value_digest(value: object) -> str | None:
+    return None if value in (None, "") else _value_digest(value)
+
+
+def _value_digest(value: object) -> str:
+    return _digest({"value": value})
+
+
+def _grandfathered(derived: dict[str, Any]) -> bool:
+    return derived["reconciliation_status"] in {
+        "cleanup_evidence_invalid",
+        "hibernation_evidence_invalid",
         "missing_path_branch_missing",
         "missing_path_branch_present",
         "registry_path_mismatch",
@@ -555,6 +810,7 @@ def _validate_item(item: object) -> None:
         "reason_codes",
         "grandfathered_row",
         "metadata_delta",
+        "derived",
         "source_snapshot",
         "source_snapshot_digest",
     }:
@@ -568,205 +824,324 @@ def _validate_item(item: object) -> None:
         or "\\" in item["task_id"]
     ):
         raise WorktreeReconciliationPlanValidationError("task id is invalid")
-    if item["action_class"] not in ACTION_CLASSES:
-        raise WorktreeReconciliationPlanValidationError("action class is invalid")
-    if (
-        not isinstance(item["reason_codes"], list)
-        or item["reason_codes"] != sorted(set(item["reason_codes"]))
-        or not item["reason_codes"]
-        or any(reason not in REASON_CODES for reason in item["reason_codes"])
-    ):
-        raise WorktreeReconciliationPlanValidationError("reason codes are invalid")
-    if not isinstance(item["grandfathered_row"], bool):
-        raise WorktreeReconciliationPlanValidationError(
-            "grandfathered marker is invalid"
-        )
     _validate_snapshot(item["source_snapshot"])
-    expected_grandfathered = item["source_snapshot"]["classification"][
-        "reconciliation_status"
-    ] in {
-        "missing_path_branch_missing",
-        "missing_path_branch_present",
-        "registry_path_mismatch",
-        "registry_unavailable",
-    }
-    if item["grandfathered_row"] is not expected_grandfathered:
+    expected_derived = _derive(item["source_snapshot"])
+    if item["derived"] != expected_derived:
         raise WorktreeReconciliationPlanValidationError(
-            "grandfathered marker does not match source snapshot"
+            "derived projection does not match source facts"
         )
-    _validate_delta(item)
-    expected_action, expected_reasons, expected_delta = _classify_snapshot(
-        item["source_snapshot"]
+    expected_action, expected_reasons, expected_delta = _classify(
+        item["source_snapshot"], expected_derived
     )
     if (
-        item["action_class"] != expected_action
+        item["action_class"] not in ACTION_CLASSES
+        or item["action_class"] != expected_action
         or item["reason_codes"] != sorted(set(expected_reasons))
         or item["metadata_delta"] != expected_delta
     ):
         raise WorktreeReconciliationPlanValidationError(
-            "action projection does not match source snapshot"
+            "action projection does not match source facts"
         )
-    expected = _digest(item["source_snapshot"])
-    if item["source_snapshot_digest"] != expected:
+    if item["grandfathered_row"] is not _grandfathered(expected_derived):
+        raise WorktreeReconciliationPlanValidationError(
+            "grandfathered marker does not match source facts"
+        )
+    expected_digest = _digest(item["source_snapshot"])
+    if item["source_snapshot_digest"] != expected_digest:
         raise WorktreeReconciliationPlanValidationError(
             "source snapshot digest mismatch"
         )
 
 
-def _validate_delta(item: dict[str, Any]) -> None:
-    delta = item["metadata_delta"]
-    expected = (
-        [
-            {
-                "field": "execution_worktree_status",
-                "before": item["source_snapshot"]["canonical_state"]["worktree_status"],
-                "after": "cleaned",
-            }
-        ]
-        if item["action_class"] == "exact_repair_candidate"
-        else []
-    )
-    if delta != expected or (
-        delta and delta[0]["before"] not in {"retained", "recovery_required"}
-    ):
-        raise WorktreeReconciliationPlanValidationError("metadata delta is invalid")
-
-
 def _validate_snapshot(snapshot: object) -> None:
     if not isinstance(snapshot, dict) or set(snapshot) != {
         "canonical_state",
-        "git_binding",
-        "classification",
-        "cleanup_receipt",
-        "provenance",
+        "git_observations",
+        "apply_evidence",
+        "cleanup_evidence",
+        "hibernation_evidence",
+        "provenance_evidence",
     }:
         raise WorktreeReconciliationPlanValidationError(
             "source snapshot fields are invalid"
         )
-    state = snapshot["canonical_state"]
-    if (
-        not isinstance(state, dict)
-        or set(state)
-        != {
-            "execution_mode",
-            "task_status",
-            "review_status",
-            "apply_status",
-            "worktree_status",
-            "resolution_present",
-            "followup_present",
-        }
-        or state["execution_mode"] not in {"git_worktree", "main_worktree", "unknown"}
-        or state["task_status"] not in TASK_STATUSES
-        or state["review_status"] not in REVIEW_STATUSES
-        or state["apply_status"] not in APPLY_STATUSES
-        or state["worktree_status"] not in WORKTREE_STATUSES
-        or not isinstance(state["resolution_present"], bool)
-        or not isinstance(state["followup_present"], bool)
-    ):
+    _validate_canonical_state(snapshot["canonical_state"])
+    _validate_git_observations(snapshot["git_observations"])
+    _validate_apply_evidence(snapshot["apply_evidence"])
+    _validate_cleanup_evidence(snapshot["cleanup_evidence"])
+    _validate_hibernation_evidence(snapshot["hibernation_evidence"])
+    _validate_provenance_evidence(snapshot["provenance_evidence"])
+
+
+def _validate_canonical_state(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "execution_mode",
+        "task_status",
+        "review_status",
+        "apply_status",
+        "worktree_status",
+        "resolution",
+        "resolution_digest",
+        "followup_present",
+        "followup_digest",
+    }:
         raise WorktreeReconciliationPlanValidationError("canonical state is invalid")
-    binding = snapshot["git_binding"]
-    if not isinstance(binding, dict) or set(binding) != {
+    if (
+        value["execution_mode"] not in {"git_worktree", "main_worktree", "unknown"}
+        or value["task_status"] not in TASK_STATUSES
+        or value["review_status"] not in REVIEW_STATUSES
+        or value["apply_status"] not in APPLY_STATUSES
+        or value["worktree_status"] not in WORKTREE_STATUSES
+        or value["resolution"] not in RESOLUTIONS
+        or not isinstance(value["followup_present"], bool)
+    ):
+        raise WorktreeReconciliationPlanValidationError(
+            "canonical state enum is invalid"
+        )
+    _validate_optional_digest(value["resolution_digest"], "resolution digest")
+    _validate_optional_digest(value["followup_digest"], "followup digest")
+    if (value["resolution"] == "none") is not (value["resolution_digest"] is None):
+        raise WorktreeReconciliationPlanValidationError(
+            "resolution presence is inconsistent"
+        )
+    if value["followup_present"] is not (value["followup_digest"] is not None):
+        raise WorktreeReconciliationPlanValidationError(
+            "followup presence is inconsistent"
+        )
+
+
+def _validate_git_observations(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
         "repository_ref",
         "branch_ref",
         "base_head",
+        "observed_base_head",
         "checkpoint_head",
+        "observed_checkpoint_head",
         "observed_branch_head",
-        "registry_state",
+        "base_is_ancestor_of_observed_branch",
+        "registry_available",
         "path_exists",
         "path_registry_ref",
         "branch_registry_ref",
+        "worktree_dirty",
     }:
-        raise WorktreeReconciliationPlanValidationError("git binding is invalid")
+        raise WorktreeReconciliationPlanValidationError("git observations are invalid")
     for key in (
         "repository_ref",
         "branch_ref",
         "path_registry_ref",
         "branch_registry_ref",
     ):
-        if binding[key] is not None and not OPAQUE_REF.fullmatch(binding[key]):
+        if value[key] is not None and not OPAQUE_REF.fullmatch(value[key]):
             raise WorktreeReconciliationPlanValidationError(f"{key} is invalid")
-    for key in ("base_head", "checkpoint_head", "observed_branch_head"):
-        if binding[key] is not None and not COMMIT.fullmatch(binding[key]):
+    for key in (
+        "base_head",
+        "observed_base_head",
+        "checkpoint_head",
+        "observed_checkpoint_head",
+        "observed_branch_head",
+    ):
+        if value[key] is not None and not COMMIT.fullmatch(value[key]):
             raise WorktreeReconciliationPlanValidationError(f"{key} is invalid")
-    if binding["registry_state"] not in REGISTRY_STATES or not isinstance(
-        binding["path_exists"], bool
+    if not isinstance(value["registry_available"], bool) or not isinstance(
+        value["path_exists"], bool
     ):
-        raise WorktreeReconciliationPlanValidationError("registry binding is invalid")
-    classification = snapshot["classification"]
-    if (
-        not isinstance(classification, dict)
-        or set(classification)
-        != {
-            "reconciliation_status",
-            "branch_only_review_compatible",
-            "hibernation_compatible",
-            "reattach_compatible",
-            "resume_compatible",
-            "cleanup_eligibility",
-        }
-        or classification["reconciliation_status"] not in RECONCILIATION_STATUSES
-        or any(
-            classification[key] not in (True, False, None)
-            for key in (
-                "branch_only_review_compatible",
-                "hibernation_compatible",
-                "reattach_compatible",
-                "resume_compatible",
-            )
+        raise WorktreeReconciliationPlanValidationError(
+            "git observation booleans are invalid"
         )
-        or classification["cleanup_eligibility"]
-        not in {"applied", "discard", "no_change", "blocked"}
-    ):
-        raise WorktreeReconciliationPlanValidationError("classification is invalid")
-    receipt = snapshot["cleanup_receipt"]
-    if (
-        not isinstance(receipt, dict)
-        or set(receipt)
-        != {
-            "kind",
-            "reason",
-            "branch_retained",
-            "result_applied",
-            "cleaned_at_present",
-            "applied_head",
-            "apply_target_ref",
-            "apply_target_contains_applied_head",
-        }
-        or receipt["kind"] not in {"applied", "discard", "no_change", "unknown"}
-        or receipt["reason"]
-        not in {
-            "execution_apply_status=applied",
-            "review_status=rejected",
-            "resolution=duplicate",
-            "resolution=manual",
-            "resolution=superseded",
-            "resolution=wont_fix",
-            "already_contained",
-            "unknown",
-        }
-        or receipt["branch_retained"] not in (True, False, None)
-        or receipt["result_applied"] not in (True, False, None)
-        or not isinstance(receipt["cleaned_at_present"], bool)
-        or (
-            receipt["applied_head"] is not None
-            and not COMMIT.fullmatch(receipt["applied_head"])
+    for key in ("base_is_ancestor_of_observed_branch", "worktree_dirty"):
+        if value[key] not in (True, False, None):
+            raise WorktreeReconciliationPlanValidationError(f"{key} is invalid")
+    if value["repository_ref"] is None and value["registry_available"]:
+        raise WorktreeReconciliationPlanValidationError(
+            "registry cannot be available without repository"
         )
-        or (
-            receipt["apply_target_ref"] is not None
-            and not OPAQUE_REF.fullmatch(receipt["apply_target_ref"])
+    if value["branch_ref"] is None and (
+        value["branch_registry_ref"] is not None
+        or value["observed_branch_head"] is not None
+    ):
+        raise WorktreeReconciliationPlanValidationError(
+            "branch observations require canonical branch binding"
         )
-        or receipt["apply_target_contains_applied_head"] not in (True, False, None)
+    if value["repository_ref"] is None and any(
+        value[key] is not None
+        for key in (
+            "observed_base_head",
+            "observed_checkpoint_head",
+            "observed_branch_head",
+        )
     ):
-        raise WorktreeReconciliationPlanValidationError("cleanup receipt is invalid")
-    provenance = snapshot["provenance"]
+        raise WorktreeReconciliationPlanValidationError(
+            "resolved Git observations require repository binding"
+        )
+    if not value["registry_available"] and (
+        value["path_registry_ref"] is not None
+        or value["branch_registry_ref"] is not None
+    ):
+        raise WorktreeReconciliationPlanValidationError(
+            "registry refs require available registry"
+        )
+    if value["observed_base_head"] is not None and value["base_head"] is None:
+        raise WorktreeReconciliationPlanValidationError(
+            "observed base requires canonical base"
+        )
     if (
-        not isinstance(provenance, dict)
-        or set(provenance) != {"status", "unsafe_or_unreported"}
-        or provenance["status"] not in {"complete", "ambiguous_or_missing"}
-        or not isinstance(provenance["unsafe_or_unreported"], bool)
+        value["observed_checkpoint_head"] is not None
+        and value["checkpoint_head"] is None
     ):
-        raise WorktreeReconciliationPlanValidationError("provenance is invalid")
+        raise WorktreeReconciliationPlanValidationError(
+            "observed checkpoint requires canonical checkpoint"
+        )
+    ancestry_inputs = (
+        value["observed_base_head"] is not None
+        and value["observed_branch_head"] is not None
+    )
+    if (
+        value["base_is_ancestor_of_observed_branch"] is not None
+    ) is not ancestry_inputs:
+        raise WorktreeReconciliationPlanValidationError(
+            "base ancestry observation is inconsistent"
+        )
+    attached = (
+        value["path_exists"]
+        and value["path_registry_ref"] is not None
+        and value["path_registry_ref"] == value["branch_registry_ref"]
+    )
+    if (value["worktree_dirty"] is not None) is not attached:
+        raise WorktreeReconciliationPlanValidationError(
+            "dirty observation is inconsistent with registry attachment"
+        )
+
+
+def _validate_apply_evidence(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "applied_head",
+        "applied_at_digest",
+        "apply_target_ref",
+        "observed_apply_target_head",
+        "applied_head_is_ancestor_of_target",
+    }:
+        raise WorktreeReconciliationPlanValidationError("apply evidence is invalid")
+    for key in ("applied_head", "observed_apply_target_head"):
+        if value[key] is not None and not COMMIT.fullmatch(value[key]):
+            raise WorktreeReconciliationPlanValidationError(f"{key} is invalid")
+    if value["apply_target_ref"] is not None and not OPAQUE_REF.fullmatch(
+        value["apply_target_ref"]
+    ):
+        raise WorktreeReconciliationPlanValidationError("apply target ref is invalid")
+    _validate_optional_digest(value["applied_at_digest"], "applied at digest")
+    if value["applied_head_is_ancestor_of_target"] not in (True, False, None):
+        raise WorktreeReconciliationPlanValidationError(
+            "apply containment observation is invalid"
+        )
+    containment_inputs = (
+        value["applied_head"] is not None
+        and value["observed_apply_target_head"] is not None
+    )
+    if (
+        value["applied_head_is_ancestor_of_target"] is not None
+    ) is not containment_inputs:
+        raise WorktreeReconciliationPlanValidationError(
+            "apply containment inputs are inconsistent"
+        )
+
+
+def _validate_cleanup_evidence(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "kind",
+        "reason",
+        "branch_retained",
+        "result_applied",
+        "cleaned_at_digest",
+        "receipt_digest",
+    }:
+        raise WorktreeReconciliationPlanValidationError("cleanup evidence is invalid")
+    if value["kind"] not in CLEANUP_KINDS or value["reason"] not in CLEANUP_REASONS:
+        raise WorktreeReconciliationPlanValidationError(
+            "cleanup evidence enum is invalid"
+        )
+    if value["branch_retained"] not in (True, False, None) or value[
+        "result_applied"
+    ] not in (True, False, None):
+        raise WorktreeReconciliationPlanValidationError(
+            "cleanup evidence booleans are invalid"
+        )
+    _validate_optional_digest(value["cleaned_at_digest"], "cleaned at digest")
+    if not isinstance(value["receipt_digest"], str) or not HEX_DIGEST.fullmatch(
+        value["receipt_digest"]
+    ):
+        raise WorktreeReconciliationPlanValidationError(
+            "cleanup receipt digest is invalid"
+        )
+
+
+def _validate_hibernation_evidence(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "contract",
+        "kind",
+        "base_head",
+        "branch_head",
+        "hibernated_at_digest",
+    }:
+        raise WorktreeReconciliationPlanValidationError(
+            "hibernation evidence is invalid"
+        )
+    if value["contract"] not in {HIBERNATION_CONTRACT, "unknown"} or value[
+        "kind"
+    ] not in {"disposable", "pooled", "unknown"}:
+        raise WorktreeReconciliationPlanValidationError(
+            "hibernation evidence enum is invalid"
+        )
+    for key in ("base_head", "branch_head"):
+        if value[key] is not None and not COMMIT.fullmatch(value[key]):
+            raise WorktreeReconciliationPlanValidationError(f"{key} is invalid")
+    _validate_optional_digest(value["hibernated_at_digest"], "hibernated at digest")
+
+
+def _validate_provenance_evidence(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "history_count",
+        "history_digest",
+        "parse_valid",
+        "view_status",
+        "unsafe_or_unreported",
+    }:
+        raise WorktreeReconciliationPlanValidationError(
+            "provenance evidence is invalid"
+        )
+    if (
+        not isinstance(value["history_count"], int)
+        or isinstance(value["history_count"], bool)
+        or value["history_count"] < 0
+        or not isinstance(value["parse_valid"], bool)
+        or value["view_status"]
+        not in {"mutation_observed", "no_mutation_observed", "unknown"}
+        or not isinstance(value["unsafe_or_unreported"], bool)
+    ):
+        raise WorktreeReconciliationPlanValidationError(
+            "provenance evidence values are invalid"
+        )
+    _validate_optional_digest(value["history_digest"], "provenance history digest")
+    if (value["history_count"] > 0) is not (value["history_digest"] is not None):
+        raise WorktreeReconciliationPlanValidationError(
+            "provenance history presence is inconsistent"
+        )
+    if not value["parse_valid"] and value["view_status"] != "unknown":
+        raise WorktreeReconciliationPlanValidationError(
+            "invalid provenance parse cannot have complete view status"
+        )
+    if value["parse_valid"] and value["history_count"] == 0:
+        raise WorktreeReconciliationPlanValidationError(
+            "valid provenance parse requires history"
+        )
+
+
+def _validate_optional_digest(value: object, label: str) -> None:
+    if value is not None and (
+        not isinstance(value, str) or not HEX_DIGEST.fullmatch(value)
+    ):
+        raise WorktreeReconciliationPlanValidationError(f"{label} is invalid")
 
 
 def _digest(value: object) -> str:

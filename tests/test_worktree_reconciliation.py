@@ -14,6 +14,7 @@ from codex_batch_runner.cli import main
 from codex_batch_runner.config import Config
 from codex_batch_runner.worktree_reconciliation import (
     WorktreeReconciliationPlanValidationError,
+    _digest,
     build_worktree_reconciliation_plan,
     validate_worktree_reconciliation_plan,
 )
@@ -105,6 +106,41 @@ def save_task(config: Config, task: dict[str, object]) -> None:
     )
 
 
+def make_exact_candidate(
+    config: Config,
+    repo: Path,
+    base: str,
+    *,
+    task_id: str,
+) -> dict[str, object]:
+    task, worktree = create_task(config, repo, base, task_id=task_id)
+    head = str(task["execution_branch_head"])
+    git(repo, "merge", "--ff-only", str(task["execution_branch"]))
+    git(repo, "worktree", "remove", str(worktree))
+    task.update(
+        {
+            "review_status": "accepted",
+            "execution_apply_status": "applied",
+            "execution_applied_head": head,
+            "execution_applied_at": "2030-01-01T00:00:00Z",
+            "execution_apply_target": "main",
+            "execution_cleanup_kind": "applied",
+            "execution_cleanup_reason": "execution_apply_status=applied",
+            "execution_cleanup_branch_retained": True,
+            "execution_cleanup_result_applied": True,
+            "execution_cleaned_at": "2030-01-01T00:01:00Z",
+        }
+    )
+    save_task(config, task)
+    return task
+
+
+def redigest(report: dict[str, object]) -> None:
+    report["report_digest"] = _digest(
+        {key: value for key, value in report.items() if key != "report_digest"}
+    )
+
+
 class WorktreeReconciliationPlanTests(unittest.TestCase):
     def test_public_example_validates(self) -> None:
         example = (
@@ -136,11 +172,13 @@ class WorktreeReconciliationPlanTests(unittest.TestCase):
                 config, repo, base, task_id="terminal-cleanup"
             )
             git(repo, "worktree", "remove", str(terminal_path))
+            terminal["review_status"] = "rejected"
             terminal["execution_worktree_status"] = "cleaned"
             terminal["execution_cleanup_kind"] = "discard"
             terminal["execution_cleanup_reason"] = "review_status=rejected"
             terminal["execution_cleanup_branch_retained"] = True
             terminal["execution_cleanup_result_applied"] = False
+            terminal["execution_cleaned_at"] = "2030-01-01T00:00:00Z"
             save_task(config, terminal)
             with patch(
                 "codex_batch_runner.worktree_reconciliation._provenance",
@@ -216,8 +254,10 @@ class WorktreeReconciliationPlanTests(unittest.TestCase):
             git(repo, "worktree", "remove", str(worktree))
             task["execution_worktree_status"] = "hibernated"
             task["execution_hibernation_contract"] = "worktree-hibernation-v1"
+            task["execution_hibernation_kind"] = "disposable"
             task["execution_hibernation_base_head"] = base
             task["execution_hibernation_branch_head"] = task["execution_branch_head"]
+            task["execution_hibernated_at"] = "2030-01-01T00:00:00Z"
             save_task(config, task)
             with patch(
                 "codex_batch_runner.worktree_reconciliation._provenance",
@@ -266,24 +306,7 @@ class WorktreeReconciliationPlanTests(unittest.TestCase):
             root = Path(tmp)
             config = Config.load(str(write_config(root)))
             repo, base = create_repo(root)
-            task, worktree = create_task(config, repo, base, task_id="metadata-only")
-            head = str(task["execution_branch_head"])
-            git(repo, "merge", "--ff-only", str(task["execution_branch"]))
-            git(repo, "worktree", "remove", str(worktree))
-            task.update(
-                {
-                    "review_status": "accepted",
-                    "execution_apply_status": "applied",
-                    "execution_applied_head": head,
-                    "execution_apply_target": "main",
-                    "execution_cleanup_kind": "applied",
-                    "execution_cleanup_reason": "execution_apply_status=applied",
-                    "execution_cleanup_branch_retained": True,
-                    "execution_cleanup_result_applied": True,
-                    "execution_cleaned_at": "2030-01-01T00:00:00Z",
-                }
-            )
-            save_task(config, task)
+            task = make_exact_candidate(config, repo, base, task_id="metadata-only")
             with patch(
                 "codex_batch_runner.worktree_reconciliation._provenance",
                 return_value=SAFE_PROVENANCE,
@@ -306,7 +329,7 @@ class WorktreeReconciliationPlanTests(unittest.TestCase):
             self.assertEqual(first, second)
             rendered = json.dumps(first, sort_keys=True)
             self.assertNotIn(str(root), rendered)
-            self.assertNotIn(str(worktree), rendered)
+            self.assertNotIn(str(root / "worktree-metadata-only"), rendered)
             self.assertNotIn(str(task["execution_branch"]), rendered)
 
     def test_validator_rejects_source_report_and_action_tampering(self) -> None:
@@ -333,11 +356,7 @@ class WorktreeReconciliationPlanTests(unittest.TestCase):
         )
         report = json.loads(example.read_text(encoding="utf-8"))
         report["items"][0]["source_snapshot_digest"] = "sha256:" + "0" * 64
-        from codex_batch_runner.worktree_reconciliation import _digest
-
-        report["report_digest"] = _digest(
-            {key: value for key, value in report.items() if key != "report_digest"}
-        )
+        redigest(report)
         with self.assertRaises(WorktreeReconciliationPlanValidationError):
             validate_worktree_reconciliation_plan(report)
 
@@ -349,13 +368,232 @@ class WorktreeReconciliationPlanTests(unittest.TestCase):
         )
         report = json.loads(example.read_text(encoding="utf-8"))
         report["items"][0]["action_class"] = "manual_review"
-        from codex_batch_runner.worktree_reconciliation import _digest
-
-        report["report_digest"] = _digest(
-            {key: value for key, value in report.items() if key != "report_digest"}
-        )
+        redigest(report)
         with self.assertRaises(WorktreeReconciliationPlanValidationError):
             validate_worktree_reconciliation_plan(report)
+
+    def test_nonexistent_base_cannot_be_exact_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task = make_exact_candidate(config, repo, base, task_id="nonexistent-base")
+            task["execution_base_head"] = "a" * 40
+            save_task(config, task)
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                report = build_worktree_reconciliation_plan(config)
+            item = report["items"][0]
+            self.assertEqual(
+                "unrecoverable_without_owner_decision", item["action_class"]
+            )
+            self.assertIn("base_head_not_current", item["reason_codes"])
+            self.assertIsNone(
+                item["source_snapshot"]["git_observations"]["observed_base_head"]
+            )
+
+    def test_non_ancestor_base_cannot_be_exact_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task = make_exact_candidate(config, repo, base, task_id="unrelated-base")
+            tree = git(repo, "rev-parse", f"{base}^{{tree}}")
+            unrelated = git(repo, "commit-tree", tree, "-m", "unrelated base")
+            task["execution_base_head"] = unrelated
+            save_task(config, task)
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                report = build_worktree_reconciliation_plan(config)
+            item = report["items"][0]
+            self.assertEqual(
+                "unrecoverable_without_owner_decision", item["action_class"]
+            )
+            self.assertIn("base_not_ancestor_of_checkpoint", item["reason_codes"])
+            self.assertFalse(
+                item["source_snapshot"]["git_observations"][
+                    "base_is_ancestor_of_observed_branch"
+                ]
+            )
+
+    def test_missing_applied_at_cannot_be_exact_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task = make_exact_candidate(
+                config, repo, base, task_id="missing-applied-at"
+            )
+            task.pop("execution_applied_at")
+            save_task(config, task)
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                report = build_worktree_reconciliation_plan(config)
+            item = report["items"][0]
+            self.assertEqual("manual_review", item["action_class"])
+            self.assertIn("apply_containment_unproven", item["reason_codes"])
+            self.assertIsNone(
+                item["source_snapshot"]["apply_evidence"]["applied_at_digest"]
+            )
+
+    def test_exact_applied_cleanup_receipt_allows_terminal_no_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task = make_exact_candidate(config, repo, base, task_id="applied-cleaned")
+            task["execution_worktree_status"] = "cleaned"
+            save_task(config, task)
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                report = build_worktree_reconciliation_plan(config)
+            item = report["items"][0]
+            self.assertEqual("no_action", item["action_class"])
+            self.assertEqual(
+                "terminal_cleanup_current",
+                item["derived"]["reconciliation_status"],
+            )
+
+    def test_cleaned_enum_without_terminal_receipt_is_not_no_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task, worktree = create_task(
+                config, repo, base, task_id="cleaned-enum-only"
+            )
+            git(repo, "worktree", "remove", str(worktree))
+            task["execution_worktree_status"] = "cleaned"
+            save_task(config, task)
+            report = build_worktree_reconciliation_plan(config)
+            item = report["items"][0]
+            self.assertEqual("manual_review", item["action_class"])
+            self.assertIn("invalid_terminal_cleanup_evidence", item["reason_codes"])
+
+    def test_malformed_hibernation_is_not_no_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task, worktree = create_task(
+                config, repo, base, task_id="malformed-hibernation"
+            )
+            git(repo, "worktree", "remove", str(worktree))
+            task["execution_worktree_status"] = "hibernated"
+            task["execution_hibernation_contract"] = "worktree-hibernation-v1"
+            task["execution_hibernation_kind"] = "disposable"
+            task["execution_hibernation_base_head"] = base
+            task["execution_hibernation_branch_head"] = "b" * 40
+            task["execution_hibernated_at"] = "2030-01-01T00:00:00Z"
+            save_task(config, task)
+            report = build_worktree_reconciliation_plan(config)
+            item = report["items"][0]
+            self.assertEqual("manual_review", item["action_class"])
+            self.assertIn("malformed_hibernation_evidence", item["reason_codes"])
+
+    def test_attached_current_derived_tamper_is_rejected_after_redigest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            _, worktree = create_task(config, repo, base, task_id="missing")
+            git(repo, "worktree", "remove", str(worktree))
+            report = build_worktree_reconciliation_plan(config)
+            report["items"][0]["derived"]["reconciliation_status"] = "attached_current"
+            redigest(report)
+            with self.assertRaises(WorktreeReconciliationPlanValidationError):
+                validate_worktree_reconciliation_plan(report)
+
+    def test_cleanup_eligibility_tamper_is_rejected_after_redigest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            make_exact_candidate(config, repo, base, task_id="cleanup-tamper")
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                report = build_worktree_reconciliation_plan(config)
+            report["items"][0]["derived"]["cleanup_eligibility"] = "discard"
+            redigest(report)
+            with self.assertRaises(WorktreeReconciliationPlanValidationError):
+                validate_worktree_reconciliation_plan(report)
+
+    def test_provenance_derived_tamper_is_rejected_after_redigest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            _, worktree = create_task(config, repo, base, task_id="provenance-tamper")
+            git(repo, "worktree", "remove", str(worktree))
+            report = build_worktree_reconciliation_plan(config)
+            report["items"][0]["derived"]["provenance_status"] = "complete"
+            redigest(report)
+            with self.assertRaises(WorktreeReconciliationPlanValidationError):
+                validate_worktree_reconciliation_plan(report)
+
+    def test_containment_source_inconsistency_is_rejected_after_redigest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            make_exact_candidate(config, repo, base, task_id="containment-tamper")
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                report = build_worktree_reconciliation_plan(config)
+            item = report["items"][0]
+            item["source_snapshot"]["apply_evidence"]["applied_head"] = None
+            item["source_snapshot_digest"] = _digest(item["source_snapshot"])
+            redigest(report)
+            with self.assertRaises(WorktreeReconciliationPlanValidationError):
+                validate_worktree_reconciliation_plan(report)
+
+    def test_relevant_canonical_evidence_changes_source_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            repo, base = create_repo(root)
+            task = make_exact_candidate(config, repo, base, task_id="digest-binding")
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                baseline = build_worktree_reconciliation_plan(config)["items"][0][
+                    "source_snapshot_digest"
+                ]
+                for field, value in (
+                    ("resolution", "manual"),
+                    ("chain_status", "needs_fix"),
+                    ("execution_applied_at", "2030-01-02T00:00:00Z"),
+                    ("execution_cleaned_at", "2030-01-02T00:00:00Z"),
+                ):
+                    changed = copy.deepcopy(task)
+                    changed[field] = value
+                    save_task(config, changed)
+                    digest = build_worktree_reconciliation_plan(config)["items"][0][
+                        "source_snapshot_digest"
+                    ]
+                    self.assertNotEqual(baseline, digest, field)
+                changed = copy.deepcopy(task)
+                changed["execution_mutation_provenance_history"].append(
+                    {"fixture": "changed"}
+                )
+                save_task(config, changed)
+                digest = build_worktree_reconciliation_plan(config)["items"][0][
+                    "source_snapshot_digest"
+                ]
+                self.assertNotEqual(baseline, digest, "provenance")
 
     def test_cli_exact_task_project_filter_and_no_apply_surface(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -17,9 +17,10 @@ Each item has exactly one stable action class:
 - `exact_repair_candidate`: the only inconsistency is
   `execution_worktree_status=retained|recovery_required` after an independently
   proven accepted+applied terminal cleanup receipt. The branch still equals the
-  recorded checkpoint, the apply target contains the exact applied head, the
-  Git registry confirms the path is absent, and mutation provenance is
-  complete.
+  recorded checkpoint, the recorded base resolves and is an ancestor of that
+  checkpoint, `execution_applied_at` is present, the apply target contains the
+  exact applied head, the Git registry confirms the path is absent, and
+  mutation provenance is complete.
 - `unrecoverable_without_owner_decision`: repository, registry, branch,
   base/checkpoint, or registry/path identity evidence is missing or
   contradictory.
@@ -38,20 +39,32 @@ The projection is not repair authority. The schema always reports
 `repair_authority_granted=false`, `repair_supported=false`, and
 `mutation_performed=false`. There is no `--apply` form.
 
-The `source_snapshot` contains allowlisted enum values, booleans, exact commit
-ids, and opaque digests for repository, branch, and registry paths. Its digest
-binds the source facts used by the action classifier; a separate report digest
-binds ordering, summary, authority boundary, and all items. The strict
-validator recomputes both digests and the action/reason/delta projection.
+The `source_snapshot` contains allowlisted enum values, observed booleans,
+resolved base/checkpoint/branch/apply-target commits, and opaque digests for
+repository, branch, registry paths, resolution/follow-up state, timestamps,
+cleanup receipt, and mutation-provenance history. Its digest binds the source
+facts used by the action classifier; a separate report digest binds ordering,
+summary, authority boundary, and all items. The strict offline validator cannot
+re-run Git. It enforces internal relationships among the bound observations,
+then recomputes reconciliation, cleanup eligibility, provenance completeness,
+apply containment status, action, reasons, and delta. A re-digested change to a
+derived claim is rejected when it does not match those source facts.
 Absolute paths, raw branch names, prompts, transcripts, session/thread ids,
 credentials, account identity, and arbitrary task values are not emitted.
 
 A missing path never means `hibernated`, `cleaned`, accepted, applied,
 rejected, resolved, archived, or deletion-eligible. Grandfathered rows are
-marked and reported only. The command does not create/remove worktrees, alter
+marked and reported only. `cleaned` is current only with a matching terminal
+cleanup receipt; `hibernated` is current only with the exact hibernation
+contract, kind, base, checkpoint, timestamp, branch, and registry evidence.
+The command does not create/remove worktrees, alter
 branches, release/reset pool slots, mutate tasks/events/configuration, run
 cleanup/GC/TTL/retention/archive logic, migrate/backfill metadata, start a
 worker, install a hook, or grant future repair authority.
+
+Any future C2 repair must acquire the queue lock, rebuild this exact source
+snapshot, require the approved digest to match, and revalidate every live fact
+before mutation. This C1 report does not implement or authorize that step.
 
 See
 [`examples/worktree-reconciliation-plan-v1.example.json`](../examples/worktree-reconciliation-plan-v1.example.json)

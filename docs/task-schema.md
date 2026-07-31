@@ -174,10 +174,12 @@ backfill하지 않음. Reattach 성공 시 새 `execution_worktree_path`,
 review status, result disposition, worker lifecycle을 변경하지 않음.
 
 `worktree reconciliation-plan`은 legacy/current metadata를 read-only로 분류함.
-Source snapshot은 task status, review/apply/worktree enum, exact commit binding, opaque
-repository/branch/registry refs, cleanup receipt, mutation provenance를 digest로 묶음.
+Source snapshot은 task status, review/apply/worktree enum, resolved base/checkpoint/branch
+commit과 ancestry, opaque repository/branch/registry refs, resolution/follow-up/timestamp
+digests, cleanup/hibernation receipt, mutation provenance를 digest로 묶음.
 `exact_repair_candidate`가 표시되더라도 future repair 권한은 생기지 않으며, 현재
-command는 enum-level before/after delta만 출력함. Missing path alone은
+command는 enum-level before/after delta만 출력함. Future repair는 queue lock 아래에서
+approved digest와 live source facts를 다시 대조해야 함. Missing path alone은
 `hibernated`, `cleaned`, accepted/applied/rejected/resolved/archived 또는 deletion
 eligibility 증거가 아님.
 
