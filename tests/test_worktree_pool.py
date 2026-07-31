@@ -123,6 +123,9 @@ class WorktreePoolTests(unittest.TestCase):
 
             self.assertEqual("current", observation["state_status"])
             self.assertEqual("leased", observation["slot_status"])
+            self.assertEqual(
+                str(root / "worktrees" / "slot-01"), observation["path"]
+            )
             self.assertEqual("task-a", observation["task_id"])
             self.assertEqual("cbr/task-a", observation["branch"])
             self.assertEqual("policy-v1", observation["policy_fingerprint"])

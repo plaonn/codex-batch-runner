@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 from codex_batch_runner.cli import main
 from codex_batch_runner.config import Config
+from codex_batch_runner.queue import create_task as create_queue_task
+from codex_batch_runner.queue import load_task
 from codex_batch_runner.worktree_reconciliation import (
     WorktreeReconciliationPlanValidationError,
     _digest,
@@ -124,7 +126,7 @@ def save_pool_state(
                     {
                         "slot_id": "slot-01",
                         "repo_root": str(repo.resolve()),
-                        "path": str(root / "pool-slot"),
+                        "path": str((root / "pool-slot").resolve()),
                         "policy_fingerprint": "policy-v1",
                         "status": status,
                         "task_id": task_id,
@@ -516,6 +518,9 @@ class WorktreeReconciliationPlanTests(unittest.TestCase):
                     "execution_worktree_pool_released_at": "2030-01-01T00:02:00Z",
                 }
             )
+            pool_slot = root / "pool-slot"
+            git(repo, "worktree", "add", "--detach", str(pool_slot), base)
+            task["execution_worktree_path"] = str(pool_slot.resolve())
             save_task(config, task)
             save_pool_state(
                 root,
@@ -536,6 +541,125 @@ class WorktreeReconciliationPlanTests(unittest.TestCase):
             rendered = json.dumps(item)
             self.assertNotIn("slot-01", rendered)
             self.assertNotIn("policy-v1", rendered)
+
+    def test_real_pooled_cleanup_is_terminal_and_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _ = create_repo(root)
+            (repo / ".cbr.toml").write_text(
+                """
+[worktree]
+copy = []
+retain = []
+
+[worktree.pool]
+max_slots = 1
+idle_ttl_hours = 24
+""",
+                encoding="utf-8",
+            )
+            git(repo, "add", ".cbr.toml")
+            git(repo, "commit", "-m", "add pool policy")
+            config_path = write_config(root)
+            config_data = json.loads(config_path.read_text(encoding="utf-8"))
+            config_data["worktree_mode"] = "task"
+            config_path.write_text(json.dumps(config_data), encoding="utf-8")
+            config = Config.load(str(config_path))
+            create_queue_task(
+                config,
+                "owner pool cleanup",
+                str(repo),
+                task_id="pooled-owner-cleanup",
+            )
+            prepare_code, _ = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "worktree",
+                    "prepare",
+                    "pooled-owner-cleanup",
+                    "--apply",
+                    "--json",
+                ]
+            )
+            self.assertEqual(0, prepare_code)
+            task = load_task(config, "pooled-owner-cleanup")
+            task["status"] = "completed"
+            task["review_status"] = "accepted"
+            task["execution_mutation_provenance_history"] = [{"fixture": True}]
+            save_task(config, task)
+            cleanup_code, _ = run_cli(
+                [
+                    "--config",
+                    str(config_path),
+                    "worktree",
+                    "cleanup",
+                    "pooled-owner-cleanup",
+                    "--apply",
+                    "--json",
+                ]
+            )
+            self.assertEqual(0, cleanup_code)
+            cleaned = load_task(config, "pooled-owner-cleanup")
+            slot = Path(str(cleaned["execution_worktree_path"]))
+            self.assertEqual("cleaned", cleaned["execution_worktree_status"])
+            self.assertEqual("released", cleaned["execution_worktree_lease_status"])
+            self.assertTrue(slot.is_dir())
+
+            task_path = config.queue_dir / "pooled-owner-cleanup.json"
+            pool_path = root / ".pool-state.json"
+            before = (
+                task_path.read_bytes(),
+                pool_path.read_bytes(),
+                git(repo, "worktree", "list", "--porcelain"),
+            )
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                report = build_worktree_reconciliation_plan(config)
+            self.assertEqual(before[0], task_path.read_bytes())
+            self.assertEqual(before[1], pool_path.read_bytes())
+            self.assertEqual(before[2], git(repo, "worktree", "list", "--porcelain"))
+            item = report["items"][0]
+            self.assertEqual("no_action", item["action_class"])
+            self.assertEqual(
+                "terminal_cleanup_current",
+                item["derived"]["reconciliation_status"],
+            )
+            self.assertEqual(
+                item["source_snapshot"]["git_observations"]["path_registry_ref"],
+                item["source_snapshot"]["pool_evidence"]["observed_pool_path_ref"],
+            )
+            self.assertIsNone(
+                item["source_snapshot"]["git_observations"]["branch_registry_ref"]
+            )
+
+            tampered = copy.deepcopy(report)
+            tampered_item = tampered["items"][0]
+            tampered_item["source_snapshot"]["pool_evidence"][
+                "observed_pool_path_ref"
+            ] = "path:" + "0" * 16
+            tampered_item["source_snapshot_digest"] = _digest(
+                tampered_item["source_snapshot"]
+            )
+            redigest(tampered)
+            with self.assertRaises(WorktreeReconciliationPlanValidationError):
+                validate_worktree_reconciliation_plan(tampered)
+
+            pool_state = json.loads(pool_path.read_text(encoding="utf-8"))
+            pool_state["slots"][0]["path"] = str(root / "mismatched-slot")
+            pool_path.write_text(json.dumps(pool_state), encoding="utf-8")
+            with patch(
+                "codex_batch_runner.worktree_reconciliation._provenance",
+                return_value=SAFE_PROVENANCE,
+            ):
+                mismatch = build_worktree_reconciliation_plan(config)["items"][0]
+            self.assertEqual("manual_review", mismatch["action_class"])
+            self.assertEqual(
+                "cleanup_evidence_invalid",
+                mismatch["derived"]["reconciliation_status"],
+            )
 
     def test_leased_or_ambiguous_pool_blocks_exact_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -493,6 +493,7 @@ def _source_snapshot(
                     "unknown",
                 },
             ),
+            "observed_pool_path_ref": _opaque_ref("path", pool_observation.get("path")),
             "observed_task_ref": _opaque_ref("task", pool_observation.get("task_id")),
             "observed_branch_ref": _opaque_ref(
                 "branch", pool_observation.get("branch")
@@ -554,6 +555,8 @@ def _reconciliation_status(snapshot: dict[str, Any]) -> str:
         ):
             return "dirty_or_uncheckpointed"
         return "attached_current"
+    if _released_pool_idle_path_valid(snapshot):
+        return "missing_path_branch_present"
     if git["path_exists"] or path_ref is not None or branch_ref is not None:
         return "registry_path_mismatch"
     if git["observed_branch_head"] is None:
@@ -618,6 +621,7 @@ def _pool_consistency(snapshot: dict[str, Any]) -> str:
             evidence["released_at_digest"] is not None,
             evidence["observed_state_status"] != "not_applicable",
             evidence["observed_slot_status"] != "missing",
+            evidence["observed_pool_path_ref"] is not None,
             evidence["observed_task_ref"] is not None,
             evidence["observed_branch_ref"] is not None,
             evidence["observed_policy_fingerprint_digest"] is not None,
@@ -631,6 +635,7 @@ def _pool_consistency(snapshot: dict[str, Any]) -> str:
         or evidence["slot_ref"] is None
         or evidence["policy_fingerprint_digest"] is None
         or evidence["observed_state_status"] != "current"
+        or evidence["observed_pool_path_ref"] is None
     ):
         return "ambiguous"
     if (
@@ -736,22 +741,29 @@ def _classify(
 def _base_binding_reasons(snapshot: dict[str, Any]) -> list[str]:
     git = snapshot["git_observations"]
     branch_pruned = _branch_prune_evidence_valid(snapshot)
+    no_change_terminal = snapshot["cleanup_evidence"][
+        "kind"
+    ] == "no_change" and _terminal_cleanup_evidence_valid(snapshot)
     reasons: list[str] = []
     if git["base_head"] is None:
         reasons.append("missing_execution_base")
     elif git["observed_base_head"] != git["base_head"]:
         reasons.append("base_head_not_current")
-    if git["checkpoint_head"] is None or git["observed_checkpoint_head"] is None:
-        reasons.append("missing_checkpoint")
-    elif git["observed_checkpoint_head"] != git["checkpoint_head"]:
-        reasons.append("checkpoint_head_mismatch")
+    if not no_change_terminal:
+        if git["checkpoint_head"] is None or git["observed_checkpoint_head"] is None:
+            reasons.append("missing_checkpoint")
+        elif git["observed_checkpoint_head"] != git["checkpoint_head"]:
+            reasons.append("checkpoint_head_mismatch")
     if not branch_pruned:
         if git["observed_branch_head"] is None:
             reasons.append("missing_branch")
-        elif git["observed_branch_head"] != git["checkpoint_head"]:
+        elif git["observed_branch_head"] != (
+            git["base_head"] if no_change_terminal else git["checkpoint_head"]
+        ):
             reasons.append("checkpoint_head_mismatch")
     if (
-        git["observed_base_head"] is not None
+        not no_change_terminal
+        and git["observed_base_head"] is not None
         and git["observed_branch_head"] is not None
         and git["base_is_ancestor_of_checkpoint"] is not True
     ):
@@ -788,14 +800,23 @@ def _terminal_cleanup_evidence_valid(snapshot: dict[str, Any]) -> bool:
     if (
         evidence["cleaned_at_digest"] is None
         or evidence["receipt_digest"] is None
-        or git["path_exists"]
-        or git["path_registry_ref"] is not None
-        or git["branch_registry_ref"] is not None
         or not _terminal_pool_evidence_valid(snapshot)
     ):
         return False
+    if _pool_consistency(snapshot) == "released":
+        if not _released_pool_idle_path_valid(snapshot):
+            return False
+    elif (
+        git["path_exists"]
+        or git["path_registry_ref"] is not None
+        or git["branch_registry_ref"] is not None
+    ):
+        return False
     if evidence["branch_retained"] is True:
-        if git["observed_branch_head"] != git["checkpoint_head"]:
+        retained_head = git["checkpoint_head"]
+        if evidence["kind"] == "no_change" and retained_head is None:
+            retained_head = git["base_head"]
+        if retained_head is None or git["observed_branch_head"] != retained_head:
             return False
     elif evidence["branch_retained"] is False:
         if not _branch_prune_evidence_valid(snapshot):
@@ -870,6 +891,19 @@ def _hibernation_evidence_valid(snapshot: dict[str, Any]) -> bool:
 def _terminal_pool_evidence_valid(snapshot: dict[str, Any]) -> bool:
     consistency = _pool_consistency(snapshot)
     return consistency in {"not_pooled", "released"}
+
+
+def _released_pool_idle_path_valid(snapshot: dict[str, Any]) -> bool:
+    git = snapshot["git_observations"]
+    pool = snapshot["pool_evidence"]
+    return bool(
+        pool["enabled"]
+        and _pool_consistency(snapshot) == "released"
+        and git["path_exists"]
+        and git["path_registry_ref"] is not None
+        and git["path_registry_ref"] == pool["observed_pool_path_ref"]
+        and git["branch_registry_ref"] is None
+    )
 
 
 def _branch_prune_evidence_valid(snapshot: dict[str, Any]) -> bool:
@@ -1413,6 +1447,7 @@ def _validate_pool_evidence(value: object) -> None:
         "evidence_digest",
         "observed_state_status",
         "observed_slot_status",
+        "observed_pool_path_ref",
         "observed_task_ref",
         "observed_branch_ref",
         "observed_policy_fingerprint_digest",
@@ -1432,6 +1467,7 @@ def _validate_pool_evidence(value: object) -> None:
     ref_kinds = {
         "task_ref": "task:",
         "slot_ref": "pool:",
+        "observed_pool_path_ref": "path:",
         "observed_task_ref": "task:",
         "observed_branch_ref": "branch:",
     }

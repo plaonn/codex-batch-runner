@@ -93,6 +93,7 @@
           "observed_branch_ref": null,
           "observed_last_released_at_digest": null,
           "observed_policy_fingerprint_digest": null,
+          "observed_pool_path_ref": null,
           "observed_slot_status": "missing",
           "observed_state_status": "not_applicable",
           "observed_task_ref": null,
@@ -109,12 +110,12 @@
           "view_status": "unknown"
         }
       },
-      "source_snapshot_digest": "sha256:fedae8894df7263b2594e852189cf32de27b0f650b0d5d678b21526d20215d20",
+      "source_snapshot_digest": "sha256:680fa65abff9f3611e1f4e73b7cf4b9687d021edd3fea78f16948254ab20db95",
       "task_id": "plain"
     }
   ],
   "mode": "report-only",
-  "report_digest": "sha256:b15ac631da2d53bcdb26c73e69d8d545b4994bdbf831b66f9dde6170b47ec148",
+  "report_digest": "sha256:7057bf8c8aa5b8eadc993df0abe0888816569e047b07a5be6900441028fc625a",
   "schema_version": "worktree-reconciliation-plan-v1",
   "summary": {
     "action_by_class": {

@@ -64,7 +64,10 @@ contract, kind, base, checkpoint, timestamp, branch, and registry evidence.
 Pooled cleanup/hibernation also requires `execution_worktree_lease_status` to
 be `released` with slot, policy fingerprint, and released-at evidence, plus an
 exact matching idle slot in the local pool state with its release timestamp.
-An observed lease must match the canonical task, branch, slot, and policy.
+The preserved idle slot directory and Git registry entry are valid only when
+their opaque path binding matches that exact observed slot and the task branch
+has no registry entry. An observed lease must match the canonical task, branch,
+slot, and policy.
 Non-pooled rows carrying injected pool metadata are inconsistent.
 
 Terminal cleanup remains owned by the existing cleanup/apply/branch-prune

@@ -316,6 +316,7 @@ def pool_slot_observation(
     return {
         "state_status": "current",
         "slot_status": str(slot.get("status") or "unknown"),
+        "path": slot.get("path"),
         "task_id": slot.get("task_id"),
         "branch": slot.get("branch"),
         "policy_fingerprint": slot.get("policy_fingerprint"),
