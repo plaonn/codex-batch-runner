@@ -96,7 +96,10 @@ confirmation cannot authorize a different inventory approval. Before any new
 operation, every existing restore-index entry is cross-checked against its strict
 bundle and transaction journal; any orphan, damage, or binding mismatch blocks
 the whole apply. A valid prepared entry is recoverable only by that same
-operation and blocks a different new operation until recovery finishes.
+operation and blocks a different new operation until recovery finishes. Bundle
+and transaction directories are also scanned independently, so unindexed,
+unpaired, malformed, symlinked, or unknown records cannot hide outside the
+restore index.
 
 The tombstone records that source artifacts are unchanged. The restore index
 does not implement restore and explicitly marks raw log/transcript restore as

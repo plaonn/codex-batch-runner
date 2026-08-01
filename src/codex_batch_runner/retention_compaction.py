@@ -1104,35 +1104,84 @@ def _validate_restore_index_references(
     index: dict[str, Any],
     current_operation_id: str,
 ) -> None:
-    for operation_id, entry in index["entries"].items():
-        bundle_path = paths["bundles"] / f"{operation_id}.json"
-        transaction_path = paths["transactions"] / f"{operation_id}.json"
-        if (
-            bundle_path.is_symlink()
-            or not bundle_path.is_file()
-            or transaction_path.is_symlink()
-            or not transaction_path.is_file()
+    bundle_files = _retention_operation_files(paths["bundles"], "bundle")
+    transaction_files = _retention_operation_files(
+        paths["transactions"], "transaction"
+    )
+    indexed_operations = set(index["entries"])
+    observed_operations = set(bundle_files) | set(transaction_files)
+
+    for operation_id in sorted(indexed_operations | observed_operations):
+        bundle_path = bundle_files.get(operation_id)
+        transaction_path = transaction_files.get(operation_id)
+        entry = index["entries"].get(operation_id)
+        if operation_id in indexed_operations and (
+            bundle_path is None or transaction_path is None
         ):
             raise RetentionCompactionError(
                 "restore index references missing or unsafe retention records"
             )
+        if operation_id not in indexed_operations:
+            if operation_id != current_operation_id:
+                raise RetentionCompactionError(
+                    "foreign unindexed retention records require recovery"
+                )
+            if bundle_path is None:
+                raise RetentionCompactionError(
+                    "current retention transaction lacks durable bundle"
+                )
+
+        if bundle_path is None:
+            raise RetentionCompactionError("retention bundle is missing")
         existing_bundle = _load_json_record(bundle_path, "indexed compact bundle")
         validate_retention_compaction_bundle(existing_bundle)
         if existing_bundle.get("operation_id") != operation_id:
             raise RetentionCompactionError("restore index bundle identity mismatch")
-        if entry != _restore_index_entry(existing_bundle):
+        if entry is not None and entry != _restore_index_entry(existing_bundle):
             raise RetentionCompactionError("restore index bundle binding mismatch")
+        if transaction_path is None:
+            # Bundle-first publication is the only valid single-file partial state,
+            # and only the matching current operation may recover it.
+            if operation_id != current_operation_id or entry is not None:
+                raise RetentionCompactionError(
+                    "retention bundle lacks matching transaction journal"
+                )
+            continue
         transaction = _load_json_record(
             transaction_path, "indexed transaction journal"
         )
         _validate_transaction(transaction, existing_bundle)
-        if (
-            transaction["state"] == "prepared"
-            and operation_id != current_operation_id
-        ):
+        if entry is None and transaction["state"] != "prepared":
+            raise RetentionCompactionError(
+                "unindexed committed retention transaction is inconsistent"
+            )
+        if transaction["state"] == "prepared" and operation_id != current_operation_id:
             raise RetentionCompactionError(
                 "foreign prepared retention transaction requires recovery"
             )
+
+
+def _retention_operation_files(directory: Path, label: str) -> dict[str, Path]:
+    if not directory.exists():
+        return {}
+    if directory.is_symlink() or not directory.is_dir():
+        raise RetentionCompactionError(f"retention {label} directory is unsafe")
+    records: dict[str, Path] = {}
+    for path in sorted(directory.iterdir()):
+        operation_id = path.stem
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.suffix != ".json"
+            or path.name != f"{operation_id}.json"
+            or not _is_operation_id(operation_id)
+            or operation_id in records
+        ):
+            raise RetentionCompactionError(
+                f"retention {label} directory contains an unknown record"
+            )
+        records[operation_id] = path
+    return records
 
 
 def _prepare_store(paths: dict[str, Path]) -> None:

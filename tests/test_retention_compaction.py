@@ -243,6 +243,23 @@ class RetentionCompactionTests(unittest.TestCase):
             plan = build_retention_compaction_plan(
                 config, report_path, "private-session-like-task", now=NOW
             )
+            report_b = root / "inventory-b.json"
+            report_b.write_text(
+                json.dumps(
+                    build_retention_inventory_report(
+                        config,
+                        proposal_age_days=60,
+                        now=NOW + timedelta(seconds=1),
+                    )
+                ),
+                encoding="utf-8",
+            )
+            plan_b = build_retention_compaction_plan(
+                config,
+                report_b,
+                "private-session-like-task",
+                now=NOW + timedelta(seconds=1),
+            )
             calls = 0
 
             def fail_first_index(path: Path, value: object) -> None:
@@ -270,6 +287,17 @@ class RetentionCompactionTests(unittest.TestCase):
                 next((store / "transactions").glob("*.json")).read_text()
             )
             self.assertEqual("prepared", transaction["state"])
+            self.assertFalse((store / "restore-index-v1.json").exists())
+            with self.assertRaisesRegex(
+                RetentionCompactionError, "foreign unindexed retention records"
+            ):
+                apply_retention_compaction(
+                    config,
+                    report_b,
+                    "private-session-like-task",
+                    confirm_operation_id=plan_b["operation_id"],
+                    now=NOW + timedelta(seconds=1),
+                )
             recovered = apply_retention_compaction(
                 config,
                 report_path,
@@ -867,6 +895,37 @@ class RetentionCompactionTests(unittest.TestCase):
                     RetentionCompactionError,
                     "outside queue, log, and event directories",
                 ):
+                    build_retention_compaction_plan(
+                        config,
+                        report_path,
+                        "private-session-like-task",
+                        now=NOW,
+                    )
+
+    def test_retention_store_scan_rejects_unknown_symlink_and_malformed_records(self) -> None:
+        for kind in ("unknown", "symlink", "malformed"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                config = Config.load(str(write_config(root)))
+                write_task(config)
+                report_path = inventory_path(root, config)
+                plan = build_retention_compaction_plan(
+                    config, report_path, "private-session-like-task", now=NOW
+                )
+                bundles = root / "runtime" / "retention" / "bundles"
+                bundles.mkdir(parents=True)
+                if kind == "unknown":
+                    (bundles / "unknown.txt").write_text("unknown", encoding="utf-8")
+                    expected = "unknown record"
+                elif kind == "symlink":
+                    (bundles / f"{plan['operation_id']}.json").symlink_to(report_path)
+                    expected = "unsafe|unknown record"
+                else:
+                    (bundles / f"{plan['operation_id']}.json").write_text(
+                        "{}", encoding="utf-8"
+                    )
+                    expected = "compact bundle is malformed"
+                with self.assertRaisesRegex(RetentionCompactionError, expected):
                     build_retention_compaction_plan(
                         config,
                         report_path,
