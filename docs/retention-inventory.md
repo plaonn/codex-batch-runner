@@ -74,7 +74,10 @@ all-project scope, proposal input, task/event/cursor source scope, selected task
 digest, and live terminal eligibility immediately before writing. Project-filtered
 reports, cursor uncertainty, malformed unrelated task/event sources, active or
 resumable work, unresolved review/failure/fix chains, unapplied or unclean
-worktrees, unreleased pool leases, and recovery-required metadata fail closed.
+worktrees, unreleased pool leases, unknown lifecycle/execution modes,
+recovery-required metadata, and selected-task parent-attention records that are
+not acknowledged fail closed. The parent-attention outbox is read strictly;
+unreadable or malformed evidence also blocks apply.
 
 The command writes only sanitized additive records in a retention directory
 beside (not inside) the configured queue directory:
@@ -87,7 +90,13 @@ The durable order is bundle, prepared journal, restore index, then committed
 journal marker. A retry recovers bundle-only or prepared partial writes and the
 stable operation identity prevents duplicates for the same bound snapshot.
 Every file is atomically published or replaced. A restore index never points to
-a missing or unvalidated bundle.
+a missing or unvalidated bundle. The operation identity binds the exact inventory
+report, preview, all-project scope, cursor scope, and proposal age, so a dry-run
+confirmation cannot authorize a different inventory approval. Before any new
+operation, every existing restore-index entry is cross-checked against its strict
+bundle and transaction journal; any orphan, damage, or binding mismatch blocks
+the whole apply. A valid prepared entry is recoverable only by that same
+operation and blocks a different new operation until recovery finishes.
 
 The tombstone records that source artifacts are unchanged. The restore index
 does not implement restore and explicitly marks raw log/transcript restore as

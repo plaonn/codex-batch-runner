@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -11,6 +12,7 @@ from codex_batch_runner.config import Config
 from codex_batch_runner.fs import write_json_atomic as real_write_json_atomic
 from codex_batch_runner.fs import write_json_atomic_create as real_write_json_atomic_create
 from codex_batch_runner.lock import FileLock
+from codex_batch_runner.parent_attention import create_parent_attention
 from codex_batch_runner.retention import build_retention_inventory_report
 from codex_batch_runner.retention_compaction import (
     RetentionCompactionError,
@@ -23,6 +25,13 @@ from codex_batch_runner.retention_compaction import (
 
 NOW = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
 OLD = "2026-01-01T00:00:00+00:00"
+
+
+def stable_digest(value: object) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def write_config(root: Path, *, cursor: Path | None = None) -> Path:
@@ -76,6 +85,16 @@ def inventory_path(
     path = root / "inventory.json"
     path.write_text(json.dumps(report), encoding="utf-8")
     return path
+
+
+def snapshot_tree(path: Path) -> dict[str, bytes]:
+    if not path.exists():
+        return {}
+    return {
+        item.relative_to(path).as_posix(): item.read_bytes()
+        for item in sorted(path.rglob("*"))
+        if item.is_file()
+    }
 
 
 class RetentionCompactionTests(unittest.TestCase):
@@ -408,7 +427,12 @@ class RetentionCompactionTests(unittest.TestCase):
                     "status": "archived",
                     "archived_at": OLD,
                     "previous_status": "completed",
-                    "archive_gate_result": {"status": "passed"},
+                    "archive_gate_result": {
+                        "status": "passed",
+                        "checked_at": OLD,
+                        "blockers": [],
+                        "warnings": [],
+                    },
                     **fields,
                 }
                 write_task(config, **base)
@@ -468,6 +492,387 @@ class RetentionCompactionTests(unittest.TestCase):
             forged_plan["action"] = "delete"
             with self.assertRaisesRegex(RetentionCompactionError, "semantics"):
                 validate_retention_compaction_plan(forged_plan)
+
+    def test_operation_id_binds_exact_inventory_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            write_task(config)
+            report_a = inventory_path(root, config, now=NOW)
+            report_a = root / "inventory-a.json"
+            report_a.write_text(
+                json.dumps(
+                    build_retention_inventory_report(
+                        config, proposal_age_days=60, now=NOW
+                    )
+                ),
+                encoding="utf-8",
+            )
+            report_b = root / "inventory-b.json"
+            report_b.write_text(
+                json.dumps(
+                    build_retention_inventory_report(
+                        config,
+                        proposal_age_days=60,
+                        now=NOW + timedelta(seconds=1),
+                    )
+                ),
+                encoding="utf-8",
+            )
+            plan_a = build_retention_compaction_plan(
+                config, report_a, "private-session-like-task", now=NOW
+            )
+            plan_b = build_retention_compaction_plan(
+                config,
+                report_b,
+                "private-session-like-task",
+                now=NOW + timedelta(seconds=1),
+            )
+            self.assertNotEqual(plan_a["operation_id"], plan_b["operation_id"])
+            with self.assertRaisesRegex(RetentionCompactionError, "confirm-operation-id"):
+                apply_retention_compaction(
+                    config,
+                    report_b,
+                    "private-session-like-task",
+                    confirm_operation_id=plan_a["operation_id"],
+                    now=NOW + timedelta(seconds=1),
+                )
+            self.assertFalse((root / "runtime" / "retention").exists())
+
+    def test_unknown_lifecycle_and_parent_attention_fail_closed(self) -> None:
+        for fields, reason in (
+            ({"chain_status": "unknown-chain"}, "chain_status_unknown"),
+            ({"execution_mode": "remote-magic"}, "execution_mode_unknown"),
+        ):
+            with self.subTest(fields=fields), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                config = Config.load(str(write_config(root)))
+                write_task(config, **fields)
+                report_path = inventory_path(root, config)
+                with self.assertRaisesRegex(RetentionCompactionError, reason):
+                    build_retention_compaction_plan(
+                        config, report_path, "private-session-like-task", now=NOW
+                    )
+
+        for gate in (
+            {
+                "status": "passed",
+                "checked_at": OLD,
+                "blockers": ["contradiction"],
+                "warnings": [],
+            },
+            {
+                "status": "unknown",
+                "checked_at": OLD,
+                "blockers": [],
+                "warnings": [],
+            },
+        ):
+            with self.subTest(gate=gate), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                config = Config.load(str(write_config(root)))
+                write_task(
+                    config,
+                    status="archived",
+                    archived_at=OLD,
+                    previous_status="completed",
+                    archive_gate_result=gate,
+                )
+                report_path = inventory_path(root, config)
+                with self.assertRaisesRegex(
+                    RetentionCompactionError,
+                    "archive_terminal_consistency_unverified",
+                ):
+                    build_retention_compaction_plan(
+                        config, report_path, "private-session-like-task", now=NOW
+                    )
+
+        for state in (
+            "pending",
+            "retry_wait",
+            "delivered",
+            "unavailable",
+            "failed",
+            "acknowledged",
+        ):
+            with self.subTest(attention_state=state), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                config = Config.load(str(write_config(root)))
+                write_task(config)
+                record = create_parent_attention(
+                    config,
+                    parent_ref="opaque-parent",
+                    work_item_ref="private-session-like-task",
+                    completion_id="completion-safe",
+                    wake_reason="completed",
+                    summary="safe summary",
+                )
+                record["delivery"]["state"] = state
+                if state == "acknowledged":
+                    record["delivery"]["acknowledged_at"] = OLD
+                outbox_record = (
+                    config.parent_attention_outbox_dir / f"{record['event_id']}.json"
+                )
+                outbox_record.write_text(json.dumps(record), encoding="utf-8")
+                report_path = inventory_path(root, config)
+                if state == "acknowledged":
+                    plan = build_retention_compaction_plan(
+                        config, report_path, "private-session-like-task", now=NOW
+                    )
+                    self.assertEqual("create", plan["action"])
+                else:
+                    with self.assertRaisesRegex(
+                        RetentionCompactionError, "unresolved parent attention"
+                    ):
+                        build_retention_compaction_plan(
+                            config,
+                            report_path,
+                            "private-session-like-task",
+                            now=NOW,
+                        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            write_task(config)
+            config.parent_attention_outbox_dir.mkdir(parents=True)
+            (config.parent_attention_outbox_dir / "pa-malformed.json").write_text(
+                "{bad json", encoding="utf-8"
+            )
+            report_path = inventory_path(root, config)
+            with self.assertRaisesRegex(
+                RetentionCompactionError, "parent attention record"
+            ):
+                build_retention_compaction_plan(
+                    config, report_path, "private-session-like-task", now=NOW
+                )
+
+    def test_global_restore_index_references_block_new_operations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            write_task(config)
+            report_a = root / "inventory-a.json"
+            report_a.write_text(
+                json.dumps(
+                    build_retention_inventory_report(
+                        config, proposal_age_days=60, now=NOW
+                    )
+                ),
+                encoding="utf-8",
+            )
+            plan_a = build_retention_compaction_plan(
+                config, report_a, "private-session-like-task", now=NOW
+            )
+            apply_retention_compaction(
+                config,
+                report_a,
+                "private-session-like-task",
+                confirm_operation_id=plan_a["operation_id"],
+                now=NOW,
+            )
+            report_b = root / "inventory-b.json"
+            report_b.write_text(
+                json.dumps(
+                    build_retention_inventory_report(
+                        config,
+                        proposal_age_days=60,
+                        now=NOW + timedelta(seconds=1),
+                    )
+                ),
+                encoding="utf-8",
+            )
+            plan_b = build_retention_compaction_plan(
+                config,
+                report_b,
+                "private-session-like-task",
+                now=NOW + timedelta(seconds=1),
+            )
+            store = root / "runtime" / "retention"
+            (store / "bundles" / f"{plan_a['operation_id']}.json").unlink()
+            with self.assertRaisesRegex(
+                RetentionCompactionError, "missing or unsafe retention records"
+            ):
+                apply_retention_compaction(
+                    config,
+                    report_b,
+                    "private-session-like-task",
+                    confirm_operation_id=plan_b["operation_id"],
+                    now=NOW + timedelta(seconds=1),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            write_task(config)
+            report_a = inventory_path(root, config)
+            plan_a = build_retention_compaction_plan(
+                config, report_a, "private-session-like-task", now=NOW
+            )
+            apply_retention_compaction(
+                config,
+                report_a,
+                "private-session-like-task",
+                confirm_operation_id=plan_a["operation_id"],
+                now=NOW,
+            )
+            index_path = root / "runtime" / "retention" / "restore-index-v1.json"
+            index = json.loads(index_path.read_text())
+            entry = index["entries"][plan_a["operation_id"]]
+            entry["bundle_digest"] = "sha256:" + ("0" * 64)
+            entry_body = {
+                key: value for key, value in entry.items() if key != "entry_digest"
+            }
+            entry["entry_digest"] = stable_digest(entry_body)
+            index_body = {
+                key: value for key, value in index.items() if key != "index_digest"
+            }
+            index["index_digest"] = stable_digest(index_body)
+            index_path.write_text(json.dumps(index), encoding="utf-8")
+            report_b = root / "inventory-b.json"
+            report_b.write_text(
+                json.dumps(
+                    build_retention_inventory_report(
+                        config,
+                        proposal_age_days=60,
+                        now=NOW + timedelta(seconds=1),
+                    )
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                RetentionCompactionError, "bundle binding mismatch"
+            ):
+                build_retention_compaction_plan(
+                    config,
+                    report_b,
+                    "private-session-like-task",
+                    now=NOW + timedelta(seconds=1),
+                )
+
+    def test_canonical_artifacts_unchanged_and_commit_marker_failure_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config.load(str(write_config(root)))
+            config.log_dir.mkdir(parents=True)
+            log = config.log_dir / "attempt.jsonl"
+            log.write_bytes(b'{"synthetic":"log"}\n')
+            config.event_dir.mkdir(parents=True)
+            event = config.event_dir / "events.jsonl"
+            event.write_bytes(b'{"synthetic":"event"}\n')
+            write_task(config, log_paths=[str(log)])
+            report_path = inventory_path(root, config)
+            plan = build_retention_compaction_plan(
+                config, report_path, "private-session-like-task", now=NOW
+            )
+            report_b = root / "inventory-b.json"
+            report_b.write_text(
+                json.dumps(
+                    build_retention_inventory_report(
+                        config,
+                        proposal_age_days=60,
+                        now=NOW + timedelta(seconds=1),
+                    )
+                ),
+                encoding="utf-8",
+            )
+            plan_b = build_retention_compaction_plan(
+                config,
+                report_b,
+                "private-session-like-task",
+                now=NOW + timedelta(seconds=1),
+            )
+            before = {
+                "queue": snapshot_tree(config.queue_dir),
+                "log": snapshot_tree(config.log_dir),
+                "event": snapshot_tree(config.event_dir),
+            }
+
+            def fail_commit_marker(path: Path, value: object) -> None:
+                if (
+                    path.parent.name == "transactions"
+                    and isinstance(value, dict)
+                    and value.get("state") == "committed"
+                ):
+                    raise OSError("synthetic committed marker failure")
+                real_write_json_atomic(path, value)
+
+            with patch(
+                "codex_batch_runner.retention_compaction.write_json_atomic",
+                side_effect=fail_commit_marker,
+            ):
+                with self.assertRaises(OSError):
+                    apply_retention_compaction(
+                        config,
+                        report_path,
+                        "private-session-like-task",
+                        confirm_operation_id=plan["operation_id"],
+                        now=NOW,
+                    )
+            store = root / "runtime" / "retention"
+            transaction = json.loads(
+                next((store / "transactions").glob("*.json")).read_text()
+            )
+            index = json.loads((store / "restore-index-v1.json").read_text())
+            self.assertEqual("prepared", transaction["state"])
+            self.assertIn(plan["operation_id"], index["entries"])
+            with self.assertRaisesRegex(
+                RetentionCompactionError, "foreign prepared retention transaction"
+            ):
+                apply_retention_compaction(
+                    config,
+                    report_b,
+                    "private-session-like-task",
+                    confirm_operation_id=plan_b["operation_id"],
+                    now=NOW + timedelta(seconds=1),
+                )
+            recovered = apply_retention_compaction(
+                config,
+                report_path,
+                "private-session-like-task",
+                confirm_operation_id=plan["operation_id"],
+                now=NOW,
+            )
+            self.assertEqual("recovered", recovered["action"])
+            after = {
+                "queue": snapshot_tree(config.queue_dir),
+                "log": snapshot_tree(config.log_dir),
+                "event": snapshot_tree(config.event_dir),
+            }
+            self.assertEqual(before, after)
+
+    def test_retention_store_rejects_bidirectional_artifact_overlap(self) -> None:
+        for log_suffix in ("", "retention/logs"):
+            with self.subTest(log_suffix=log_suffix), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                runtime = root / "runtime"
+                log_dir = runtime / log_suffix if log_suffix else runtime
+                config_path = root / "config.json"
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "queue_dir": str(runtime / "tasks"),
+                            "log_dir": str(log_dir),
+                            "event_dir": str(runtime / "events"),
+                            "lock_file": str(runtime / "runner.lock"),
+                            "state_file": str(runtime / "state.json"),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                config = Config.load(str(config_path))
+                write_task(config)
+                report_path = inventory_path(root, config)
+                with self.assertRaisesRegex(
+                    RetentionCompactionError,
+                    "outside queue, log, and event directories",
+                ):
+                    build_retention_compaction_plan(
+                        config,
+                        report_path,
+                        "private-session-like-task",
+                        now=NOW,
+                    )
 
 
 if __name__ == "__main__":

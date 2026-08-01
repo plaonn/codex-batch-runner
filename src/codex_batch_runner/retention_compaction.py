@@ -9,6 +9,12 @@ from typing import Any
 from .config import Config
 from .fs import write_json_atomic, write_json_atomic_create
 from .lock import FileLock
+from .parent_attention import (
+    DELIVERY_STATES,
+    SCHEMA_VERSION as PARENT_ATTENTION_SCHEMA_VERSION,
+    WAKE_REASONS,
+    outbox_dir as parent_attention_outbox_dir,
+)
 from .queue import RESOLUTIONS
 from .retention import (
     CURSOR_UNCERTAINTY,
@@ -596,6 +602,7 @@ def _live_item(
     if len(selected_tasks) != 1:
         raise RetentionCompactionError("live task source is missing or ambiguous")
     live_blockers = _live_apply_blockers(selected_tasks[0])
+    _validate_parent_attention_state(config, task_id)
     if live_blockers:
         raise RetentionCompactionError(
             f"live task consistency rejected: {live_blockers[0]}"
@@ -662,6 +669,95 @@ def _validate_live_event_files(config: Config) -> None:
             ) from exc
 
 
+def _validate_parent_attention_state(config: Config, task_id: str) -> None:
+    directory = parent_attention_outbox_dir(config).expanduser().resolve()
+    if not directory.exists():
+        return
+    if directory.is_symlink() or not directory.is_dir():
+        raise RetentionCompactionError("parent attention outbox is unsafe")
+    for path in sorted(directory.glob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            raise RetentionCompactionError("parent attention record is unsafe")
+        record = _load_json_record(path, "parent attention record")
+        _validate_parent_attention_record(record, path.stem)
+        if (
+            record["work_item_ref"] == task_id
+            and record["delivery"]["state"] != "acknowledged"
+        ):
+            raise RetentionCompactionError(
+                "selected task has unresolved parent attention delivery"
+            )
+
+
+def _validate_parent_attention_record(
+    record: dict[str, Any], expected_event_id: str
+) -> None:
+    if set(record) != {
+        "schema_version",
+        "event_type",
+        "event_id",
+        "parent_ref",
+        "work_item_ref",
+        "completion_id",
+        "wake_reason",
+        "result",
+        "delivery",
+        "created_at",
+        "updated_at",
+    }:
+        raise RetentionCompactionError("parent attention record is malformed")
+    delivery = record.get("delivery")
+    if (
+        record.get("schema_version") != PARENT_ATTENTION_SCHEMA_VERSION
+        or record.get("event_type") != "parent_attention_required"
+        or record.get("event_id") != expected_event_id
+        or not isinstance(record.get("parent_ref"), str)
+        or not isinstance(record.get("work_item_ref"), str)
+        or not isinstance(record.get("completion_id"), str)
+        or record.get("wake_reason") not in WAKE_REASONS
+        or not isinstance(record.get("result"), dict)
+        or parse_time(record.get("created_at")) is None
+        or parse_time(record.get("updated_at")) is None
+        or not isinstance(delivery, dict)
+        or set(delivery)
+        != {
+            "state",
+            "attempts",
+            "max_attempts",
+            "next_attempt_at",
+            "last_attempt_at",
+            "last_error",
+            "delivered_at",
+            "acknowledged_at",
+        }
+        or delivery.get("state") not in DELIVERY_STATES
+        or isinstance(delivery.get("attempts"), bool)
+        or not isinstance(delivery.get("attempts"), int)
+        or delivery.get("attempts") < 0
+        or isinstance(delivery.get("max_attempts"), bool)
+        or not isinstance(delivery.get("max_attempts"), int)
+        or delivery.get("max_attempts") < 1
+    ):
+        raise RetentionCompactionError("parent attention record is malformed")
+    for key in (
+        "next_attempt_at",
+        "last_attempt_at",
+        "delivered_at",
+        "acknowledged_at",
+    ):
+        value = delivery.get(key)
+        if value is not None and parse_time(value) is None:
+            raise RetentionCompactionError("parent attention timestamp is malformed")
+    if delivery.get("last_error") is not None and not isinstance(
+        delivery.get("last_error"), str
+    ):
+        raise RetentionCompactionError("parent attention error state is malformed")
+    if delivery["state"] == "acknowledged" and parse_time(
+        delivery.get("acknowledged_at")
+    ) is None:
+        raise RetentionCompactionError("parent attention acknowledgement is malformed")
+
+
 def _live_apply_blockers(task: dict[str, Any]) -> list[str]:
     blockers: list[str] = []
     status = task.get("status")
@@ -672,8 +768,7 @@ def _live_apply_blockers(task: dict[str, Any]) -> list[str]:
             blockers.append("review_not_accepted")
     elif status == "archived":
         gate = task.get("archive_gate_result")
-        if not isinstance(gate, dict) or gate.get("status") != "passed":
-            blockers.append("archive_terminal_consistency_unverified")
+        blockers.extend(_archive_gate_blockers(gate))
         previous = task.get("previous_status")
         if previous == "completed":
             if review not in {"accepted", "rejected"}:
@@ -690,15 +785,22 @@ def _live_apply_blockers(task: dict[str, Any]) -> list[str]:
         blockers.append("active_run_present")
     if task.get("recovery_required") or task.get("execution_worktree_status") == "recovery_required":
         blockers.append("recovery_required")
-    if task.get("chain_status") in {
+    chain_status = task.get("chain_status")
+    if chain_status in {
         "awaiting_review",
         "reviewing",
         "needs_fix",
         "fixing",
         "needs_human",
+        "loop_limit_reached",
     }:
         blockers.append("review_or_fix_chain_active")
-    if task.get("execution_mode") == "git_worktree":
+    elif chain_status not in {None, "accepted"}:
+        blockers.append("chain_status_unknown")
+    execution_mode = task.get("execution_mode")
+    if execution_mode not in {None, "main_worktree", "git_worktree"}:
+        blockers.append("execution_mode_unknown")
+    if execution_mode == "git_worktree":
         if task.get("execution_worktree_status") != "cleaned":
             blockers.append("worktree_not_cleaned")
         if task.get("execution_worktree_pool") and task.get(
@@ -717,14 +819,44 @@ def _live_apply_blockers(task: dict[str, Any]) -> list[str]:
     return sorted(set(blockers))
 
 
+def _archive_gate_blockers(gate: object) -> list[str]:
+    if not isinstance(gate, dict) or set(gate) != {
+        "status",
+        "checked_at",
+        "blockers",
+        "warnings",
+    }:
+        return ["archive_gate_malformed"]
+    if (
+        gate.get("status") != "passed"
+        or parse_time(gate.get("checked_at")) is None
+        or gate.get("blockers") != []
+        or not _string_list(gate.get("warnings"))
+    ):
+        return ["archive_terminal_consistency_unverified"]
+    return []
+
+
 def _build_bundle(
     item: dict[str, Any], inventory: dict[str, Any]
 ) -> dict[str, Any]:
     task_ref = item["artifacts"][0]["artifact_ref"]
+    approval_identity = {
+        "inventory_report_digest": inventory["report_digest"],
+        "inventory_preview_digest": item["compact_tombstone_preview"][
+            "preview_digest"
+        ],
+        "inventory_scope_digest": _inventory_scope_digest(inventory),
+        "cursor_scope_digest": inventory["cursor_safety"][
+            "cursor_scope_digest"
+        ],
+        "proposal_age_days": inventory["proposal_parameters"]["age_days"],
+    }
     identity = {
         "policy_revision": POLICY_REVISION,
         "source_task_ref": task_ref,
         "source_task_digest": item["source_task_digest"],
+        **approval_identity,
     }
     operation_id = "retention-" + _digest(identity).split(":", 1)[1][:32]
     status = item.get("status")
@@ -743,15 +875,7 @@ def _build_bundle(
         "operation_id": operation_id,
         "policy_revision": POLICY_REVISION,
         "approval_binding": {
-            "inventory_report_digest": inventory["report_digest"],
-            "inventory_preview_digest": item["compact_tombstone_preview"][
-                "preview_digest"
-            ],
-            "inventory_scope_digest": _inventory_scope_digest(inventory),
-            "cursor_scope_digest": inventory["cursor_safety"][
-                "cursor_scope_digest"
-            ],
-            "proposal_age_days": inventory["proposal_parameters"]["age_days"],
+            **approval_identity,
             "project_scope": "all_projects",
         },
         "source": {
@@ -910,6 +1034,7 @@ def _store_paths(config: Config, operation_id: str) -> dict[str, Path]:
     root = queue_dir.parent / "retention"
     if root in {queue_dir, log_dir, event_dir} or any(
         _is_relative_to(root, artifact_root)
+        or _is_relative_to(artifact_root, root)
         for artifact_root in (queue_dir, log_dir, event_dir)
     ):
         raise RetentionCompactionError(
@@ -931,6 +1056,7 @@ def _inspect_store(paths: dict[str, Path], bundle: dict[str, Any]) -> str:
     bundle_exists = paths["bundle"].exists()
     index_exists = paths["index"].exists()
     index = _load_restore_index(paths["index"])
+    _validate_restore_index_references(paths, index, bundle["operation_id"])
     entry = index["entries"].get(bundle["operation_id"])
     expected_entry = _restore_index_entry(bundle)
 
@@ -971,6 +1097,42 @@ def _inspect_store(paths: dict[str, Path], bundle: dict[str, Any]) -> str:
         # An index for other operations is not evidence of this operation.
         return "prepared"
     return "prepared"
+
+
+def _validate_restore_index_references(
+    paths: dict[str, Path],
+    index: dict[str, Any],
+    current_operation_id: str,
+) -> None:
+    for operation_id, entry in index["entries"].items():
+        bundle_path = paths["bundles"] / f"{operation_id}.json"
+        transaction_path = paths["transactions"] / f"{operation_id}.json"
+        if (
+            bundle_path.is_symlink()
+            or not bundle_path.is_file()
+            or transaction_path.is_symlink()
+            or not transaction_path.is_file()
+        ):
+            raise RetentionCompactionError(
+                "restore index references missing or unsafe retention records"
+            )
+        existing_bundle = _load_json_record(bundle_path, "indexed compact bundle")
+        validate_retention_compaction_bundle(existing_bundle)
+        if existing_bundle.get("operation_id") != operation_id:
+            raise RetentionCompactionError("restore index bundle identity mismatch")
+        if entry != _restore_index_entry(existing_bundle):
+            raise RetentionCompactionError("restore index bundle binding mismatch")
+        transaction = _load_json_record(
+            transaction_path, "indexed transaction journal"
+        )
+        _validate_transaction(transaction, existing_bundle)
+        if (
+            transaction["state"] == "prepared"
+            and operation_id != current_operation_id
+        ):
+            raise RetentionCompactionError(
+                "foreign prepared retention transaction requires recovery"
+            )
 
 
 def _prepare_store(paths: dict[str, Path]) -> None:
