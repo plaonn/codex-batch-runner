@@ -118,9 +118,15 @@ event file만 삭제할 수 있음. Canonical task JSON은 legacy/debug/audit ev
 
 `cbr retention-inventory`는 이 owner들을 재사용하는 별도 report-only projection임.
 명시적 proposal age가 없으면 age eligibility를 부여하지 않고, canonical task JSON은
-항상 protected로 남김. Tombstone/restore 정보는 preview일 뿐 compact record, index,
-TTL, 삭제 또는 runtime mutation을 만들지 않음. 상세 계약은
-[Report-only retention inventory](retention-inventory.md)를 참고하십시오.
+항상 protected로 남김. 이 inventory command의 Tombstone/restore 정보는 preview일 뿐
+compact record, index, TTL, 삭제 또는 runtime mutation을 만들지 않음. 상세 계약은
+[Retention inventory and additive compact records](retention-inventory.md)를 참고하십시오.
+
+`cbr retention compact`는 fresh unfiltered inventory report와 live source scope를
+CAS로 대조한 뒤 sanitized compact bundle, logical tombstone, lookup-only restore
+index, transaction journal만 additive하게 기록함. 기본은 dry-run이고 apply는 exact
+operation confirmation과 queue lock을 요구함. Canonical task와 raw artifact는
+변경하지 않으며 restore/delete/move/cold-storage를 구현하지 않음.
 
 SQLite는 초기 source of truth가 아니라 derived read index/cache입니다. SQLite index는 retained task JSON 파일과 retained event log에서 재생성 가능해야 하며, dashboard, notification, search, automated review workflow가 빠르게 조회하기 위한 optional layer로 둡니다. SQLite에는 prompt, transcript, raw Codex JSONL, session id, thread id, credential, environment value 같은 sensitive raw fields를 저장하지 않고 sanitized projection만 저장합니다. SQLite 파일이 없거나 손상되어도 `cbr enqueue`, `cbr list`, `cbr run-next`, `cbr accept/reject`, `cbr prune` 같은 core command는 canonical task JSON 파일과 event log만으로 계속 동작해야 합니다. 복구 방법은 손상된 SQLite 파일을 삭제하고 retained task JSON 및 retained event log에서 index를 다시 build하는 것입니다.
 

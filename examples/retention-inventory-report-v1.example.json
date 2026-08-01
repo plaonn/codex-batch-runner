@@ -2,6 +2,7 @@
   "cursor_safety": {
     "block_all_event_pruning": false,
     "configured_cursor_count": 0,
+    "cursor_scope_digest": "sha256:4ecb1aae1ffd40b4adb83a64185845d36caa30a1fecd333f149b5813188e7484",
     "reason_codes": []
   },
   "event_files": [],
@@ -18,7 +19,7 @@
     "age_is_policy": false,
     "project_filter_applied": false
   },
-  "report_digest": "sha256:b45792bb374ea4087846bcfc2e7a483e39764bd22f532e1cabf5a7138fc8d901",
+  "report_digest": "sha256:4d67bda04d19f3beef3b86cfe779fd66235e849a65f68dcfedd6ead66785d5ad",
   "schema_version": "retention-inventory-report-v1",
   "summary": {
     "artifact_count": 0,

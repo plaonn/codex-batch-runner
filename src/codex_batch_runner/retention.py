@@ -111,6 +111,7 @@ def build_retention_inventory_report(
         "cursor_safety": {
             "configured_cursor_count": len(cursor_safety.cursor_paths),
             "block_all_event_pruning": cursor_safety.block_all_event_pruning,
+            "cursor_scope_digest": _cursor_scope_digest(cursor_paths),
             "reason_codes": (
                 [CURSOR_UNCERTAINTY]
                 if cursor_safety.block_all_event_pruning or cursor_safety.warnings
@@ -416,6 +417,7 @@ def _event_items(
                 "exists": candidate.exists,
                 "safe": candidate.safe,
                 "modified_at": modified_at.isoformat(),
+                "source_digest": _file_digest(path),
                 "lifecycle_class": COLD_CANDIDATE if eligible else WARM,
                 "prune_candidate": eligible,
                 "reason_codes": (
@@ -493,6 +495,26 @@ def _file_digest(path: Path) -> str:
         return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return _digest(None)
+
+
+def _cursor_scope_digest(paths: list[Path]) -> str:
+    states: list[dict[str, Any]] = []
+    for path in paths:
+        resolved = path.expanduser().resolve(strict=False)
+        try:
+            state = {
+                "cursor_ref": _artifact_ref("cursor", str(resolved)),
+                "exists": resolved.exists(),
+                "source_digest": _file_digest(resolved) if resolved.exists() else None,
+            }
+        except OSError:
+            state = {
+                "cursor_ref": _artifact_ref("cursor", str(resolved)),
+                "exists": False,
+                "source_digest": None,
+            }
+        states.append(state)
+    return _digest({"cursor_states": states})
 
 
 def _digest(value: object) -> str:

@@ -31,7 +31,7 @@
 - [Orchestration selection funnel](docs/orchestration-selection-funnel.md): read-only durable selection-to-CBR lifecycle projection with explicit unknown/non-applicable semantics.
 - [Source-goal reconciliation](docs/goal-reconciliation.md): strict source-owned goal manifest and deterministic read-only CBR evidence projection without source or completion authority.
 - [Events and index contract](docs/events-and-index.md): event log, local SQLite read index, prune/retention.
-- [Report-only retention inventory](docs/retention-inventory.md): sanitized lifecycle, blocker, tombstone, and restore projection with no apply mode.
+- [Retention inventory and additive compact records](docs/retention-inventory.md): sanitized lifecycle projection plus an explicit, non-destructive compact/tombstone/restore-index apply path.
 - [CLI reference](docs/cli-reference.md): command reference and human/JSON output semantics, including list renderer and routing-report details.
 - [Operator installation guide](docs/operator-installation.md): config discovery, macOS launchd setup, doctor, cooldown wake, cross-project usage.
 - [Beta operations guide](docs/beta-operations.md): practical beta operating model and review workflow.

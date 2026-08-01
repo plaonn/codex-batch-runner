@@ -120,6 +120,8 @@ cbr prune --apply
 cbr prune --notifier-cursor-state path/to/notify-state.json
 cbr retention-inventory
 cbr retention-inventory --proposal-age-days 60 --json
+cbr retention compact --inventory-report PATH --task-id TASK_ID --json
+cbr retention compact --inventory-report PATH --task-id TASK_ID --apply --confirm-operation-id ID --json
 ```
 
 공통 option:
@@ -274,6 +276,16 @@ age eligibility를 부여하지 않습니다. `--proposal-age-days 60` 같은 �
 report-only proposal input이며 TTL 채택이나 apply authority가 아닙니다. 이 명령에는
 apply mode가 없고 canonical task JSON을 항상 protected로 표시합니다. 상세 계약은
 [Report-only retention inventory](retention-inventory.md)를 참고하십시오.
+
+`cbr retention compact --inventory-report PATH --task-id TASK_ID`는 fresh unfiltered
+inventory snapshot과 live task/event/cursor scope를 검증하는 dry-run이 기본입니다.
+`--apply`는 dry-run이 출력한 exact `--confirm-operation-id`를 추가로 요구하며 queue
+lock 아래에서 immutable compact bundle, logical non-deleting tombstone, lookup-only
+restore index entry, transaction journal을 순서대로 atomic write합니다. 동일 snapshot
+operation은 중복 생성하지 않고 bundle-only/prepared partial transaction을 재개합니다.
+Canonical task/log/event를 삭제·이동·변경하지 않으며 raw log/transcript restore를
+지원한다고 주장하지 않습니다. 상세 계약은 [Retention inventory and additive compact
+records](retention-inventory.md)를 참고하십시오.
 
 `cbr dashboard`는 local read-only operator overview HTTP server를 실행합니다. 기본 bind는 `127.0.0.1:8765`이며 `--host`, `--port`로 변경할 수 있습니다. Browser를 자동으로 열지 않고, 인증/token 설정을 추가하지 않으며, queue/task/review/event/state를 변경하는 route를 제공하지 않습니다.
 

@@ -91,6 +91,11 @@ from .retention import (
     build_retention_inventory_report,
     render_retention_inventory_report,
 )
+from .retention_compaction import (
+    apply_retention_compaction,
+    build_retention_compaction_plan,
+    render_retention_compaction_report,
+)
 from .post_accept import accept_task_and_integrate
 from .presentation import (
     TaskListPresentation,
@@ -1165,6 +1170,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retention_inventory.add_argument("--json", action="store_true", help="print JSON")
     retention_inventory.set_defaults(func=cmd_retention_inventory)
+
+    retention = sub.add_parser(
+        "retention",
+        help="plan or apply additive retention records without deleting artifacts",
+    )
+    retention_sub = retention.add_subparsers(
+        dest="retention_command", required=True
+    )
+    retention_compact = retention_sub.add_parser(
+        "compact",
+        help="write a compact record, logical tombstone, and restore index entry",
+    )
+    retention_compact.add_argument(
+        "--inventory-report",
+        type=Path,
+        required=True,
+        help="fresh retention-inventory JSON report",
+    )
+    retention_compact.add_argument("--task-id", required=True)
+    retention_compact_mode = retention_compact.add_mutually_exclusive_group()
+    retention_compact_mode.add_argument(
+        "--dry-run", action="store_true", help="validate and report; this is the default"
+    )
+    retention_compact_mode.add_argument(
+        "--apply", action="store_true", help="write additive retention records"
+    )
+    retention_compact.add_argument(
+        "--confirm-operation-id",
+        help="exact operation id emitted by dry-run; required with --apply",
+    )
+    retention_compact.add_argument("--json", action="store_true", help="print JSON")
+    retention_compact.set_defaults(func=cmd_retention_compact)
 
     apply_plan = sub.add_parser("apply-plan", help="validate or apply a queue mutation plan")
     apply_plan.add_argument("plan_path", help="queue plan JSON path")
@@ -6063,6 +6100,29 @@ def cmd_retention_inventory(config: Config, args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_retention_inventory_report(report), end="")
+    return 0
+
+
+def cmd_retention_compact(config: Config, args: argparse.Namespace) -> int:
+    if args.apply:
+        report = apply_retention_compaction(
+            config,
+            args.inventory_report,
+            args.task_id,
+            confirm_operation_id=args.confirm_operation_id,
+        )
+    else:
+        if args.confirm_operation_id:
+            raise ValueError("--confirm-operation-id is only valid with --apply")
+        report = build_retention_compaction_plan(
+            config,
+            args.inventory_report,
+            args.task_id,
+        )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_retention_compaction_report(report), end="")
     return 0
 
 
