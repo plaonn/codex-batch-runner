@@ -163,6 +163,16 @@ def build_worktree_reconciliation_plan(
     return validate_worktree_reconciliation_plan(report)
 
 
+def build_worktree_reconciliation_item(
+    config: Config,
+    task: dict[str, Any],
+) -> dict[str, Any]:
+    """Rebuild and validate one item from an already loaded canonical task."""
+    item = _task_plan(config, task, {})
+    _validate_item(item)
+    return item
+
+
 def validate_worktree_reconciliation_plan(value: object) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "schema_version",

@@ -19,7 +19,7 @@
 - [Provider resource report and D2-A simulator](docs/provider-resource-report.md): read-only provider evidence, exact-target decision/alternative preview, canonical gate keys, and D2-B safety boundary.
 - [Review contract](docs/review.md): review-bundle, review-next, reviewer Codex gates, bounded auto-fix loop.
 - [Worktree hibernation compatibility](docs/worktree-hibernation-plan.md): deterministic branch-only review and attachment reconciliation report.
-- [Legacy worktree reconciliation plan](docs/worktree-reconciliation-plan.md): snapshot-bound, report-only action classes for current and grandfathered metadata.
+- [Legacy worktree reconciliation plan and exact repair](docs/worktree-reconciliation-plan.md): snapshot-bound report-only classification plus queue-locked, single-task enum repair.
 - [Worktree contract](docs/worktrees.md): worktree prepare/apply/rebase/conflict-fix/cleanup/branch-prune/recovery.
 - [Scoped execution mutation provenance](docs/execution-mutation-provenance.md): report-only pre/post/terminal worktree evidence and explicit global non-claims.
 - [Trusted pre-execution delegation](docs/execution-delegation.md): immutable queue admission and runner-owned exact-target receipt barrier before worker invocation.

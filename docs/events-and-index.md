@@ -91,6 +91,18 @@ Payload 원칙:
 
 Minimal implementation emits events from `enqueue`, `run-next` task transitions, `accept`, `reject`, `resolve`, `archive`, manual cooldown changes, and rate-limit detection. Event write failures are non-fatal warnings; canonical task JSON remains the source of truth.
 
+`worktree reconciliation-repair` keeps stricter recovery audit history because
+its ordering is part of partial-write recovery. It writes sanitized
+`task_mutated` envelopes to one bounded per-task `.audit` file in the protected
+`event_dir/worktree-reconciliation-repair-v1/` namespace; the filename contains
+only an opaque task hash. Only the exact repair/recovery validator discovers
+this deterministic path. Ordinary `events`, index, notifier cursor, prune,
+retention inventory, and retention compaction flows intentionally exclude it,
+because their date-file cursor and deletion lifecycle is not safe for repair
+recovery evidence. Repair reads remain strict: duplicate, out-of-order, or
+noncanonical records fail closed, and a torn final line is never
+auto-truncated.
+
 Event log가 필요한 이유:
 
 - Queue mutation/replan: task가 왜 pause, dependency change, supersede, follow-up 상태가 되었는지 append-only history로 남길 수 있습니다.

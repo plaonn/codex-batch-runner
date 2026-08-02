@@ -282,6 +282,10 @@ from .worktree_reconciliation import (
     build_worktree_reconciliation_plan,
     render_worktree_reconciliation_plan,
 )
+from .worktree_repair import (
+    render_worktree_reconciliation_repair,
+    repair_worktree_reconciliation,
+)
 
 WATCH_RESTART_MESSAGE = "cbr source changed since this watch started; restart watch to use updated code"
 COMPACT_TABLE_BLOCK_LAYOUT_WIDTH = 80
@@ -1323,6 +1327,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     worktree_reconciliation_plan.set_defaults(
         func=cmd_worktree_reconciliation_plan
+    )
+    worktree_reconciliation_repair = worktree_sub.add_parser(
+        "reconciliation-repair",
+        help="preview or apply one exact C1 worktree metadata repair",
+    )
+    worktree_reconciliation_repair.add_argument(
+        "task_id",
+        help="exact task id from one C1 reconciliation-plan item",
+    )
+    worktree_reconciliation_repair.add_argument(
+        "--approved-source-digest",
+        required=True,
+        help="exact approved C1 source_snapshot_digest",
+    )
+    worktree_reconciliation_repair.add_argument(
+        "--apply",
+        action="store_true",
+        help="apply the single allowlisted metadata transition under the queue lock",
+    )
+    worktree_reconciliation_repair.add_argument(
+        "--json", action="store_true", help="print JSON"
+    )
+    worktree_reconciliation_repair.set_defaults(
+        func=cmd_worktree_reconciliation_repair
     )
     return parser
 
@@ -6232,6 +6260,22 @@ def cmd_worktree_reconciliation_plan(
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_worktree_reconciliation_plan(report), end="")
+    return 0
+
+
+def cmd_worktree_reconciliation_repair(
+    config: Config, args: argparse.Namespace
+) -> int:
+    report = repair_worktree_reconciliation(
+        config,
+        args.task_id,
+        approved_source_digest=args.approved_source_digest,
+        apply=args.apply,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_worktree_reconciliation_repair(report), end="")
     return 0
 
 

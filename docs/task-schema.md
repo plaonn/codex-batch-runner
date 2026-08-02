@@ -174,6 +174,11 @@ backfill하지 않음. Reattach 성공 시 새 `execution_worktree_path`,
 review status, result disposition, worker lifecycle을 변경하지 않음.
 
 `worktree reconciliation-plan`은 legacy/current metadata를 read-only로 분류함.
+`worktree reconciliation-repair` apply는 exact C1 digest와 live candidate를 queue
+lock 아래에서 다시 검증하고 `execution_worktree_status`의
+`retained|recovery_required -> cleaned` 전이만 허용함. 다른 task field는 그대로
+유지되며 partial recovery는 task field가 아니라 sanitized append-only audit phase로
+추적함.
 Source snapshot은 task status, review/apply/worktree enum, resolved base/checkpoint/branch
 commit과 ancestry, opaque repository/branch/registry refs, resolution/follow-up/timestamp
 digests, cleanup/hibernation/branch-prune receipt, conflict-fix apply linkage,
@@ -182,9 +187,10 @@ released lease receipt를 추가로 요구하며 non-pool row의 injected pool m
 active/ambiguous lease는 repair candidate가 아님. Existing cleanup 뒤 branch-prune
 또는 conflict-fix apply-via owner receipt가 exact한 terminal `cleaned` state는
 `no_action`으로 유지함.
-`exact_repair_candidate`가 표시되더라도 future repair 권한은 생기지 않으며, 현재
-command는 enum-level before/after delta만 출력함. Future repair는 queue lock 아래에서
-approved digest와 live source facts를 다시 대조해야 함. Missing path alone은
+`exact_repair_candidate`가 표시되더라도 C1 plan 자체에서 repair 권한은 생기지 않으며,
+C1 command는 enum-level before/after delta만 출력함. 별도 C2
+`reconciliation-repair` apply가 queue lock 아래에서 approved digest와 live source facts를
+다시 대조해야 함. Missing path alone은
 `hibernated`, `cleaned`, accepted/applied/rejected/resolved/archived 또는 deletion
 eligibility 증거가 아님.
 
