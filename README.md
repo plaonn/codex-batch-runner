@@ -27,6 +27,7 @@
 - [Capacity target-ordering activation simulation](docs/capacity-target-ordering-simulation.md): deterministic report-only counterfactual ordering over the immutable baseline eligible set.
 - [Bounded capacity target-ordering canary mechanism](docs/capacity-target-ordering-canary.md): default-disabled exact-scope claim-time ordering with deterministic assignment, append-only evidence, and fail-closed rollback.
 - [Capacity gate-lifecycle activation simulation](docs/capacity-gate-lifecycle-simulation.md): deterministic report-only replay of typed gate creation, deduplication, supersession, wake revalidation, release, rollback, and synthetic hard-exclusion mechanics.
+- [Capacity reservation and feedback simulation](docs/capacity-reservation-feedback-simulation.md): exact-bound, report-only reservation, append-only feedback, half-open, and retry-budget previews.
 - [Orchestration selection shadow evidence](docs/orchestration-selection-shadow.md): deterministic D1-bound recommendation/selection comparison with immutable private recording and no dispatch or warning authority.
 - [Orchestration selection funnel](docs/orchestration-selection-funnel.md): read-only durable selection-to-CBR lifecycle projection with explicit unknown/non-applicable semantics.
 - [Source-goal reconciliation](docs/goal-reconciliation.md): strict source-owned goal manifest and deterministic read-only CBR evidence projection without source or completion authority.

@@ -239,6 +239,10 @@ from .provider_resource_report import (
     validate_snapshot as validate_provider_resource_snapshot,
 )
 from .provider_resource_authority import validate_admission_policy
+from .capacity_reservation_feedback_simulation import (
+    CapacityReservationFeedbackSimulationError,
+    simulate_capacity_reservation_feedback,
+)
 from .provider_resource_simulator import (
     build_provider_resource_simulation,
     render_provider_resource_simulation,
@@ -954,6 +958,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provider_resource_simulate.add_argument("--json", action="store_true", help="print JSON")
     provider_resource_simulate.set_defaults(func=cmd_provider_resource_simulate)
+
+    reservation_feedback_simulate = sub.add_parser(
+        "capacity-reservation-feedback-simulate",
+        help="preview exact-bound reservation and feedback without changing runtime state",
+    )
+    reservation_feedback_simulate.add_argument("--request-json", required=True, metavar="PATH")
+    reservation_feedback_simulate.add_argument("--json", action="store_true", help="print JSON")
+    reservation_feedback_simulate.set_defaults(func=cmd_capacity_reservation_feedback_simulate)
 
     cooldown = sub.add_parser("cooldown", help="show, set, or clear global cooldown")
     cooldown_sub = cooldown.add_subparsers(dest="cooldown_command", required=True)
@@ -5540,6 +5552,19 @@ def cmd_provider_resource_simulate(config: Config, args: argparse.Namespace) -> 
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_provider_resource_simulation(report), end="")
+    return 0
+
+
+def cmd_capacity_reservation_feedback_simulate(config: Config, args: argparse.Namespace) -> int:
+    del config
+    try:
+        report = simulate_capacity_reservation_feedback(
+            load_provider_resource_json(args.request_json)
+        )
+    except (CapacityReservationFeedbackSimulationError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 

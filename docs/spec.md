@@ -13,6 +13,7 @@
 - [Capacity target-ordering activation simulation](capacity-target-ordering-simulation.md): bounded report-only activation handoff that preserves the immutable baseline while counterfactually reordering only its already-eligible exact targets.
 - [Bounded capacity target-ordering canary mechanism](capacity-target-ordering-canary.md): default-disabled exact-scope claim-time reordering over the immutable eligible set with a fixed 10% ceiling and baseline-only rollback.
 - [Capacity gate-lifecycle activation simulation](capacity-gate-lifecycle-simulation.md): bounded report-only replay over immutable typed gate state, global-first observations, canonical decision/wake keys, reset revalidation, rollback, and non-authoritative synthetic hard-exclusion mechanics.
+- [Capacity reservation and feedback simulation](capacity-reservation-feedback-simulation.md): strict report-only exact-bound reservation and append-only feedback preview with separate retry budgeting.
 - [Review contract](review.md): review-bundle, review-next, reviewer Codex safety model, mechanical gates, bounded auto-fix loop.
 - [Worktree isolation and apply contract](worktrees.md): worktree execution isolation, apply/rebase/conflict-fix, cleanup, branch-prune, recovery.
 - [Events, index, and retention contract](events-and-index.md): event log, local SQLite read index, prune/retention behavior.
