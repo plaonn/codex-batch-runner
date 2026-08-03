@@ -8,9 +8,15 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
+from .capacity_target_ordering_simulation import (
+    CapacityTargetOrderingSimulationError,
+    validate_capacity_target_ordering_simulation_report,
+)
 from .provider_resource_authority import (
     resource_gate_key,
     validate_admission_policy,
+    validate_gate_decision,
+    validate_gate_state,
     validate_mapping_v2,
 )
 from .provider_resource_report import ProviderResourceValidationError
@@ -18,6 +24,7 @@ from .provider_resource_report import ProviderResourceValidationError
 REQUEST_CONTRACT = "capacity-reservation-feedback-simulation-request-v1"
 REPORT_CONTRACT = "capacity-reservation-feedback-simulation-v1"
 POLICY_REVISION = "capacity-reservation-feedback-simulation-policy-v1"
+RETRY_POLICY_REVISION = "capacity-reservation-feedback-retry-policy-v1"
 MANUAL_OVERRIDE_BINDING_GAP = "manual_override_binding_not_expressed_by_selector_report"
 MUTATION_FIELDS = (
     "queue_mutations",
@@ -32,6 +39,8 @@ MUTATION_FIELDS = (
     "retry_mutations",
 )
 SAFE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:+-")
+GATE_STATUSES = {"allowed", "gated", "unknown"}
+OUTCOMES = {"success", "failure", "unknown", "recovery"}
 
 
 class CapacityReservationFeedbackSimulationError(ValueError):
@@ -51,27 +60,27 @@ def stable_digest(value: object) -> str:
         raise CapacityReservationFeedbackSimulationError(
             "value is not stable-digest serializable"
         ) from exc
-    return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def validate_capacity_reservation_feedback_simulation_request(
     value: object,
 ) -> dict[str, Any]:
-    r = _obj("request", value)
+    request = _obj("request", value)
     _keys(
         "request",
-        r,
+        request,
         {
             "schema_version",
             "contract",
             "scope",
             "revisions",
-            "currentness",
-            "selector_binding",
-            "global_admission",
             "mapping",
             "admission_policy",
+            "currentness_evidence",
+            "selector_binding",
             "resource",
+            "gates",
             "replay",
             "predecessor_events",
             "reservation",
@@ -79,17 +88,17 @@ def validate_capacity_reservation_feedback_simulation_request(
             "retry_budget",
         },
     )
-    _int_literal("request.schema_version", r.get("schema_version"), 1)
-    _lit("request.contract", r.get("contract"), REQUEST_CONTRACT)
-    scope = _scope(r.get("scope"))
-    revisions = _revisions(r.get("revisions"))
-    currentness = _currentness(r.get("currentness"), revisions)
+    _int_literal("request.schema_version", request.get("schema_version"), 1)
+    _lit("request.contract", request.get("contract"), REQUEST_CONTRACT)
+    scope = _scope(request.get("scope"))
+    revisions = _revisions(request.get("revisions"))
+    replay = _replay(request.get("replay"))
     try:
-        mapping = validate_mapping_v2(r.get("mapping"))
-        admission_policy = validate_admission_policy(r.get("admission_policy"))
+        mapping = validate_mapping_v2(request.get("mapping"))
+        policy = validate_admission_policy(request.get("admission_policy"))
     except ProviderResourceValidationError as exc:
         raise CapacityReservationFeedbackSimulationError(
-            "mapping or admission policy invalid"
+            "request mapping or admission policy is invalid"
         ) from exc
     _lit(
         "request.revisions.mapping_revision",
@@ -99,29 +108,65 @@ def validate_capacity_reservation_feedback_simulation_request(
     _lit(
         "request.revisions.policy_revision",
         revisions["policy_revision"],
-        admission_policy["policy_revision"],
+        policy["policy_revision"],
     )
-    selector = _selector(r.get("selector_binding"), scope, revisions)
-    global_admission = _global(r.get("global_admission"))
-    resource = _resource(r.get("resource"), revisions, mapping, admission_policy, scope)
-    replay = _replay(r.get("replay"))
-    events = _events(r.get("predecessor_events"), replay["evaluated_at"])
+    resource, binding, rule = _resource(
+        request.get("resource"), scope, revisions, mapping, policy, replay
+    )
+    currentness = _currentness(
+        request.get("currentness_evidence"),
+        scope,
+        revisions,
+        mapping,
+        policy,
+        resource,
+        replay,
+    )
+    selector = _selector(
+        request.get("selector_binding"), scope, revisions, mapping, resource
+    )
+    gates = _gates(request.get("gates"), resource, revisions)
+    events = _events(request.get("predecessor_events"), replay["evaluated_at"])
     reservation = _reservation(
-        r.get("reservation"), scope, resource, revisions, currentness
+        request.get("reservation"),
+        scope,
+        revisions,
+        mapping,
+        policy,
+        currentness,
+        selector,
+        resource,
+        binding,
+        gates,
     )
-    feedback = _feedback(r.get("feedback"), scope, resource, revisions, events)
-    retry = _retry(r.get("retry_budget"), scope)
+    feedback = _feedback(
+        request.get("feedback"),
+        scope,
+        revisions,
+        currentness,
+        resource,
+        gates,
+        events,
+        replay,
+    )
+    retry = _retry(request.get("retry_budget"), scope, revisions, selector)
+    # Retain the selected applicable source rule in validation, but do not add a
+    # second caller-authored authority copy to the normalized request.
+    if rule["target_id"] != scope["target_id"]:
+        raise CapacityReservationFeedbackSimulationError(
+            "applicable policy target rule mismatch"
+        )
     return {
         "schema_version": 1,
         "contract": REQUEST_CONTRACT,
         "scope": scope,
         "revisions": revisions,
-        "currentness": currentness,
         "mapping": deepcopy(mapping),
-        "admission_policy": deepcopy(admission_policy),
+        "admission_policy": deepcopy(policy),
+        "currentness_evidence": currentness,
         "selector_binding": selector,
-        "global_admission": global_admission,
         "resource": resource,
+        "gates": gates,
         "replay": replay,
         "predecessor_events": events,
         "reservation": reservation,
@@ -131,9 +176,8 @@ def validate_capacity_reservation_feedback_simulation_request(
 
 
 def simulate_capacity_reservation_feedback(value: object) -> dict[str, Any]:
-    return validate_capacity_reservation_feedback_simulation_report(
-        _build(validate_capacity_reservation_feedback_simulation_request(value))
-    )
+    request = validate_capacity_reservation_feedback_simulation_request(value)
+    return validate_capacity_reservation_feedback_simulation_report(_build(request))
 
 
 def validate_capacity_reservation_feedback_simulation_report(
@@ -184,7 +228,7 @@ def validate_capacity_reservation_feedback_simulation_report(
     )
     _digest("report.input_digest", report.get("input_digest"))
     _digest("report.replay_digest", report.get("replay_digest"))
-    for f in (
+    for field in (
         "simulation_only",
         "activation_authority",
         "runtime_reservation",
@@ -204,89 +248,109 @@ def validate_capacity_reservation_feedback_simulation_report(
         "worker_promotion",
         "provider_promotion",
     ):
-        _lit("report." + f, report.get(f), f == "simulation_only")
-    for f in MUTATION_FIELDS:
-        _lit("report." + f, report.get(f), [])
+        _lit("report." + field, report.get(field), field == "simulation_only")
+    for field in MUTATION_FIELDS:
+        _lit("report." + field, report.get(field), [])
     _lit(
         "report.manual_override_binding_resolved",
         report.get("manual_override_binding_resolved"),
         False,
     )
-    if report != _build(request):
+    expected = _build(request)
+    if report != expected:
         raise CapacityReservationFeedbackSimulationError(
             "report must exactly match deterministic simulation request replay"
         )
     return deepcopy(report)
 
 
-def _build(r: dict[str, Any]) -> dict[str, Any]:
+def _build(request: dict[str, Any]) -> dict[str, Any]:
     reasons: list[str] = []
-    preview = "would_reserve"
-    reservation = deepcopy(r["reservation"])
-    feedback = deepcopy(r["feedback"])
-    # The validated upstream selector report has no manual-override artifact.
-    # Do not manufacture one locally: this branch remains fail-closed.
-    if True:
-        reasons.append(MANUAL_OVERRIDE_BINDING_GAP)
-    elif r["global_admission"]["status"] != "allowed":
-        reasons.append("global_admission_" + r["global_admission"]["status"])
-    elif r["selector_binding"]["status"] != "eligible":
-        reasons.append("selector_" + r["selector_binding"]["status"])
-    elif r["currentness"]["status"] != "current" or not _in_window(
-        r["replay"]["evaluated_at"], r["currentness"]
-    ):
-        reasons.append("currentness_not_current")
-    elif r["resource"]["mapping_status"] != "exact":
-        reasons.append("resource_mapping_not_exact")
-    elif not _in_window(r["replay"]["evaluated_at"], r["resource"]):
-        reasons.append("resource_not_current")
-    elif r["reservation"]["expires_at"] != _earliest(
-        r["reservation"], r["currentness"], r["resource"]
-    ):
-        reasons.append("reservation_expiry_not_earliest_boundary")
-    elif _at(r["replay"]["evaluated_at"]) >= _at(r["reservation"]["expires_at"]):
-        reasons.append("reservation_expired_revalidate_only")
-    if reasons:
-        preview = "fail_closed"
-        reservation = {"status": "not_reserved", "reason": reasons[0]}
-    # feedback is always append-only observation; failure/unknown are retained verbatim.
-    half_open = {"status": "not_eligible", "candidate_resource_keys": []}
-    recovery = (
-        r["feedback"]["outcome"] == "recovery" and r["feedback"]["fresh_exact_bound"]
-    )
-    if not reasons and recovery:
-        half_open = {
-            "status": "would_consider_one_candidate",
-            "candidate_resource_keys": [r["resource"]["canonical_key"]],
-        }
-    retry_status = (
-        "would_not_retry"
-        if r["retry_budget"]["automatic_retries"] == 0
-        else "preview_only"
+    gates = request["gates"]
+    selector = request["selector_binding"]
+    retry = request["retry_budget"]["body"]
+
+    # Canonical global-first precedence. Target state is intentionally ignored
+    # while the global tuple is not allowed.
+    if gates["global"]["status"] != "allowed":
+        reasons.append("global_gate_" + gates["global"]["status"])
+    elif gates["target"]["status"] != "allowed":
+        reasons.append("target_gate_" + gates["target"]["status"])
+    elif selector["hard_constraints"] != "pass":
+        reasons.append("selector_hard_constraints_not_pass")
+    elif selector["exact_target_eligibility"] != "pass":
+        reasons.append("selector_exact_target_eligibility_not_pass")
+    elif selector["quality_floor"] != "pass":
+        reasons.append("selector_quality_floor_not_pass")
+    elif selector["activation_report"]["decision"] == "fail_closed":
+        reasons.append("selector_activation_report_fail_closed")
+    elif not retry["cooldown_inactive"]:
+        reasons.append("retry_cooldown_active")
+    elif not retry["dependencies_satisfied"]:
+        reasons.append("retry_dependencies_unsatisfied")
+    elif not retry["resume_stop_inactive"]:
+        reasons.append("retry_resume_stop_active")
+    elif not retry["operator_stop_inactive"]:
+        reasons.append("retry_operator_stop_active")
+    elif not retry["task_attempt_boundary_preserved"]:
+        reasons.append("retry_task_attempt_boundary_not_preserved")
+    reasons.append(MANUAL_OVERRIDE_BINDING_GAP)
+
+    feedback_body = deepcopy(request["feedback"]["body"])
+    recovery = request["feedback"]["recovery_evidence"]
+    half_open_reason = (
+        MANUAL_OVERRIDE_BINDING_GAP
+        if recovery is not None
+        else "no_source_attested_recovery_evidence"
     )
     event_results = [
-        {"event_id": e["event_id"], "status": "retained_observation"}
-        for e in r["predecessor_events"]
+        {
+            "event_id": event["body"]["event_id"],
+            "outcome": event["body"]["outcome"],
+            "status": "retained_observation",
+        }
+        for event in request["predecessor_events"]
     ]
+    event_results.append(
+        {
+            "event_id": feedback_body["event_id"],
+            "outcome": feedback_body["outcome"],
+            "status": "retained_observation",
+        }
+    )
     body: dict[str, Any] = {
         "schema_version": 1,
         "contract": REPORT_CONTRACT,
-        "evaluated_at": r["replay"]["evaluated_at"],
-        "scope": deepcopy(r["scope"]),
-        "preview": preview,
-        "reason_codes": sorted(set(reasons or ["exact_bound_report_only_preview"])),
-        "reservation_preview": reservation,
-        "feedback_preview": feedback,
-        "half_open_preview": half_open,
+        "evaluated_at": request["replay"]["evaluated_at"],
+        "scope": deepcopy(request["scope"]),
+        "preview": "fail_closed",
+        "reason_codes": reasons,
+        "reservation_preview": {
+            "status": "not_reserved",
+            "reason": reasons[0],
+            "expires_at": request["reservation"]["body"]["expires_at"],
+        },
+        "feedback_preview": {
+            "status": "retained_observation",
+            "event_id": feedback_body["event_id"],
+            "outcome": feedback_body["outcome"],
+            "evidence_digest": request["feedback"]["evidence_digest"],
+        },
+        "half_open_preview": {
+            "status": "not_eligible",
+            "reason": half_open_reason,
+            "candidate_resource_keys": [],
+        },
         "retry_preview": {
-            "status": retry_status,
-            "remaining_preview": r["retry_budget"]["remaining"],
+            "status": "would_not_retry",
+            "safety_status": "safe" if _retry_safe(retry) else "unsafe",
+            "remaining_preview": retry["remaining"],
             "separate_from_provider_quota": True,
             "separate_from_task_attempt_limit": True,
         },
         "event_results": event_results,
-        "simulation_request": deepcopy(r),
-        "input_digest": stable_digest(r),
+        "simulation_request": deepcopy(request),
+        "input_digest": stable_digest(request),
         "simulation_only": True,
         "activation_authority": False,
         "runtime_reservation": False,
@@ -306,301 +370,617 @@ def _build(r: dict[str, Any]) -> dict[str, Any]:
         "worker_promotion": False,
         "provider_promotion": False,
         "manual_override_binding_resolved": False,
-        **{f: [] for f in MUTATION_FIELDS},
+        **{field: [] for field in MUTATION_FIELDS},
     }
     body["replay_digest"] = stable_digest(body)
     return body
 
 
-def _scope(v: object) -> dict[str, Any]:
-    d = _obj("request.scope", v)
+def _scope(value: object) -> dict[str, Any]:
+    scope = _obj("request.scope", value)
     _keys(
         "request.scope",
-        d,
+        scope,
         {
             "project_id",
             "repository_id",
             "task_class",
+            "opt_in_scope_id",
             "task_id",
             "attempt_id",
             "target_id",
             "opted_in",
         },
     )
-    for k in d:
-        if k != "opted_in":
-            _id("request.scope." + k, d[k])
-    _lit("request.scope.opted_in", d["opted_in"], True)
-    return deepcopy(d)
+    for field in scope:
+        if field != "opted_in":
+            _id("request.scope." + field, scope[field])
+    _lit("request.scope.opted_in", scope["opted_in"], True)
+    return deepcopy(scope)
 
 
-def _revisions(v: object) -> dict[str, Any]:
-    d = _obj("request.revisions", v)
+def _revisions(value: object) -> dict[str, Any]:
+    revisions = _obj("request.revisions", value)
     _keys(
         "request.revisions",
-        d,
+        revisions,
         {
             "mapping_revision",
             "currentness_revision",
             "policy_revision",
             "selector_revision",
             "resume_revision",
+            "retry_policy_revision",
             "simulation_policy_revision",
         },
     )
-    for k, x in d.items():
-        _id("request.revisions." + k, x)
+    for field, item in revisions.items():
+        _id("request.revisions." + field, item)
+    _lit(
+        "request.revisions.retry_policy_revision",
+        revisions["retry_policy_revision"],
+        RETRY_POLICY_REVISION,
+    )
     _lit(
         "request.revisions.simulation_policy_revision",
-        d["simulation_policy_revision"],
+        revisions["simulation_policy_revision"],
         POLICY_REVISION,
     )
-    return deepcopy(d)
+    return deepcopy(revisions)
 
 
-def _currentness(v: object, rev: dict[str, Any]) -> dict[str, Any]:
-    d = _timed(
-        "request.currentness", v, {"revision", "status", "observed_at", "expires_at"}
-    )
-    _lit("request.currentness.revision", d["revision"], rev["currentness_revision"])
-    if d["status"] not in {
-        "current",
-        "stale",
-        "unknown",
-        "missing",
-        "ambiguous",
-        "conflicting",
-    }:
-        raise CapacityReservationFeedbackSimulationError(
-            "request.currentness.status invalid"
-        )
-    return d
-
-
-def _selector(
-    v: object, scope: dict[str, Any], revisions: dict[str, Any]
-) -> dict[str, Any]:
-    d = _obj("request.selector_binding", v)
-    _keys(
-        "request.selector_binding",
-        d,
-        {
-            "status",
-            "baseline_digest",
-            "resume_binding",
-            "selector_revision",
-            "resume_revision",
-            "eligible_target_ids",
-        },
-    )
-    _digest("request.selector_binding.baseline_digest", d["baseline_digest"])
-    _id("request.selector_binding.resume_binding", d["resume_binding"])
-    _lit(
-        "request.selector_binding.selector_revision",
-        d["selector_revision"],
-        revisions["selector_revision"],
-    )
-    _lit(
-        "request.selector_binding.resume_revision",
-        d["resume_revision"],
-        revisions["resume_revision"],
-    )
-    if (
-        d["status"] not in {"eligible", "ineligible", "unknown", "stale", "conflicting"}
-        or not isinstance(d["eligible_target_ids"], list)
-        or scope["target_id"] not in d["eligible_target_ids"]
-    ):
-        raise CapacityReservationFeedbackSimulationError("selector binding invalid")
-    return deepcopy(d)
-
-
-def _global(v: object) -> dict[str, Any]:
-    d = _obj("request.global_admission", v)
-    _keys("request.global_admission", d, {"status", "decision_key", "wake_key"})
-    if d["status"] not in {"allowed", "gated", "unknown", "missing", "conflicting"}:
-        raise CapacityReservationFeedbackSimulationError("global admission invalid")
-    _id("request.global_admission.decision_key", d["decision_key"])
-    _id("request.global_admission.wake_key", d["wake_key"])
-    return deepcopy(d)
+def _replay(value: object) -> dict[str, str]:
+    replay = _obj("request.replay", value)
+    _keys("request.replay", replay, {"evaluated_at"})
+    _at(replay["evaluated_at"])
+    return deepcopy(replay)
 
 
 def _resource(
-    v: object,
+    value: object,
+    scope: dict[str, Any],
     revisions: dict[str, Any],
     mapping: dict[str, Any],
     policy: dict[str, Any],
-    scope: dict[str, Any],
-) -> dict[str, Any]:
-    d = _timed(
+    replay: dict[str, str],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    resource = _obj("request.resource", value)
+    _keys(
         "request.resource",
-        v,
+        resource,
         {
+            "target_id",
+            "binding_id",
+            "provider_id",
+            "quota_identity_id",
+            "scope_id",
+            "window_id",
             "canonical_key",
-            "mapping_status",
             "mapping_revision",
             "policy_revision",
-            "observed_at",
+            "identity_authority",
+            "verified_at",
             "expires_at",
         },
     )
-    _id("request.resource.canonical_key", d["canonical_key"])
-    _lit(
-        "request.resource.mapping_revision",
-        d["mapping_revision"],
-        revisions["mapping_revision"],
-    )
-    _lit(
-        "request.resource.policy_revision",
-        d["policy_revision"],
-        revisions["policy_revision"],
-    )
+    for field in resource:
+        if field not in {"verified_at", "expires_at"}:
+            _id("request.resource." + field, resource[field])
+    verified = _at(resource["verified_at"])
+    expires = _at(resource["expires_at"])
+    evaluated = _at(replay["evaluated_at"])
+    if not verified <= evaluated < expires:
+        raise CapacityReservationFeedbackSimulationError(
+            "resource mapping binding is not current at replay time"
+        )
+    if mapping["status"] != "current" or policy["status"] != "current":
+        raise CapacityReservationFeedbackSimulationError(
+            "mapping and admission policy must be current"
+        )
+    if not policy["enabled"]:
+        raise CapacityReservationFeedbackSimulationError(
+            "admission policy must be enabled"
+        )
+    if mapping["mapping_revision"] not in policy["allowed_mapping_revisions"]:
+        raise CapacityReservationFeedbackSimulationError(
+            "admission policy rejects mapping revision"
+        )
     bindings = [
-        item
-        for item in mapping["bindings"]
-        if item["target_id"] == scope["target_id"]
-        and item["status"] == "current"
-        and item["identity_authority"] == "source_attested"
+        binding
+        for binding in mapping["bindings"]
+        if binding["target_id"] == scope["target_id"]
+        and binding["status"] == "current"
+        and binding["identity_authority"] == "source_attested"
+        and _at(binding["verified_at"]) <= evaluated < _at(binding["expires_at"])
     ]
     if len(bindings) != 1:
         raise CapacityReservationFeedbackSimulationError(
-            "source-attested mapping binding missing or ambiguous"
+            "exactly one current source-attested target binding is required"
         )
     binding = bindings[0]
-    expected_key = resource_gate_key(
-        binding["provider_id"],
-        binding["quota_identity_id"],
-        binding["observation_scope"]["scope_id"],
-        "primary",
+    rules = [
+        rule
+        for rule in policy["target_rules"]
+        if rule["target_id"] == scope["target_id"]
+        and rule["provider_id"] == binding["provider_id"]
+    ]
+    if len(rules) != 1:
+        raise CapacityReservationFeedbackSimulationError(
+            "exactly one applicable enabled target policy rule is required"
+        )
+    rule = rules[0]
+    windows = {window["window_id"]: window for window in rule["window_rules"]}
+    if resource["window_id"] not in windows:
+        raise CapacityReservationFeedbackSimulationError(
+            "resource window is not admitted by target policy rule"
+        )
+    expected = {
+        "target_id": scope["target_id"],
+        "binding_id": binding["binding_id"],
+        "provider_id": binding["provider_id"],
+        "quota_identity_id": binding["quota_identity_id"],
+        "scope_id": binding["observation_scope"]["scope_id"],
+        "window_id": resource["window_id"],
+        "canonical_key": resource_gate_key(
+            binding["provider_id"],
+            binding["quota_identity_id"],
+            binding["observation_scope"]["scope_id"],
+            resource["window_id"],
+        ),
+        "mapping_revision": revisions["mapping_revision"],
+        "policy_revision": revisions["policy_revision"],
+        "identity_authority": "source_attested",
+        "verified_at": binding["verified_at"],
+        "expires_at": binding["expires_at"],
+    }
+    if resource != expected:
+        raise CapacityReservationFeedbackSimulationError(
+            "resource must exact-bind the current source artifact"
+        )
+    return deepcopy(resource), deepcopy(binding), deepcopy(rule)
+
+
+def _currentness(
+    value: object,
+    scope: dict[str, Any],
+    revisions: dict[str, Any],
+    mapping: dict[str, Any],
+    policy: dict[str, Any],
+    resource: dict[str, Any],
+    replay: dict[str, str],
+) -> dict[str, Any]:
+    evidence = _evidence("request.currentness_evidence", value)
+    body = evidence["body"]
+    _keys(
+        "request.currentness_evidence.body",
+        body,
+        {
+            "target_id",
+            "resource_key",
+            "scope",
+            "mapping_revision",
+            "policy_revision",
+            "currentness_revision",
+            "mapping_artifact_digest",
+            "policy_artifact_digest",
+            "observed_at",
+            "expires_at",
+            "identity_authority",
+        },
     )
-    _lit("request.resource.canonical_key", d["canonical_key"], expected_key)
-    if (
-        mapping["status"] != "current"
-        or policy["status"] != "current"
-        or not policy["enabled"]
-        or mapping["mapping_revision"] not in policy["allowed_mapping_revisions"]
-    ):
+    expected_scope = _source_scope(scope)
+    _lit("currentness target", body["target_id"], scope["target_id"])
+    _lit("currentness resource", body["resource_key"], resource["canonical_key"])
+    _lit("currentness scope", body["scope"], expected_scope)
+    _lit(
+        "currentness mapping revision",
+        body["mapping_revision"],
+        revisions["mapping_revision"],
+    )
+    _lit(
+        "currentness policy revision",
+        body["policy_revision"],
+        revisions["policy_revision"],
+    )
+    _lit(
+        "currentness revision",
+        body["currentness_revision"],
+        revisions["currentness_revision"],
+    )
+    _lit(
+        "currentness mapping artifact digest",
+        body["mapping_artifact_digest"],
+        stable_digest(mapping),
+    )
+    _lit(
+        "currentness policy artifact digest",
+        body["policy_artifact_digest"],
+        stable_digest(policy),
+    )
+    _lit(
+        "currentness identity authority", body["identity_authority"], "source_attested"
+    )
+    _digest("currentness mapping artifact digest", body["mapping_artifact_digest"])
+    _digest("currentness policy artifact digest", body["policy_artifact_digest"])
+    observed = _at(body["observed_at"])
+    expires = _at(body["expires_at"])
+    evaluated = _at(replay["evaluated_at"])
+    if not observed <= evaluated < expires:
         raise CapacityReservationFeedbackSimulationError(
-            "mapping or policy not currently admitted"
+            "source-attested currentness is not current at replay time"
         )
-    if d["mapping_status"] not in {
-        "exact",
-        "unknown",
-        "stale",
-        "missing",
-        "ambiguous",
-        "conflicting",
-    }:
-        raise CapacityReservationFeedbackSimulationError("resource mapping invalid")
-    return d
+    return evidence
 
 
-def _replay(v: object) -> dict[str, Any]:
-    d = _obj("request.replay", v)
-    _keys("request.replay", d, {"evaluated_at"})
-    _at(d["evaluated_at"])
-    return deepcopy(d)
-
-
-def _events(v: object, clock: str) -> list[dict[str, Any]]:
-    if not isinstance(v, list):
+def _selector(
+    value: object,
+    scope: dict[str, Any],
+    revisions: dict[str, Any],
+    mapping: dict[str, Any],
+    resource: dict[str, Any],
+) -> dict[str, Any]:
+    selector = _obj("request.selector_binding", value)
+    _keys(
+        "request.selector_binding",
+        selector,
+        {
+            "activation_report",
+            "activation_report_digest",
+            "hard_constraints",
+            "exact_target_eligibility",
+            "quality_floor",
+            "eligible_target_ids",
+            "immutable_baseline_digest",
+            "immutable_baseline_order",
+            "selected_target_id",
+            "selector_revision",
+            "resume_target_id",
+            "resume_revision",
+            "manual_override_binding_resolved",
+        },
+    )
+    try:
+        report = validate_capacity_target_ordering_simulation_report(
+            selector["activation_report"]
+        )
+    except CapacityTargetOrderingSimulationError as exc:
         raise CapacityReservationFeedbackSimulationError(
-            "predecessor_events must be a list"
+            "selector activation report is invalid"
+        ) from exc
+    _validate_digest_fields("selector activation report", report)
+    _lit(
+        "selector activation report digest",
+        selector["activation_report_digest"],
+        stable_digest(report),
+    )
+    _digest("selector activation report digest", selector["activation_report_digest"])
+    report_scope = report["scope"]
+    for field in ("project_id", "repository_id", "task_class", "opt_in_scope_id"):
+        _lit("selector scope " + field, report_scope[field], scope[field])
+    report_gates = report["simulation_request"]["global_gate"]
+    for field in ("hard_constraints", "exact_target_eligibility", "quality_floor"):
+        _lit("selector " + field, selector[field], report_gates[field])
+    _lit(
+        "selector eligible target ids",
+        selector["eligible_target_ids"],
+        report["baseline_order"],
+    )
+    _lit(
+        "selector immutable baseline order",
+        selector["immutable_baseline_order"],
+        report["baseline_order"],
+    )
+    _lit(
+        "selector immutable baseline digest",
+        selector["immutable_baseline_digest"],
+        stable_digest(
+            {"baseline": report["baseline"], "baseline_order": report["baseline_order"]}
+        ),
+    )
+    _digest("selector immutable baseline digest", selector["immutable_baseline_digest"])
+    _lit(
+        "selector selected target",
+        selector["selected_target_id"],
+        report["counterfactual_target_id"],
+    )
+    _lit("selector target scope", selector["selected_target_id"], scope["target_id"])
+    if selector["selected_target_id"] not in selector["eligible_target_ids"]:
+        raise CapacityReservationFeedbackSimulationError(
+            "selector target must be exactly eligible"
         )
-    out = []
-    previous = None
-    last = None
-    seen_ids: set[str] = set()
-    seen_digests: set[str] = set()
-    for i, raw in enumerate(v):
-        d = _obj(f"predecessor_events[{i}]", raw)
-        _keys(
-            f"predecessor_events[{i}]",
-            d,
-            {"event_id", "predecessor_event_id", "observed_at", "evidence_digest"},
+    _lit(
+        "selector revision",
+        selector["selector_revision"],
+        report["revisions"]["selector_policy_revision"],
+    )
+    _lit(
+        "selector request revision",
+        selector["selector_revision"],
+        revisions["selector_revision"],
+    )
+    _lit(
+        "selector mapping revision",
+        report["revisions"]["mapping_revision"],
+        mapping["mapping_revision"],
+    )
+    _lit(
+        "selector resume target",
+        selector["resume_target_id"],
+        report["resume_target_id"],
+    )
+    if selector["resume_target_id"] is not None:
+        _lit(
+            "selector resume target scope",
+            selector["resume_target_id"],
+            scope["target_id"],
         )
-        _id("event_id", d["event_id"])
-        _digest("evidence_digest", d["evidence_digest"])
-        if d["event_id"] in seen_ids or d["evidence_digest"] in seen_digests:
+    _lit(
+        "selector resume revision",
+        selector["resume_revision"],
+        revisions["resume_revision"],
+    )
+    _lit(
+        "selector manual override binding",
+        selector["manual_override_binding_resolved"],
+        False,
+    )
+    # Exact resource target binding is explicit even though the upstream report
+    # does not yet express the independent manual-override policy axis.
+    _lit(
+        "selector resource target",
+        resource["target_id"],
+        selector["selected_target_id"],
+    )
+    result = deepcopy(selector)
+    result["activation_report"] = report
+    return result
+
+
+def _gates(
+    value: object,
+    resource: dict[str, Any],
+    revisions: dict[str, Any],
+) -> dict[str, Any]:
+    gates = _obj("request.gates", value)
+    _keys("request.gates", gates, {"state", "decisions", "global", "target"})
+    try:
+        state = validate_gate_state(gates["state"])
+        raw_decisions = _list("request.gates.decisions", gates["decisions"])
+        decisions = [validate_gate_decision(item) for item in raw_decisions]
+    except ProviderResourceValidationError as exc:
+        raise CapacityReservationFeedbackSimulationError(
+            "canonical gate state or decision evidence is invalid"
+        ) from exc
+    if len(decisions) != 2 or len({item["decision_key"] for item in decisions}) != 2:
+        raise CapacityReservationFeedbackSimulationError(
+            "exactly two unique canonical gate decisions are required"
+        )
+    by_key = {item["decision_key"]: item for item in decisions}
+    normalized: dict[str, Any] = {
+        "state": state,
+        "decisions": decisions,
+    }
+    for name in ("global", "target"):
+        item = _gate_tuple("request.gates." + name, gates[name])
+        decision = by_key.get(item["decision_key"])
+        if decision is None:
             raise CapacityReservationFeedbackSimulationError(
-                "duplicate event id or evidence digest"
+                name + " gate tuple lacks exact canonical decision evidence"
             )
-        now = _at(d["observed_at"])
+        expected_status = _decision_status(decision["action"])
+        expected = {
+            "resource_key": decision["resource_key"],
+            "decision_key": decision["decision_key"],
+            "wake_key": decision["wake_key"],
+            "status": expected_status,
+        }
+        if item != expected:
+            raise CapacityReservationFeedbackSimulationError(
+                name + " gate tuple does not match canonical evidence"
+            )
         if (
-            d["predecessor_event_id"] != previous
-            or (last and now <= last)
-            or now > _at(clock)
+            decision["policy_revision"] != revisions["policy_revision"]
+            or decision["mapping_revision"] != revisions["mapping_revision"]
         ):
             raise CapacityReservationFeedbackSimulationError(
-                "predecessor lineage is broken or unordered"
+                name + " gate decision revision mismatch"
             )
-        out.append(deepcopy(d))
-        seen_ids.add(d["event_id"])
-        seen_digests.add(d["evidence_digest"])
-        previous = d["event_id"]
-        last = now
-    return out
+        normalized[name] = item
+    if normalized["global"]["decision_key"] == normalized["target"]["decision_key"]:
+        raise CapacityReservationFeedbackSimulationError(
+            "global and target gates must be distinct"
+        )
+    if normalized["target"]["resource_key"] != resource["canonical_key"]:
+        raise CapacityReservationFeedbackSimulationError(
+            "target gate resource mismatch"
+        )
+    active_expected = sorted(
+        [
+            {
+                "resource_key": decision["resource_key"],
+                "decision_key": decision["decision_key"],
+                "wake_key": decision["wake_key"],
+                "reset_at": decision["reset_at"],
+                "status": "active",
+            }
+            for decision in decisions
+            if _decision_status(decision["action"]) == "gated"
+        ],
+        key=lambda item: item["resource_key"],
+    )
+    actual_active = sorted(state["active_gates"], key=lambda item: item["resource_key"])
+    if actual_active != active_expected:
+        raise CapacityReservationFeedbackSimulationError(
+            "gate state must exact-bind all and only gated canonical tuples"
+        )
+    return normalized
+
+
+def _gate_tuple(name: str, value: object) -> dict[str, str]:
+    item = _obj(name, value)
+    _keys(name, item, {"resource_key", "decision_key", "wake_key", "status"})
+    for field in ("resource_key", "decision_key", "wake_key"):
+        _id(name + "." + field, item[field])
+    if item["status"] not in GATE_STATUSES:
+        raise CapacityReservationFeedbackSimulationError(name + ".status invalid")
+    return deepcopy(item)
+
+
+def _decision_status(action: str) -> str:
+    if action == "allow":
+        return "allowed"
+    if action in {"defer", "covered_by_global"}:
+        return "gated"
+    return "unknown"
+
+
+def _events(value: object, evaluated_at: str) -> list[dict[str, Any]]:
+    raw_events = _list("request.predecessor_events", value)
+    events: list[dict[str, Any]] = []
+    previous_id: str | None = None
+    previous_at: datetime | None = None
+    seen_ids: set[str] = set()
+    seen_digests: set[str] = set()
+    for index, raw in enumerate(raw_events):
+        event = _evidence(f"request.predecessor_events[{index}]", raw)
+        body = event["body"]
+        _keys(
+            f"request.predecessor_events[{index}].body",
+            body,
+            {"event_id", "predecessor_event_id", "observed_at", "outcome"},
+        )
+        event_id = _id("predecessor event id", body["event_id"])
+        if body["outcome"] not in OUTCOMES:
+            raise CapacityReservationFeedbackSimulationError(
+                "predecessor event outcome invalid"
+            )
+        observed = _at(body["observed_at"])
+        if (
+            body["predecessor_event_id"] != previous_id
+            or (previous_at is not None and observed <= previous_at)
+            or observed > _at(evaluated_at)
+        ):
+            raise CapacityReservationFeedbackSimulationError(
+                "predecessor lineage is broken, unordered, or future-dated"
+            )
+        if event_id in seen_ids or event["evidence_digest"] in seen_digests:
+            raise CapacityReservationFeedbackSimulationError(
+                "predecessor event ids and digests must be unique"
+            )
+        seen_ids.add(event_id)
+        seen_digests.add(event["evidence_digest"])
+        previous_id = event_id
+        previous_at = observed
+        events.append(event)
+    return events
 
 
 def _reservation(
-    v: object,
-    s: dict[str, Any],
+    value: object,
+    scope: dict[str, Any],
+    revisions: dict[str, Any],
+    mapping: dict[str, Any],
+    policy: dict[str, Any],
+    currentness: dict[str, Any],
+    selector: dict[str, Any],
     resource: dict[str, Any],
-    rev: dict[str, Any],
-    cur: dict[str, Any],
+    binding: dict[str, Any],
+    gates: dict[str, Any],
 ) -> dict[str, Any]:
-    d = _obj("request.reservation", v)
+    evidence = _evidence("request.reservation", value)
+    body = evidence["body"]
     _keys(
-        "request.reservation",
-        d,
+        "request.reservation.body",
+        body,
         {
             "task_id",
             "attempt_id",
             "target_id",
             "resource_key",
-            "evidence_digest",
             "policy_revision",
-            "expires_at",
+            "mapping_digest",
+            "policy_digest",
+            "currentness_digest",
+            "selector_digest",
+            "gate_digest",
+            "authoritative_reset_at",
             "authoritative_wake_at",
+            "expires_at",
         },
     )
-    for k in (
-        "task_id",
-        "attempt_id",
-        "target_id",
-        "resource_key",
-        "evidence_digest",
-        "policy_revision",
+    expected = {
+        "task_id": scope["task_id"],
+        "attempt_id": scope["attempt_id"],
+        "target_id": scope["target_id"],
+        "resource_key": resource["canonical_key"],
+        "policy_revision": revisions["policy_revision"],
+        "mapping_digest": stable_digest(mapping),
+        "policy_digest": stable_digest(policy),
+        "currentness_digest": currentness["evidence_digest"],
+        "selector_digest": selector["activation_report_digest"],
+        "gate_digest": stable_digest(gates),
+        "authoritative_reset_at": _gate_reset(gates, "target"),
+        "authoritative_wake_at": _authoritative_wake(gates),
+        "expires_at": body["expires_at"],
+    }
+    for field, expected_value in expected.items():
+        _lit("reservation " + field, body[field], expected_value)
+    for field in (
+        "mapping_digest",
+        "policy_digest",
+        "currentness_digest",
+        "selector_digest",
+        "gate_digest",
     ):
-        (_digest if k == "evidence_digest" else _id)("reservation." + k, d[k])
-    if (
-        {
-            "task_id": d["task_id"],
-            "attempt_id": d["attempt_id"],
-            "target_id": d["target_id"],
-        }
-        != {k: s[k] for k in ("task_id", "attempt_id", "target_id")}
-        or d["resource_key"] != resource["canonical_key"]
-        or d["policy_revision"] != rev["policy_revision"]
-    ):
-        raise CapacityReservationFeedbackSimulationError(
-            "reservation exact binding mismatch"
-        )
-    _at(d["expires_at"])
-    _at(d["authoritative_wake_at"])
-    return deepcopy(d)
+        _digest("reservation " + field, body[field])
+    earliest = _earliest(
+        body["authoritative_reset_at"],
+        body["authoritative_wake_at"],
+        currentness["body"]["expires_at"],
+        binding["expires_at"],
+        resource["expires_at"],
+    )
+    _lit("reservation expires_at", body["expires_at"], earliest)
+    return evidence
+
+
+def _gate_reset(gates: dict[str, Any], name: str) -> str:
+    decision_key = gates[name]["decision_key"]
+    return next(
+        decision["reset_at"]
+        for decision in gates["decisions"]
+        if decision["decision_key"] == decision_key
+    )
+
+
+def _authoritative_wake(gates: dict[str, Any]) -> str:
+    return _earliest(*[decision["reset_at"] for decision in gates["decisions"]])
 
 
 def _feedback(
-    v: object,
-    s: dict[str, Any],
+    value: object,
+    scope: dict[str, Any],
+    revisions: dict[str, Any],
+    currentness: dict[str, Any],
     resource: dict[str, Any],
-    rev: dict[str, Any],
+    gates: dict[str, Any],
     events: list[dict[str, Any]],
+    replay: dict[str, str],
 ) -> dict[str, Any]:
-    d = _obj("request.feedback", v)
+    feedback = _obj("request.feedback", value)
     _keys(
         "request.feedback",
-        d,
+        feedback,
+        {"body", "evidence_digest", "recovery_evidence"},
+    )
+    evidence = _evidence(
+        "request.feedback",
+        {"body": feedback["body"], "evidence_digest": feedback["evidence_digest"]},
+    )
+    body = evidence["body"]
+    _keys(
+        "request.feedback.body",
+        body,
         {
             "event_id",
             "task_id",
@@ -608,133 +988,309 @@ def _feedback(
             "target_id",
             "resource_key",
             "outcome",
-            "fresh_exact_bound",
             "predecessor_event_id",
+            "observed_at",
         },
     )
-    for k in ("event_id", "task_id", "attempt_id", "target_id", "resource_key"):
-        _id("feedback." + k, d[k])
+    for field in ("event_id", "task_id", "attempt_id", "target_id", "resource_key"):
+        _id("feedback." + field, body[field])
+    if body["outcome"] not in OUTCOMES:
+        raise CapacityReservationFeedbackSimulationError("feedback outcome invalid")
+    expected_predecessor = events[-1]["body"]["event_id"] if events else None
     if (
-        d["outcome"] not in {"success", "failure", "unknown", "recovery"}
-        or type(d["fresh_exact_bound"]) is not bool
-        or d["task_id"] != s["task_id"]
-        or d["attempt_id"] != s["attempt_id"]
-        or d["target_id"] != s["target_id"]
-        or d["resource_key"] != resource["canonical_key"]
-        or d["predecessor_event_id"] != (events[-1]["event_id"] if events else None)
-        or d["event_id"] in {event["event_id"] for event in events}
+        body["task_id"] != scope["task_id"]
+        or body["attempt_id"] != scope["attempt_id"]
+        or body["target_id"] != scope["target_id"]
+        or body["resource_key"] != resource["canonical_key"]
+        or body["predecessor_event_id"] != expected_predecessor
+        or _at(body["observed_at"]) > _at(replay["evaluated_at"])
     ):
         raise CapacityReservationFeedbackSimulationError(
             "feedback exact binding or lineage mismatch"
         )
-    return deepcopy(d)
+    predecessor_ids = {event["body"]["event_id"] for event in events}
+    predecessor_digests = {event["evidence_digest"] for event in events}
+    if (
+        body["event_id"] in predecessor_ids
+        or evidence["evidence_digest"] in predecessor_digests
+    ):
+        raise CapacityReservationFeedbackSimulationError(
+            "feedback may not reuse predecessor ids or digests"
+        )
+    recovery_raw = feedback["recovery_evidence"]
+    if body["outcome"] == "recovery":
+        recovery = _recovery(
+            recovery_raw,
+            body,
+            scope,
+            revisions,
+            currentness,
+            resource,
+            gates,
+            replay,
+        )
+        if recovery["evidence_digest"] in predecessor_digests | {
+            evidence["evidence_digest"]
+        }:
+            raise CapacityReservationFeedbackSimulationError(
+                "recovery evidence digest must be unique"
+            )
+    elif recovery_raw is not None:
+        raise CapacityReservationFeedbackSimulationError(
+            "non-recovery feedback cannot include recovery evidence"
+        )
+    else:
+        recovery = None
+    return {
+        "body": body,
+        "evidence_digest": evidence["evidence_digest"],
+        "recovery_evidence": recovery,
+    }
 
 
-def _retry(v: object, s: dict[str, Any]) -> dict[str, Any]:
-    d = _obj("request.retry_budget", v)
+def _recovery(
+    value: object,
+    feedback_body: dict[str, Any],
+    scope: dict[str, Any],
+    revisions: dict[str, Any],
+    currentness: dict[str, Any],
+    resource: dict[str, Any],
+    gates: dict[str, Any],
+    replay: dict[str, str],
+) -> dict[str, Any]:
+    evidence = _evidence("request.feedback.recovery_evidence", value)
+    body = evidence["body"]
     _keys(
-        "request.retry_budget",
-        d,
+        "request.feedback.recovery_evidence.body",
+        body,
+        {
+            "observed_at",
+            "expires_at",
+            "currentness_revision",
+            "currentness_digest",
+            "target_id",
+            "resource_key",
+            "scope",
+            "global_decision_key",
+            "global_wake_key",
+            "target_decision_key",
+            "target_wake_key",
+            "predecessor_event_id",
+            "identity_authority",
+        },
+    )
+    expected = {
+        "observed_at": feedback_body["observed_at"],
+        "expires_at": body["expires_at"],
+        "currentness_revision": revisions["currentness_revision"],
+        "currentness_digest": currentness["evidence_digest"],
+        "target_id": scope["target_id"],
+        "resource_key": resource["canonical_key"],
+        "scope": _source_scope(scope),
+        "global_decision_key": gates["global"]["decision_key"],
+        "global_wake_key": gates["global"]["wake_key"],
+        "target_decision_key": gates["target"]["decision_key"],
+        "target_wake_key": gates["target"]["wake_key"],
+        "predecessor_event_id": feedback_body["predecessor_event_id"],
+        "identity_authority": "source_attested",
+    }
+    if body != expected:
+        raise CapacityReservationFeedbackSimulationError(
+            "recovery evidence exact binding mismatch"
+        )
+    _digest("recovery currentness digest", body["currentness_digest"])
+    observed = _at(body["observed_at"])
+    evaluated = _at(replay["evaluated_at"])
+    expires = _at(body["expires_at"])
+    current_observed = _at(currentness["body"]["observed_at"])
+    current_expires = _at(currentness["body"]["expires_at"])
+    if not current_observed <= observed <= evaluated < expires <= current_expires:
+        raise CapacityReservationFeedbackSimulationError(
+            "recovery evidence is stale or outside currentness window"
+        )
+    return evidence
+
+
+def _retry(
+    value: object,
+    scope: dict[str, Any],
+    revisions: dict[str, Any],
+    selector: dict[str, Any],
+) -> dict[str, Any]:
+    evidence = _evidence("request.retry_budget", value)
+    body = evidence["body"]
+    _keys(
+        "request.retry_budget.body",
+        body,
         {
             "task_id",
             "attempt_id",
+            "resume_target_id",
+            "resume_revision",
+            "retry_policy_revision",
             "remaining",
             "automatic_retries",
+            "cooldown_inactive",
+            "dependencies_satisfied",
+            "resume_stop_inactive",
+            "operator_stop_inactive",
+            "task_attempt_boundary_preserved",
             "provider_quota_bound",
             "task_attempt_limit_bound",
         },
     )
-    _id("retry.task_id", d["task_id"])
-    _id("retry.attempt_id", d["attempt_id"])
-    if (
-        d["task_id"] != s["task_id"]
-        or d["attempt_id"] != s["attempt_id"]
-        or type(d["remaining"]) is not int
-        or d["remaining"] < 0
-        or d["automatic_retries"] != 0
-        or d["provider_quota_bound"]
-        or d["task_attempt_limit_bound"]
+    for field in (
+        "cooldown_inactive",
+        "dependencies_satisfied",
+        "resume_stop_inactive",
+        "operator_stop_inactive",
+        "task_attempt_boundary_preserved",
+        "provider_quota_bound",
+        "task_attempt_limit_bound",
     ):
-        raise CapacityReservationFeedbackSimulationError(
-            "retry budget must be independent and automatic retries zero"
+        _bool("retry." + field, body[field])
+    _int("retry.remaining", body["remaining"], minimum=0)
+    _int_literal("retry.automatic_retries", body["automatic_retries"], 0)
+    expected = {
+        "task_id": scope["task_id"],
+        "attempt_id": scope["attempt_id"],
+        "resume_target_id": selector["resume_target_id"],
+        "resume_revision": revisions["resume_revision"],
+        "retry_policy_revision": revisions["retry_policy_revision"],
+    }
+    for field, expected_value in expected.items():
+        _lit("retry " + field, body[field], expected_value)
+    _lit("retry provider quota separation", body["provider_quota_bound"], False)
+    _lit("retry task attempt separation", body["task_attempt_limit_bound"], False)
+    return evidence
+
+
+def _retry_safe(body: dict[str, Any]) -> bool:
+    return all(
+        body[field]
+        for field in (
+            "cooldown_inactive",
+            "dependencies_satisfied",
+            "resume_stop_inactive",
+            "operator_stop_inactive",
+            "task_attempt_boundary_preserved",
         )
-    return deepcopy(d)
-
-
-def _timed(n: str, v: object, keys: set[str]) -> dict[str, Any]:
-    d = _obj(n, v)
-    _keys(n, d, keys)
-    for k in ("observed_at", "expires_at"):
-        _at(d[k])
-    if _at(d["observed_at"]) >= _at(d["expires_at"]):
-        raise CapacityReservationFeedbackSimulationError(n + " validity window invalid")
-    return deepcopy(d)
-
-
-def _earliest(
-    res: dict[str, Any], cur: dict[str, Any], resource: dict[str, Any]
-) -> str:
-    candidates = (
-        res["authoritative_wake_at"],
-        cur["expires_at"],
-        resource["expires_at"],
     )
-    return min(candidates, key=_at)
 
 
-def _in_window(now: str, d: dict[str, Any]) -> bool:
-    return _at(d["observed_at"]) <= _at(now) < _at(d["expires_at"])
+def _evidence(name: str, value: object) -> dict[str, Any]:
+    evidence = _obj(name, value)
+    _keys(name, evidence, {"body", "evidence_digest"})
+    body = _obj(name + ".body", evidence["body"])
+    claimed = _digest(name + ".evidence_digest", evidence["evidence_digest"])
+    _lit(name + ".evidence_digest", claimed, stable_digest(body))
+    return {"body": deepcopy(body), "evidence_digest": claimed}
 
 
-def _obj(n: str, v: object) -> dict[str, Any]:
-    if not isinstance(v, dict):
-        raise CapacityReservationFeedbackSimulationError(n + " must be an object")
-    return v
+def _source_scope(scope: dict[str, Any]) -> dict[str, str]:
+    return {
+        "project_id": scope["project_id"],
+        "repository_id": scope["repository_id"],
+        "task_class": scope["task_class"],
+        "opt_in_scope_id": scope["opt_in_scope_id"],
+    }
 
 
-def _keys(n: str, d: dict[str, Any], expected: set[str]) -> None:
-    if set(d) != expected:
+def _earliest(*values: str) -> str:
+    if not values:
         raise CapacityReservationFeedbackSimulationError(
-            n + " has unknown, missing, or malformed fields"
+            "earliest boundary requires candidates"
         )
+    return min(values, key=_at)
 
 
-def _lit(n: str, v: object, e: object) -> None:
-    if v != e or (isinstance(e, bool) and type(v) is not bool):
-        raise CapacityReservationFeedbackSimulationError(n + " mismatch")
-
-
-def _int_literal(n: str, v: object, e: int) -> None:
-    if type(v) is not int or v != e:
-        raise CapacityReservationFeedbackSimulationError(n + " mismatch")
-
-
-def _id(n: str, v: object) -> str:
-    if not isinstance(v, str) or not v or any(c not in SAFE for c in v):
-        raise CapacityReservationFeedbackSimulationError(
-            n + " must be a safe identifier"
-        )
-    return v
-
-
-def _digest(n: str, v: object) -> str:
-    value = _id(n, v)
-    if (
-        not value.startswith("sha256:")
-        or len(value) != 71
-        or any(char not in "0123456789abcdef" for char in value[7:])
-    ):
-        raise CapacityReservationFeedbackSimulationError(n + " must be sha256")
+def _obj(name: str, value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise CapacityReservationFeedbackSimulationError(name + " must be an object")
     return value
 
 
-def _at(v: object) -> datetime:
-    if not isinstance(v, str):
+def _list(name: str, value: object) -> list[Any]:
+    if not isinstance(value, list):
+        raise CapacityReservationFeedbackSimulationError(name + " must be a list")
+    return value
+
+
+def _keys(name: str, value: dict[str, Any], expected: set[str]) -> None:
+    if set(value) != expected:
+        raise CapacityReservationFeedbackSimulationError(
+            name + " has unknown, missing, or malformed fields"
+        )
+
+
+def _lit(name: str, value: object, expected: object) -> None:
+    if type(value) is not type(expected) or value != expected:
+        raise CapacityReservationFeedbackSimulationError(name + " mismatch")
+
+
+def _int_literal(name: str, value: object, expected: int) -> None:
+    if type(value) is not int or value != expected:
+        raise CapacityReservationFeedbackSimulationError(name + " mismatch")
+
+
+def _int(name: str, value: object, *, minimum: int) -> int:
+    if type(value) is not int or value < minimum:
+        raise CapacityReservationFeedbackSimulationError(name + " invalid")
+    return value
+
+
+def _bool(name: str, value: object) -> bool:
+    if type(value) is not bool:
+        raise CapacityReservationFeedbackSimulationError(name + " must be boolean")
+    return value
+
+
+def _id(name: str, value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 200
+        or any(character not in SAFE for character in value)
+    ):
+        raise CapacityReservationFeedbackSimulationError(
+            name + " must be a safe identifier"
+        )
+    return value
+
+
+def _digest(name: str, value: object) -> str:
+    digest = _id(name, value)
+    if (
+        not digest.startswith("sha256:")
+        or len(digest) != 71
+        or any(character not in "0123456789abcdef" for character in digest[7:])
+    ):
+        raise CapacityReservationFeedbackSimulationError(
+            name + " must be an exact lowercase sha256 digest"
+        )
+    return digest
+
+
+def _validate_digest_fields(name: str, value: object) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child = name + "." + str(key)
+            if str(key).endswith("_digest"):
+                _digest(child, item)
+            else:
+                _validate_digest_fields(child, item)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_digest_fields(f"{name}[{index}]", item)
+
+
+def _at(value: object) -> datetime:
+    if not isinstance(value, str):
         raise CapacityReservationFeedbackSimulationError("timestamp invalid")
     try:
-        d = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise CapacityReservationFeedbackSimulationError("timestamp invalid") from exc
-    if d.tzinfo is None:
+    if parsed.tzinfo is None:
         raise CapacityReservationFeedbackSimulationError("timestamp timezone required")
-    return d
+    return parsed
