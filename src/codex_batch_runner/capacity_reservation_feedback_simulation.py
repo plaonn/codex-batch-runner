@@ -8,6 +8,13 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
+from .provider_resource_authority import (
+    resource_gate_key,
+    validate_admission_policy,
+    validate_mapping_v2,
+)
+from .provider_resource_report import ProviderResourceValidationError
+
 REQUEST_CONTRACT = "capacity-reservation-feedback-simulation-request-v1"
 REPORT_CONTRACT = "capacity-reservation-feedback-simulation-v1"
 POLICY_REVISION = "capacity-reservation-feedback-simulation-policy-v1"
@@ -61,6 +68,8 @@ def validate_capacity_reservation_feedback_simulation_request(
             "currentness",
             "selector_binding",
             "global_admission",
+            "mapping",
+            "admission_policy",
             "resource",
             "replay",
             "predecessor_events",
@@ -69,14 +78,31 @@ def validate_capacity_reservation_feedback_simulation_request(
             "retry_budget",
         },
     )
-    _lit("request.schema_version", r.get("schema_version"), 1)
+    _int_literal("request.schema_version", r.get("schema_version"), 1)
     _lit("request.contract", r.get("contract"), REQUEST_CONTRACT)
     scope = _scope(r.get("scope"))
     revisions = _revisions(r.get("revisions"))
     currentness = _currentness(r.get("currentness"), revisions)
+    try:
+        mapping = validate_mapping_v2(r.get("mapping"))
+        admission_policy = validate_admission_policy(r.get("admission_policy"))
+    except ProviderResourceValidationError as exc:
+        raise CapacityReservationFeedbackSimulationError(
+            "mapping or admission policy invalid"
+        ) from exc
+    _lit(
+        "request.revisions.mapping_revision",
+        revisions["mapping_revision"],
+        mapping["mapping_revision"],
+    )
+    _lit(
+        "request.revisions.policy_revision",
+        revisions["policy_revision"],
+        admission_policy["policy_revision"],
+    )
     selector = _selector(r.get("selector_binding"), scope, revisions)
     global_admission = _global(r.get("global_admission"))
-    resource = _resource(r.get("resource"), revisions)
+    resource = _resource(r.get("resource"), revisions, mapping, admission_policy, scope)
     replay = _replay(r.get("replay"))
     events = _events(r.get("predecessor_events"), replay["evaluated_at"])
     reservation = _reservation(
@@ -90,6 +116,8 @@ def validate_capacity_reservation_feedback_simulation_request(
         "scope": scope,
         "revisions": revisions,
         "currentness": currentness,
+        "mapping": deepcopy(mapping),
+        "admission_policy": deepcopy(admission_policy),
         "selector_binding": selector,
         "global_admission": global_admission,
         "resource": resource,
@@ -128,9 +156,18 @@ def validate_capacity_reservation_feedback_simulation_report(
         "replay_digest",
         "simulation_only",
         "activation_authority",
-        "runtime_reservation_mutation",
+        "runtime_reservation",
+        "runtime_feedback_mutation",
+        "automatic_half_open",
         "automatic_retry",
-        "provider_calls",
+        "queue_mutation",
+        "config_mutation",
+        "cooldown_mutation",
+        "wake_mutation",
+        "selection_mutation",
+        "dispatch_authority",
+        "provider_call",
+        "promotion_authority",
         "live_routing",
         "default_routing",
         "worker_promotion",
@@ -138,7 +175,7 @@ def validate_capacity_reservation_feedback_simulation_report(
         *MUTATION_FIELDS,
     }
     _keys("report", report, required)
-    _lit("report.schema_version", report.get("schema_version"), 1)
+    _int_literal("report.schema_version", report.get("schema_version"), 1)
     _lit("report.contract", report.get("contract"), REPORT_CONTRACT)
     request = validate_capacity_reservation_feedback_simulation_request(
         report.get("simulation_request")
@@ -148,9 +185,18 @@ def validate_capacity_reservation_feedback_simulation_report(
     for f in (
         "simulation_only",
         "activation_authority",
-        "runtime_reservation_mutation",
+        "runtime_reservation",
+        "runtime_feedback_mutation",
+        "automatic_half_open",
         "automatic_retry",
-        "provider_calls",
+        "queue_mutation",
+        "config_mutation",
+        "cooldown_mutation",
+        "wake_mutation",
+        "selection_mutation",
+        "dispatch_authority",
+        "provider_call",
+        "promotion_authority",
         "live_routing",
         "default_routing",
         "worker_promotion",
@@ -232,9 +278,18 @@ def _build(r: dict[str, Any]) -> dict[str, Any]:
         "input_digest": stable_digest(r),
         "simulation_only": True,
         "activation_authority": False,
-        "runtime_reservation_mutation": False,
+        "runtime_reservation": False,
+        "runtime_feedback_mutation": False,
+        "automatic_half_open": False,
         "automatic_retry": False,
-        "provider_calls": False,
+        "queue_mutation": False,
+        "config_mutation": False,
+        "cooldown_mutation": False,
+        "wake_mutation": False,
+        "selection_mutation": False,
+        "dispatch_authority": False,
+        "provider_call": False,
+        "promotion_authority": False,
         "live_routing": False,
         "default_routing": False,
         "worker_promotion": False,
@@ -357,7 +412,13 @@ def _global(v: object) -> dict[str, Any]:
     return deepcopy(d)
 
 
-def _resource(v: object, revisions: dict[str, Any]) -> dict[str, Any]:
+def _resource(
+    v: object,
+    revisions: dict[str, Any],
+    mapping: dict[str, Any],
+    policy: dict[str, Any],
+    scope: dict[str, Any],
+) -> dict[str, Any]:
     d = _timed(
         "request.resource",
         v,
@@ -381,6 +442,34 @@ def _resource(v: object, revisions: dict[str, Any]) -> dict[str, Any]:
         d["policy_revision"],
         revisions["policy_revision"],
     )
+    bindings = [
+        item
+        for item in mapping["bindings"]
+        if item["target_id"] == scope["target_id"]
+        and item["status"] == "current"
+        and item["identity_authority"] == "source_attested"
+    ]
+    if len(bindings) != 1:
+        raise CapacityReservationFeedbackSimulationError(
+            "source-attested mapping binding missing or ambiguous"
+        )
+    binding = bindings[0]
+    expected_key = resource_gate_key(
+        binding["provider_id"],
+        binding["quota_identity_id"],
+        binding["observation_scope"]["scope_id"],
+        "primary",
+    )
+    _lit("request.resource.canonical_key", d["canonical_key"], expected_key)
+    if (
+        mapping["status"] != "current"
+        or policy["status"] != "current"
+        or not policy["enabled"]
+        or mapping["mapping_revision"] not in policy["allowed_mapping_revisions"]
+    ):
+        raise CapacityReservationFeedbackSimulationError(
+            "mapping or policy not currently admitted"
+        )
     if d["mapping_status"] not in {
         "exact",
         "unknown",
@@ -408,6 +497,8 @@ def _events(v: object, clock: str) -> list[dict[str, Any]]:
     out = []
     previous = None
     last = None
+    seen_ids: set[str] = set()
+    seen_digests: set[str] = set()
     for i, raw in enumerate(v):
         d = _obj(f"predecessor_events[{i}]", raw)
         _keys(
@@ -417,6 +508,10 @@ def _events(v: object, clock: str) -> list[dict[str, Any]]:
         )
         _id("event_id", d["event_id"])
         _digest("evidence_digest", d["evidence_digest"])
+        if d["event_id"] in seen_ids or d["evidence_digest"] in seen_digests:
+            raise CapacityReservationFeedbackSimulationError(
+                "duplicate event id or evidence digest"
+            )
         now = _at(d["observed_at"])
         if (
             d["predecessor_event_id"] != previous
@@ -427,6 +522,8 @@ def _events(v: object, clock: str) -> list[dict[str, Any]]:
                 "predecessor lineage is broken or unordered"
             )
         out.append(deepcopy(d))
+        seen_ids.add(d["event_id"])
+        seen_digests.add(d["evidence_digest"])
         previous = d["event_id"]
         last = now
     return out
@@ -507,12 +604,13 @@ def _feedback(
         _id("feedback." + k, d[k])
     if (
         d["outcome"] not in {"success", "failure", "unknown", "recovery"}
-        or not isinstance(d["fresh_exact_bound"], bool)
+        or type(d["fresh_exact_bound"]) is not bool
         or d["task_id"] != s["task_id"]
         or d["attempt_id"] != s["attempt_id"]
         or d["target_id"] != s["target_id"]
         or d["resource_key"] != resource["canonical_key"]
         or d["predecessor_event_id"] != (events[-1]["event_id"] if events else None)
+        or d["event_id"] in {event["event_id"] for event in events}
     ):
         raise CapacityReservationFeedbackSimulationError(
             "feedback exact binding or lineage mismatch"
@@ -539,7 +637,7 @@ def _retry(v: object, s: dict[str, Any]) -> dict[str, Any]:
     if (
         d["task_id"] != s["task_id"]
         or d["attempt_id"] != s["attempt_id"]
-        or not isinstance(d["remaining"], int)
+        or type(d["remaining"]) is not int
         or d["remaining"] < 0
         or d["automatic_retries"] != 0
         or d["provider_quota_bound"]
@@ -564,7 +662,12 @@ def _timed(n: str, v: object, keys: set[str]) -> dict[str, Any]:
 def _earliest(
     res: dict[str, Any], cur: dict[str, Any], resource: dict[str, Any]
 ) -> str:
-    return min(res["authoritative_wake_at"], cur["expires_at"], resource["expires_at"])
+    candidates = (
+        res["authoritative_wake_at"],
+        cur["expires_at"],
+        resource["expires_at"],
+    )
+    return min(candidates, key=_at)
 
 
 def _in_window(now: str, d: dict[str, Any]) -> bool:
@@ -589,6 +692,11 @@ def _lit(n: str, v: object, e: object) -> None:
         raise CapacityReservationFeedbackSimulationError(n + " mismatch")
 
 
+def _int_literal(n: str, v: object, e: int) -> None:
+    if type(v) is not int or v != e:
+        raise CapacityReservationFeedbackSimulationError(n + " mismatch")
+
+
 def _id(n: str, v: object) -> str:
     if not isinstance(v, str) or not v or any(c not in SAFE for c in v):
         raise CapacityReservationFeedbackSimulationError(
@@ -599,7 +707,11 @@ def _id(n: str, v: object) -> str:
 
 def _digest(n: str, v: object) -> str:
     value = _id(n, v)
-    if not value.startswith("sha256:") or len(value) != 71:
+    if (
+        not value.startswith("sha256:")
+        or len(value) != 71
+        or any(char not in "0123456789abcdef" for char in value[7:])
+    ):
         raise CapacityReservationFeedbackSimulationError(n + " must be sha256")
     return value
 

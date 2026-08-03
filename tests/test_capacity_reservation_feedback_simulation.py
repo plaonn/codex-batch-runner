@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import copy
+import contextlib
+import io
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from codex_batch_runner.capacity_reservation_feedback_simulation import (
     CapacityReservationFeedbackSimulationError,
@@ -12,6 +17,9 @@ from codex_batch_runner.capacity_reservation_feedback_simulation import (
     validate_capacity_reservation_feedback_simulation_report,
     validate_capacity_reservation_feedback_simulation_request,
 )
+from tests.test_provider_resource_authority import mapping_v2, policy
+from codex_batch_runner.provider_resource_authority import resource_gate_key
+from codex_batch_runner.cli import main
 
 
 NOW = "2030-01-02T05:00:00+00:00"
@@ -26,25 +34,28 @@ def request() -> dict:
         "task_class": "class",
         "task_id": "task",
         "attempt_id": "attempt-1",
-        "target_id": "target",
+        "target_id": "target-a",
         "opted_in": True,
     }
     revisions = {
-        "mapping_revision": "mapping-r1",
+        "mapping_revision": "mapping-r2",
         "currentness_revision": "current-r1",
         "policy_revision": "policy-r1",
         "selector_revision": "selector-r1",
         "resume_revision": "resume-r1",
         "simulation_policy_revision": POLICY_REVISION,
     }
+    canonical_key = resource_gate_key("provider-a", "quota-a", "scope-a", "primary")
     resource = {
-        "canonical_key": "resource-a",
+        "canonical_key": canonical_key,
         "mapping_status": "exact",
-        "mapping_revision": "mapping-r1",
+        "mapping_revision": "mapping-r2",
         "policy_revision": "policy-r1",
         "observed_at": EARLY,
         "expires_at": LATE,
     }
+    mapping = mapping_v2()
+    admission_policy = policy()
     return {
         "schema_version": 1,
         "contract": "capacity-reservation-feedback-simulation-request-v1",
@@ -56,13 +67,15 @@ def request() -> dict:
             "observed_at": EARLY,
             "expires_at": LATE,
         },
+        "mapping": mapping,
+        "admission_policy": admission_policy,
         "selector_binding": {
             "status": "eligible",
             "baseline_digest": stable_digest({"baseline": 1}),
             "resume_binding": "resume-r1",
             "selector_revision": "selector-r1",
             "resume_revision": "resume-r1",
-            "eligible_target_ids": ["target"],
+            "eligible_target_ids": ["target-a"],
         },
         "global_admission": {
             "status": "allowed",
@@ -75,8 +88,8 @@ def request() -> dict:
         "reservation": {
             "task_id": "task",
             "attempt_id": "attempt-1",
-            "target_id": "target",
-            "resource_key": "resource-a",
+            "target_id": "target-a",
+            "resource_key": canonical_key,
             "evidence_digest": stable_digest({"e": 1}),
             "policy_revision": "policy-r1",
             "expires_at": LATE,
@@ -86,8 +99,8 @@ def request() -> dict:
             "event_id": "feedback-1",
             "task_id": "task",
             "attempt_id": "attempt-1",
-            "target_id": "target",
-            "resource_key": "resource-a",
+            "target_id": "target-a",
+            "resource_key": canonical_key,
             "outcome": "unknown",
             "fresh_exact_bound": False,
             "predecessor_event_id": None,
@@ -158,7 +171,8 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         source["feedback"]["fresh_exact_bound"] = True
         report = simulate_capacity_reservation_feedback(source)
         self.assertEqual(
-            ["resource-a"], report["half_open_preview"]["candidate_resource_keys"]
+            [resource_gate_key("provider-a", "quota-a", "scope-a", "primary")],
+            report["half_open_preview"]["candidate_resource_keys"],
         )
         source["feedback"]["fresh_exact_bound"] = False
         self.assertEqual(
@@ -184,3 +198,27 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         source["retry_budget"]["automatic_retries"] = 1
         with self.assertRaises(CapacityReservationFeedbackSimulationError):
             validate_capacity_reservation_feedback_simulation_request(source)
+
+    def test_standalone_cli_never_loads_or_mutates_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request()), encoding="utf-8")
+            before = {path.name: path.read_bytes() for path in root.iterdir()}
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "capacity-reservation-feedback-simulate",
+                            "--request-json",
+                            str(request_path),
+                            "--json",
+                        ]
+                    ),
+                )
+            self.assertEqual(
+                before, {path.name: path.read_bytes() for path in root.iterdir()}
+            )
+            self.assertEqual("would_reserve", json.loads(stdout.getvalue())["preview"])

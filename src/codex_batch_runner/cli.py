@@ -329,6 +329,15 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+    if args.command == "capacity-reservation-feedback-simulate":
+        if args.config:
+            print("error: --config is not supported by capacity-reservation-feedback-simulate", file=sys.stderr)
+            return 2
+        try:
+            return args.func(None, args)
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if args.command == "orchestration":
         if args.orchestration_command in {"plan", "selection-preview", "selection-record", "selection-funnel", "goal-reconcile", "goal-explain"}:
             if args.config and args.orchestration_command in {"plan", "selection-preview", "goal-reconcile", "goal-explain"}:

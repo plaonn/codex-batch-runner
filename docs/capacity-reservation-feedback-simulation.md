@@ -26,8 +26,12 @@ cooldowns, dependencies, resume bindings, or operator stops.
 
 The report embeds the validated request, binds `input_digest`, and its
 standalone validator reconstructs the exact report. All mutation arrays are
-empty and `simulation_only=true`; activation, runtime mutation, automatic
-retry, provider calls, routing, and promotion are false.
+empty. Exact authority flags are `simulation_only=true`; and
+`activation_authority`, `runtime_reservation`, `runtime_feedback_mutation`,
+`automatic_half_open`, `automatic_retry`, `queue_mutation`, `config_mutation`,
+`cooldown_mutation`, `wake_mutation`, `selection_mutation`,
+`dispatch_authority`, `provider_call`, and `promotion_authority` are all
+`false`.
 
 Run it with:
 
