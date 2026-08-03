@@ -331,13 +331,24 @@ def parse_time(value: str):
 def set_gate(
     source: dict, name: str, *, action: str, reset_at: str | None = None
 ) -> None:
+    updates = {"action": action}
+    if reset_at is not None:
+        updates["reset_at"] = reset_at
+    update_gate_decision(source, name, **updates)
+
+
+def update_gate_decision(source: dict, name: str, **updates: str) -> None:
     old_key = source["gates"][name]["decision_key"]
     decision = next(
         item for item in source["gates"]["decisions"] if item["decision_key"] == old_key
     )
-    decision["action"] = action
-    if reset_at is not None:
-        decision["reset_at"] = reset_at
+    decision.update(updates)
+    decision["resource_key"] = resource_gate_key(
+        decision["provider_id"],
+        decision["quota_identity_id"],
+        decision["scope_id"],
+        decision["window_id"],
+    )
     decision["wake_key"] = resource_gate_wake_key(
         decision["provider_id"],
         decision["quota_identity_id"],
@@ -496,6 +507,45 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         source["gates"]["target"]["wake_key"] = "wake-" + "b" * 64
         self.assert_rejected(source)
 
+    def test_unrelated_but_canonical_global_gate_rejected(self) -> None:
+        source = build_request()
+        update_gate_decision(
+            source,
+            "global",
+            provider_id="unrelated-provider",
+            quota_identity_id="unrelated-quota",
+            scope_id="unrelated-scope",
+            window_id="unrelated-window",
+        )
+        self.assert_rejected(source)
+
+    def test_future_target_gate_decision_rejected(self) -> None:
+        source = build_request()
+        update_gate_decision(
+            source,
+            "target",
+            observed_at="2030-01-02T04:01:00+00:00",
+        )
+        self.assert_rejected(source)
+
+    def test_expired_target_reset_and_wake_rejected(self) -> None:
+        source = build_request()
+        set_gate(
+            source,
+            "target",
+            action="allow",
+            reset_at="2030-01-02T03:59:00+00:00",
+        )
+        self.assert_rejected(source)
+
+    def test_expired_reservation_earliest_boundary_rejected(self) -> None:
+        source = build_request()
+        source["reservation"]["body"]["expires_at"] = NOW
+        source["reservation"]["evidence_digest"] = stable_digest(
+            source["reservation"]["body"]
+        )
+        self.assert_rejected(source)
+
     def test_global_gate_precedes_target_gate(self) -> None:
         source = build_request()
         set_gate(source, "target", action="defer")
@@ -614,6 +664,20 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         )
         self.assert_rejected(source)
 
+    def test_feedback_must_be_strictly_after_predecessor(self) -> None:
+        for observed_at in (
+            "2030-01-02T03:54:00+00:00",
+            "2030-01-02T03:55:00+00:00",
+        ):
+            with self.subTest(observed_at=observed_at):
+                source = build_request()
+                add_predecessor(source)
+                source["feedback"]["body"]["observed_at"] = observed_at
+                source["feedback"]["evidence_digest"] = stable_digest(
+                    source["feedback"]["body"]
+                )
+                self.assert_rejected(source)
+
     def test_failure_and_unknown_observations_are_retained(self) -> None:
         source = build_request()
         add_predecessor(source, outcome="failure")
@@ -659,6 +723,25 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         forged["replay_digest"] = stable_digest(replay_body)
         with self.assertRaises(CapacityReservationFeedbackSimulationError):
             validate_capacity_reservation_feedback_simulation_report(forged)
+
+    def test_standalone_report_recursively_rejects_nested_bool_int_aliases(
+        self,
+    ) -> None:
+        source = build_request()
+        source["retry_budget"]["body"]["remaining"] = 0
+        source["retry_budget"]["evidence_digest"] = stable_digest(
+            source["retry_budget"]["body"]
+        )
+        report = simulate_capacity_reservation_feedback(source)
+        for field, forged_value in (
+            ("remaining_preview", False),
+            ("separate_from_provider_quota", 1),
+        ):
+            with self.subTest(field=field):
+                forged = copy.deepcopy(report)
+                forged["retry_preview"][field] = forged_value
+                with self.assertRaises(CapacityReservationFeedbackSimulationError):
+                    validate_capacity_reservation_feedback_simulation_report(forged)
 
     def test_mutation_arrays_are_separate_and_exactly_empty(self) -> None:
         report = simulate_capacity_reservation_feedback(build_request())

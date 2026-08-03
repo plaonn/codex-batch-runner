@@ -35,7 +35,11 @@ The strict request has these authoritative sections:
 - `gates` embeds a validated typed gate state and exactly two validated
   canonical gate decisions. The global and target tuples each contain the exact
   `{resource_key, decision_key, wake_key, status}` derived from that evidence.
-  Arbitrary public-safe strings are not accepted.
+  The global decision is fixed to the opted-in global scope tuple; the target
+  decision binds the selected provider, quota identity, observation scope, and
+  window. Decision observations cannot be future-dated and reset/wake
+  boundaries must remain future-current. Arbitrary coherent tuples and
+  public-safe strings are not accepted.
 - `reservation`, every predecessor event, feedback, optional recovery
   evidence, and retry budget use `{body, evidence_digest}` with
   `evidence_digest == stable_digest(body)`. SHA-256 values are exact lowercase
@@ -55,7 +59,9 @@ as instants rather than strings.
 
 Feedback retains `failure` and `unknown` as append-only observations and never
 infers quota, quality, promotion, capacity, or routing. IDs and digests cannot
-be reused across feedback and predecessor lineage. Recovery requires a fresh
+be reused across feedback and predecessor lineage. Feedback observation time
+must be strictly later than its referenced predecessor and no later than the
+replay clock. Recovery requires a fresh
 source-attested evidence body binding observation/expiry, currentness
 revision/digest, target/resource/scope, both global and target decision/wake
 keys, predecessor event, and identity authority. At most one exact resource
@@ -71,8 +77,10 @@ reports no retry.
 
 The report embeds the normalized validated request, binds `input_digest`, and
 its standalone validator reconstructs the exact report. It rejects a forged
-replay even if the caller recomputes `replay_digest`. All mutation arrays are
-separate and empty. Exact authority flags are `simulation_only=true`; and
+replay even if the caller recomputes `replay_digest`. Recursive deterministic
+comparison requires both type and value equality, including nested derived
+booleans and integers. All mutation arrays are separate and empty. Exact
+authority flags are `simulation_only=true`; and
 `activation_authority`, `runtime_reservation`, `runtime_feedback_mutation`,
 `automatic_half_open`, `automatic_retry`, `queue_mutation`, `config_mutation`,
 `cooldown_mutation`, `wake_mutation`, `selection_mutation`,

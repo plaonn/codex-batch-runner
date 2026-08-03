@@ -125,7 +125,7 @@ def validate_capacity_reservation_feedback_simulation_request(
     selector = _selector(
         request.get("selector_binding"), scope, revisions, mapping, resource
     )
-    gates = _gates(request.get("gates"), resource, revisions)
+    gates = _gates(request.get("gates"), scope, resource, revisions, replay)
     events = _events(request.get("predecessor_events"), replay["evaluated_at"])
     reservation = _reservation(
         request.get("reservation"),
@@ -138,6 +138,7 @@ def validate_capacity_reservation_feedback_simulation_request(
         resource,
         binding,
         gates,
+        replay,
     )
     feedback = _feedback(
         request.get("feedback"),
@@ -257,7 +258,7 @@ def validate_capacity_reservation_feedback_simulation_report(
         False,
     )
     expected = _build(request)
-    if report != expected:
+    if not _type_exact_equal(report, expected):
         raise CapacityReservationFeedbackSimulationError(
             "report must exactly match deterministic simulation request replay"
         )
@@ -738,8 +739,10 @@ def _selector(
 
 def _gates(
     value: object,
+    scope: dict[str, Any],
     resource: dict[str, Any],
     revisions: dict[str, Any],
+    replay: dict[str, str],
 ) -> dict[str, Any]:
     gates = _obj("request.gates", value)
     _keys("request.gates", gates, {"state", "decisions", "global", "target"})
@@ -760,6 +763,7 @@ def _gates(
         "state": state,
         "decisions": decisions,
     }
+    evaluated_at = _at(replay["evaluated_at"])
     for name in ("global", "target"):
         item = _gate_tuple("request.gates." + name, gates[name])
         decision = by_key.get(item["decision_key"])
@@ -785,6 +789,14 @@ def _gates(
             raise CapacityReservationFeedbackSimulationError(
                 name + " gate decision revision mismatch"
             )
+        if _at(decision["observed_at"]) > evaluated_at:
+            raise CapacityReservationFeedbackSimulationError(
+                name + " gate decision is future-dated"
+            )
+        if _at(decision["reset_at"]) <= evaluated_at:
+            raise CapacityReservationFeedbackSimulationError(
+                name + " gate reset and wake boundary must be future-current"
+            )
         normalized[name] = item
     if normalized["global"]["decision_key"] == normalized["target"]["decision_key"]:
         raise CapacityReservationFeedbackSimulationError(
@@ -793,6 +805,38 @@ def _gates(
     if normalized["target"]["resource_key"] != resource["canonical_key"]:
         raise CapacityReservationFeedbackSimulationError(
             "target gate resource mismatch"
+        )
+    global_decision = by_key[normalized["global"]["decision_key"]]
+    expected_global = {
+        "provider_id": "global",
+        "quota_identity_id": "global",
+        "scope_id": scope["opt_in_scope_id"],
+        "window_id": "admission",
+        "resource_key": resource_gate_key(
+            "global", "global", scope["opt_in_scope_id"], "admission"
+        ),
+    }
+    if any(
+        global_decision[field] != expected_value
+        for field, expected_value in expected_global.items()
+    ):
+        raise CapacityReservationFeedbackSimulationError(
+            "global gate decision does not bind the opted-in global scope"
+        )
+    target_decision = by_key[normalized["target"]["decision_key"]]
+    expected_target = {
+        "provider_id": resource["provider_id"],
+        "quota_identity_id": resource["quota_identity_id"],
+        "scope_id": resource["scope_id"],
+        "window_id": resource["window_id"],
+        "resource_key": resource["canonical_key"],
+    }
+    if any(
+        target_decision[field] != expected_value
+        for field, expected_value in expected_target.items()
+    ):
+        raise CapacityReservationFeedbackSimulationError(
+            "target gate decision does not bind the selected target resource"
         )
     active_expected = sorted(
         [
@@ -886,6 +930,7 @@ def _reservation(
     resource: dict[str, Any],
     binding: dict[str, Any],
     gates: dict[str, Any],
+    replay: dict[str, str],
 ) -> dict[str, Any]:
     evidence = _evidence("request.reservation", value)
     body = evidence["body"]
@@ -933,6 +978,10 @@ def _reservation(
         "gate_digest",
     ):
         _digest("reservation " + field, body[field])
+    if _at(body["expires_at"]) <= _at(replay["evaluated_at"]):
+        raise CapacityReservationFeedbackSimulationError(
+            "reservation earliest boundary must be future-current"
+        )
     earliest = _earliest(
         body["authoritative_reset_at"],
         body["authoritative_wake_at"],
@@ -997,13 +1046,19 @@ def _feedback(
     if body["outcome"] not in OUTCOMES:
         raise CapacityReservationFeedbackSimulationError("feedback outcome invalid")
     expected_predecessor = events[-1]["body"]["event_id"] if events else None
+    feedback_observed_at = _at(body["observed_at"])
+    predecessor_observed_at = _at(events[-1]["body"]["observed_at"]) if events else None
     if (
         body["task_id"] != scope["task_id"]
         or body["attempt_id"] != scope["attempt_id"]
         or body["target_id"] != scope["target_id"]
         or body["resource_key"] != resource["canonical_key"]
         or body["predecessor_event_id"] != expected_predecessor
-        or _at(body["observed_at"]) > _at(replay["evaluated_at"])
+        or feedback_observed_at > _at(replay["evaluated_at"])
+        or (
+            predecessor_observed_at is not None
+            and feedback_observed_at <= predecessor_observed_at
+        )
     ):
         raise CapacityReservationFeedbackSimulationError(
             "feedback exact binding or lineage mismatch"
@@ -1282,6 +1337,21 @@ def _validate_digest_fields(name: str, value: object) -> None:
     elif isinstance(value, list):
         for index, item in enumerate(value):
             _validate_digest_fields(f"{name}[{index}]", item)
+
+
+def _type_exact_equal(value: object, expected: object) -> bool:
+    if type(value) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(value) == set(expected) and all(
+            _type_exact_equal(value[key], expected[key]) for key in expected
+        )
+    if isinstance(expected, list):
+        return len(value) == len(expected) and all(
+            _type_exact_equal(item, expected_item)
+            for item, expected_item in zip(value, expected, strict=True)
+        )
+    return value == expected
 
 
 def _at(value: object) -> datetime:
