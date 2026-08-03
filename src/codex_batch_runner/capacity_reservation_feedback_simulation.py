@@ -18,6 +18,7 @@ from .provider_resource_report import ProviderResourceValidationError
 REQUEST_CONTRACT = "capacity-reservation-feedback-simulation-request-v1"
 REPORT_CONTRACT = "capacity-reservation-feedback-simulation-v1"
 POLICY_REVISION = "capacity-reservation-feedback-simulation-policy-v1"
+MANUAL_OVERRIDE_BINDING_GAP = "manual_override_binding_not_expressed_by_selector_report"
 MUTATION_FIELDS = (
     "queue_mutations",
     "config_mutations",
@@ -172,6 +173,7 @@ def validate_capacity_reservation_feedback_simulation_report(
         "default_routing",
         "worker_promotion",
         "provider_promotion",
+        "manual_override_binding_resolved",
         *MUTATION_FIELDS,
     }
     _keys("report", report, required)
@@ -205,6 +207,11 @@ def validate_capacity_reservation_feedback_simulation_report(
         _lit("report." + f, report.get(f), f == "simulation_only")
     for f in MUTATION_FIELDS:
         _lit("report." + f, report.get(f), [])
+    _lit(
+        "report.manual_override_binding_resolved",
+        report.get("manual_override_binding_resolved"),
+        False,
+    )
     if report != _build(request):
         raise CapacityReservationFeedbackSimulationError(
             "report must exactly match deterministic simulation request replay"
@@ -217,7 +224,11 @@ def _build(r: dict[str, Any]) -> dict[str, Any]:
     preview = "would_reserve"
     reservation = deepcopy(r["reservation"])
     feedback = deepcopy(r["feedback"])
-    if r["global_admission"]["status"] != "allowed":
+    # The validated upstream selector report has no manual-override artifact.
+    # Do not manufacture one locally: this branch remains fail-closed.
+    if True:
+        reasons.append(MANUAL_OVERRIDE_BINDING_GAP)
+    elif r["global_admission"]["status"] != "allowed":
         reasons.append("global_admission_" + r["global_admission"]["status"])
     elif r["selector_binding"]["status"] != "eligible":
         reasons.append("selector_" + r["selector_binding"]["status"])
@@ -294,6 +305,7 @@ def _build(r: dict[str, Any]) -> dict[str, Any]:
         "default_routing": False,
         "worker_promotion": False,
         "provider_promotion": False,
+        "manual_override_binding_resolved": False,
         **{f: [] for f in MUTATION_FIELDS},
     }
     body["replay_digest"] = stable_digest(body)
@@ -688,7 +700,7 @@ def _keys(n: str, d: dict[str, Any], expected: set[str]) -> None:
 
 
 def _lit(n: str, v: object, e: object) -> None:
-    if v != e:
+    if v != e or (isinstance(e, bool) and type(v) is not bool):
         raise CapacityReservationFeedbackSimulationError(n + " mismatch")
 
 

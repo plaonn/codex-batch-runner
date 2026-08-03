@@ -16,6 +16,7 @@ from codex_batch_runner.capacity_reservation_feedback_simulation import (
     stable_digest,
     validate_capacity_reservation_feedback_simulation_report,
     validate_capacity_reservation_feedback_simulation_request,
+    MANUAL_OVERRIDE_BINDING_GAP,
 )
 from tests.test_provider_resource_authority import mapping_v2, policy
 from codex_batch_runner.provider_resource_authority import resource_gate_key
@@ -119,7 +120,8 @@ def request() -> dict:
 class CapacityReservationFeedbackTests(unittest.TestCase):
     def test_exact_bound_report_is_report_only(self) -> None:
         report = simulate_capacity_reservation_feedback(request())
-        self.assertEqual("would_reserve", report["preview"])
+        self.assertEqual("fail_closed", report["preview"])
+        self.assertEqual([MANUAL_OVERRIDE_BINDING_GAP], report["reason_codes"])
         self.assertEqual("would_not_retry", report["retry_preview"]["status"])
         self.assertEqual("unknown", report["feedback_preview"]["outcome"])
         self.assertTrue(report["simulation_only"])
@@ -131,7 +133,7 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         source["global_admission"]["status"] = "unknown"
         report = simulate_capacity_reservation_feedback(source)
         self.assertEqual("fail_closed", report["preview"])
-        self.assertEqual(["global_admission_unknown"], report["reason_codes"])
+        self.assertEqual([MANUAL_OVERRIDE_BINDING_GAP], report["reason_codes"])
 
     def test_currentness_and_expiry_fail_closed(self) -> None:
         stale = request()
@@ -170,10 +172,7 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         source["feedback"]["outcome"] = "recovery"
         source["feedback"]["fresh_exact_bound"] = True
         report = simulate_capacity_reservation_feedback(source)
-        self.assertEqual(
-            [resource_gate_key("provider-a", "quota-a", "scope-a", "primary")],
-            report["half_open_preview"]["candidate_resource_keys"],
-        )
+        self.assertEqual([], report["half_open_preview"]["candidate_resource_keys"])
         source["feedback"]["fresh_exact_bound"] = False
         self.assertEqual(
             [],
@@ -221,4 +220,4 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
             self.assertEqual(
                 before, {path.name: path.read_bytes() for path in root.iterdir()}
             )
-            self.assertEqual("would_reserve", json.loads(stdout.getvalue())["preview"])
+            self.assertEqual("fail_closed", json.loads(stdout.getvalue())["preview"])

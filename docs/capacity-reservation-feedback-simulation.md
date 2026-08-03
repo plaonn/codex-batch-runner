@@ -5,6 +5,12 @@ report-only contract. It previews an exact-bound reservation, append-only
 observational feedback, half-open eligibility, and a retry budget without
 reserving capacity, calling a provider, or changing a task.
 
+Current prerequisite gap: the upstream selector report does not express a
+manual-override binding. This simulator records
+`manual_override_binding_resolved=false` and fails closed with
+`manual_override_binding_not_expressed_by_selector_report`; it must not be
+treated as an accepted reservation contract until that upstream artifact exists.
+
 The request exact-binds opted-in project/repository/task class/task/attempt/
 target, canonical resource key, mapping/currentness/policy/selector/resume
 revisions, immutable selector baseline digest, global admission keys, replay
