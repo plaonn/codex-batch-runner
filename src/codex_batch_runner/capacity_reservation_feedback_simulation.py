@@ -12,6 +12,10 @@ from .capacity_target_ordering_simulation import (
     CapacityTargetOrderingSimulationError,
     validate_capacity_target_ordering_simulation_report,
 )
+from .execution_target_selector_decision_envelope import (
+    ExecutionTargetSelectorDecisionEnvelopeError,
+    validate_execution_target_selector_decision_envelope,
+)
 from .provider_resource_authority import (
     resource_gate_key,
     validate_admission_policy,
@@ -25,7 +29,6 @@ REQUEST_CONTRACT = "capacity-reservation-feedback-simulation-request-v1"
 REPORT_CONTRACT = "capacity-reservation-feedback-simulation-v1"
 POLICY_REVISION = "capacity-reservation-feedback-simulation-policy-v1"
 RETRY_POLICY_REVISION = "capacity-reservation-feedback-retry-policy-v1"
-MANUAL_OVERRIDE_BINDING_GAP = "manual_override_binding_not_expressed_by_selector_report"
 MUTATION_FIELDS = (
     "queue_mutations",
     "config_mutations",
@@ -123,7 +126,7 @@ def validate_capacity_reservation_feedback_simulation_request(
         replay,
     )
     selector = _selector(
-        request.get("selector_binding"), scope, revisions, mapping, resource
+        request.get("selector_binding"), scope, revisions, mapping, resource, replay
     )
     gates = _gates(request.get("gates"), scope, resource, revisions, replay)
     events = _events(request.get("predecessor_events"), replay["evaluated_at"])
@@ -218,6 +221,8 @@ def validate_capacity_reservation_feedback_simulation_report(
         "default_routing",
         "worker_promotion",
         "provider_promotion",
+        "report_only",
+        "selection_authority",
         "manual_override_binding_resolved",
         *MUTATION_FIELDS,
     }
@@ -250,12 +255,14 @@ def validate_capacity_reservation_feedback_simulation_report(
         "provider_promotion",
     ):
         _lit("report." + field, report.get(field), field == "simulation_only")
+    _lit("report.report_only", report.get("report_only"), True)
+    _lit("report.selection_authority", report.get("selection_authority"), False)
     for field in MUTATION_FIELDS:
         _lit("report." + field, report.get(field), [])
     _lit(
         "report.manual_override_binding_resolved",
         report.get("manual_override_binding_resolved"),
-        False,
+        True,
     )
     expected = _build(request)
     if not _type_exact_equal(report, expected):
@@ -269,6 +276,7 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
     reasons: list[str] = []
     gates = request["gates"]
     selector = request["selector_binding"]
+    envelope = selector["decision_envelopes"][0]
     retry = request["retry_budget"]["body"]
 
     # Canonical global-first precedence. Target state is intentionally ignored
@@ -285,6 +293,8 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
         reasons.append("selector_quality_floor_not_pass")
     elif selector["activation_report"]["decision"] == "fail_closed":
         reasons.append("selector_activation_report_fail_closed")
+    elif envelope["disposition"] == "fail_closed":
+        reasons.extend(envelope["reason_codes"])
     elif not retry["cooldown_inactive"]:
         reasons.append("retry_cooldown_active")
     elif not retry["dependencies_satisfied"]:
@@ -295,12 +305,17 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
         reasons.append("retry_operator_stop_active")
     elif not retry["task_attempt_boundary_preserved"]:
         reasons.append("retry_task_attempt_boundary_not_preserved")
-    reasons.append(MANUAL_OVERRIDE_BINDING_GAP)
+    eligible = not reasons
+    if eligible:
+        reasons.append("report_only_reservation_preview_eligible")
 
     feedback_body = deepcopy(request["feedback"]["body"])
     recovery = request["feedback"]["recovery_evidence"]
+    half_open_eligible = eligible and recovery is not None
     half_open_reason = (
-        MANUAL_OVERRIDE_BINDING_GAP
+        "source_attested_recovery_preview_eligible"
+        if half_open_eligible
+        else reasons[0]
         if recovery is not None
         else "no_source_attested_recovery_evidence"
     )
@@ -324,10 +339,10 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
         "contract": REPORT_CONTRACT,
         "evaluated_at": request["replay"]["evaluated_at"],
         "scope": deepcopy(request["scope"]),
-        "preview": "fail_closed",
+        "preview": "would_reserve" if eligible else "fail_closed",
         "reason_codes": reasons,
         "reservation_preview": {
-            "status": "not_reserved",
+            "status": "would_reserve" if eligible else "not_reserved",
             "reason": reasons[0],
             "expires_at": request["reservation"]["body"]["expires_at"],
         },
@@ -338,9 +353,11 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
             "evidence_digest": request["feedback"]["evidence_digest"],
         },
         "half_open_preview": {
-            "status": "not_eligible",
+            "status": "would_be_eligible" if half_open_eligible else "not_eligible",
             "reason": half_open_reason,
-            "candidate_resource_keys": [],
+            "candidate_resource_keys": (
+                [request["resource"]["canonical_key"]] if half_open_eligible else []
+            ),
         },
         "retry_preview": {
             "status": "would_not_retry",
@@ -353,6 +370,7 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
         "simulation_request": deepcopy(request),
         "input_digest": stable_digest(request),
         "simulation_only": True,
+        "report_only": True,
         "activation_authority": False,
         "runtime_reservation": False,
         "runtime_feedback_mutation": False,
@@ -363,6 +381,7 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
         "cooldown_mutation": False,
         "wake_mutation": False,
         "selection_mutation": False,
+        "selection_authority": False,
         "dispatch_authority": False,
         "provider_call": False,
         "promotion_authority": False,
@@ -370,7 +389,7 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
         "default_routing": False,
         "worker_promotion": False,
         "provider_promotion": False,
-        "manual_override_binding_resolved": False,
+        "manual_override_binding_resolved": True,
         **{field: [] for field in MUTATION_FIELDS},
     }
     body["replay_digest"] = stable_digest(body)
@@ -389,13 +408,26 @@ def _scope(value: object) -> dict[str, Any]:
             "opt_in_scope_id",
             "task_id",
             "attempt_id",
+            "canonical_task_source_revision",
+            "task_attempts_before_claim",
+            "attempt",
             "target_id",
             "opted_in",
         },
     )
     for field in scope:
-        if field != "opted_in":
+        if field not in {"opted_in", "task_attempts_before_claim", "attempt"}:
             _id("request.scope." + field, scope[field])
+    before = _int(
+        "request.scope.task_attempts_before_claim",
+        scope["task_attempts_before_claim"],
+        minimum=0,
+    )
+    attempt = _int("request.scope.attempt", scope["attempt"], minimum=1)
+    if attempt != before + 1:
+        raise CapacityReservationFeedbackSimulationError(
+            "request.scope attempt binding mismatch"
+        )
     _lit("request.scope.opted_in", scope["opted_in"], True)
     return deepcopy(scope)
 
@@ -619,6 +651,7 @@ def _selector(
     revisions: dict[str, Any],
     mapping: dict[str, Any],
     resource: dict[str, Any],
+    replay: dict[str, str],
 ) -> dict[str, Any]:
     selector = _obj("request.selector_binding", value)
     _keys(
@@ -638,6 +671,7 @@ def _selector(
             "resume_target_id",
             "resume_revision",
             "manual_override_binding_resolved",
+            "decision_envelopes",
         },
     )
     try:
@@ -684,7 +718,6 @@ def _selector(
         selector["selected_target_id"],
         report["counterfactual_target_id"],
     )
-    _lit("selector target scope", selector["selected_target_id"], scope["target_id"])
     if selector["selected_target_id"] not in selector["eligible_target_ids"]:
         raise CapacityReservationFeedbackSimulationError(
             "selector target must be exactly eligible"
@@ -723,17 +756,76 @@ def _selector(
     _lit(
         "selector manual override binding",
         selector["manual_override_binding_resolved"],
-        False,
+        True,
     )
-    # Exact resource target binding is explicit even though the upstream report
-    # does not yet express the independent manual-override policy axis.
+    envelopes = _list(
+        "request.selector_binding.decision_envelopes",
+        selector["decision_envelopes"],
+    )
+    if len(envelopes) != 1:
+        raise CapacityReservationFeedbackSimulationError(
+            "exactly one current selector decision envelope is required"
+        )
+    try:
+        envelope = validate_execution_target_selector_decision_envelope(envelopes[0])
+    except ExecutionTargetSelectorDecisionEnvelopeError as exc:
+        raise CapacityReservationFeedbackSimulationError(
+            "selector decision envelope is invalid"
+        ) from exc
+    expected_task = {
+        "task_id": scope["task_id"],
+        "canonical_task_source_revision": scope["canonical_task_source_revision"],
+        "task_attempts_before_claim": scope["task_attempts_before_claim"],
+        "attempt": scope["attempt"],
+    }
+    _lit("selector envelope task binding", envelope["task"], expected_task)
+    expected_scope = {
+        field: scope[field]
+        for field in ("project_id", "repository_id", "task_class", "opt_in_scope_id")
+    }
+    _lit("selector envelope scope binding", envelope["scope"], expected_scope)
+    _lit(
+        "selector envelope requirement revision",
+        envelope["selector_inputs"]["requirement_revision"],
+        report["revisions"]["requirement_revision"],
+    )
+    _lit(
+        "selector envelope inventory revision",
+        envelope["selector_inputs"]["inventory_snapshot_id"],
+        report["revisions"]["inventory_snapshot_id"],
+    )
+    _lit(
+        "selector envelope policy revision",
+        envelope["selector_inputs"]["selector_policy_revision"],
+        revisions["selector_revision"],
+    )
+    _lit(
+        "selector envelope baseline report digest",
+        envelope["baseline_binding"]["report_digest"],
+        stable_digest(report),
+    )
+    evaluated = _at(replay["evaluated_at"])
+    observed = _at(envelope["currentness_binding"]["observed_at"])
+    expires = _at(envelope["currentness_binding"]["expires_at"])
+    if not observed <= evaluated < expires:
+        raise CapacityReservationFeedbackSimulationError(
+            "selector decision envelope is stale at report evaluation time"
+        )
+    selected = envelope["selected_target_id"]
+    if selected is not None:
+        _lit("selector envelope target scope", selected, scope["target_id"])
+    elif envelope["disposition"] != "fail_closed":
+        raise CapacityReservationFeedbackSimulationError(
+            "non-fail-closed selector envelope must provide a target"
+        )
     _lit(
         "selector resource target",
         resource["target_id"],
-        selector["selected_target_id"],
+        scope["target_id"],
     )
     result = deepcopy(selector)
     result["activation_report"] = report
+    result["decision_envelopes"] = [envelope]
     return result
 
 
@@ -947,6 +1039,7 @@ def _reservation(
             "policy_digest",
             "currentness_digest",
             "selector_digest",
+            "selector_envelope_digest",
             "gate_digest",
             "authoritative_reset_at",
             "authoritative_wake_at",
@@ -963,6 +1056,9 @@ def _reservation(
         "policy_digest": stable_digest(policy),
         "currentness_digest": currentness["evidence_digest"],
         "selector_digest": selector["activation_report_digest"],
+        "selector_envelope_digest": selector["decision_envelopes"][0][
+            "artifact_digest"
+        ],
         "gate_digest": stable_digest(gates),
         "authoritative_reset_at": _gate_reset(gates, "target"),
         "authoritative_wake_at": _authoritative_wake(gates),
@@ -975,6 +1071,7 @@ def _reservation(
         "policy_digest",
         "currentness_digest",
         "selector_digest",
+        "selector_envelope_digest",
         "gate_digest",
     ):
         _digest("reservation " + field, body[field])

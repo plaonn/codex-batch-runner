@@ -243,6 +243,10 @@ from .capacity_reservation_feedback_simulation import (
     CapacityReservationFeedbackSimulationError,
     simulate_capacity_reservation_feedback,
 )
+from .execution_target_selector_decision_envelope import (
+    ExecutionTargetSelectorDecisionEnvelopeError,
+    build_execution_target_selector_decision_envelope,
+)
 from .provider_resource_simulator import (
     build_provider_resource_simulation,
     render_provider_resource_simulation,
@@ -329,9 +333,12 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-    if args.command == "capacity-reservation-feedback-simulate":
+    if args.command in (
+        "capacity-reservation-feedback-simulate",
+        "execution-target-selector-decision-envelope",
+    ):
         if args.config:
-            print("error: --config is not supported by capacity-reservation-feedback-simulate", file=sys.stderr)
+            print(f"error: --config is not supported by {args.command}", file=sys.stderr)
             return 2
         try:
             return args.func(None, args)
@@ -975,6 +982,14 @@ def build_parser() -> argparse.ArgumentParser:
     reservation_feedback_simulate.add_argument("--request-json", required=True, metavar="PATH")
     reservation_feedback_simulate.add_argument("--json", action="store_true", help="print JSON")
     reservation_feedback_simulate.set_defaults(func=cmd_capacity_reservation_feedback_simulate)
+
+    selector_envelope = sub.add_parser(
+        "execution-target-selector-decision-envelope",
+        help="build a report-only, exact-bound selector decision envelope",
+    )
+    selector_envelope.add_argument("--request-json", required=True, metavar="PATH")
+    selector_envelope.add_argument("--json", action="store_true", help="print JSON")
+    selector_envelope.set_defaults(func=cmd_execution_target_selector_decision_envelope)
 
     cooldown = sub.add_parser("cooldown", help="show, set, or clear global cooldown")
     cooldown_sub = cooldown.add_subparsers(dest="cooldown_command", required=True)
@@ -5574,6 +5589,19 @@ def cmd_capacity_reservation_feedback_simulate(config: Config, args: argparse.Na
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_execution_target_selector_decision_envelope(config: Config, args: argparse.Namespace) -> int:
+    del config
+    try:
+        envelope = build_execution_target_selector_decision_envelope(
+            load_provider_resource_json(args.request_json)
+        )
+    except (ExecutionTargetSelectorDecisionEnvelopeError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 

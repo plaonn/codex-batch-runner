@@ -25,6 +25,7 @@
 - [Trusted pre-execution delegation](docs/execution-delegation.md): immutable queue admission and runner-owned exact-target receipt barrier before worker invocation.
 - [Scoped readonly certification projection](docs/scoped-readonly-certification.md): receipt-bound 20/95%/zero-adverse advisory aggregation within the CBR worktree scope.
 - [Capacity target-ordering activation simulation](docs/capacity-target-ordering-simulation.md): deterministic report-only counterfactual ordering over the immutable baseline eligible set.
+- [Execution-target selector decision envelope](docs/execution-target-selector-decision-envelope.md): task/attempt-scoped canonical override-or-absence binding over the unchanged ordering-v1 baseline.
 - [Bounded capacity target-ordering canary mechanism](docs/capacity-target-ordering-canary.md): default-disabled exact-scope claim-time ordering with deterministic assignment, append-only evidence, and fail-closed rollback.
 - [Capacity gate-lifecycle activation simulation](docs/capacity-gate-lifecycle-simulation.md): deterministic report-only replay of typed gate creation, deduplication, supersession, wake revalidation, release, rollback, and synthetic hard-exclusion mechanics.
 - [Capacity reservation and feedback simulation](docs/capacity-reservation-feedback-simulation.md): exact-bound, report-only reservation, append-only feedback, half-open, and retry-budget previews.

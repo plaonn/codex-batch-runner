@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 
 from codex_batch_runner.capacity_reservation_feedback_simulation import (
-    MANUAL_OVERRIDE_BINDING_GAP,
     MUTATION_FIELDS,
     POLICY_REVISION,
     RETRY_POLICY_REVISION,
@@ -18,6 +17,12 @@ from codex_batch_runner.capacity_reservation_feedback_simulation import (
     stable_digest,
     validate_capacity_reservation_feedback_simulation_report,
     validate_capacity_reservation_feedback_simulation_request,
+)
+from codex_batch_runner.execution_target_selector_decision_envelope import (
+    PRODUCER_ID,
+    PRODUCER_REVISION,
+    build_execution_target_selector_decision_envelope,
+    selector_input_digest,
 )
 from codex_batch_runner.capacity_target_ordering_simulation import (
     simulate_capacity_target_ordering_activation,
@@ -136,6 +141,9 @@ def build_request() -> dict:
         **selector_report["scope"],
         "task_id": "task-a",
         "attempt_id": "attempt-1",
+        "canonical_task_source_revision": "task-source-r1",
+        "task_attempts_before_claim": 0,
+        "attempt": 1,
         "target_id": selector_report["counterfactual_target_id"],
     }
     revisions = {
@@ -209,8 +217,74 @@ def build_request() -> dict:
         "selector_revision": revisions["selector_revision"],
         "resume_target_id": selector_report["resume_target_id"],
         "resume_revision": revisions["resume_revision"],
-        "manual_override_binding_resolved": False,
+        "manual_override_binding_resolved": True,
     }
+    envelope_task = {
+        "task_id": scope["task_id"],
+        "canonical_task_source_revision": scope["canonical_task_source_revision"],
+        "task_attempts_before_claim": scope["task_attempts_before_claim"],
+        "attempt": scope["attempt"],
+    }
+    envelope_scope = {
+        field: scope[field]
+        for field in ("project_id", "repository_id", "task_class", "opt_in_scope_id")
+    }
+    envelope_inputs = {
+        field: selector_report["revisions"][field]
+        for field in (
+            "requirement_revision",
+            "inventory_snapshot_id",
+            "selector_policy_revision",
+        )
+    }
+    envelope_inputs["selector_input_digest"] = selector_input_digest(
+        task=envelope_task,
+        scope=envelope_scope,
+        requirement_revision=envelope_inputs["requirement_revision"],
+        inventory_snapshot_id=envelope_inputs["inventory_snapshot_id"],
+        selector_policy_revision=envelope_inputs["selector_policy_revision"],
+    )
+    projection = {
+        "task_id": scope["task_id"],
+        "canonical_task_source_revision": scope["canonical_task_source_revision"],
+        "routing_override": None,
+    }
+    source = {
+        "status": "authoritative_absence",
+        "producer_id": PRODUCER_ID,
+        "producer_revision": PRODUCER_REVISION,
+        "source_revision": "task-source-r1",
+        "source_projection": projection,
+        "source_projection_digest": stable_digest(projection),
+    }
+    currentness_body = {
+        "producer_id": PRODUCER_ID,
+        "producer_revision": PRODUCER_REVISION,
+        "source_revision": source["source_revision"],
+        "identity_authority": "source_attested",
+        "observed_at": OBSERVED,
+        "expires_at": CURRENTNESS_EXPIRES,
+        "source_projection_digest": source["source_projection_digest"],
+    }
+    envelope_currentness = {
+        **currentness_body,
+        "currentness_digest": stable_digest(currentness_body),
+    }
+    selector["decision_envelopes"] = [
+        build_execution_target_selector_decision_envelope(
+            {
+                "schema_version": 1,
+                "contract": "execution-target-selector-decision-envelope-request-v1",
+                "evaluated_at": NOW,
+                "task": envelope_task,
+                "scope": envelope_scope,
+                "selector_inputs": envelope_inputs,
+                "manual_override_source": source,
+                "currentness": envelope_currentness,
+                "baseline_report": selector_report,
+            }
+        )
+    ]
     global_decision = gate_decision(
         provider_id="global",
         quota_identity_id="global",
@@ -242,6 +316,9 @@ def build_request() -> dict:
         "policy_digest": stable_digest(admission_policy),
         "currentness_digest": currentness["evidence_digest"],
         "selector_digest": selector["activation_report_digest"],
+        "selector_envelope_digest": selector["decision_envelopes"][0][
+            "artifact_digest"
+        ],
         "gate_digest": stable_digest(gates),
         "authoritative_reset_at": TARGET_RESET,
         "authoritative_wake_at": TARGET_RESET,
@@ -313,6 +390,9 @@ def rebind_reservation(source: dict) -> None:
             "policy_digest": stable_digest(source["admission_policy"]),
             "currentness_digest": source["currentness_evidence"]["evidence_digest"],
             "selector_digest": source["selector_binding"]["activation_report_digest"],
+            "selector_envelope_digest": source["selector_binding"][
+                "decision_envelopes"
+            ][0]["artifact_digest"],
             "gate_digest": stable_digest(source["gates"]),
             "authoritative_reset_at": target["reset_at"],
             "authoritative_wake_at": wake,
@@ -320,6 +400,27 @@ def rebind_reservation(source: dict) -> None:
         }
     )
     source["reservation"]["evidence_digest"] = stable_digest(body)
+
+
+def set_selector_override(source: dict, override: dict | None) -> None:
+    producer_request = copy.deepcopy(
+        source["selector_binding"]["decision_envelopes"][0]["producer_request"]
+    )
+    manual = producer_request["manual_override_source"]
+    manual["status"] = "authoritative_absence" if override is None else "present"
+    manual["source_projection"]["routing_override"] = copy.deepcopy(override)
+    manual["source_projection_digest"] = stable_digest(manual["source_projection"])
+    envelope_currentness = producer_request["currentness"]
+    envelope_currentness["source_projection_digest"] = manual[
+        "source_projection_digest"
+    ]
+    body = copy.deepcopy(envelope_currentness)
+    body.pop("currentness_digest")
+    envelope_currentness["currentness_digest"] = stable_digest(body)
+    source["selector_binding"]["decision_envelopes"] = [
+        build_execution_target_selector_decision_envelope(producer_request)
+    ]
+    rebind_reservation(source)
 
 
 def parse_time(value: str):
@@ -403,13 +504,17 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         with self.assertRaises(CapacityReservationFeedbackSimulationError):
             validate_capacity_reservation_feedback_simulation_request(source)
 
-    def test_exact_bound_report_is_report_only_and_manual_override_fail_closed(
+    def test_exact_bound_report_is_report_only_and_selector_envelope_resolved(
         self,
     ) -> None:
         report = simulate_capacity_reservation_feedback(build_request())
-        self.assertEqual("fail_closed", report["preview"])
-        self.assertEqual([MANUAL_OVERRIDE_BINDING_GAP], report["reason_codes"])
-        self.assertFalse(report["manual_override_binding_resolved"])
+        self.assertEqual("would_reserve", report["preview"])
+        self.assertEqual(
+            ["report_only_reservation_preview_eligible"], report["reason_codes"]
+        )
+        self.assertTrue(report["manual_override_binding_resolved"])
+        self.assertTrue(report["report_only"])
+        self.assertFalse(report["selection_authority"])
         self.assertEqual([], report["half_open_preview"]["candidate_resource_keys"])
         self.assertTrue(report["simulation_only"])
         for field in MUTATION_FIELDS:
@@ -467,6 +572,7 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
             "policy_digest",
             "currentness_digest",
             "selector_digest",
+            "selector_envelope_digest",
             "gate_digest",
         )
         for field in fields:
@@ -496,6 +602,87 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
             source["selector_binding"]["activation_report"]
         )
         self.assert_rejected(source)
+
+    def test_valid_override_envelope_precedes_capacity_in_branch_3a(self) -> None:
+        source = build_request()
+        target = source["scope"]["target_id"]
+        set_selector_override(
+            source,
+            {
+                "mode": "preference",
+                "target_id": target,
+                "reason": "bounded-operator-choice",
+                "scope": "single_task",
+                "allow_fallback": False,
+                "provenance": "operator_override",
+            },
+        )
+        report = simulate_capacity_reservation_feedback(source)
+        envelope = report["simulation_request"]["selector_binding"][
+            "decision_envelopes"
+        ][0]
+        self.assertEqual("operator_preference", envelope["disposition"])
+        self.assertEqual("would_reserve", report["preview"])
+
+    def test_fail_closed_override_envelope_never_reserves_or_retries(self) -> None:
+        source = build_request()
+        set_selector_override(
+            source,
+            {
+                "mode": "pin",
+                "target_id": "target-unavailable",
+                "reason": "bounded-operator-choice",
+                "scope": "single_task",
+                "allow_fallback": False,
+                "provenance": "operator_override",
+            },
+        )
+        report = simulate_capacity_reservation_feedback(source)
+        self.assertEqual("fail_closed", report["preview"])
+        self.assertEqual(["manual_pin_unavailable"], report["reason_codes"])
+        self.assertEqual("not_reserved", report["reservation_preview"]["status"])
+        self.assertEqual("would_not_retry", report["retry_preview"]["status"])
+        self.assertEqual([], report["half_open_preview"]["candidate_resource_keys"])
+
+    def test_missing_duplicate_or_stale_envelope_rejected_for_branch_3a(self) -> None:
+        missing = build_request()
+        missing["selector_binding"]["decision_envelopes"] = []
+        duplicate = build_request()
+        duplicate["selector_binding"]["decision_envelopes"].append(
+            copy.deepcopy(duplicate["selector_binding"]["decision_envelopes"][0])
+        )
+        duplicate_divergent = build_request()
+        alternative = build_request()
+        set_selector_override(
+            alternative,
+            {
+                "mode": "preference",
+                "target_id": alternative["scope"]["target_id"],
+                "reason": "bounded-operator-choice",
+                "scope": "single_task",
+                "allow_fallback": False,
+                "provenance": "operator_override",
+            },
+        )
+        duplicate_divergent["selector_binding"]["decision_envelopes"].append(
+            alternative["selector_binding"]["decision_envelopes"][0]
+        )
+        stale = build_request()
+        producer_request = copy.deepcopy(
+            stale["selector_binding"]["decision_envelopes"][0]["producer_request"]
+        )
+        producer_request["currentness"]["expires_at"] = "2030-01-02T04:05:00+00:00"
+        body = copy.deepcopy(producer_request["currentness"])
+        body.pop("currentness_digest")
+        producer_request["currentness"]["currentness_digest"] = stable_digest(body)
+        producer_request["evaluated_at"] = "2030-01-02T04:01:00+00:00"
+        stale["selector_binding"]["decision_envelopes"] = [
+            build_execution_target_selector_decision_envelope(producer_request)
+        ]
+        stale["replay"]["evaluated_at"] = "2030-01-02T04:06:00+00:00"
+        for source in (missing, duplicate, duplicate_divergent, stale):
+            with self.subTest():
+                self.assert_rejected(source)
 
     def test_global_gate_key_mismatch_rejected(self) -> None:
         source = build_request()
@@ -552,7 +739,7 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         set_gate(source, "global", action="defer")
         report = simulate_capacity_reservation_feedback(source)
         self.assertEqual(
-            ["global_gate_gated", MANUAL_OVERRIDE_BINDING_GAP],
+            ["global_gate_gated"],
             report["reason_codes"],
         )
         self.assertNotIn("target_gate_gated", report["reason_codes"])
@@ -562,19 +749,23 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         set_gate(source, "target", action="defer")
         report = simulate_capacity_reservation_feedback(source)
         self.assertEqual(
-            ["target_gate_gated", MANUAL_OVERRIDE_BINDING_GAP],
+            ["target_gate_gated"],
             report["reason_codes"],
         )
 
-    def test_recovery_is_validated_but_manual_override_keeps_zero_candidates(
+    def test_recovery_is_validated_and_previews_one_exact_candidate(
         self,
     ) -> None:
         source = build_request()
         make_recovery(source)
         report = simulate_capacity_reservation_feedback(source)
-        self.assertEqual([], report["half_open_preview"]["candidate_resource_keys"])
         self.assertEqual(
-            MANUAL_OVERRIDE_BINDING_GAP, report["half_open_preview"]["reason"]
+            [source["resource"]["canonical_key"]],
+            report["half_open_preview"]["candidate_resource_keys"],
+        )
+        self.assertEqual(
+            "source_attested_recovery_preview_eligible",
+            report["half_open_preview"]["reason"],
         )
 
     def test_recovery_stale_rejected(self) -> None:
@@ -773,7 +964,7 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
             self.assertEqual(
                 before, {path.name: path.read_bytes() for path in root.iterdir()}
             )
-            self.assertEqual("fail_closed", json.loads(stdout.getvalue())["preview"])
+            self.assertEqual("would_reserve", json.loads(stdout.getvalue())["preview"])
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr):
                 self.assertEqual(

@@ -5,13 +5,13 @@ report-only contract. It previews an exact-bound reservation, append-only
 observational feedback, half-open eligibility, and retry safety without
 reserving capacity, calling a provider, or changing a task.
 
-Current prerequisite gap: the upstream selector report does not express a
-manual-override binding. This simulator records
-`manual_override_binding_resolved=false` and fails closed with
-`manual_override_binding_not_expressed_by_selector_report`. The implementation
-cannot be accepted or activated until that predecessor policy gap is resolved
-in the authoritative selector artifact. This simulator does not invent the
-missing policy axis.
+Branch 3A consumes exactly one current
+`execution-target-selector-decision-envelope-v1` in addition to the unchanged
+ordering-v1 report. The envelope independently binds the canonical override or
+source-attested absence to the task, attempt, scope, selector inputs, and exact
+ordering baseline. Missing, stale, ambiguous, conflicting, forged, or drifted
+envelopes fail this Branch 3A request closed; ordering-v1 remains valid without an
+envelope for its existing canary and gate consumers.
 
 The strict request has these authoritative sections:
 
@@ -30,8 +30,11 @@ The strict request has these authoritative sections:
   `capacity-target-ordering-activation-simulation-v1` report. The binding
   exact-matches its digest, hard constraints, exact-target eligibility, quality
   floor, immutable baseline and order, selected target, selector revision, and
-  resume target/revision to this request scope. It explicitly retains
-  `manual_override_binding_resolved=false`.
+  resume target/revision to this request scope without changing its bytes or shape.
+  `selector_binding.decision_envelopes` contains exactly one independently
+  standalone-validated current envelope. `manual_override_binding_resolved=true`
+  means only that this report-only consumer has exact evidence; it is not runtime
+  selection or dispatch authority.
 - `gates` embeds a validated typed gate state and exactly two validated
   canonical gate decisions. The global and target tuples each contain the exact
   `{resource_key, decision_key, wake_key, status}` derived from that evidence.
@@ -51,8 +54,9 @@ revision/artifact drift, and malformed bindings reject the request.
 
 Global gate evidence is evaluated first. Target gate evidence is considered
 only when the global tuple is `allowed`, followed by selector and retry safety.
-The reservation body binds mapping, policy, currentness, selector, and gate
-digests plus task, attempt, target, resource, and policy. Its `expires_at` must
+The reservation body binds mapping, policy, currentness, selector,
+selector-envelope, and gate digests plus task, attempt, target, resource, and
+policy. Its `expires_at` must
 be the parsed-time earliest of authoritative reset, authoritative wake,
 currentness expiry, and mapping/resource expiry; mixed UTC offsets are compared
 as instants rather than strings.
@@ -64,9 +68,8 @@ must be strictly later than its referenced predecessor and no later than the
 replay clock. Recovery requires a fresh
 source-attested evidence body binding observation/expiry, currentness
 revision/digest, target/resource/scope, both global and target decision/wake
-keys, predecessor event, and identity authority. At most one exact resource
-could be a half-open candidate; while manual override remains unresolved, the
-reported candidate list is always empty.
+keys, predecessor event, and identity authority. At most one exact resource can be
+a report-only half-open candidate when every gate and selector condition passes.
 
 Retry safety is deliberately independent from provider quota and task attempt
 limits. Its evidence exact-binds task/attempt, resume target/revision, and retry
@@ -80,12 +83,20 @@ its standalone validator reconstructs the exact report. It rejects a forged
 replay even if the caller recomputes `replay_digest`. Recursive deterministic
 comparison requires both type and value equality, including nested derived
 booleans and integers. All mutation arrays are separate and empty. Exact
-authority flags are `simulation_only=true`; and
+authority flags are `report_only=true`, `simulation_only=true`; and
 `activation_authority`, `runtime_reservation`, `runtime_feedback_mutation`,
 `automatic_half_open`, `automatic_retry`, `queue_mutation`, `config_mutation`,
 `cooldown_mutation`, `wake_mutation`, `selection_mutation`,
-`dispatch_authority`, `provider_call`, and `promotion_authority` are all
+`selection_authority`, `dispatch_authority`, `provider_call`, and
+`promotion_authority` are all
 `false`.
+
+Envelope precedence is fixed: authoritative absence uses the ordering-v1 target;
+preference and pin use the exact validated override target before capacity;
+preference fallback uses the immutable automatic baseline target. Unavailable pin,
+disabled/exhausted fallback, or an envelope `fail_closed` disposition produces no
+reservation, half-open candidate, or retry. See
+[Execution-target selector decision envelope](execution-target-selector-decision-envelope.md).
 
 Run it with:
 

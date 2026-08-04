@@ -165,6 +165,12 @@ advanced operator가 exact versioned target을 지정하는 아래 `routing_over
 - `target_id`는 inventory key일 뿐 task issuer가 provider capability를 선언하는 표면이
   아닙니다. Task에는 별도 model/provider/profile field를 허용하지 않습니다.
 
+Report-only Branch 3A consumers use the independently versioned
+[`execution-target-selector-decision-envelope-v1`](execution-target-selector-decision-envelope.md)
+to exact-bind this canonical value or source-attested authoritative absence to one
+task attempt and the unchanged ordering-v1 baseline. The envelope does not change
+the runtime selector, persist task evidence, or grant selection/dispatch authority.
+
 ## Exact model attribution and provider attestation
 
 Automatic target은 exact model과 reasoning effort를 command에 명시해야 합니다.
