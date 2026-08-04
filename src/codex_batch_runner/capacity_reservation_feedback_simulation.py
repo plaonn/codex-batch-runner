@@ -291,10 +291,13 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
         reasons.append("selector_exact_target_eligibility_not_pass")
     elif selector["quality_floor"] != "pass":
         reasons.append("selector_quality_floor_not_pass")
-    elif selector["activation_report"]["decision"] == "fail_closed":
-        reasons.append("selector_activation_report_fail_closed")
     elif envelope["disposition"] == "fail_closed":
         reasons.extend(envelope["reason_codes"])
+    elif (
+        envelope["disposition"] == "authoritative_absence"
+        and selector["activation_report"]["decision"] == "fail_closed"
+    ):
+        reasons.append("selector_activation_report_fail_closed")
     elif not retry["cooldown_inactive"]:
         reasons.append("retry_cooldown_active")
     elif not retry["dependencies_satisfied"]:
@@ -714,15 +717,6 @@ def _selector(
     )
     _digest("selector immutable baseline digest", selector["immutable_baseline_digest"])
     _lit(
-        "selector selected target",
-        selector["selected_target_id"],
-        report["counterfactual_target_id"],
-    )
-    if selector["selected_target_id"] not in selector["eligible_target_ids"]:
-        raise CapacityReservationFeedbackSimulationError(
-            "selector target must be exactly eligible"
-        )
-    _lit(
         "selector revision",
         selector["selector_revision"],
         report["revisions"]["selector_policy_revision"],
@@ -813,11 +807,18 @@ def _selector(
         )
     selected = envelope["selected_target_id"]
     if selected is not None:
+        _lit("selector selected target", selector["selected_target_id"], selected)
+        if selected not in selector["eligible_target_ids"]:
+            raise CapacityReservationFeedbackSimulationError(
+                "selector target must be exactly eligible"
+            )
         _lit("selector envelope target scope", selected, scope["target_id"])
     elif envelope["disposition"] != "fail_closed":
         raise CapacityReservationFeedbackSimulationError(
             "non-fail-closed selector envelope must provide a target"
         )
+    else:
+        _lit("selector selected target", selector["selected_target_id"], None)
     _lit(
         "selector resource target",
         resource["target_id"],

@@ -33,8 +33,14 @@ from codex_batch_runner.provider_resource_authority import (
     resource_gate_key,
     resource_gate_wake_key,
 )
-from tests.test_capacity_target_ordering_simulation import simulation_request
-from tests.test_provider_capacity_shadow import request as shadow_request
+from tests.test_capacity_target_ordering_simulation import (
+    alternative_shadow_request,
+    simulation_request,
+)
+from tests.test_provider_capacity_shadow import (
+    bundle as capacity_bundle,
+    request as shadow_request,
+)
 from tests.test_provider_resource_authority import policy
 
 NOW = "2030-01-02T04:00:00+00:00"
@@ -46,6 +52,19 @@ GLOBAL_RESET = "2030-01-02T05:15:00+00:00"
 
 def evidence(body: dict) -> dict:
     return {"body": copy.deepcopy(body), "evidence_digest": stable_digest(body)}
+
+
+def routing_override(
+    mode: str, target_id: str, *, allow_fallback: bool = False
+) -> dict:
+    return {
+        "mode": mode,
+        "target_id": target_id,
+        "reason": "bounded-operator-choice",
+        "scope": "single_task",
+        "allow_fallback": allow_fallback,
+        "provenance": "operator_override",
+    }
 
 
 def gate_decision(
@@ -420,6 +439,120 @@ def set_selector_override(source: dict, override: dict | None) -> None:
     source["selector_binding"]["decision_envelopes"] = [
         build_execution_target_selector_decision_envelope(producer_request)
     ]
+    source["selector_binding"]["selected_target_id"] = source["selector_binding"][
+        "decision_envelopes"
+    ][0]["selected_target_id"]
+    rebind_reservation(source)
+
+
+def set_selector_report(source: dict, selector_report: dict) -> None:
+    selector = source["selector_binding"]
+    selector.update(
+        {
+            "activation_report": selector_report,
+            "activation_report_digest": stable_digest(selector_report),
+            **selector_report["simulation_request"]["global_gate"],
+            "eligible_target_ids": selector_report["baseline_order"],
+            "immutable_baseline_digest": stable_digest(
+                {
+                    "baseline": selector_report["baseline"],
+                    "baseline_order": selector_report["baseline_order"],
+                }
+            ),
+            "immutable_baseline_order": selector_report["baseline_order"],
+            "selector_revision": selector_report["revisions"][
+                "selector_policy_revision"
+            ],
+            "resume_target_id": selector_report["resume_target_id"],
+        }
+    )
+    source["revisions"]["selector_revision"] = selector["selector_revision"]
+    producer_request = copy.deepcopy(
+        selector["decision_envelopes"][0]["producer_request"]
+    )
+    producer_request["baseline_report"] = selector_report
+    inputs = producer_request["selector_inputs"]
+    for field in (
+        "requirement_revision",
+        "inventory_snapshot_id",
+        "selector_policy_revision",
+    ):
+        inputs[field] = selector_report["revisions"][field]
+    inputs["selector_input_digest"] = selector_input_digest(
+        task=producer_request["task"],
+        scope=producer_request["scope"],
+        requirement_revision=inputs["requirement_revision"],
+        inventory_snapshot_id=inputs["inventory_snapshot_id"],
+        selector_policy_revision=inputs["selector_policy_revision"],
+    )
+    selector["decision_envelopes"] = [
+        build_execution_target_selector_decision_envelope(producer_request)
+    ]
+    selector["selected_target_id"] = selector["decision_envelopes"][0][
+        "selected_target_id"
+    ]
+    rebind_reservation(source)
+
+
+def retarget_request(source: dict, target_id: str) -> None:
+    binding = next(
+        item for item in source["mapping"]["bindings"] if item["target_id"] == target_id
+    )
+    source["scope"]["target_id"] = target_id
+    rule = copy.deepcopy(source["admission_policy"]["target_rules"][0])
+    rule.update({"target_id": target_id, "provider_id": binding["provider_id"]})
+    source["admission_policy"]["target_rules"] = [rule]
+    resource = {
+        "target_id": target_id,
+        "binding_id": binding["binding_id"],
+        "provider_id": binding["provider_id"],
+        "quota_identity_id": binding["quota_identity_id"],
+        "scope_id": binding["observation_scope"]["scope_id"],
+        "window_id": "primary",
+        "canonical_key": resource_gate_key(
+            binding["provider_id"],
+            binding["quota_identity_id"],
+            binding["observation_scope"]["scope_id"],
+            "primary",
+        ),
+        "mapping_revision": source["revisions"]["mapping_revision"],
+        "policy_revision": source["revisions"]["policy_revision"],
+        "identity_authority": "source_attested",
+        "verified_at": binding["verified_at"],
+        "expires_at": binding["expires_at"],
+    }
+    source["resource"] = resource
+    currentness = source["currentness_evidence"]
+    currentness["body"].update(
+        {
+            "target_id": target_id,
+            "resource_key": resource["canonical_key"],
+            "mapping_artifact_digest": stable_digest(source["mapping"]),
+            "policy_artifact_digest": stable_digest(source["admission_policy"]),
+        }
+    )
+    currentness["evidence_digest"] = stable_digest(currentness["body"])
+    target_decision = gate_decision(
+        provider_id=resource["provider_id"],
+        quota_identity_id=resource["quota_identity_id"],
+        scope_id=resource["scope_id"],
+        window_id=resource["window_id"],
+        reset_at=TARGET_RESET,
+    )
+    old_target_key = source["gates"]["target"]["decision_key"]
+    source["gates"]["decisions"] = [
+        target_decision if item["decision_key"] == old_target_key else item
+        for item in source["gates"]["decisions"]
+    ]
+    source["gates"]["target"] = gate_tuple(target_decision)
+    source["gates"]["state"] = gate_state(source["gates"]["decisions"])
+    source["reservation"]["body"].update(
+        {"target_id": target_id, "resource_key": resource["canonical_key"]}
+    )
+    source["feedback"]["body"].update(
+        {"target_id": target_id, "resource_key": resource["canonical_key"]}
+    )
+    source["feedback"]["evidence_digest"] = stable_digest(source["feedback"]["body"])
     rebind_reservation(source)
 
 
@@ -623,6 +756,150 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         ][0]
         self.assertEqual("operator_preference", envelope["disposition"])
         self.assertEqual("would_reserve", report["preview"])
+
+    def test_preference_and_pin_skip_replay_valid_capacity_only_fail_closed(
+        self,
+    ) -> None:
+        stale_shadow = shadow_request(
+            capacity_bundle=capacity_bundle(freshness_status="stale")
+        )
+        stale_report = simulate_capacity_target_ordering_activation(
+            simulation_request(stale_shadow)
+        )
+        missing_shadow = shadow_request()
+        missing_shadow["preeligible_targets"][1]["binding"]["observation_id"] = (
+            "missing-observation"
+        )
+        missing_report = simulate_capacity_target_ordering_activation(
+            simulation_request(missing_shadow)
+        )
+        for report, mode, target in (
+            (stale_report, "preference", "target-a"),
+            (missing_report, "pin", "target-b"),
+        ):
+            with self.subTest(mode=mode, target=target):
+                self.assertEqual("fail_closed", report["decision"])
+                self.assertEqual(
+                    {
+                        "hard_constraints": "pass",
+                        "exact_target_eligibility": "pass",
+                        "quality_floor": "pass",
+                    },
+                    report["simulation_request"]["global_gate"],
+                )
+                source = build_request()
+                set_selector_report(source, report)
+                set_selector_override(source, routing_override(mode, target))
+                if target != source["scope"]["target_id"]:
+                    retarget_request(source, target)
+                result = simulate_capacity_reservation_feedback(source)
+                self.assertEqual("would_reserve", result["preview"])
+                self.assertEqual(
+                    target,
+                    result["simulation_request"]["selector_binding"][
+                        "selected_target_id"
+                    ],
+                )
+
+    def test_override_target_can_differ_from_ordering_v1_counterfactual(self) -> None:
+        alternative_report = simulate_capacity_target_ordering_activation(
+            simulation_request(alternative_shadow_request())
+        )
+        self.assertEqual("target-b", alternative_report["counterfactual_target_id"])
+        pin_baseline = build_request()
+        set_selector_report(pin_baseline, alternative_report)
+        set_selector_override(pin_baseline, routing_override("pin", "target-a"))
+        first = simulate_capacity_reservation_feedback(pin_baseline)
+        self.assertEqual("target-a", first["scope"]["target_id"])
+        self.assertEqual("would_reserve", first["preview"])
+
+        preference_alternative = build_request()
+        self.assertEqual(
+            "target-a",
+            preference_alternative["selector_binding"]["activation_report"][
+                "counterfactual_target_id"
+            ],
+        )
+        set_selector_override(
+            preference_alternative,
+            routing_override("preference", "target-b"),
+        )
+        retarget_request(preference_alternative, "target-b")
+        second = simulate_capacity_reservation_feedback(preference_alternative)
+        self.assertEqual("target-b", second["scope"]["target_id"])
+        self.assertEqual("would_reserve", second["preview"])
+
+    def test_preference_fallback_uses_immutable_baseline_and_skips_v1(self) -> None:
+        alternative_report = simulate_capacity_target_ordering_activation(
+            simulation_request(alternative_shadow_request())
+        )
+        source = build_request()
+        set_selector_report(source, alternative_report)
+        set_selector_override(
+            source,
+            routing_override("preference", "target-unavailable", allow_fallback=True),
+        )
+        result = simulate_capacity_reservation_feedback(source)
+        envelope = result["simulation_request"]["selector_binding"][
+            "decision_envelopes"
+        ][0]
+        self.assertEqual("target-b", alternative_report["counterfactual_target_id"])
+        self.assertEqual("operator_preference_fallback", envelope["disposition"])
+        self.assertEqual("target-a", envelope["selected_target_id"])
+        self.assertEqual("would_reserve", result["preview"])
+
+    def test_authoritative_absence_obeys_replay_valid_v1_fail_closed(self) -> None:
+        stale_report = simulate_capacity_target_ordering_activation(
+            simulation_request(
+                shadow_request(
+                    capacity_bundle=capacity_bundle(freshness_status="stale")
+                )
+            )
+        )
+        source = build_request()
+        set_selector_report(source, stale_report)
+        result = simulate_capacity_reservation_feedback(source)
+        envelope = result["simulation_request"]["selector_binding"][
+            "decision_envelopes"
+        ][0]
+        self.assertEqual("authoritative_absence", envelope["disposition"])
+        self.assertEqual("fail_closed", result["preview"])
+        self.assertEqual(
+            ["selector_activation_report_fail_closed"], result["reason_codes"]
+        )
+
+    def test_valid_override_does_not_bypass_global_or_selector_gates(self) -> None:
+        global_gate = build_request()
+        set_selector_override(global_gate, routing_override("preference", "target-a"))
+        set_gate(global_gate, "global", action="defer")
+        global_result = simulate_capacity_reservation_feedback(global_gate)
+        self.assertEqual(["global_gate_gated"], global_result["reason_codes"])
+
+        for field in (
+            "hard_constraints",
+            "exact_target_eligibility",
+            "quality_floor",
+        ):
+            with self.subTest(field=field):
+                gate = {
+                    "hard_constraints": "pass",
+                    "exact_target_eligibility": "pass",
+                    "quality_floor": "pass",
+                }
+                gate[field] = "fail"
+                ordering_report = simulate_capacity_target_ordering_activation(
+                    simulation_request(shadow_request(), global_gate=gate)
+                )
+                source = build_request()
+                set_selector_report(source, ordering_report)
+                set_selector_override(
+                    source, routing_override("preference", "target-a")
+                )
+                result = simulate_capacity_reservation_feedback(source)
+                self.assertEqual("fail_closed", result["preview"])
+                self.assertEqual(
+                    ["selector_" + field + "_not_pass"], result["reason_codes"]
+                )
 
     def test_fail_closed_override_envelope_never_reserves_or_retries(self) -> None:
         source = build_request()

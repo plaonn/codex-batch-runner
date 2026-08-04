@@ -41,6 +41,14 @@ An override never admits, revives, or reorders another target. Presence of any v
 override skips capacity ordering, including fallback: fallback uses the immutable
 automatic selector baseline, not the capacity counterfactual.
 
+This precedence also applies when the embedded ordering-v1 report is replay-valid
+but `fail_closed` solely because capacity evidence is missing, stale, conflicting,
+or otherwise unusable. A valid preference, pin, or preference fallback still comes
+from the envelope and skips that capacity outcome. Authoritative absence continues
+to obey ordering-v1 `fail_closed`. Global and target resource gates, selector hard
+constraints, exact-target eligibility, quality floor, retry safety, and an envelope
+`fail_closed` disposition remain blocking.
+
 ## Sanitized request example
 
 The following is the public-safe outer shape. `baseline_report` must be the complete

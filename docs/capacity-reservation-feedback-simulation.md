@@ -97,6 +97,10 @@ preference fallback uses the immutable automatic baseline target. Unavailable pi
 disabled/exhausted fallback, or an envelope `fail_closed` disposition produces no
 reservation, half-open candidate, or retry. See
 [Execution-target selector decision envelope](execution-target-selector-decision-envelope.md).
+Consequently, a replay-valid ordering-v1 `fail_closed` caused only by unusable
+capacity evidence blocks authoritative absence but does not override a valid
+preference, pin, or fallback target. Global/target gates, hard constraints,
+exact-target eligibility, quality floor, and retry safety still take precedence.
 
 Run it with:
 
