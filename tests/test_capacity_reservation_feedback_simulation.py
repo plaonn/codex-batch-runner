@@ -232,11 +232,11 @@ def build_request() -> dict:
             }
         ),
         "immutable_baseline_order": selector_report["baseline_order"],
-        "selected_target_id": selector_report["counterfactual_target_id"],
+        "selected_target_id": None,
         "selector_revision": revisions["selector_revision"],
         "resume_target_id": selector_report["resume_target_id"],
         "resume_revision": revisions["resume_revision"],
-        "manual_override_binding_resolved": True,
+        "manual_override_binding_resolved": False,
     }
     envelope_task = {
         "task_id": scope["task_id"],
@@ -442,6 +442,9 @@ def set_selector_override(source: dict, override: dict | None) -> None:
     source["selector_binding"]["selected_target_id"] = source["selector_binding"][
         "decision_envelopes"
     ][0]["selected_target_id"]
+    source["selector_binding"]["manual_override_binding_resolved"] = (
+        override is not None
+    )
     rebind_reservation(source)
 
 
@@ -637,15 +640,13 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         with self.assertRaises(CapacityReservationFeedbackSimulationError):
             validate_capacity_reservation_feedback_simulation_request(source)
 
-    def test_exact_bound_report_is_report_only_and_selector_envelope_resolved(
+    def test_unattested_absence_report_is_report_only_and_fail_closed(
         self,
     ) -> None:
         report = simulate_capacity_reservation_feedback(build_request())
-        self.assertEqual("would_reserve", report["preview"])
-        self.assertEqual(
-            ["report_only_reservation_preview_eligible"], report["reason_codes"]
-        )
-        self.assertTrue(report["manual_override_binding_resolved"])
+        self.assertEqual("fail_closed", report["preview"])
+        self.assertEqual(["manual_override_source_not_trusted"], report["reason_codes"])
+        self.assertFalse(report["manual_override_binding_resolved"])
         self.assertTrue(report["report_only"])
         self.assertFalse(report["selection_authority"])
         self.assertEqual([], report["half_open_preview"]["candidate_resource_keys"])
@@ -848,7 +849,7 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         self.assertEqual("target-a", envelope["selected_target_id"])
         self.assertEqual("would_reserve", result["preview"])
 
-    def test_authoritative_absence_obeys_replay_valid_v1_fail_closed(self) -> None:
+    def test_self_asserted_absence_is_unattested_and_fail_closed(self) -> None:
         stale_report = simulate_capacity_target_ordering_activation(
             simulation_request(
                 shadow_request(
@@ -862,11 +863,10 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         envelope = result["simulation_request"]["selector_binding"][
             "decision_envelopes"
         ][0]
-        self.assertEqual("authoritative_absence", envelope["disposition"])
+        self.assertEqual("unattested", envelope["disposition"])
+        self.assertFalse(result["manual_override_binding_resolved"])
         self.assertEqual("fail_closed", result["preview"])
-        self.assertEqual(
-            ["selector_activation_report_fail_closed"], result["reason_codes"]
-        )
+        self.assertEqual(["manual_override_source_not_trusted"], result["reason_codes"])
 
     def test_valid_override_does_not_bypass_global_or_selector_gates(self) -> None:
         global_gate = build_request()
@@ -1036,12 +1036,9 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         source = build_request()
         make_recovery(source)
         report = simulate_capacity_reservation_feedback(source)
+        self.assertEqual([], report["half_open_preview"]["candidate_resource_keys"])
         self.assertEqual(
-            [source["resource"]["canonical_key"]],
-            report["half_open_preview"]["candidate_resource_keys"],
-        )
-        self.assertEqual(
-            "source_attested_recovery_preview_eligible",
+            "manual_override_source_not_trusted",
             report["half_open_preview"]["reason"],
         )
 
@@ -1079,6 +1076,9 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 source = build_request()
+                set_selector_override(
+                    source, routing_override("preference", "target-a")
+                )
                 source["retry_budget"]["body"][field] = False
                 source["retry_budget"]["evidence_digest"] = stable_digest(
                     source["retry_budget"]["body"]
@@ -1241,7 +1241,7 @@ class CapacityReservationFeedbackTests(unittest.TestCase):
             self.assertEqual(
                 before, {path.name: path.read_bytes() for path in root.iterdir()}
             )
-            self.assertEqual("would_reserve", json.loads(stdout.getvalue())["preview"])
+            self.assertEqual("fail_closed", json.loads(stdout.getvalue())["preview"])
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr):
                 self.assertEqual(

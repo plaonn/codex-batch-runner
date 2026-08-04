@@ -53,15 +53,15 @@ def override(*, mode: str, target_id: str, allow_fallback: bool = False) -> dict
 
 
 class ExecutionTargetSelectorDecisionEnvelopeTests(unittest.TestCase):
-    def test_authoritative_absence_uses_exact_ordering_v1_target(self) -> None:
+    def test_self_asserted_authoritative_absence_is_unattested(self) -> None:
         source = request()
         envelope = build_execution_target_selector_decision_envelope(source)
         self.assertEqual(ENVELOPE_CONTRACT, envelope["contract"])
-        self.assertEqual("authoritative_absence", envelope["disposition"])
+        self.assertEqual("unattested", envelope["disposition"])
         self.assertEqual(
-            source["baseline_report"]["counterfactual_target_id"],
-            envelope["selected_target_id"],
+            ["manual_override_source_not_trusted"], envelope["reason_codes"]
         )
+        self.assertIsNone(envelope["selected_target_id"])
         self.assertTrue(envelope["report_only"])
         self.assertTrue(envelope["simulation_only"])
         for field in (
@@ -189,7 +189,7 @@ class ExecutionTargetSelectorDecisionEnvelopeTests(unittest.TestCase):
 
         envelope = build_execution_target_selector_decision_envelope(request())
         forged = copy.deepcopy(envelope)
-        forged["selected_target_id"] = None
+        forged["reason_codes"] = ["forged"]
         with self.assertRaises(ExecutionTargetSelectorDecisionEnvelopeError):
             validate_execution_target_selector_decision_envelope(forged)
 

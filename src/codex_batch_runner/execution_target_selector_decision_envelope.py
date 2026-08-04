@@ -20,6 +20,7 @@ PRODUCER_ID = "execution-target-selector"
 PRODUCER_REVISION = "execution-target-selector-decision-envelope-producer-v1"
 DISPOSITIONS = {
     "authoritative_absence",
+    "unattested",
     "operator_preference",
     "operator_pin",
     "operator_preference_fallback",
@@ -234,10 +235,15 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
     selected: str | None = None
     reasons: list[str]
 
+    # This standalone request contains only caller-provided source labels,
+    # projection, timestamps, and digests. Those values can prove internal
+    # consistency, but cannot attest that the canonical task source was read.
+    # Explicit override content retains its existing validation semantics; only
+    # an asserted absence would need source authority that this contract lacks.
     if source["status"] == "authoritative_absence":
-        disposition = "authoritative_absence"
-        selected = report["counterfactual_target_id"]
-        reasons = ["authoritative_override_absence_uses_ordering_v1"]
+        disposition = "unattested"
+        selected = None
+        reasons = ["manual_override_source_not_trusted"]
     elif override["target_id"] in baseline_order:
         disposition = "operator_" + override["mode"]
         selected = override["target_id"]

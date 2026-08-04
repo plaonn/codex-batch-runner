@@ -262,7 +262,7 @@ def validate_capacity_reservation_feedback_simulation_report(
     _lit(
         "report.manual_override_binding_resolved",
         report.get("manual_override_binding_resolved"),
-        True,
+        request["selector_binding"]["manual_override_binding_resolved"],
     )
     expected = _build(request)
     if not _type_exact_equal(report, expected):
@@ -291,7 +291,7 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
         reasons.append("selector_exact_target_eligibility_not_pass")
     elif selector["quality_floor"] != "pass":
         reasons.append("selector_quality_floor_not_pass")
-    elif envelope["disposition"] == "fail_closed":
+    elif envelope["disposition"] in {"fail_closed", "unattested"}:
         reasons.extend(envelope["reason_codes"])
     elif (
         envelope["disposition"] == "authoritative_absence"
@@ -392,7 +392,9 @@ def _build(request: dict[str, Any]) -> dict[str, Any]:
         "default_routing": False,
         "worker_promotion": False,
         "provider_promotion": False,
-        "manual_override_binding_resolved": True,
+        "manual_override_binding_resolved": selector[
+            "manual_override_binding_resolved"
+        ],
         **{field: [] for field in MUTATION_FIELDS},
     }
     body["replay_digest"] = stable_digest(body)
@@ -747,11 +749,6 @@ def _selector(
         selector["resume_revision"],
         revisions["resume_revision"],
     )
-    _lit(
-        "selector manual override binding",
-        selector["manual_override_binding_resolved"],
-        True,
-    )
     envelopes = _list(
         "request.selector_binding.decision_envelopes",
         selector["decision_envelopes"],
@@ -766,6 +763,11 @@ def _selector(
         raise CapacityReservationFeedbackSimulationError(
             "selector decision envelope is invalid"
         ) from exc
+    _lit(
+        "selector manual override binding",
+        selector["manual_override_binding_resolved"],
+        envelope["disposition"] != "unattested",
+    )
     expected_task = {
         "task_id": scope["task_id"],
         "canonical_task_source_revision": scope["canonical_task_source_revision"],
@@ -813,7 +815,7 @@ def _selector(
                 "selector target must be exactly eligible"
             )
         _lit("selector envelope target scope", selected, scope["target_id"])
-    elif envelope["disposition"] != "fail_closed":
+    elif envelope["disposition"] not in {"fail_closed", "unattested"}:
         raise CapacityReservationFeedbackSimulationError(
             "non-fail-closed selector envelope must provide a target"
         )

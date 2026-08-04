@@ -2,8 +2,7 @@
 
 `execution-target-selector-decision-envelope-v1` is an independently versioned,
 task/attempt-scoped, report-only binding between the canonical task selector input,
-an authoritative `routing_override` observation (including explicit authoritative
-absence), and one complete
+a declared `routing_override` projection, and one complete
 `capacity-target-ordering-activation-simulation-v1` report. It does not change the
 runtime selector, select for dispatch, persist task evidence, reserve capacity, or
 call a provider.
@@ -18,9 +17,9 @@ The strict producer request is
   deterministic selector-input digest;
 - the canonical task-source projection and its digest. `status=present` requires
   the complete value accepted by the existing `routing_override_value` validator.
-  `status=authoritative_absence` requires an explicit JSON `null`; missing fields,
-  `{}`, or a consumer assertion are not absence evidence;
-- the fixed selector producer id/revision, task source revision, source-attested
+  `status=authoritative_absence` requires an explicit JSON `null`; missing fields
+  and `{}` are invalid;
+- the fixed selector producer id/revision, task source revision,
   observation/expiry interval, source-projection digest, and currentness digest;
 - the complete standalone-validated ordering-v1 report, its exact digest, immutable
   baseline decision digest, selected automatic baseline target, and ordered eligible
@@ -30,24 +29,27 @@ The deterministic dispositions are:
 
 | Source state | Disposition | Report-only target |
 | --- | --- | --- |
-| authoritative absence | `authoritative_absence` | ordering-v1 counterfactual target |
+| asserted authoritative absence without trusted source comparison | `unattested` | none |
 | eligible preference | `operator_preference` | exact override target |
 | eligible pin | `operator_pin` | exact override target |
 | unavailable preference with fallback | `operator_preference_fallback` | immutable automatic baseline target |
-| unavailable pin, disabled/exhausted fallback, or invalid evidence | `fail_closed` | none |
+| malformed source declaration or incompatible baseline | `fail_closed` | none |
 
 Every non-null target must already occur in the exact ordering-v1 baseline order.
 An override never admits, revives, or reorders another target. Presence of any valid
 override skips capacity ordering, including fallback: fallback uses the immutable
 automatic selector baseline, not the capacity counterfactual.
 
-This precedence also applies when the embedded ordering-v1 report is replay-valid
-but `fail_closed` solely because capacity evidence is missing, stale, conflicting,
-or otherwise unusable. A valid preference, pin, or preference fallback still comes
-from the envelope and skips that capacity outcome. Authoritative absence continues
-to obey ordering-v1 `fail_closed`. Global and target resource gates, selector hard
-constraints, exact-target eligibility, quality floor, retry safety, and an envelope
-`fail_closed` disposition remain blocking.
+A standalone request does not include a trusted canonical task snapshot, producer
+receipt, or destination-side source readback. Its producer labels, source revision,
+timestamps, and internally consistent digests are therefore not authority for an
+absence claim: such an envelope is `unattested`, cannot select a target, and cannot
+resolve the manual-override binding. Explicit, non-null overrides retain their
+existing canonical value validation. Only a future contract that performs trusted
+source comparison may recognize `authoritative_absence` or resolve an absence
+binding. Global and target resource gates, selector hard constraints, exact-target
+eligibility, quality floor, retry safety, and `unattested`/`fail_closed` dispositions
+remain blocking.
 
 ## Sanitized request example
 
@@ -111,10 +113,9 @@ cbr execution-target-selector-decision-envelope --request-json request.json --js
 ```
 
 The command rejects `--config`, reads no runner state, and writes nothing. A JSON
-object merely claiming the fixed producer labels does not gain selector authority;
-the envelope is consumable only at the bounded producer/consumer boundary described
-here. The standalone validator replays the embedded producer request and recomputes
-the disposition, target, input/currentness/baseline bindings, and artifact digest.
+object merely claiming the fixed producer labels does not gain selector authority.
+The standalone validator replays the embedded producer request and recomputes the
+disposition, input/currentness/baseline bindings, and artifact digest.
 Unknown keys, primitive-type aliases, stale evidence, task/attempt/scope/revision
 drift, conflicting artifacts, and forged replay outputs are rejected.
 
