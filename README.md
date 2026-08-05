@@ -12,6 +12,10 @@
 
 CBR은 durable하고 비대화형인 실행 lifecycle을 소유합니다. interactive/supervised agent IDE는 작업 공간 탐색, terminal steering, worktree 상호작용, diff 검토에 적합한 별도 surface입니다. 예를 들어 Orca는 그러한 interactive/supervised surface의 비규범적 예시일 뿐이며, CBR과의 통합·backend 지원·권한 이전을 뜻하지 않습니다.
 
+CBR은 conversational UX, messaging gateway, personal memory, skill 또는 MCP discovery, 일반 목적의 cron·monitoring, browser research, interactive agent steering을 소유하지 않습니다. 이러한 사용자-facing 수집·정제·전달 계층은 CBR 밖의 교체 가능한 surface로 유지하고, 필요한 경우 bounded execution contract를 통해 CBR에 작업을 위임합니다.
+
+외부 gateway나 agent runtime은 CBR의 adapter 또는 issuer가 될 수 있지만 CBR의 admission, authority, readiness, review, acceptance, apply, audit, recovery 경계를 우회하거나 대체하지 않습니다. CBR은 범용 개인 에이전트 플랫폼으로 확장하지 않고 unattended coding mutation의 정책·transaction control plane으로 유지합니다.
+
 ## 문서 지도
 
 - [요구사항 계층 (`ROOT-REQ-*`, `REQ-*`)](docs/requirements.md)
@@ -178,7 +182,7 @@ The first selected path is authoritative. A missing, unreadable, invalid, or non
 
 Optional `root` makes relative runtime paths independent of the process current working directory. `worktree_mode=task` enables task-specific git worktrees. A project can opt into reusable worktree directories with a tracked root `.cbr.toml`; projects without it keep disposable task worktrees, and invalid/untracked policy files fail closed. See [worktree isolation and apply](docs/worktrees.md). `model_requirement_vector`, `model_selection_rules`, and `default_execution_config` keep task intent separate from local Codex model/profile choices. `worker_targets` and `worker_selection_rules` can route matching default Codex tasks to a configured shell or external JSON worker before claim.
 
-`usage_admission_enabled` optionally adds a provider-neutral, read-only JSON snapshot check before a native Codex implementation task is claimed. It is disabled by default, never installs or authenticates a snapshot provider, and fails open to the existing runner path when the configured argv command is unavailable or invalid. See [docs/execution.md](docs/execution.md#usage-aware-codex-admission) and [docs/operator-installation.md](docs/operator-installation.md#usage-aware-admission-설정).
+`usage_admission_enabled` optionally adds a provider-neutral, read-only JSON snapshot check before a native Codex implementation task가 claimed됩니다. It is disabled by default, never installs or authenticates a snapshot provider, and fails open to the existing runner path when the configured argv command is unavailable or invalid. See [docs/execution.md](docs/execution.md#usage-aware-codex-admission) and [docs/operator-installation.md](docs/operator-installation.md#usage-aware-admission-설정).
 
 For launchd/systemd installation, config discovery, and `doctor`, use [docs/operator-installation.md](docs/operator-installation.md). For execution policy and full config contracts, use [docs/execution.md](docs/execution.md).
 
