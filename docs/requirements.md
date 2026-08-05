@@ -9,26 +9,43 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 `under review`로 전환해 근거 문서와 파생 spec/check를 함께 재검증하고,
 `retain`, `narrow`, `supersede`, `discard` 중 하나를 기록한다.
 
-## ROOT-REQ-SAFE-UNATTENDED-OPERATION: 운영 집중도와 토큰 낭비 감소를 지키는 안전 우선 스케줄링
+## ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION: 코딩 에이전트를 위한 policy-governed unattended execution
+
+- Parent: none
+- Root goal: 코딩 에이전트의 비대화형 실행을 권한·readiness·의존성·리뷰·복구 경계 아래에서 제어 가능한 lifecycle로 운영한다.
+- Decision class: Durable Requirement
+- Status: active
+- Validity scope: Durable
+- Requirement: `codex-batch-runner`는 authority-bound admission, readiness·dependency gate, idempotent execution, retry/resume, isolated review unit, execution/acceptance/apply separation, audit evidence, recovery, parent attention을 통해 코딩 에이전트의 unattended execution lifecycle을 제어한다.
+- Rationale: 비대화형 실행을 단순 호출 반복이 아니라 안전하게 검증·수거·복구할 수 있는 control plane으로 유지하기 위해.
+- Failure prevented: 모호한 권한의 실행, 준비되지 않은 작업의 호출, 중복 실행, 승인 전 통합, 감사·복구 근거 상실, parent collection 누락.
+- Assumptions: 실행 전 처리 가능성과 상태 변경 권한을 판단할 수 있고, 현재 로컬 파일 큐와 Codex CLI 중심 beta 구현이 이 control plane의 concrete backend를 제공한다.
+- Derived specs: README와 스펙에서 제시된 제어 중심 운영 모델을 준수한다.
+- Revisit when: unattended execution의 권한·readiness·review·recovery lifecycle, primary backend, 또는 운영자 제어 모델이 materially 바뀔 때.
+- Revisit signal status: not observed
+- Evidence: [README.md](../README.md), [docs/spec.md](spec.md)
+
+## Historical predecessor (superseded): `ROOT-REQ-SAFE-UNATTENDED-OPERATION`
 
 - Parent: none
 - Previous identifiers: R0
 - Root goal: 반복적인 Codex 실행을 직접 관리하는 부담과 토큰 낭비를 줄이면서도 무인 작업에 대한 운영자 제어권을 유지한다.
 - Decision class: Durable Requirement
-- Status: active
-- Validity scope: Durable
+- Status: superseded
+- Superseded by: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
+- Validity scope: Historical durable rationale; not a current semantic hierarchy entry
 - Requirement: `codex-batch-runner`는 실행 가능한 작업이 있을 때만 Codex를 호출하고, 큐/리뷰/안전 구조를 통해 무인 운영에서도 제어권을 유지한다.
 - Rationale: 반복 호출 중심의 오퍼레이션에서 수동 개입을 줄이고 토큰 낭비를 방지하며, 실행 판단 근거를 잃지 않기 위해.
 - Failure prevented: 대기 작업이 없어도 발생하는 무의미한 Codex 호출, 큐의 무단 변경, 검토 미완료 작업의 완료 처리, 제어 평면 정보 소실.
 - Assumptions: Codex 호출은 운영 비용을 소비하며, 무인 실행에서도 처리 가능성과 상태 변경 권한을 호출 전에 판단할 수 있다.
 - Derived specs: README와 스펙에서 제시된 제어 중심 운영 모델을 준수한다.
 - Revisit when: Codex 호출 비용이 사실상 사라지거나, 무인 실행 모델·운영 주기·수동 개입 정책이 바뀔 때.
-- Revisit signal status: not observed
+- Revisit signal status: superseded by root product-positioning decision
 - Evidence: [README.md](../README.md), [docs/spec.md](spec.md)
 
 ## REQ-CLOSED-LOOP-ORCHESTRATION: source workstream의 계획과 명시적 CBR dispatch
 
-- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Parent: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
 - Decision class: Durable Requirement
 - Status: active
 - Validity scope: Durable
@@ -43,14 +60,14 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 
 ## REQ-EXECUTION-READINESS-GATES: 실행성 있는 작업에서만 Codex 호출
 
-- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Parent: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
 - Previous identifiers: R1
 - Decision class: Durable Requirement
 - Status: active
 - Validity scope: Durable
 - Requirement: `run-next`와 `run-loop`는 pause/lock/cooldown/의존성/용량/리뷰/큐 준비 상태를 선행 점검한 뒤에만 Codex를 호출하고, 불가 상태이면 비실행 결괏값으로 종료한다.
-- Rationale: 스케줄러의 핵심 가치는 토큰 절감과 무사한 자동 운영이다.
-- Failure prevented: 중단, 잠금, 쿨다운, 의존성 미해결, 리뷰 블록 상태에서의 불필요한 토큰 소모.
+- Rationale: readiness gate는 안전한 unattended execution과 불필요한 호출 방지를 함께 보장한다.
+- Failure prevented: 중단, 잠금, 쿨다운, 의존성 미해결, 리뷰 블록 상태에서의 준비되지 않은 실행과 불필요한 토큰 소모.
 - Assumptions: 실행 가능성을 결정하는 gate 상태를 Codex 호출 전에 로컬에서 읽을 수 있고, gate 확인 비용이 호출 비용보다 작다.
 - Derived specs: `run-next`는 단일 단위 처리, `run-loop`는 매 반복 config/큐 재로딩, gate 위반 시 실패 상태 변경 없이 중단.
 - Revisit when: 실행 gate 우선순위·용량 정책·스케줄링 엔진이 변경되거나, 호출 전에 readiness를 판정할 수 없는 backend가 도입될 때.
@@ -59,7 +76,7 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 
 ## REQ-AUDITABLE-RECOVERABLE-STATE: 큐 상태의 감사와 복구 가능성
 
-- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Parent: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
 - Previous identifiers: R2
 - Decision class: Durable Requirement
 - Status: active
@@ -90,7 +107,7 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 
 ## REQ-SEPARATE-EXECUTION-AND-ACCEPTANCE: 실행 완료와 리뷰 수용 분리
 
-- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Parent: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
 - Previous identifiers: R3
 - Decision class: Durable Requirement
 - Status: active
@@ -106,7 +123,7 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 
 ## REQ-ISOLATED-REVIEW-UNITS: 작업물 격리와 승인 후 통합
 
-- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Parent: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
 - Previous identifiers: R4
 - Decision class: Durable Requirement
 - Status: active
@@ -137,7 +154,7 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 
 ## REQ-TERMINAL-LIFECYCLE-CONSISTENCY: archive 전 실행·리뷰·worktree 책임 종결
 
-- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Parent: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
 - Decision class: Durable Requirement
 - Status: active
 - Validity scope: Durable
@@ -152,7 +169,7 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 
 ## REQ-BOUNDED-OPT-IN-AUTOMATION: 자동화는 보고 우선·범위 제한
 
-- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Parent: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
 - Previous identifiers: R5
 - Decision class: Durable Requirement
 - Status: active
@@ -168,7 +185,7 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 
 ## REQ-PUBLIC-PRIVATE-BOUNDARY: 공개/비공개 경계 보호
 
-- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Parent: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
 - Previous identifiers: R6
 - Decision class: Durable Requirement
 - Status: active
@@ -184,7 +201,7 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 
 ## REQ-SEPARATE-ROUTING-EVIDENCE: 작업 특성, 실행 선택, 평가 근거 분리
 
-- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Parent: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
 - Previous identifiers: R7
 - Decision class: Durable Requirement
 - Status: active
@@ -200,7 +217,7 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 
 ## REQ-SEPARATE-PROJECT-AND-RUNTIME-TRUTH: 프로젝트 로컬 진실과 글로벌 큐 분리
 
-- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Parent: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
 - Previous identifiers: R8
 - Decision class: Durable Requirement
 - Status: active
@@ -216,7 +233,7 @@ observable signal이 발생하면 해당 항목은 자동 폐기되지 않는다
 
 ## REQ-DURABLE-PARENT-ATTENTION: parent collection을 위한 durable attention delivery
 
-- Parent: ROOT-REQ-SAFE-UNATTENDED-OPERATION
+- Parent: ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION
 - Decision class: Durable Requirement
 - Status: active
 - Validity scope: Durable

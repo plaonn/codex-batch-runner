@@ -1,12 +1,16 @@
 # codex-batch-runner
 
-`codex-batch-runner`는 Codex CLI 작업을 로컬 파일 큐에서 하나씩 실행하는 배치 runner입니다. 스케줄러가 자주 실행되더라도 처리할 작업이 있을 때만 `codex exec --json` 또는 `codex exec resume ... --json`을 호출하여 불필요한 Codex 토큰 소모를 줄입니다.
+`codex-batch-runner`는 코딩 에이전트를 위한 policy-governed unattended execution control plane입니다. 현재 구현은 Codex CLI를 주 native backend로 사용하는 로컬 파일 큐 runner이며, 실행 권한·readiness·의존성·리뷰·복구를 분리해 비대화형 작업의 lifecycle을 통제합니다. 스케줄러가 자주 실행되더라도 처리할 작업이 있을 때만 `codex exec --json` 또는 `codex exec resume ... --json`을 호출하므로 불필요한 Codex 호출과 토큰 소모도 줄입니다.
 
 ## 현재 상태
 
 현재는 로컬 beta 운영을 목표로 core flow를 구현하고 있습니다. 파일 기반 queue, lock, cooldown, Codex JSONL parsing, 자동 검토, bounded auto-fix, shell task backend, worktree 격리 실행, worktree apply/rebase/cleanup/branch-prune 흐름을 포함합니다.
 
 실제 Codex CLI JSONL schema는 버전별 차이가 있을 수 있으므로 runner는 원본 JSONL 로그를 보존하고, 최종 응답과 session/thread id는 best-effort로 파싱합니다.
+
+## 제품 경계
+
+CBR은 durable하고 비대화형인 실행 lifecycle을 소유합니다. interactive/supervised agent IDE는 작업 공간 탐색, terminal steering, worktree 상호작용, diff 검토에 적합한 별도 surface입니다. 예를 들어 Orca는 그러한 interactive/supervised surface의 비규범적 예시일 뿐이며, CBR과의 통합·backend 지원·권한 이전을 뜻하지 않습니다.
 
 ## 문서 지도
 

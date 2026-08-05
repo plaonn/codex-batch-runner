@@ -4,7 +4,7 @@
 
 ## Topic map
 
-- [요구사항 계층 (`ROOT-REQ-*`, `REQ-*`)](requirements.md): 토큰 효율/스케줄링·완화·감사·리뷰·격리·안전 경계·모델 요구사항·프로젝트 진실 분리를 의미 기반 stable identifier로 설명.
+- [요구사항 계층 (`ROOT-REQ-*`, `REQ-*`)](requirements.md): policy-governed unattended execution의 authority, readiness, orchestration, 감사, 리뷰, 격리, 안전 경계, 모델 요구사항, 프로젝트 진실 분리를 의미 기반 stable identifier로 설명.
 - [Model routing requirement contract](model-routing-contract.md): role-agnostic issuer-owned requirement v2, rubric anchors, hard constraints/unknown policy, bounded override, exact model attribution, migration/freeze dependency.
 - [Task schema and dependency contract](task-schema.md): task JSON fields, task status, review status, project routing metadata, dependency readiness.
 - [Execution contract](execution.md): model requirements, opt-in usage-aware Codex admission, shell and external-json-command backends, capacity and priority, queue mutation, runner execution policy, watchdog, lock, atomic writes, Codex command/prompt wrapper, rate-limit, Codex CLI maintenance.
@@ -40,9 +40,9 @@
 
 ## 목표
 
-`codex-batch-runner`는 로컬 파일 기반 큐에 등록된 작업을 Codex CLI로 순차 처리하는 배치 runner임.
+`codex-batch-runner`는 코딩 에이전트를 위한 policy-governed unattended execution control plane임. 현재 concrete implementation은 로컬 파일 기반 큐에 등록된 작업을 Codex CLI 중심으로 순차 처리하는 Python CLI beta임.
 
-핵심 목표는 Codex CLI를 직접 주기적으로 호출하되, 처리할 작업이 없거나 지금 처리하면 안 되는 상태에서는 Codex를 호출하지 않아 불필요한 Codex 토큰 소모를 줄이는 것임.
+핵심 목표는 authority-bound admission, readiness·dependency gate, idempotent execution, retry/resume, 격리된 review unit, execution/acceptance/apply 분리, audit evidence, recovery, parent attention으로 비대화형 실행 lifecycle을 제어하는 것임. 처리할 작업이 없거나 지금 처리하면 안 되는 상태에서 Codex를 호출하지 않는 동작은 이 control plane의 구체적인 안전·효율 이점임.
 
 runner는 cron, launchd, systemd처럼 외부 스케줄러가 자주 실행해도 안전해야 함. macOS에서는 launchd를 기본 운영 방식으로 문서화하고, cron은 portable fallback으로만 다룸.
 
