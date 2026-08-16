@@ -1067,3 +1067,11 @@ or:
 ```
 
 `current_event_file` and `last_processed_event_file` may be absolute paths or paths relative to configured `event_dir`, but must resolve inside `event_dir`. If `current_byte_offset` is absent or is smaller than the current event file size, that current file is treated as not fully processed. Files after the current cursor file, or after `last_processed_event_file` when only whole-file progress is recorded, are also skipped. If a configured cursor state file is missing, malformed, unreadable, or references files outside `event_dir`, `cbr prune` emits a warning and skips event JSONL deletion for that safety decision while still reporting task/log cleanup candidates.
+
+## Automatic Chamber evidence
+
+CBR의 ordinary automatic Codex queue path는 [Automatic Chamber evidence contract](automatic-evidence.md)의 execution-controller입니다. Caller가 `--evidence-source-json`으로 exact `{kind,id,revision}`을 제공한 task만 configured `execution_evidence_adapter`를 통해 native Codex를 실행합니다. CBR는 prompt, cwd, latest task 또는 terminal state에서 source를 추정하지 않습니다.
+
+Claim 시 생성되는 기존 `active_run_id`는 one native dispatch attempt의 external execution identity로 adapter에 전달됩니다. Retry마다 새 identity가 생성되고 source/revision은 immutable하게 유지됩니다. Adapter result는 task의 `automatic_evidence_attempts`에 sanitized append-only record로 남습니다.
+
+Child completion은 acceptance가 아닙니다. Authoritative review가 아직 없으면 `completed`/`unreviewed`와 `acceptance_state=pending-authority`를 유지하고 outcome event나 settlement를 실행하지 않습니다. `cbr accept`, `cbr reject`, 또는 같은 authority를 가진 review-next path가 accepted/rejected로 전이할 때만 latest exact attempt에 deferred callback을 호출합니다. Callback이 `recorded`/`idempotent`를 반환하지 않으면 `unknown-effect`/reconciliation-required로 남기며 automatic retry하지 않습니다. Source 없는 manual/ad-hoc task는 기존 execution-only path를 유지합니다.

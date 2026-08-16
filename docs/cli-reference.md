@@ -63,6 +63,7 @@ cbr enqueue --cwd /repo --reasoning-depth low --cost-sensitivity high --prompt-f
 cbr enqueue --cwd /repo --routing-size small --routing-risk low --verification-scope unit --verification-scope docs --prompt-file prompt.md
 cbr enqueue --cwd /repo --backend shell --command-json '["python3", "-m", "pytest", "tests/test_smoke.py"]'
 cbr enqueue --cwd /repo --backend external-json-command --prompt-file task.md --command-json '["./tools/cbr-json-wrapper"]'
+cbr enqueue --cwd /repo --prompt-file prompt.md --evidence-source-json source.json
 cbr list
 cbr list --project project-id
 cbr list --project-root /repo
@@ -131,6 +132,14 @@ cbr retention compact --inventory-report PATH --task-id TASK_ID --apply --confir
 ```
 
 `cbr enqueue --backend external-json-command` requires `--command-json` or final-position `--command`. The command must be an argv list; cbr does not evaluate shell strings. The runner appends the wrapped cbr prompt as the command's final argv argument and expects stdout to contain one final JSON object with `task_id`, `status`, `summary`, `changed_files`, and `verification`.
+
+`cbr enqueue --evidence-source-json PATH` admits a Codex task with the exact
+machine-readable `{kind,id,revision}` source required by the [automatic Chamber
+evidence contract](automatic-evidence.md). The source is stored immutable and is
+never derived from prompt text, current directory, terminal state, or a latest-task
+heuristic. A source-bearing task fails closed before native launch unless the
+configured `execution_evidence_adapter` is present. Tasks without this option keep
+the ordinary execution-only path.
 
 `cbr execution-plan TASK_ID`는 canonical task와 current config에서
 `gateway-neutral-execution-plan-v1`을 계산해 canonical JSON만 stdout에 출력하는

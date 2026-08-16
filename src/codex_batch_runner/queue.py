@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 from .config import Config
+from .execution_evidence_adapter import record_review_callback, validate_evidence_source
 from .execution_delegation import (
     ExecutionDelegationError,
     admit_execution_delegation_contract,
@@ -84,6 +85,7 @@ ORCHESTRATION_IMMUTABLE_FIELDS = (
     "orchestration_dispatch_id",
     "orchestration_request_fingerprint",
     "orchestration_execution_fingerprint",
+    "evidence_source",
 )
 
 
@@ -132,6 +134,10 @@ def save_task(
                 "execution_delegation_contract is immutable after enqueue; "
                 "create a new task revision instead"
             )
+        if existing.get("evidence_source") != task.get("evidence_source"):
+            raise ValueError(
+                "evidence_source is immutable after enqueue; create a new task revision instead"
+            )
         if existing.get("capacity_target_ordering_assignment_id") != task.get(
             "capacity_target_ordering_assignment_id"
         ):
@@ -143,6 +149,8 @@ def save_task(
             "preexecution_delegation_phase_history",
             "capacity_target_ordering_canary_decision_history",
             "capacity_target_ordering_canary_outcome_history",
+            "automatic_evidence_attempts",
+            "automatic_evidence_callback_history",
         ):
             existing_history = existing.get(field, [])
             new_history = task.get(field, [])
@@ -366,6 +374,8 @@ def set_review_status(
         summary=f"reviewed task {task_id} as {review_status}",
         payload=transition_payload(task, review_status=review_status, reviewed_at=task.get("reviewed_at")),
     )
+    if review_status in {"accepted", "rejected"}:
+        record_review_callback(config, task, review_status)
     if review_status == "needs_followup" and task.get("origin_parent_ref"):
         from .parent_attention import create_parent_attention
         create_parent_attention(
@@ -494,6 +504,7 @@ def create_task(
     orchestration_request_fingerprint: str | None = None,
     orchestration_execution_fingerprint: str | None = None,
     execution_delegation_contract: dict | None = None,
+    evidence_source: dict[str, str] | None = None,
 ) -> dict:
     ensure_dir(config.queue_dir)
     now = iso_now()
@@ -524,6 +535,11 @@ def create_task(
     external_timeout_seconds = (
         validate_external_timeout(external_timeout_seconds) if external_timeout_seconds is not None else None
     )
+    if evidence_source is not None:
+        try:
+            evidence_source = validate_evidence_source(evidence_source)
+        except ValueError:
+            raise
     path = task_path(config, task_id)
     task = {
         "schema_version": SCHEMA_VERSION,
@@ -568,6 +584,10 @@ def create_task(
         "cwd": str(cwd_path),
         "execution_backend": execution_backend,
         "execution_backend_explicit": execution_backend_explicit,
+        "evidence_source": evidence_source,
+        "automatic_evidence_attempts": [],
+        "automatic_evidence_callback_history": [],
+        "automatic_evidence_last_callback": None,
         "capacity_pool": capacity_pool,
         "task_priority": task_priority,
         "shell_command": shell_command,

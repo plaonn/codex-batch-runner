@@ -82,6 +82,9 @@ creator는 기존 target을 replace하지 않고 `FileExistsError`로 종료합�
 - `shell_timeout_seconds`: shell backend task-specific timeout. 없으면 config `shell_task_timeout_seconds` 기본값을 사용합니다.
 - `external_command`: external-json-command backend가 실행할 non-empty argv string list. Raw shell string은 저장하지 않습니다. Runner는 정상 cbr prompt wrapper를 마지막 argv argument로 추가합니다.
 - `external_timeout_seconds`: external-json-command task-specific wall-clock timeout. 없으면 config `external_json_command_timeout_seconds` 기본값을 사용합니다.
+- `evidence_source`: optional immutable `{kind,id,revision}` supplied by the automatic execution caller. CBR never derives it from prompt or cwd. When present, the task must use the configured automatic-evidence adapter before native Codex launch.
+- `automatic_evidence_attempts`: source-bound per-native-dispatch evidence records. Each retry appends a new record with the CBR `active_run_id` reused as the exact execution identity.
+- `automatic_evidence_callback_history`: append-only accepted/rejected callback dispositions. `recorded` and `idempotent` are confirmed; `unknown-effect` requires reconciliation and is never converted into acceptance by inference.
 - `worker_target`: config `worker_selection_rules`가 claim 시점에 적용한 worker target alias.
 - `worker_selection_rule`: worker target을 선택한 config rule name.
 - `worker_selection_reason`: worker target 선택 이유.

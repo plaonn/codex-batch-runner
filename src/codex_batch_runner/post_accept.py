@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .config import Config
+from .execution_evidence_adapter import record_review_callback
 from .events import emit_task_event, transition_payload
 from .lock import FileLock
 from .queue import load_task, save_task, task_title
@@ -21,7 +22,7 @@ def accept_task_and_integrate(config: Config, task_id: str, reason: str | None, 
             "post_accept": {"status": "locked", "errors": [f"another runner is active: {config.lock_file}"]},
         }
     try:
-        task = mark_task_accepted_locked(config, task_id, reason, source=source)
+        mark_task_accepted_locked(config, task_id, reason, source=source)
         post_accept = integrate_accepted_worktree_locked(config, task_id)
         return {"task": load_task(config, task_id), "post_accept": post_accept}
     finally:
@@ -65,6 +66,7 @@ def mark_task_accepted_locked(config: Config, task_id: str, reason: str | None, 
         summary=f"accepted task {task_title(task)} ({task_id})",
         payload=transition_payload(task, review_status="accepted", reviewed_at=task.get("reviewed_at")),
     )
+    record_review_callback(config, task, "accepted")
     return task
 
 

@@ -19,6 +19,7 @@ from .capacity_target_ordering_canary import (
     record_capacity_target_ordering_canary_outcome,
 )
 from .events import emit_task_event, result_summary_payload, transition_payload
+from .execution_evidence_adapter import validate_task_evidence_binding
 from .parent_attention import create_parent_attention
 from .external_json_command import (
     ExternalJsonCommandResult,
@@ -340,6 +341,15 @@ def claim_next_implementation_task_locked(
             mark_execution_config_failure(config, task, config_error)
             mark_run(config, task["id"])
             return None, RunOutcome(status=task["status"], message=config_error, task_id=task["id"]), None
+        evidence_binding_error = validate_task_evidence_binding(config, task)
+        if evidence_binding_error:
+            mark_execution_config_failure(config, task, evidence_binding_error)
+            mark_run(config, task["id"])
+            return None, RunOutcome(
+                status=task["status"],
+                message=evidence_binding_error,
+                task_id=task["id"],
+            ), None
         binding_error = capacity_canary_dispatch_binding_error(
             task, execution_config
         )
@@ -972,17 +982,32 @@ def apply_codex_result(
     git_status_cwd: Path | None = None,
     execution_settings: ResolvedExecutionConfig | None = None,
 ) -> None:
+    active_execution_id = task.get("active_run_id")
     clear_active_run_metadata(task)
     log_paths = task.setdefault("log_paths", [])
     if str(result.log_path) not in log_paths:
         log_paths.append(str(result.log_path))
-    record_last_run(config, task, result, execution_settings=execution_settings)
+    record_last_run(
+        config,
+        task,
+        result,
+        execution_settings=execution_settings,
+        execution_id=str(active_execution_id) if active_execution_id else None,
+    )
     if result.command_kind == "resume":
         task["resume_count"] = int(task.get("resume_count", 0)) + 1
     if result.session_id:
         task["session_id"] = result.session_id
     if result.thread_id:
         task["thread_id"] = result.thread_id
+
+    if result.execution_evidence_adapter_error:
+        mark_automatic_evidence_reconciliation_required(
+            config,
+            task,
+            result.execution_evidence_adapter_error,
+        )
+        return
 
     previous_runnable_status = resumable_status(task)
 
@@ -1735,6 +1760,7 @@ def startup_stall_error(reason: str, progress: dict[str, Any]) -> str:
 def record_last_run(
     config: Config, task: dict, result: CodexResult, *,
     execution_settings: ResolvedExecutionConfig | None = None,
+    execution_id: str | None = None,
 ) -> None:
     finished_at = iso_now()
     started_at = task.get("started_at")
@@ -1758,12 +1784,91 @@ def record_last_run(
         task["last_run"]["process_lifecycle"] = validate_process_lifecycle(
             result.process_lifecycle
         )
+    automatic_evidence = automatic_evidence_attempt_record(
+        task,
+        result,
+        execution_id=execution_id,
+    )
+    if automatic_evidence is not None:
+        task["last_run"]["automatic_evidence"] = automatic_evidence
+        history = task.setdefault("automatic_evidence_attempts", [])
+        if not isinstance(history, list):
+            history = []
+            task["automatic_evidence_attempts"] = history
+        if not history or history[-1].get("execution_id") != automatic_evidence.get("execution_id"):
+            history.append(automatic_evidence)
     if execution_settings and exact_v3_settings(execution_settings):
         attach_execution_evidence_v3(
             task, build_codex_execution_evidence_v3(task, result, execution_settings, config)
         )
     else:
         attach_execution_evidence(task, build_codex_execution_evidence(task, result))
+
+
+def automatic_evidence_attempt_record(
+    task: dict[str, Any],
+    result: CodexResult,
+    *,
+    execution_id: str | None,
+) -> dict[str, Any] | None:
+    source = task.get("evidence_source")
+    if not isinstance(source, dict):
+        return None
+    result_value = result.execution_evidence_adapter_result
+    if isinstance(result_value, dict):
+        return {
+            "schema": "automatic-evidence-attempt.v1",
+            "attempt": int(task.get("attempts") or 0),
+            "execution_id": str(result_value.get("execution_id") or execution_id or ""),
+            "source": dict(source),
+            "acceptance_state": result_value.get("acceptance_state"),
+            "acceptance_status": result_value.get("acceptance_status"),
+            "outcome_status": result_value.get("outcome_status"),
+            "settlement_disposition": result_value.get("settlement_disposition"),
+            "settlement_recorded": result_value.get("settlement_recorded"),
+            "child_exit_code": result_value.get("child_exit_code"),
+        }
+    if result.execution_evidence_adapter_error:
+        return {
+            "schema": "automatic-evidence-attempt.v1",
+            "attempt": int(task.get("attempts") or 0),
+            "execution_id": str(execution_id or ""),
+            "source": dict(source),
+            "acceptance_state": "unknown-effect",
+            "acceptance_status": None,
+            "outcome_status": None,
+            "settlement_disposition": "unknown-effect",
+            "settlement_recorded": False,
+            "child_exit_code": result.returncode,
+            "error_code": result.execution_evidence_adapter_error,
+        }
+    return None
+
+
+def mark_automatic_evidence_reconciliation_required(
+    config: Config,
+    task: dict[str, Any],
+    error_code: str,
+) -> None:
+    task["status"] = "blocked_user"
+    task["last_error"] = "automatic execution evidence result is ambiguous; reconciliation required"
+    task["automatic_evidence_reconciliation_required"] = True
+    task["automatic_evidence_error_code"] = str(error_code)
+    task["failure_count"] = int(task.get("failure_count", 0)) + 1
+    save_task(config, task)
+    emit_task_event(
+        config,
+        "automatic_evidence_reconciliation_required",
+        task,
+        source="run-next",
+        summary=task["last_error"],
+        payload=transition_payload(
+            task,
+            error_code=str(error_code),
+            reconciliation_required=True,
+        ),
+    )
+    emit_parent_attention_for_task(config, task, "needs_decision")
 
 
 def execution_settings_has_metadata(settings: ResolvedExecutionConfig) -> bool:

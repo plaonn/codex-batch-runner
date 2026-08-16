@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Config
+from .execution_evidence_adapter import (
+    AutomaticEvidenceError,
+    build_run_command,
+    read_run_result,
+    validate_evidence_source,
+)
 from .execution_evidence_v3 import enforce_codex_command_identity
 from .fs import ensure_dir
 from .limits import matched_rate_limit_markers
@@ -48,6 +54,8 @@ class CodexResult:
     progress: dict[str, Any] | None = None
     watchdog_reason: str | None = None
     process_lifecycle: dict[str, Any] | None = None
+    execution_evidence_adapter_result: dict[str, Any] | None = None
+    execution_evidence_adapter_error: str | None = None
 
 
 @dataclass
@@ -153,6 +161,21 @@ def run_codex(
     base = format_command(config.codex_resume_command if use_resume else config.codex_command, task, prompt)
     command = [*insert_command_options(base[:-1], command_options(settings)), base[-1]]
     enforce_codex_command_identity(task, settings, command, config)
+    evidence_result_file: Path | None = None
+    evidence_source = task.get("evidence_source")
+    if evidence_source is not None:
+        normalized_source = validate_evidence_source(evidence_source)
+        execution_id = str(task.get("active_run_id") or "")
+        if not execution_id:
+            raise AutomaticEvidenceError("execution-id-missing")
+        evidence_result_file = log_dir / f"attempt-{attempt}.chamber.json"
+        command = build_run_command(
+            config,
+            normalized_source,
+            execution_id,
+            evidence_result_file,
+            command,
+        )
     stderr_chunks: list[str] = []
     events: list[dict[str, Any]] = []
     live_progress_callback = task.get("_live_progress_callback")
@@ -190,6 +213,10 @@ def run_codex(
             progress=None,
             watchdog_reason=None,
             process_lifecycle=None,
+            execution_evidence_adapter_result=None,
+            execution_evidence_adapter_error=(
+                f"adapter-launch-{exc.__class__.__name__}" if evidence_result_file else None
+            ),
         )
 
     def read_stderr() -> None:
@@ -232,6 +259,17 @@ def run_codex(
     session_id = first_recursive_value(events, ("session_id", "sessionId", "conversation_id")) or thread_id
     raw_text = stderr + "\n" + "\n".join(json.dumps(event, ensure_ascii=False) for event in events)
     rate_limit_markers = matched_rate_limit_markers(raw_text)
+    evidence_result: dict[str, Any] | None = None
+    evidence_error: str | None = None
+    if evidence_result_file is not None:
+        try:
+            evidence_result = read_run_result(
+                evidence_result_file,
+                validate_evidence_source(evidence_source),
+                str(task.get("active_run_id") or ""),
+            )
+        except AutomaticEvidenceError as exc:
+            evidence_error = exc.code
     return CodexResult(
         returncode=returncode,
         log_path=log_path,
@@ -247,6 +285,8 @@ def run_codex(
         progress=tracker.as_dict(),
         watchdog_reason=tracker.watchdog_reason,
         process_lifecycle=process_lifecycle,
+        execution_evidence_adapter_result=evidence_result,
+        execution_evidence_adapter_error=evidence_error,
     )
 
 

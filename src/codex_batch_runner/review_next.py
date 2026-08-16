@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .execution_evidence_adapter import record_review_callback
 from .events import emit_task_event, transition_payload
 from .fs import ensure_dir
 from .lock import FileLock
@@ -1086,6 +1087,7 @@ def apply_mechanical_accept(
         summary=event_summary or f"mechanically auto-accepted task {task_id}",
         payload=transition_payload(task, review_status="accepted", reviewed_at=task.get("reviewed_at")),
     )
+    record_review_callback(config, task, "accepted")
     post_accept = integrate_accepted_worktree(config, task_id, locked=True)
     decision, reason = post_accept_decision(
         post_accept,
@@ -1414,6 +1416,7 @@ def apply_reviewer_accept(
             reviewer_codex=compact_reviewer_result(reviewer_result),
         ),
     )
+    record_review_callback(config, task, "accepted")
     post_accept = integrate_accepted_worktree(config, task_id, locked=True)
     decision, reason = post_accept_decision(
         post_accept,

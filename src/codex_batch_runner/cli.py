@@ -36,6 +36,7 @@ from .decision_cards import (
 )
 from .events import DEFAULT_EVENT_LIMIT, list_events, render_events_human, write_event_nonfatal
 from .execution_evidence import ExecutionEvidenceError, load_execution_evidence_records
+from .execution_evidence_adapter import parse_evidence_source_file
 from .execution_evidence_v2 import ExecutionEvidenceV2Error, reporting_evidence_view
 from .execution_evidence_v3 import ExecutionEvidenceV3Error
 from .execution_report import (
@@ -409,6 +410,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "canonical cbr-execution-delegation-contract-v1 JSON admitted "
             "immutably before first claim"
+        ),
+    )
+    enqueue.add_argument(
+        "--evidence-source-json",
+        help=(
+            "JSON file containing the exact automatic-evidence source object "
+            "{kind,id,revision}; never derived from the prompt or cwd"
         ),
     )
     enqueue.add_argument("--model-requirement-json", help="model requirement vector JSON object")
@@ -1407,6 +1415,13 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
     command = parse_command_args(args)
     backend = args.backend or "codex"
+    evidence_source = (
+        parse_evidence_source_file(args.evidence_source_json)
+        if args.evidence_source_json
+        else None
+    )
+    if evidence_source is not None and backend != "codex":
+        raise ValueError("--evidence-source-json requires --backend codex")
     if backend == "codex" and prompt is None:
         raise ValueError("Codex tasks require --prompt or --prompt-file")
     if backend in {"shell", "external-json-command"} and not command:
@@ -1443,6 +1458,7 @@ def cmd_enqueue(config: Config, args: argparse.Namespace) -> int:
         capacity_pool=args.capacity_pool,
         task_priority=args.priority,
         execution_delegation_contract=parse_delegation_contract_arg(args),
+        evidence_source=evidence_source,
     )
     run_post_mutation_trigger(config)
     print(task["id"])

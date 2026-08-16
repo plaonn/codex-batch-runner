@@ -85,6 +85,19 @@
       "execution_target": "high_capability_current"
     }
   ],
+  "execution_evidence_adapter": {
+    "command": ["/absolute/path/to/python3", "/absolute/path/to/evidence-adapter.py"],
+    "run_arguments": [
+      "--chamber-entrypoint", "/absolute/path/to/chamber-entrypoint.js",
+      "--chamber-executable", "node"
+    ],
+    "settle_arguments": [
+      "--chamber-entrypoint", "/absolute/path/to/chamber-entrypoint.js",
+      "--chamber-executable", "node"
+    ],
+    "timeout_seconds": 30,
+    "producer": "execution-controller"
+  },
   "manual_cooldown_wake_scheduler": "disabled",
   "manual_cooldown_wake_command": [],
   "codex_cli_update_command": [],

@@ -23,6 +23,7 @@ CBR은 conversational UX, messaging gateway, personal memory, skill 또는 MCP d
 - [Core spec index](docs/spec.md): 현재 구현 truth와 topic 문서 index.
 - [Task schema and dependency contract](docs/task-schema.md): task JSON fields, task/review status, dependency readiness.
 - [Execution contract](docs/execution.md): model requirements, capacity/priority, shell backend, runner policy, watchdog, lock, atomic write, Codex command/prompt wrapper, rate-limit, queue mutation.
+- [Automatic Chamber evidence contract](docs/automatic-evidence.md): CBR-owned automatic source/attempt binding, pending authority, deferred callback, retry and provider replacement boundary.
 - [Gateway-neutral execution plan](docs/gateway-neutral-execution-plan.md): exact-target/delegation-bound sanitized execution-plan projection with no launch or runtime mutation.
 - [Provider resource report and D2-A simulator](docs/provider-resource-report.md): read-only provider evidence, exact-target decision/alternative preview, canonical gate keys, and D2-B safety boundary.
 - [Review contract](docs/review.md): review-bundle, review-next, reviewer Codex gates, bounded auto-fix loop.

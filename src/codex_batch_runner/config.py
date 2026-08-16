@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .execution_evidence_adapter import execution_evidence_adapter_value
 from .execution_target_selector import constraint_registry_value, execution_target_inventory_value
 from .model_requirements import (
     REQUIREMENT_DIMENSIONS,
@@ -41,6 +42,7 @@ class Config:
     stale_lock_seconds: int
     rate_limit_cooldown_seconds: int
     default_max_attempts: int
+    execution_evidence_adapter: dict[str, Any] = field(default_factory=dict)
     parent_attention_outbox_dir: Path | None = None
     parent_attention_delivery_command: list[str] = field(default_factory=list)
     parent_attention_delivery_timeout_seconds: int = 15
@@ -149,6 +151,9 @@ class Config:
                 data.get("capacity_target_ordering_canary_policy")
             )
         )
+        execution_evidence_adapter = execution_evidence_adapter_value(
+            data.get("execution_evidence_adapter")
+        )
         usage_admission_enabled = bool_value(
             "usage_admission_enabled",
             data.get("usage_admission_enabled", False),
@@ -228,6 +233,7 @@ class Config:
             stale_lock_seconds=int(data.get("stale_lock_seconds", 21600)),
             rate_limit_cooldown_seconds=int(data.get("rate_limit_cooldown_seconds", 1800)),
             default_max_attempts=int(data.get("default_max_attempts", 5)),
+            execution_evidence_adapter=execution_evidence_adapter,
             usage_admission_enabled=usage_admission_enabled,
             usage_admission_command=usage_admission_command,
             usage_admission_timeout_seconds=positive_int_value(
