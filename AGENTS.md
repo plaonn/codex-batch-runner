@@ -7,3 +7,4 @@ This repository is public.
 - Treat `.private/`, `.codex-batch-runner/`, `*.local.md`, and `*.local.plist` as private/local-only unless explicitly instructed otherwise.
 - `.codex-batch-runner/` is runtime state. Do not use it for project roadmap, task dashboard, proposal, or operator planning documents.
 - If `.private/AGENTS.md` exists, read and apply it for local operator instructions. If it is missing, continue with this file only.
+- Before resuming, after a handoff or context compaction, at phase changes, and before declaring done, reread the `Anchor` scope of `docs/requirements.md`. Proceed without asking on refinements inside the same requirement; stop and ask only for requirement-boundary or automation-boundary changes.

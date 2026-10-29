@@ -1,5 +1,11 @@
 # 요구사항 계층 문서
 
+## Anchor
+
+이 문서는 길어서 매번 전체를 읽지 않는다. 방향 확인용 앵커는 문서 시작부터 root requirement(`ROOT-REQ-POLICY-GOVERNED-UNATTENDED-EXECUTION`) 항목까지와, 문서 끝의 `Non-goals`, `Automation boundary`다. 개별 `REQ-*` 항목은 작업이 건드리는 것만 읽는다.
+
+작업 재개, handoff, context compaction 복구, phase 전환, 완료 선언 전에 앵커를 다시 읽고 현재 작업을 분류한다. 같은 requirement 안의 spec·test·구현 정제는 묻지 않고 진행하고, requirement 경계나 automation boundary를 넘는 변경이면 멈추고 사용자 확인을 받는다.
+
 이 문서는 공개 저장소 기준으로 유지되는 durable requirement 계층을 정리한다.
 개별 topic 문서는 `docs/spec.md`에서 링크되며, 각 항목은 requirement와 validity
 조건을 설명하는 인덱스 수준으로만 제시한다.
